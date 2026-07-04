@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/json-populate"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/00ccbf69f6e804d19fdb3f644b4e6fa3/json-populate.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/855880dddf841091b90ce0dac88d38d6/json-populate-complete.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/1cad7ff8b6d81309234aa09042cc35ae/json-populate-build.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/1cad7ff8b6d81309234aa09042cc35ae/json-populate-configure.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/1cad7ff8b6d81309234aa09042cc35ae/json-populate-download.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/1cad7ff8b6d81309234aa09042cc35ae/json-populate-install.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/1cad7ff8b6d81309234aa09042cc35ae/json-populate-mkdir.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/1cad7ff8b6d81309234aa09042cc35ae/json-populate-patch.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/1cad7ff8b6d81309234aa09042cc35ae/json-populate-test.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/CMakeFiles/1cad7ff8b6d81309234aa09042cc35ae/json-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"json-populate"
+		],
+		"name" : "json-populate"
+	}
+}

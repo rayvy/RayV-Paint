@@ -1,0 +1,14 @@
+# Target labels
+ glfw-populate
+# Source files and their labels
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/glfw-populate
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/1370ba64376192b2c84c672bab1d10e9/glfw-populate.rule
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/e94f1ed73bbf4d3ae12e6063bf316518/glfw-populate-complete.rule
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-build.rule
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-configure.rule
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-download.rule
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-install.rule
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-mkdir.rule
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-patch.rule
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-test.rule
+C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-update.rule

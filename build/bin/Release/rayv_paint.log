@@ -1,0 +1,32 @@
+[2026-07-04 11:47:07.621] [INFO]  ===================================================
+[2026-07-04 11:47:07.622] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 11:47:07.622] [WARN]  Could not open config file: config.json. Creating default config.
+[2026-07-04 11:47:07.622] [INFO]  Configuration saved successfully to config.json
+[2026-07-04 11:47:07.622] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 11:47:07.626] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 11:47:07.653] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 11:47:07.866] [INFO]  Startup completed in: 245.370400 ms
+[2026-07-04 11:47:32.753] [INFO]  Configuration saved successfully to config.json
+[2026-07-04 11:52:11.962] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 11:52:11.965] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 11:52:11.965] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 11:52:55.534] [INFO]  ===================================================
+[2026-07-04 11:52:55.535] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 11:52:55.535] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 11:52:55.535] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 11:52:55.538] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 11:52:55.563] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 11:52:55.775] [INFO]  Startup completed in: 241.025500 ms
+[2026-07-04 12:00:59.750] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 12:00:59.754] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 12:00:59.754] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 12:04:02.063] [INFO]  ===================================================
+[2026-07-04 12:04:02.063] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 12:04:02.063] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 12:04:02.063] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 12:04:02.066] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 12:04:02.090] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 12:04:02.293] [INFO]  Startup completed in: 230.207700 ms
+[2026-07-04 12:04:23.851] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 12:04:23.854] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 12:04:23.854] [INFO]  RayVPaint shut down cleanly.

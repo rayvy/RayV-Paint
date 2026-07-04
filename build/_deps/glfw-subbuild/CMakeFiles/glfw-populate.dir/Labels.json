@@ -1,0 +1,46 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/glfw-populate"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/1370ba64376192b2c84c672bab1d10e9/glfw-populate.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/e94f1ed73bbf4d3ae12e6063bf316518/glfw-populate-complete.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-build.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-configure.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-download.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-install.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-mkdir.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-patch.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-test.rule"
+		},
+		{
+			"file" : "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-subbuild/CMakeFiles/3782bca8e416d8f00e0936ac32360833/glfw-populate-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"glfw-populate"
+		],
+		"name" : "glfw-populate"
+	}
+}

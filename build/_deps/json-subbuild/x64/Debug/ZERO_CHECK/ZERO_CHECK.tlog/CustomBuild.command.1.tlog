@@ -1,0 +1,10 @@
+^C:\USERS\RAYVY\DOCUMENTS\GITHUB\RAYV-PAINT\BUILD\_DEPS\JSON-SUBBUILD\CMAKEFILES\00CCBF69F6E804D19FDB3F644B4E6FA3\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -SC:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild -BC:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-subbuild/json-populate.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
