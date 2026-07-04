@@ -144,3 +144,51 @@ foreach(shader_file ${SHADER_FILES})
         COMMENT "Copying shader ${shader_name} to output directory"
     )
 endforeach()
+
+# Locate and copy Python DLL and ZIP for portability on Windows
+if(WIN32)
+    find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+    
+    # We want to download the embeddable package matching the found Python version
+    set(PY_VER "${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}.${Python3_VERSION_PATCH}")
+    set(PY_EMBED_ZIP_NAME "python-${PY_VER}-embed-amd64.zip")
+    set(PY_EMBED_URL "https://www.python.org/ftp/python/${PY_VER}/${PY_EMBED_ZIP_NAME}")
+    set(PY_EMBED_DOWNLOAD_PATH "${CMAKE_BINARY_DIR}/${PY_EMBED_ZIP_NAME}")
+    
+    message(STATUS "Checking for Python embeddable package: ${PY_EMBED_ZIP_NAME}")
+    
+    if(NOT EXISTS "${PY_EMBED_DOWNLOAD_PATH}")
+        message(STATUS "Downloading Python embeddable package from ${PY_EMBED_URL}...")
+        file(DOWNLOAD "${PY_EMBED_URL}" "${PY_EMBED_DOWNLOAD_PATH}" SHOW_PROGRESS STATUS download_status)
+        list(GET download_status 0 download_code)
+        if(download_code EQUAL 0)
+            message(STATUS "Python embeddable package downloaded successfully.")
+        else()
+            message(WARNING "Failed to download Python embeddable package. Status: ${download_status}")
+        endif()
+    endif()
+
+    if(EXISTS "${PY_EMBED_DOWNLOAD_PATH}")
+        # Extract the zip directly to the target bin directory
+        add_custom_command(
+            TARGET RayVPaint POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E tar xf "${PY_EMBED_DOWNLOAD_PATH}"
+            WORKING_DIRECTORY $<TARGET_FILE_DIR:RayVPaint>
+            COMMENT "Extracting Python embeddable runtime environment for portability"
+        )
+    else()
+        # Fallback to copy the local DLL only if download failed
+        get_filename_component(PYTHON_DIR "${Python3_EXECUTABLE}" DIRECTORY)
+        set(PYTHON_DLL_NAME "python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}.dll")
+        set(PYTHON_DLL_PATH "${PYTHON_DIR}/${PYTHON_DLL_NAME}")
+        if(EXISTS "${PYTHON_DLL_PATH}")
+            add_custom_command(
+                TARGET RayVPaint POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PYTHON_DLL_PATH}"
+                "$<TARGET_FILE_DIR:RayVPaint>/${PYTHON_DLL_NAME}"
+                COMMENT "Fallback: Copying local ${PYTHON_DLL_NAME} to output directory"
+            )
+        endif()
+    endif()
+endif()
