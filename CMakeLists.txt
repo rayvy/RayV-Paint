@@ -169,12 +169,18 @@ if(WIN32)
     endif()
 
     if(EXISTS "${PY_EMBED_DOWNLOAD_PATH}")
-        # Extract the zip directly to the target bin directory
+        # Extract and organize Python runtime directory
         add_custom_command(
             TARGET RayVPaint POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E tar xf "${PY_EMBED_DOWNLOAD_PATH}"
             WORKING_DIRECTORY $<TARGET_FILE_DIR:RayVPaint>
-            COMMENT "Extracting Python embeddable runtime environment for portability"
+            
+            COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:RayVPaint>/python_runtime
+            
+            COMMAND powershell -NoProfile -Command "Move-Item -Path *.pyd, *.zip -Destination python_runtime -Force -ErrorAction SilentlyContinue; Move-Item -Path libcrypto-3.dll, libffi-8.dll, libssl-3.dll, sqlite3.dll, vcruntime140.dll, vcruntime140_1.dll -Destination python_runtime -Force -ErrorAction SilentlyContinue; Set-Content -Path python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}._pth -Value @('python_runtime/python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}.zip', 'python_runtime', '.')"
+            WORKING_DIRECTORY $<TARGET_FILE_DIR:RayVPaint>
+            
+            COMMENT "Organizing Python embeddable runtime environment into python_runtime subdirectory"
         )
     else()
         # Fallback to copy the local DLL only if download failed
