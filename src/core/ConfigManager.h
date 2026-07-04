@@ -25,6 +25,21 @@ public:
     std::string GetLogFilePath() const;
     void SetLogFilePath(const std::string& path);
 
+    std::string GetTheme() const;
+    void SetTheme(const std::string& theme);
+
+    std::string GetBackupDir() const;
+    void SetBackupDir(const std::string& path);
+
+    int GetAutoSaveIntervalMinutes() const;
+    void SetAutoSaveIntervalMinutes(int minutes);
+
+    int GetMaxUndoSteps() const;
+    void SetMaxUndoSteps(int steps);
+
+    int GetMaxUndoMemoryMB() const;
+    void SetMaxUndoMemoryMB(int mb);
+
 private:
     ConfigManager() = default;
     ~ConfigManager() = default;
@@ -39,4 +54,10 @@ private:
     std::string m_LogLevel = "info";
     float m_ZoomSpeed = 1.15f;
     std::string m_LogFilePath = "rayv_paint.log";
+
+    std::string m_Theme = "Dark";
+    std::string m_BackupDir = "backups";
+    int m_AutoSaveIntervalMinutes = 10;
+    int m_MaxUndoSteps = 50;
+    int m_MaxUndoMemoryMB = 512;
 };

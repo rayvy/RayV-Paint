@@ -9,6 +9,7 @@
 #include <thread>
 #include <fcntl.h>
 #include <io.h>
+#include <filesystem>
 
 // GLFW
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -111,6 +112,48 @@ void RedirectIOToConsole() {
     std::cout.clear();
     std::cerr.clear();
     std::cin.clear();
+}
+
+void ApplyTheme(const std::string& themeName) {
+    if (themeName == "Classic") {
+        ImGui::StyleColorsClassic();
+        ImGui::GetStyle().FrameRounding = 0.0f;
+        ImGui::GetStyle().WindowRounding = 0.0f;
+    } else if (themeName == "Light") {
+        ImGui::StyleColorsLight();
+        ImGui::GetStyle().FrameRounding = 4.0f;
+        ImGui::GetStyle().WindowRounding = 6.0f;
+    } else { // "Dark"
+        ImGui::StyleColorsDark();
+        ImGuiStyle& style = ImGui::GetStyle();
+        style.WindowRounding = 6.0f;
+        style.FrameRounding = 4.0f;
+        style.GrabRounding = 4.0f;
+        style.TabRounding = 4.0f;
+        style.WindowBorderSize = 1.0f;
+        style.FrameBorderSize = 0.0f;
+
+        ImVec4* colors = style.Colors;
+        colors[ImGuiCol_WindowBg]               = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);
+        colors[ImGuiCol_ChildBg]                = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);
+        colors[ImGuiCol_PopupBg]                = ImVec4(0.08f, 0.08f, 0.10f, 0.95f);
+        colors[ImGuiCol_Border]                 = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
+        colors[ImGuiCol_FrameBg]                = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+        colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.25f, 0.25f, 0.30f, 1.00f);
+        colors[ImGuiCol_FrameBgActive]          = ImVec4(0.30f, 0.30f, 0.38f, 1.00f);
+        colors[ImGuiCol_TitleBg]                = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
+        colors[ImGuiCol_TitleBgActive]          = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
+        colors[ImGuiCol_Header]                 = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+        colors[ImGuiCol_HeaderHovered]          = ImVec4(0.25f, 0.25f, 0.35f, 1.00f);
+        colors[ImGuiCol_HeaderActive]           = ImVec4(0.30f, 0.30f, 0.45f, 1.00f);
+        colors[ImGuiCol_Button]                 = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
+        colors[ImGuiCol_ButtonHovered]          = ImVec4(0.30f, 0.30f, 0.40f, 1.00f);
+        colors[ImGuiCol_ButtonActive]           = ImVec4(0.40f, 0.40f, 0.55f, 1.00f);
+        colors[ImGuiCol_Tab]                    = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
+        colors[ImGuiCol_TabHovered]             = ImVec4(0.25f, 0.25f, 0.35f, 1.00f);
+        colors[ImGuiCol_TabActive]              = ImVec4(0.20f, 0.20f, 0.28f, 1.00f);
+        colors[ImGuiCol_DockingPreview]         = ImVec4(0.35f, 0.45f, 0.65f, 0.70f);
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -217,36 +260,8 @@ int main(int argc, char* argv[]) {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 
-    // Apply premium Dark Palette
-    ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 6.0f;
-    style.FrameRounding = 4.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
-
-    ImVec4* colors = style.Colors;
-    colors[ImGuiCol_WindowBg]               = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);
-    colors[ImGuiCol_ChildBg]                = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);
-    colors[ImGuiCol_PopupBg]                = ImVec4(0.08f, 0.08f, 0.10f, 0.95f);
-    colors[ImGuiCol_Border]                 = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
-    colors[ImGuiCol_FrameBg]                = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.25f, 0.25f, 0.30f, 1.00f);
-    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.30f, 0.30f, 0.38f, 1.00f);
-    colors[ImGuiCol_TitleBg]                = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
-    colors[ImGuiCol_TitleBgActive]          = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
-    colors[ImGuiCol_Header]                 = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
-    colors[ImGuiCol_HeaderHovered]          = ImVec4(0.25f, 0.25f, 0.35f, 1.00f);
-    colors[ImGuiCol_HeaderActive]           = ImVec4(0.30f, 0.30f, 0.45f, 1.00f);
-    colors[ImGuiCol_Button]                 = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
-    colors[ImGuiCol_ButtonHovered]          = ImVec4(0.30f, 0.30f, 0.40f, 1.00f);
-    colors[ImGuiCol_ButtonActive]           = ImVec4(0.40f, 0.40f, 0.55f, 1.00f);
-    colors[ImGuiCol_Tab]                    = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
-    colors[ImGuiCol_TabHovered]             = ImVec4(0.25f, 0.25f, 0.35f, 1.00f);
-    colors[ImGuiCol_TabActive]              = ImVec4(0.20f, 0.20f, 0.28f, 1.00f);
-    colors[ImGuiCol_DockingPreview]         = ImVec4(0.35f, 0.45f, 0.65f, 0.70f);
+    // Apply configured theme
+    ApplyTheme(ConfigManager::Get().GetTheme());
 
     ImGui_ImplGlfw_InitForOther(window, true);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
@@ -259,6 +274,11 @@ int main(int argc, char* argv[]) {
         glfwTerminate();
         return 1;
     }
+
+    // Check for crash recovery / autosave restore
+    std::string backupDir = ConfigManager::Get().GetBackupDir();
+    std::string backupPath = backupDir + "/autosave_backup.rayp";
+    bool showRecoveryModal = std::filesystem::exists(backupPath);
 
     // Load startup image if specified on CLI
     if (!startupImagePath.empty()) {
@@ -293,6 +313,12 @@ int main(int argc, char* argv[]) {
     bool openImportModal = false;
     bool openExportDdsModal = false;
     bool openExportStdModal = false;
+    bool openSettingsModal = false;
+    bool openSaveRaypModal = false;
+    bool openLoadRaypModal = false;
+
+    auto lastAutoSaveTime = std::chrono::steady_clock::now();
+    bool isAutoSaving = false;
 
     // 9. Main loop
     while (!glfwWindowShouldClose(window)) {
@@ -322,6 +348,13 @@ int main(int argc, char* argv[]) {
         // 9.1 Persistent Header (Main Menu Bar)
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
+                if (ImGui::MenuItem("Open Project (.rayp)", "Ctrl+O")) {
+                    openLoadRaypModal = true;
+                }
+                if (ImGui::MenuItem("Save Project (.rayp)", "Ctrl+S")) {
+                    openSaveRaypModal = true;
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("Import Image...", "Ctrl+I")) {
                     openImportModal = true;
                 }
@@ -335,12 +368,33 @@ int main(int argc, char* argv[]) {
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
-                if (ImGui::MenuItem("Save Settings", "Ctrl+S")) {
+                if (ImGui::MenuItem("Settings / Preferences...")) {
+                    openSettingsModal = true;
+                }
+                if (ImGui::MenuItem("Save Settings")) {
                     ConfigManager::Get().Save();
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Exit", "Alt+F4")) {
                     glfwSetWindowShouldClose(window, true);
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Edit")) {
+                std::string undoLabel = "Undo";
+                if (g_Canvas.CanUndo()) {
+                    undoLabel += " (" + g_Canvas.GetUndoName() + ")";
+                }
+                if (ImGui::MenuItem(undoLabel.c_str(), "Ctrl+Z", false, g_Canvas.CanUndo())) {
+                    g_Canvas.Undo();
+                }
+
+                std::string redoLabel = "Redo";
+                if (g_Canvas.CanRedo()) {
+                    redoLabel += " (" + g_Canvas.GetRedoName() + ")";
+                }
+                if (ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Y", false, g_Canvas.CanRedo())) {
+                    g_Canvas.Redo();
                 }
                 ImGui::EndMenu();
             }
@@ -389,6 +443,22 @@ int main(int argc, char* argv[]) {
         if (openExportStdModal) {
             ImGui::OpenPopup("Export Standard Image");
             openExportStdModal = false;
+        }
+        if (openSettingsModal) {
+            ImGui::OpenPopup("Settings");
+            openSettingsModal = false;
+        }
+        if (openSaveRaypModal) {
+            ImGui::OpenPopup("Save Project");
+            openSaveRaypModal = false;
+        }
+        if (openLoadRaypModal) {
+            ImGui::OpenPopup("Load Project");
+            openLoadRaypModal = false;
+        }
+        if (showRecoveryModal) {
+            ImGui::OpenPopup("Restore Auto-Saved Session?");
+            showRecoveryModal = false;
         }
 
         // Import Popup Modal
@@ -472,6 +542,175 @@ int main(int argc, char* argv[]) {
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
+        }
+
+        // Settings / Preferences Popup Modal
+        if (ImGui::BeginPopupModal("Settings", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static std::string activeTheme = ConfigManager::Get().GetTheme();
+            static int defW = ConfigManager::Get().GetDefaultWidth();
+            static int defH = ConfigManager::Get().GetDefaultHeight();
+            static char backupDir[256] = "";
+            static int autoSaveMins = ConfigManager::Get().GetAutoSaveIntervalMinutes();
+            static int maxUndo = ConfigManager::Get().GetMaxUndoSteps();
+            static int maxUndoMem = ConfigManager::Get().GetMaxUndoMemoryMB();
+            static bool settingsInitialized = false;
+
+            if (!settingsInitialized) {
+                std::strncpy(backupDir, ConfigManager::Get().GetBackupDir().c_str(), sizeof(backupDir));
+                settingsInitialized = true;
+            }
+
+            ImGui::Text("Interface Settings");
+            ImGui::Separator();
+            
+            const char* themes[] = { "Dark", "Light", "Classic" };
+            int currentThemeIdx = 0;
+            if (activeTheme == "Light") currentThemeIdx = 1;
+            else if (activeTheme == "Classic") currentThemeIdx = 2;
+
+            if (ImGui::Combo("Theme", &currentThemeIdx, themes, IM_ARRAYSIZE(themes))) {
+                activeTheme = themes[currentThemeIdx];
+                ApplyTheme(activeTheme); // Instantly apply styling for visual feedback!
+            }
+
+            ImGui::Spacing();
+            ImGui::Text("Canvas Defaults");
+            ImGui::Separator();
+            ImGui::InputInt("Default Width", &defW, 128, 256);
+            ImGui::InputInt("Default Height", &defH, 128, 256);
+
+            ImGui::Spacing();
+            ImGui::Text("Autosave & Backup System");
+            ImGui::Separator();
+            ImGui::InputText("Backups Directory", backupDir, IM_ARRAYSIZE(backupDir));
+            ImGui::SliderInt("Autosave (minutes)", &autoSaveMins, 0, 60, "%d min");
+            ImGui::TextDisabled("Set to 0 to disable periodic auto-saves");
+
+            ImGui::Spacing();
+            ImGui::Text("Undo / Redo Cache Limits");
+            ImGui::Separator();
+            ImGui::SliderInt("Max History Steps", &maxUndo, 5, 200, "%d steps");
+            ImGui::SliderInt("Max RAM Cache Size", &maxUndoMem, 64, 2048, "%d MB");
+
+            ImGui::Separator();
+            if (ImGui::Button("Save & Close", ImVec2(120, 0))) {
+                ConfigManager::Get().SetTheme(activeTheme);
+                ConfigManager::Get().SetDefaultWidth(defW);
+                ConfigManager::Get().SetDefaultHeight(defH);
+                ConfigManager::Get().SetBackupDir(backupDir);
+                ConfigManager::Get().SetAutoSaveIntervalMinutes(autoSaveMins);
+                ConfigManager::Get().SetMaxUndoSteps(maxUndo);
+                ConfigManager::Get().SetMaxUndoMemoryMB(maxUndoMem);
+                ConfigManager::Get().Save();
+                
+                settingsInitialized = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                // Re-apply original theme on cancel
+                ApplyTheme(ConfigManager::Get().GetTheme());
+                settingsInitialized = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Save Project (.rayp) Modal
+        if (ImGui::BeginPopupModal("Save Project", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char savePath[512] = "project.rayp";
+            ImGui::Text("Enter project file path (.rayp):");
+            ImGui::InputText("##savepathrayp", savePath, IM_ARRAYSIZE(savePath));
+            ImGui::Separator();
+            if (ImGui::Button("Save", ImVec2(120, 0))) {
+                if (g_Canvas.SaveCanvasRayp(savePath)) {
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Load Project (.rayp) Modal
+        if (ImGui::BeginPopupModal("Load Project", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char loadPath[512] = "project.rayp";
+            ImGui::Text("Enter project file path (.rayp):");
+            ImGui::InputText("##loadpathrayp", loadPath, IM_ARRAYSIZE(loadPath));
+            ImGui::Separator();
+            if (ImGui::Button("Load", ImVec2(120, 0))) {
+                if (g_Canvas.LoadCanvasRayp(loadPath, g_pd3dDevice)) {
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Restore Backup Modal
+        if (ImGui::BeginPopupModal("Restore Auto-Saved Session?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("It looks like the application closed unexpectedly.");
+            ImGui::Text("Would you like to restore your auto-saved session?");
+            ImGui::Separator();
+            if (ImGui::Button("Restore Session", ImVec2(140, 0))) {
+                if (g_Canvas.LoadCanvasRayp(backupPath, g_pd3dDevice)) {
+                    Logger::Get().Info("Restored auto-saved session successfully.");
+                } else {
+                    Logger::Get().Error("Failed to restore auto-saved session.");
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Discard", ImVec2(140, 0))) {
+                try {
+                    std::filesystem::remove(backupPath);
+                } catch (...) {}
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Keyboard Shortcuts Handler
+        if (!io.WantTextInput) {
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z)) {
+                g_Canvas.Undo();
+            }
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) {
+                g_Canvas.Redo();
+            }
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
+                openSaveRaypModal = true;
+            }
+            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) {
+                openLoadRaypModal = true;
+            }
+        }
+
+        // Background Auto-Save trigger
+        static bool s_IsAutoSaving = false;
+        int autoSaveInterval = ConfigManager::Get().GetAutoSaveIntervalMinutes();
+        if (autoSaveInterval > 0 && g_Canvas.IsDocumentModified() && !s_IsAutoSaving) {
+            auto currentTime = std::chrono::steady_clock::now();
+            auto elapsedMinutes = std::chrono::duration_cast<std::chrono::minutes>(currentTime - lastAutoSaveTime).count();
+            if (elapsedMinutes >= autoSaveInterval) {
+                s_IsAutoSaving = true;
+                std::filesystem::create_directories(backupDir);
+                Logger::Get().Info("Triggering background auto-save to " + backupPath);
+                g_Canvas.SaveCanvasRaypAsync(backupPath, [](bool success) {
+                    s_IsAutoSaving = false;
+                    if (success) {
+                        Logger::Get().Info("Background auto-save completed successfully.");
+                    } else {
+                        Logger::Get().Error("Background auto-save failed.");
+                    }
+                });
+                lastAutoSaveTime = currentTime;
+            }
         }
 
         // 9.4 Draw Toolbar Panel
@@ -792,6 +1031,14 @@ int main(int argc, char* argv[]) {
             frameCount = 0;
         }
     }
+
+    // Delete autosave backup on clean exit
+    try {
+        std::string bPath = ConfigManager::Get().GetBackupDir() + "/autosave_backup.rayp";
+        if (std::filesystem::exists(bPath)) {
+            std::filesystem::remove(bPath);
+        }
+    } catch (...) {}
 
     // Cleanup Subsystems in reverse order
     g_Canvas.Shutdown();

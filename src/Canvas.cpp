@@ -4,6 +4,17 @@
 #include <d3dcompiler.h>
 #include <iostream>
 #include <algorithm>
+#include <fstream>
+#include <cstring>
+#include <stb_image.h>
+#include <stb_image_write.h>
+#include <nlohmann/json.hpp>
+#include <thread>
+
+// Explicitly declare stbi_zlib_compress which is defined in ImageManager.cpp (via stb_image_write implementation)
+extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, int* out_len, int quality);
+
+using json = nlohmann::json;
 
 // Helper to compile shaders from file at runtime
 static HRESULT CompileShaderFromFile(const WCHAR* szFileName, LPCSTR szEntryPoint, LPCSTR szShaderModel, ID3DBlob** ppBlobOut) {
@@ -342,8 +353,48 @@ void Canvas::SetActiveLayerIndex(int idx) {
     }
 }
 
+void Canvas::BackupTile(int tileX, int tileY) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
+    int numTilesX = (m_Width + 255) / 256;
+    int key = tileY * numTilesX + tileX;
+    
+    if (m_ActiveStrokeDeltas.find(key) != m_ActiveStrokeDeltas.end()) {
+        return; // Already backed up this tile
+    }
+
+    auto& layer = m_Layers[m_ActiveLayerIdx];
+    TileDelta delta;
+    delta.layerIdx = m_ActiveLayerIdx;
+    delta.tileX = tileX;
+    delta.tileY = tileY;
+    delta.oldPixels.resize(256 * 256 * 4, 0.0f);
+
+    int startX = tileX * 256;
+    int startY = tileY * 256;
+    for (int y = 0; y < 256; ++y) {
+        int canvasY = startY + y;
+        if (canvasY >= m_Height) break;
+        for (int x = 0; x < 256; ++x) {
+            int canvasX = startX + x;
+            if (canvasX >= m_Width) break;
+            
+            int tileOffset = (y * 256 + x) * 4;
+            int canvasOffset = (canvasY * m_Width + canvasX) * 4;
+            
+            delta.oldPixels[tileOffset + 0] = layer.pixels[canvasOffset + 0];
+            delta.oldPixels[tileOffset + 1] = layer.pixels[canvasOffset + 1];
+            delta.oldPixels[tileOffset + 2] = layer.pixels[canvasOffset + 2];
+            delta.oldPixels[tileOffset + 3] = layer.pixels[canvasOffset + 3];
+        }
+    }
+    m_ActiveStrokeDeltas[key] = std::move(delta);
+}
+
 void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush) {
-    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= m_Layers.size()) return;
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
+
+    int numTilesX = (m_Width + 255) / 256;
+    int numTilesY = (m_Height + 255) / 256;
 
     if (phase == StrokePhase::Begin) {
         m_IsStrokeActive = true;
@@ -352,6 +403,24 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         m_LastDabY = currRawY;
         m_PrevStabilizedX = currRawX;
         m_PrevStabilizedY = currRawY;
+        m_ActiveStrokeDeltas.clear();
+
+        // Backup tiles covered by the first stamp
+        float minX = currRawX - brush.radius;
+        float maxX = currRawX + brush.radius;
+        float minY = currRawY - brush.radius;
+        float maxY = currRawY + brush.radius;
+        
+        int minTileX = std::max(0, static_cast<int>(minX) / 256);
+        int maxTileX = std::max(0, static_cast<int>(maxX) / 256);
+        int minTileY = std::max(0, static_cast<int>(minY) / 256);
+        int maxTileY = std::max(0, static_cast<int>(maxY) / 256);
+
+        for (int ty = minTileY; ty <= std::min(maxTileY, numTilesY - 1); ++ty) {
+            for (int tx = minTileX; tx <= std::min(maxTileX, numTilesX - 1); ++tx) {
+                BackupTile(tx, ty);
+            }
+        }
 
         // Place the very first stamp immediately
         PaintEngine::DrawStamp(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height, 
@@ -363,6 +432,23 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         float weight = 1.0f / static_cast<float>(std::max(1, brush.stabilization));
         float stabilizedX = m_PrevStabilizedX + weight * (currRawX - m_PrevStabilizedX);
         float stabilizedY = m_PrevStabilizedY + weight * (currRawY - m_PrevStabilizedY);
+
+        // Backup tiles covered by the stroke segment
+        float minX = std::min(m_PrevStabilizedX, stabilizedX) - brush.radius;
+        float maxX = std::max(m_PrevStabilizedX, stabilizedX) + brush.radius;
+        float minY = std::min(m_PrevStabilizedY, stabilizedY) - brush.radius;
+        float maxY = std::max(m_PrevStabilizedY, stabilizedY) + brush.radius;
+
+        int minTileX = std::max(0, static_cast<int>(minX) / 256);
+        int maxTileX = std::max(0, static_cast<int>(maxX) / 256);
+        int minTileY = std::max(0, static_cast<int>(minY) / 256);
+        int maxTileY = std::max(0, static_cast<int>(maxY) / 256);
+
+        for (int ty = minTileY; ty <= std::min(maxTileY, numTilesY - 1); ++ty) {
+            for (int tx = minTileX; tx <= std::min(maxTileX, numTilesX - 1); ++tx) {
+                BackupTile(tx, ty);
+            }
+        }
 
         // Draw segment from previous stabilized position to current stabilized position
         PaintEngine::DrawStrokeSegment(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height,
@@ -377,6 +463,45 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     }
     else if (phase == StrokePhase::End) {
         m_IsStrokeActive = false;
+        if (!m_ActiveStrokeDeltas.empty()) {
+            auto& layer = m_Layers[m_ActiveLayerIdx];
+            std::vector<TileDelta> deltas;
+            deltas.reserve(m_ActiveStrokeDeltas.size());
+
+            for (auto& pair : m_ActiveStrokeDeltas) {
+                auto& delta = pair.second;
+                delta.newPixels.resize(256 * 256 * 4, 0.0f);
+
+                int startX = delta.tileX * 256;
+                int startY = delta.tileY * 256;
+                for (int y = 0; y < 256; ++y) {
+                    int canvasY = startY + y;
+                    if (canvasY >= m_Height) break;
+                    for (int x = 0; x < 256; ++x) {
+                        int canvasX = startX + x;
+                        if (canvasX >= m_Width) break;
+                        
+                        int tileOffset = (y * 256 + x) * 4;
+                        int canvasOffset = (canvasY * m_Width + canvasX) * 4;
+                        
+                        delta.newPixels[tileOffset + 0] = layer.pixels[canvasOffset + 0];
+                        delta.newPixels[tileOffset + 1] = layer.pixels[canvasOffset + 1];
+                        delta.newPixels[tileOffset + 2] = layer.pixels[canvasOffset + 2];
+                        delta.newPixels[tileOffset + 3] = layer.pixels[canvasOffset + 3];
+                    }
+                }
+                deltas.push_back(std::move(delta));
+            }
+
+            auto cmd = std::make_shared<PaintStrokeCommand>(
+                brush.erase ? "Eraser Stroke" : "Brush Stroke",
+                m_ActiveLayerIdx,
+                std::move(deltas)
+            );
+            m_UndoRedoManager.PushCommand(cmd);
+            m_ActiveStrokeDeltas.clear();
+            m_IsDocumentModified = true;
+        }
     }
 }
 
@@ -701,4 +826,317 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
     }
 
     return ImageManager::SaveImageToFile(filepath, composite, m_Width, m_Height, iccProfilePath);
+}
+
+bool Canvas::Undo() {
+    bool res = m_UndoRedoManager.Undo(this);
+    if (res) {
+        m_IsDocumentModified = true;
+    }
+    return res;
+}
+
+bool Canvas::Redo() {
+    bool res = m_UndoRedoManager.Redo(this);
+    if (res) {
+        m_IsDocumentModified = true;
+    }
+    return res;
+}
+
+bool Canvas::CanUndo() const {
+    return m_UndoRedoManager.CanUndo();
+}
+
+bool Canvas::CanRedo() const {
+    return m_UndoRedoManager.CanRedo();
+}
+
+std::string Canvas::GetUndoName() const {
+    return m_UndoRedoManager.GetUndoName();
+}
+
+std::string Canvas::GetRedoName() const {
+    return m_UndoRedoManager.GetRedoName();
+}
+
+void Canvas::ClearUndoHistory() {
+    m_UndoRedoManager.Clear();
+}
+
+bool Canvas::SaveCanvasRayp(const std::string& filepath) {
+    if (m_Layers.empty()) {
+        Logger::Get().Error("No layers to save in RAYP.");
+        return false;
+    }
+
+    try {
+        // 1. Create JSON metadata
+        json metadata;
+        metadata["width"] = m_Width;
+        metadata["height"] = m_Height;
+        metadata["active_layer"] = m_ActiveLayerIdx;
+
+        json layersArray = json::array();
+        for (const auto& layer : m_Layers) {
+            json layerJson;
+            layerJson["name"] = layer.name;
+            layerJson["visible"] = layer.visible;
+            layerJson["opacity"] = layer.opacity;
+            layersArray.push_back(layerJson);
+        }
+        metadata["layers"] = layersArray;
+
+        std::string metadataStr = metadata.dump();
+
+        // 2. Open binary file for writing
+        std::ofstream out(filepath, std::ios::binary);
+        if (!out.is_open()) {
+            Logger::Get().Error("Could not open file for saving RAYP: " + filepath);
+            return false;
+        }
+
+        // Write Magic header
+        out.write("RAYP", 4);
+        
+        // Write format version
+        uint32_t version = 1;
+        out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+        // Write Metadata size and content
+        uint64_t metadataSize = metadataStr.size();
+        out.write(reinterpret_cast<const char*>(&metadataSize), sizeof(metadataSize));
+        out.write(metadataStr.data(), metadataStr.size());
+
+        // 3. Compress and write pixel data for each layer
+        for (const auto& layer : m_Layers) {
+            uint64_t uncompressedSize = layer.pixels.size() * sizeof(float);
+            
+            int compSize = 0;
+            unsigned char* compData = stbi_zlib_compress(
+                reinterpret_cast<unsigned char*>(const_cast<float*>(layer.pixels.data())),
+                static_cast<int>(uncompressedSize),
+                &compSize,
+                8 // good compression level
+            );
+
+            if (!compData) {
+                Logger::Get().Error("Failed to compress layer data for " + layer.name);
+                return false;
+            }
+
+            uint64_t compressedSize = compSize;
+            out.write(reinterpret_cast<const char*>(&uncompressedSize), sizeof(uncompressedSize));
+            out.write(reinterpret_cast<const char*>(&compressedSize), sizeof(compressedSize));
+            out.write(reinterpret_cast<const char*>(compData), compressedSize);
+
+            free(compData);
+        }
+
+        m_IsDocumentModified = false;
+        Logger::Get().Info("Successfully saved project to " + filepath);
+        return true;
+    }
+    catch (const std::exception& e) {
+        Logger::Get().Error("Exception saving RAYP: " + std::string(e.what()));
+        return false;
+    }
+}
+
+bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
+    try {
+        // 1. Open binary file for reading
+        std::ifstream in(filepath, std::ios::binary);
+        if (!in.is_open()) {
+            Logger::Get().Error("Could not open file for loading RAYP: " + filepath);
+            return false;
+        }
+
+        // Read Magic header
+        char magic[4];
+        in.read(magic, 4);
+        if (std::strncmp(magic, "RAYP", 4) != 0) {
+            Logger::Get().Error("Invalid RAYP magic signature.");
+            return false;
+        }
+
+        // Read format version
+        uint32_t version = 0;
+        in.read(reinterpret_cast<char*>(&version), sizeof(version));
+        if (version != 1) {
+            Logger::Get().Error("Unsupported RAYP version: " + std::to_string(version));
+            return false;
+        }
+
+        // Read Metadata size and content
+        uint64_t metadataSize = 0;
+        in.read(reinterpret_cast<char*>(&metadataSize), sizeof(metadataSize));
+        
+        std::string metadataStr;
+        metadataStr.resize(metadataSize);
+        in.read(&metadataStr[0], metadataSize);
+
+        // Parse JSON metadata
+        json metadata = json::parse(metadataStr);
+
+        // Release old resources
+        for (auto& layer : m_Layers) {
+            if (layer.texture) layer.texture->Release();
+            if (layer.srv) layer.srv->Release();
+        }
+        m_Layers.clear();
+
+        m_Width = metadata["width"].get<int>();
+        m_Height = metadata["height"].get<int>();
+        m_ActiveLayerIdx = metadata["active_layer"].get<int>();
+
+        // Recreate composition resources
+        CreateCompositeResources(device);
+
+        auto layersArray = metadata["layers"];
+        for (size_t idx = 0; idx < layersArray.size(); ++idx) {
+            auto layerJson = layersArray[idx];
+            Layer layer;
+            layer.name = layerJson["name"].get<std::string>();
+            layer.visible = layerJson["visible"].get<bool>();
+            layer.opacity = layerJson["opacity"].get<float>();
+            
+            // Read uncompressed and compressed size
+            uint64_t uncompressedSize = 0;
+            uint64_t compressedSize = 0;
+            in.read(reinterpret_cast<char*>(&uncompressedSize), sizeof(uncompressedSize));
+            in.read(reinterpret_cast<char*>(&compressedSize), sizeof(compressedSize));
+
+            std::vector<uint8_t> compressedBytes(compressedSize);
+            in.read(reinterpret_cast<char*>(compressedBytes.data()), compressedSize);
+
+            // Decompress using stbi_zlib_decode_malloc
+            int decompSize = 0;
+            char* decompData = stbi_zlib_decode_malloc(
+                reinterpret_cast<const char*>(compressedBytes.data()),
+                static_cast<int>(compressedSize),
+                &decompSize
+            );
+
+            if (!decompData || static_cast<size_t>(decompSize) != uncompressedSize) {
+                Logger::Get().Error("Failed to decompress layer data for " + layer.name);
+                if (decompData) free(decompData);
+                return false;
+            }
+
+            layer.pixels.resize(uncompressedSize / sizeof(float));
+            std::memcpy(layer.pixels.data(), decompData, uncompressedSize);
+            free(decompData);
+
+            layer.needsUpload = true;
+            RecreateLayerTexture(device, layer);
+
+            m_Layers.push_back(std::move(layer));
+        }
+
+        m_UndoRedoManager.Clear();
+        m_IsDocumentModified = false;
+        Logger::Get().Info("Successfully loaded project from " + filepath);
+        return true;
+    }
+    catch (const std::exception& e) {
+        Logger::Get().Error("Exception loading RAYP: " + std::string(e.what()));
+        return false;
+    }
+}
+
+static bool SaveCanvasRaypInternal(const std::string& filepath, int width, int height, int activeLayerIdx,
+                                  const std::vector<std::string>& layerNames,
+                                  const std::vector<bool>& layerVisibles,
+                                  const std::vector<float>& layerOpacities,
+                                  const std::vector<std::vector<float>>& layerPixels) {
+    try {
+        json metadata;
+        metadata["width"] = width;
+        metadata["height"] = height;
+        metadata["active_layer"] = activeLayerIdx;
+
+        json layersArray = json::array();
+        for (size_t i = 0; i < layerNames.size(); ++i) {
+            json layerJson;
+            layerJson["name"] = layerNames[i];
+            layerJson["visible"] = layerVisibles[i];
+            layerJson["opacity"] = layerOpacities[i];
+            layersArray.push_back(layerJson);
+        }
+        metadata["layers"] = layersArray;
+
+        std::string metadataStr = metadata.dump();
+
+        std::ofstream out(filepath, std::ios::binary);
+        if (!out.is_open()) {
+            return false;
+        }
+
+        out.write("RAYP", 4);
+        uint32_t version = 1;
+        out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+        uint64_t metadataSize = metadataStr.size();
+        out.write(reinterpret_cast<const char*>(&metadataSize), sizeof(metadataSize));
+        out.write(metadataStr.data(), metadataStr.size());
+
+        for (size_t i = 0; i < layerPixels.size(); ++i) {
+            const auto& pixels = layerPixels[i];
+            uint64_t uncompressedSize = pixels.size() * sizeof(float);
+            
+            int compSize = 0;
+            unsigned char* compData = stbi_zlib_compress(
+                reinterpret_cast<unsigned char*>(const_cast<float*>(pixels.data())),
+                static_cast<int>(uncompressedSize),
+                &compSize,
+                8
+            );
+
+            if (!compData) {
+                return false;
+            }
+
+            uint64_t compressedSize = compSize;
+            out.write(reinterpret_cast<const char*>(&uncompressedSize), sizeof(uncompressedSize));
+            out.write(reinterpret_cast<const char*>(&compressedSize), sizeof(compressedSize));
+            out.write(reinterpret_cast<const char*>(compData), compressedSize);
+
+            free(compData);
+        }
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void(bool)> callback) {
+    int width = m_Width;
+    int height = m_Height;
+    int activeLayer = m_ActiveLayerIdx;
+    
+    std::vector<std::string> names;
+    std::vector<bool> visibles;
+    std::vector<float> opacities;
+    std::vector<std::vector<float>> pixels;
+    
+    names.reserve(m_Layers.size());
+    visibles.reserve(m_Layers.size());
+    opacities.reserve(m_Layers.size());
+    pixels.reserve(m_Layers.size());
+    
+    for (const auto& layer : m_Layers) {
+        names.push_back(layer.name);
+        visibles.push_back(layer.visible);
+        opacities.push_back(layer.opacity);
+        pixels.push_back(layer.pixels);
+    }
+    
+    std::thread([=, pixels = std::move(pixels)]() {
+        bool success = SaveCanvasRaypInternal(filepath, width, height, activeLayer, names, visibles, opacities, pixels);
+        if (callback) {
+            callback(success);
+        }
+    }).detach();
 }

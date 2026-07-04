@@ -31,6 +31,11 @@ bool ConfigManager::Load(const std::string& configFilePath) {
         if (j.contains("log_level"))      m_LogLevel = j["log_level"].get<std::string>();
         if (j.contains("zoom_speed"))     m_ZoomSpeed = j["zoom_speed"].get<float>();
         if (j.contains("log_file_path"))  m_LogFilePath = j["log_file_path"].get<std::string>();
+        if (j.contains("theme"))          m_Theme = j["theme"].get<std::string>();
+        if (j.contains("backup_dir"))     m_BackupDir = j["backup_dir"].get<std::string>();
+        if (j.contains("autosave_interval_minutes")) m_AutoSaveIntervalMinutes = j["autosave_interval_minutes"].get<int>();
+        if (j.contains("max_undo_steps")) m_MaxUndoSteps = j["max_undo_steps"].get<int>();
+        if (j.contains("max_undo_memory_mb")) m_MaxUndoMemoryMB = j["max_undo_memory_mb"].get<int>();
 
         Logger::Get().Info("Configuration loaded successfully from " + configFilePath);
         return true;
@@ -51,6 +56,11 @@ bool ConfigManager::Save(const std::string& configFilePath) {
         j["log_level"]      = m_LogLevel;
         j["zoom_speed"]     = m_ZoomSpeed;
         j["log_file_path"]  = m_LogFilePath;
+        j["theme"]          = m_Theme;
+        j["backup_dir"]     = m_BackupDir;
+        j["autosave_interval_minutes"] = m_AutoSaveIntervalMinutes;
+        j["max_undo_steps"] = m_MaxUndoSteps;
+        j["max_undo_memory_mb"] = m_MaxUndoMemoryMB;
 
         std::ofstream file(configFilePath);
         if (!file.is_open()) {
@@ -116,4 +126,54 @@ std::string ConfigManager::GetLogFilePath() const {
 void ConfigManager::SetLogFilePath(const std::string& path) {
     std::lock_guard<std::mutex> lock(m_Mutex);
     m_LogFilePath = path;
+}
+
+std::string ConfigManager::GetTheme() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_Theme;
+}
+
+void ConfigManager::SetTheme(const std::string& theme) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_Theme = theme;
+}
+
+std::string ConfigManager::GetBackupDir() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_BackupDir;
+}
+
+void ConfigManager::SetBackupDir(const std::string& path) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_BackupDir = path;
+}
+
+int ConfigManager::GetAutoSaveIntervalMinutes() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_AutoSaveIntervalMinutes;
+}
+
+void ConfigManager::SetAutoSaveIntervalMinutes(int minutes) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_AutoSaveIntervalMinutes = minutes;
+}
+
+int ConfigManager::GetMaxUndoSteps() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_MaxUndoSteps;
+}
+
+void ConfigManager::SetMaxUndoSteps(int steps) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_MaxUndoSteps = steps;
+}
+
+int ConfigManager::GetMaxUndoMemoryMB() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_MaxUndoMemoryMB;
+}
+
+void ConfigManager::SetMaxUndoMemoryMB(int mb) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_MaxUndoMemoryMB = mb;
 }

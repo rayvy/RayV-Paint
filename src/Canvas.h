@@ -4,8 +4,10 @@
 #include <directxmath.h>
 #include <vector>
 #include <string>
+#include <functional>
 #include "core/PaintEngine.h"
 #include "core/DdsHelper.h"
+#include "core/UndoRedoManager.h"
 
 struct Layer {
     std::string name;
@@ -73,7 +75,25 @@ public:
     
     float* GetAlphaMaskColor() { return m_AlphaMaskColor; }
 
+    // Undo / Redo Interface
+    bool Undo();
+    bool Redo();
+    bool CanUndo() const;
+    bool CanRedo() const;
+    std::string GetUndoName() const;
+    std::string GetRedoName() const;
+    void ClearUndoHistory();
+    bool IsDocumentModified() const { return m_IsDocumentModified; }
+    void SetDocumentModified(bool modified) { m_IsDocumentModified = modified; }
+
+    // Native RAYP Format
+    bool SaveCanvasRayp(const std::string& filepath);
+    void SaveCanvasRaypAsync(const std::string& filepath, std::function<void(bool)> callback = nullptr);
+    bool LoadCanvasRayp(const std::string& filepath, ID3D11Device* device);
+
 private:
+    void BackupTile(int tileX, int tileY);
+
     struct Vertex {
         DirectX::XMFLOAT2 pos;
         DirectX::XMFLOAT2 uv;
@@ -135,4 +155,9 @@ private:
     float m_StrokeDistanceAccumulator = 0.0f;
     float m_PrevStabilizedX = 0.0f;
     float m_PrevStabilizedY = 0.0f;
+
+    // Undo/Redo Engine
+    UndoRedoManager m_UndoRedoManager;
+    std::unordered_map<int, TileDelta> m_ActiveStrokeDeltas;
+    bool m_IsDocumentModified = false;
 };

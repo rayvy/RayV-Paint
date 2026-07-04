@@ -101,6 +101,8 @@ set(SOURCES
     src/core/ImageManager.h
     src/core/PaintEngine.cpp
     src/core/PaintEngine.h
+    src/core/UndoRedoManager.cpp
+    src/core/UndoRedoManager.h
     src/scripting/ScriptingEngine.cpp
     src/scripting/ScriptingEngine.h
 )
