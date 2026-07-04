@@ -426,8 +426,22 @@ void Canvas::BackupTile(int tileX, int tileY) {
     m_ActiveStrokeDeltas[key] = std::move(delta);
 }
 
+extern float g_PenPressure;
+
 void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush) {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
+
+    BrushSettings activeBrush = brush;
+    if (brush.pressureRadius) {
+        activeBrush.radius = brush.radius * g_PenPressure;
+        if (activeBrush.radius < 1.0f) activeBrush.radius = 1.0f;
+    }
+    if (brush.pressureHardness) {
+        activeBrush.hardness = brush.hardness * g_PenPressure;
+    }
+    if (brush.pressureOpacity) {
+        activeBrush.opacity = brush.opacity * g_PenPressure;
+    }
 
     int numTilesX = (m_Width + 255) / 256;
     int numTilesY = (m_Height + 255) / 256;
@@ -442,10 +456,10 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         m_ActiveStrokeDeltas.clear();
 
         // Backup tiles covered by the first stamp
-        float minX = currRawX - brush.radius;
-        float maxX = currRawX + brush.radius;
-        float minY = currRawY - brush.radius;
-        float maxY = currRawY + brush.radius;
+        float minX = currRawX - activeBrush.radius;
+        float maxX = currRawX + activeBrush.radius;
+        float minY = currRawY - activeBrush.radius;
+        float maxY = currRawY + activeBrush.radius;
         
         int minTileX = std::max(0, static_cast<int>(minX) / 256);
         int maxTileX = std::max(0, static_cast<int>(maxX) / 256);
@@ -460,20 +474,20 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
 
         // Place the very first stamp immediately
         PaintEngine::DrawStamp(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height, 
-                               currRawX, currRawY, brush);
+                               currRawX, currRawY, activeBrush);
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
     }
     else if (phase == StrokePhase::Update && m_IsStrokeActive) {
         // Apply stabilization
-        float weight = 1.0f / static_cast<float>(std::max(1, brush.stabilization));
+        float weight = 1.0f / static_cast<float>(std::max(1, activeBrush.stabilization));
         float stabilizedX = m_PrevStabilizedX + weight * (currRawX - m_PrevStabilizedX);
         float stabilizedY = m_PrevStabilizedY + weight * (currRawY - m_PrevStabilizedY);
 
         // Backup tiles covered by the stroke segment
-        float minX = std::min(m_PrevStabilizedX, stabilizedX) - brush.radius;
-        float maxX = std::max(m_PrevStabilizedX, stabilizedX) + brush.radius;
-        float minY = std::min(m_PrevStabilizedY, stabilizedY) - brush.radius;
-        float maxY = std::max(m_PrevStabilizedY, stabilizedY) + brush.radius;
+        float minX = std::min(m_PrevStabilizedX, stabilizedX) - activeBrush.radius;
+        float maxX = std::max(m_PrevStabilizedX, stabilizedX) + activeBrush.radius;
+        float minY = std::min(m_PrevStabilizedY, stabilizedY) - activeBrush.radius;
+        float maxY = std::max(m_PrevStabilizedY, stabilizedY) + activeBrush.radius;
 
         int minTileX = std::max(0, static_cast<int>(minX) / 256);
         int maxTileX = std::max(0, static_cast<int>(maxX) / 256);
@@ -490,7 +504,7 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         PaintEngine::DrawStrokeSegment(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height,
                                        m_PrevStabilizedX, m_PrevStabilizedY,
                                        stabilizedX, stabilizedY,
-                                       brush, m_StrokeDistanceAccumulator,
+                                       activeBrush, m_StrokeDistanceAccumulator,
                                        m_LastDabX, m_LastDabY);
 
         m_PrevStabilizedX = stabilizedX;
@@ -652,6 +666,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     context->VSSetShader(m_LayerVertexShader, nullptr, 0);
     context->PSSetShader(m_LayerBlendPixelShader, nullptr, 0);
     context->PSSetSamplers(0, 1, &m_SamplerState);
+    context->PSSetConstantBuffers(0, 1, &m_ConstantBuffer);
 
     context->OMSetBlendState(m_LayerBlendState, nullptr, 0xFFFFFFFF);
 
@@ -680,9 +695,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
 }
 
 void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float viewportHeight) {
-    ComposeLayers(context);
-
-    // Draw composite texture onto viewport
+    // 1. Update constant buffer first so ComposeLayers has access to up-to-date visMode
     D3D11_MAPPED_SUBRESOURCE mappedResource;
     HRESULT hr = context->Map(m_ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
     if (SUCCEEDED(hr)) {
@@ -693,6 +706,10 @@ void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float vie
         context->Unmap(m_ConstantBuffer, 0);
     }
 
+    // 2. Compose layers
+    ComposeLayers(context);
+
+    // 3. Draw composite texture onto viewport
     context->VSSetShader(m_VertexShader, nullptr, 0);
     context->PSSetShader(m_PixelShader, nullptr, 0);
     context->IASetInputLayout(m_InputLayout);
@@ -970,6 +987,7 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         }
 
         m_IsDocumentModified = false;
+        m_CurrentProjectFilePath = filepath;
         Logger::Get().Info("Successfully saved project to " + filepath);
         return true;
     }
@@ -1072,6 +1090,7 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
 
         m_UndoRedoManager.Clear();
         m_IsDocumentModified = false;
+        m_CurrentProjectFilePath = filepath;
         Logger::Get().Info("Successfully loaded project from " + filepath);
         return true;
     }

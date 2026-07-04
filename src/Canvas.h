@@ -88,6 +88,8 @@ public:
     void ClearUndoHistory();
     bool IsDocumentModified() const { return m_IsDocumentModified; }
     void SetDocumentModified(bool modified) { m_IsDocumentModified = modified; }
+    std::string GetCurrentProjectFilePath() const { return m_CurrentProjectFilePath; }
+    void SetCurrentProjectFilePath(const std::string& path) { m_CurrentProjectFilePath = path; }
 
     // Native RAYP Format
     bool SaveCanvasRayp(const std::string& filepath);
@@ -168,4 +170,5 @@ private:
     UndoRedoManager m_UndoRedoManager;
     std::unordered_map<int, TileDelta> m_ActiveStrokeDeltas;
     bool m_IsDocumentModified = false;
+    std::string m_CurrentProjectFilePath;
 };

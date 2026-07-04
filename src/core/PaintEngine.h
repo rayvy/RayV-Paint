@@ -14,7 +14,12 @@ struct BrushSettings {
     bool writeR = true;
     bool writeG = true;
     bool writeB = true;
-    bool writeA = true;
+    bool writeA = false; // default false as requested
+
+    // Pressure options
+    bool pressureRadius = false;
+    bool pressureHardness = false;
+    bool pressureOpacity = false;
 };
 
 class PaintEngine {

@@ -1,3 +1,6 @@
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
@@ -29,6 +32,37 @@
 #include "ScriptingEngine.h"
 #include "Canvas.h"
 #include "core/KeymapManager.h"
+
+// Tablet Pointer API support
+float g_PenPressure = 1.0f;
+static bool g_IsPenActive = false;
+static WNDPROC g_OriginalWndProc = nullptr;
+
+LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+        case WM_POINTERDOWN:
+        case WM_POINTERUPDATE: {
+            UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
+            POINTER_INPUT_TYPE pointerType = PT_POINTER;
+            if (GetPointerType(pointerId, &pointerType)) {
+                if (pointerType == PT_PEN) {
+                    POINTER_PEN_INFO penInfo;
+                    if (GetPointerPenInfo(pointerId, &penInfo)) {
+                        g_PenPressure = (float)penInfo.pressure / 1024.0f;
+                        g_IsPenActive = true;
+                    }
+                }
+            }
+            break;
+        }
+        case WM_POINTERUP: {
+            g_PenPressure = 1.0f;
+            g_IsPenActive = false;
+            break;
+        }
+    }
+    return CallWindowProc(g_OriginalWndProc, hWnd, uMsg, wParam, lParam);
+}
 
 // Chained GLFW Key Callback for Layout-Independent OEM Shortcuts
 static GLFWkeyfun g_PrevKeyCallback = nullptr;
@@ -309,6 +343,9 @@ int main(int argc, char* argv[]) {
 
     HWND hWnd = glfwGetWin32Window(window);
 
+    // Subclass window procedure for high-precision pointer/tablet messages
+    g_OriginalWndProc = (WNDPROC)SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)SubclassedWndProc);
+
     // Initialize KeymapManager (requires GLFW initialized and window created for scancode resolution)
     KeymapManager::Get().Initialize();
     KeymapManager::Get().Load();
@@ -389,6 +426,7 @@ int main(int argc, char* argv[]) {
     bool showLayers = true;
     bool showToolbar = true;
     bool showColors = true;
+    bool showBrushSettings = true;
 
     // Modals
     bool openImportModal = false;
@@ -398,6 +436,8 @@ int main(int argc, char* argv[]) {
     bool openSaveRaypModal = false;
     bool openLoadRaypModal = false;
     bool openCanvasSizeModal = false;
+    bool openLoadConfigModal = false;
+    bool openSaveConfigModal = false;
 
     auto lastAutoSaveTime = std::chrono::steady_clock::now();
     bool isAutoSaving = false;
@@ -450,6 +490,13 @@ int main(int argc, char* argv[]) {
                     ImGui::EndMenu();
                 }
                 ImGui::Separator();
+                if (ImGui::MenuItem("Load Config...")) {
+                    openLoadConfigModal = true;
+                }
+                if (ImGui::MenuItem("Save Config...")) {
+                    openSaveConfigModal = true;
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("Settings / Preferences...")) {
                     openSettingsModal = true;
                 }
@@ -491,6 +538,7 @@ int main(int argc, char* argv[]) {
                 ImGui::MenuItem("Properties", nullptr, &showProperties);
                 ImGui::MenuItem("Layers", nullptr, &showLayers);
                 ImGui::MenuItem("Colors Window", nullptr, &showColors);
+                ImGui::MenuItem("Brush Settings", nullptr, &showBrushSettings);
                 ImGui::MenuItem("Console logs", nullptr, &showConsole);
                 ImGui::Separator();
                 if (ImGui::MenuItem("Reset View")) {
@@ -507,8 +555,26 @@ int main(int argc, char* argv[]) {
             ImGui::EndMainMenuBar();
         }
 
+        // 9.3 Update Window Title with Project Name & Modified Star
+        static std::string lastTitle = "";
+        std::string currentProj = g_Canvas.GetCurrentProjectFilePath();
+        if (currentProj.empty()) {
+            currentProj = "Untitled";
+        } else {
+            currentProj = std::filesystem::path(currentProj).filename().string();
+        }
+        std::string newTitle = "RayV-Paint - " + currentProj;
+        if (g_Canvas.IsDocumentModified()) {
+            newTitle += " *";
+        }
+        if (newTitle != lastTitle) {
+            glfwSetWindowTitle(window, newTitle.c_str());
+            lastTitle = newTitle;
+        }
+
         // 9.2 Persistent Footer (Status Bar)
-        ImGui::BeginViewportSideBar("##StatusBar", mainViewport, ImGuiDir_Down, 22.0f, 
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
+        ImGui::BeginViewportSideBar("##StatusBar", mainViewport, ImGuiDir_Down, 28.0f, 
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
         
         ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | Zoom: %.0f%% | Threads: %d | Tool: %s", 
@@ -516,6 +582,7 @@ int main(int argc, char* argv[]) {
             (g_ActiveTool == ActiveTool::Brush ? "Brush" : (g_ActiveTool == ActiveTool::Eraser ? "Eraser" : "Pan")));
         
         ImGui::End();
+        ImGui::PopStyleVar();
 
         // 9.3 DockSpace Configuration
         ImGui::DockSpaceOverViewport(0, mainViewport);
@@ -549,9 +616,60 @@ int main(int argc, char* argv[]) {
             ImGui::OpenPopup("Load Project");
             openLoadRaypModal = false;
         }
+        if (openLoadConfigModal) {
+            ImGui::OpenPopup("Load Config");
+            openLoadConfigModal = false;
+        }
+        if (openSaveConfigModal) {
+            ImGui::OpenPopup("Save Config");
+            openSaveConfigModal = false;
+        }
         if (showRecoveryModal) {
             ImGui::OpenPopup("Restore Auto-Saved Session?");
             showRecoveryModal = false;
+        }
+
+        // Load Config Modal
+        if (ImGui::BeginPopupModal("Load Config", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char loadConfigPath[512] = "config.json";
+            ImGui::Text("Enter config file path (.json):");
+            ImGui::InputText("##loadconfigpath", loadConfigPath, IM_ARRAYSIZE(loadConfigPath));
+            ImGui::Separator();
+            if (ImGui::Button("Load", ImVec2(120, 0))) {
+                if (ConfigManager::Get().Load(loadConfigPath)) {
+                    ApplyTheme(ConfigManager::Get().GetTheme().c_str());
+                    Logger::Get().Info("Config loaded successfully: " + std::string(loadConfigPath));
+                    ImGui::CloseCurrentPopup();
+                } else {
+                    Logger::Get().Error("Failed to load config from: " + std::string(loadConfigPath));
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Save Config Modal
+        if (ImGui::BeginPopupModal("Save Config", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char saveConfigPath[512] = "config.json";
+            ImGui::Text("Enter config file path (.json):");
+            ImGui::InputText("##saveconfigpath", saveConfigPath, IM_ARRAYSIZE(saveConfigPath));
+            ImGui::Separator();
+            if (ImGui::Button("Save", ImVec2(120, 0))) {
+                if (ConfigManager::Get().Save(saveConfigPath)) {
+                    Logger::Get().Info("Config saved successfully to: " + std::string(saveConfigPath));
+                    ImGui::CloseCurrentPopup();
+                } else {
+                    Logger::Get().Error("Failed to save config to: " + std::string(saveConfigPath));
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
         }
 
         // Import Popup Modal
@@ -952,39 +1070,200 @@ int main(int argc, char* argv[]) {
         // 9.4 Draw Toolbar Panel
         if (showToolbar) {
             ImGui::Begin("Toolbar", &showToolbar, ImGuiWindowFlags_NoCollapse);
-            ImGui::Text("Tools");
-            ImGui::Separator();
             
-            // Brush selector button
-            bool isBrush = (g_ActiveTool == ActiveTool::Brush);
-            if (isBrush) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-            if (ImGui::Button("Brush", ImVec2(-1, 40))) { 
-                g_ActiveTool = ActiveTool::Brush; 
-                g_Brush.erase = false;
-            }
-            if (isBrush) ImGui::PopStyleColor();
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            bool isVertical = (avail.y > avail.x);
+            
+            // Get current keybinds for tooltips/labels
+            std::string brushBind = KeymapManager::Get().GetActionShortcutString("BrushTool");
+            std::string eraserBind = KeymapManager::Get().GetActionShortcutString("EraserTool");
+            std::string panBind = KeymapManager::Get().GetActionShortcutString("PanTool");
+            
+            static std::string s_RebindAction = "";
 
-            // Eraser selector button
-            bool isEraser = (g_ActiveTool == ActiveTool::Eraser);
-            if (isEraser) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-            if (ImGui::Button("Eraser", ImVec2(-1, 40))) { 
-                g_ActiveTool = ActiveTool::Eraser; 
-                g_Brush.erase = true;
-            }
-            if (isEraser) ImGui::PopStyleColor();
+            if (isVertical) {
+                ImGui::Text("Tools");
+                ImGui::Separator();
+                
+                // Brush
+                bool isBrush = (g_ActiveTool == ActiveTool::Brush);
+                if (isBrush) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+                std::string brushLabel = "🖌 Brush (" + brushBind + ")";
+                if (ImGui::Button(brushLabel.c_str(), ImVec2(-1, 40))) { 
+                    g_ActiveTool = ActiveTool::Brush; 
+                    g_Brush.erase = false;
+                }
+                if (isBrush) ImGui::PopStyleColor();
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    s_RebindAction = "BrushTool";
+                    ImGui::OpenPopup("RebindToolPopup");
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Right-click to rebind Brush tool");
+                }
 
-            // Pan selector button
-            bool isPan = (g_ActiveTool == ActiveTool::Pan);
-            if (isPan) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-            if (ImGui::Button("Pan (LDrag)", ImVec2(-1, 40))) { 
-                g_ActiveTool = ActiveTool::Pan; 
-            }
-            if (isPan) ImGui::PopStyleColor();
+                // Eraser
+                bool isEraser = (g_ActiveTool == ActiveTool::Eraser);
+                if (isEraser) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+                std::string eraserLabel = "⌫ Eraser (" + eraserBind + ")";
+                if (ImGui::Button(eraserLabel.c_str(), ImVec2(-1, 40))) { 
+                    g_ActiveTool = ActiveTool::Eraser; 
+                    g_Brush.erase = true;
+                }
+                if (isEraser) ImGui::PopStyleColor();
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    s_RebindAction = "EraserTool";
+                    ImGui::OpenPopup("RebindToolPopup");
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Right-click to rebind Eraser tool");
+                }
 
-            ImGui::Separator();
-            if (ImGui::Button("Reset View", ImVec2(-1, 30))) {
-                g_Canvas.ResetView();
+                // Pan
+                bool isPan = (g_ActiveTool == ActiveTool::Pan);
+                if (isPan) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+                std::string panLabel = "✥ Pan (" + panBind + ")";
+                if (ImGui::Button(panLabel.c_str(), ImVec2(-1, 40))) { 
+                    g_ActiveTool = ActiveTool::Pan; 
+                }
+                if (isPan) ImGui::PopStyleColor();
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    s_RebindAction = "PanTool";
+                    ImGui::OpenPopup("RebindToolPopup");
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Right-click to rebind Pan tool");
+                }
+
+                ImGui::Separator();
+                if (ImGui::Button("⟲ Reset View", ImVec2(-1, 30))) {
+                    g_Canvas.ResetView();
+                }
+            } else {
+                // Horizontal Layout
+                // Brush
+                bool isBrush = (g_ActiveTool == ActiveTool::Brush);
+                if (isBrush) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+                if (ImGui::Button("🖌", ImVec2(40, 40))) { 
+                    g_ActiveTool = ActiveTool::Brush; 
+                    g_Brush.erase = false;
+                }
+                if (isBrush) ImGui::PopStyleColor();
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    s_RebindAction = "BrushTool";
+                    ImGui::OpenPopup("RebindToolPopup");
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Brush (%s)\nRight-click to rebind", brushBind.c_str());
+                }
+
+                ImGui::SameLine();
+
+                // Eraser
+                bool isEraser = (g_ActiveTool == ActiveTool::Eraser);
+                if (isEraser) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+                if (ImGui::Button("⌫", ImVec2(40, 40))) { 
+                    g_ActiveTool = ActiveTool::Eraser; 
+                    g_Brush.erase = true;
+                }
+                if (isEraser) ImGui::PopStyleColor();
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    s_RebindAction = "EraserTool";
+                    ImGui::OpenPopup("RebindToolPopup");
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Eraser (%s)\nRight-click to rebind", eraserBind.c_str());
+                }
+
+                ImGui::SameLine();
+
+                // Pan
+                bool isPan = (g_ActiveTool == ActiveTool::Pan);
+                if (isPan) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+                if (ImGui::Button("✥", ImVec2(40, 40))) { 
+                    g_ActiveTool = ActiveTool::Pan; 
+                }
+                if (isPan) ImGui::PopStyleColor();
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    s_RebindAction = "PanTool";
+                    ImGui::OpenPopup("RebindToolPopup");
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Pan (%s)\nRight-click to rebind", panBind.c_str());
+                }
+
+                ImGui::SameLine();
+
+                if (ImGui::Button("⟲", ImVec2(40, 40))) {
+                    g_Canvas.ResetView();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Reset View");
+                }
             }
+
+            // Shared Rebind Popup Modal
+            if (ImGui::BeginPopup("RebindToolPopup")) {
+                ImGui::Text("Rebind Action: %s", s_RebindAction.c_str());
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "[Press any key to rebind]");
+                
+                ImGuiIO& io = ImGui::GetIO();
+                bool bound = false;
+                for (int k = 0; k < ImGuiKey_NamedKey_END; ++k) {
+                    ImGuiKey imguiKey = (ImGuiKey)k;
+                    if (ImGui::IsKeyPressed(imguiKey)) {
+                        int glfwKey = 0;
+                        if (imguiKey >= ImGuiKey_A && imguiKey <= ImGuiKey_Z) glfwKey = GLFW_KEY_A + (imguiKey - ImGuiKey_A);
+                        else if (imguiKey >= ImGuiKey_0 && imguiKey <= ImGuiKey_9) glfwKey = GLFW_KEY_0 + (imguiKey - ImGuiKey_0);
+                        else if (imguiKey >= ImGuiKey_F1 && imguiKey <= ImGuiKey_F12) glfwKey = GLFW_KEY_F1 + (imguiKey - ImGuiKey_F1);
+                        else if (imguiKey == ImGuiKey_Space) glfwKey = GLFW_KEY_SPACE;
+                        else if (imguiKey == ImGuiKey_Enter || imguiKey == ImGuiKey_KeypadEnter) glfwKey = GLFW_KEY_ENTER;
+                        else if (imguiKey == ImGuiKey_Escape) glfwKey = GLFW_KEY_ESCAPE;
+                        else if (imguiKey == ImGuiKey_Tab) glfwKey = GLFW_KEY_TAB;
+                        else if (imguiKey == ImGuiKey_Backspace) glfwKey = GLFW_KEY_BACKSPACE;
+                        else if (imguiKey == ImGuiKey_Insert) glfwKey = GLFW_KEY_INSERT;
+                        else if (imguiKey == ImGuiKey_Delete) glfwKey = GLFW_KEY_DELETE;
+                        else if (imguiKey == ImGuiKey_RightArrow) glfwKey = GLFW_KEY_RIGHT;
+                        else if (imguiKey == ImGuiKey_LeftArrow) glfwKey = GLFW_KEY_LEFT;
+                        else if (imguiKey == ImGuiKey_DownArrow) glfwKey = GLFW_KEY_DOWN;
+                        else if (imguiKey == ImGuiKey_UpArrow) glfwKey = GLFW_KEY_UP;
+                        else if (imguiKey == ImGuiKey_Comma) glfwKey = GLFW_KEY_COMMA;
+                        else if (imguiKey == ImGuiKey_Period) glfwKey = GLFW_KEY_PERIOD;
+                        else if (imguiKey == ImGuiKey_Slash) glfwKey = GLFW_KEY_SLASH;
+                        else if (imguiKey == ImGuiKey_Semicolon) glfwKey = GLFW_KEY_SEMICOLON;
+                        else if (imguiKey == ImGuiKey_Equal) glfwKey = GLFW_KEY_EQUAL;
+                        else if (imguiKey == ImGuiKey_Minus) glfwKey = GLFW_KEY_MINUS;
+                        else if (imguiKey == ImGuiKey_LeftBracket) glfwKey = GLFW_KEY_LEFT_BRACKET;
+                        else if (imguiKey == ImGuiKey_RightBracket) glfwKey = GLFW_KEY_RIGHT_BRACKET;
+                        else if (imguiKey == ImGuiKey_Backslash) glfwKey = GLFW_KEY_BACKSLASH;
+                        else if (imguiKey == ImGuiKey_GraveAccent) glfwKey = GLFW_KEY_GRAVE_ACCENT;
+
+                        if (imguiKey != ImGuiKey_LeftCtrl && imguiKey != ImGuiKey_RightCtrl &&
+                            imguiKey != ImGuiKey_LeftShift && imguiKey != ImGuiKey_RightShift &&
+                            imguiKey != ImGuiKey_LeftAlt && imguiKey != ImGuiKey_RightAlt) {
+                            
+                            if (glfwKey != 0) {
+                                KeyCombination pendingCombo;
+                                pendingCombo.key = glfwKey;
+                                pendingCombo.ctrl = io.KeyCtrl;
+                                pendingCombo.shift = io.KeyShift;
+                                pendingCombo.alt = io.KeyAlt;
+                                
+                                KeymapManager::Get().BindAction(s_RebindAction, pendingCombo);
+                                KeymapManager::Get().Save();
+                                bound = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (bound) {
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
+
             ImGui::End();
         }
 
@@ -1043,8 +1322,29 @@ int main(int argc, char* argv[]) {
 
             float wheelDelta = isHovered ? ImGui::GetIO().MouseWheel : 0.0f;
 
+            // Photoshop-like Brush Resize/Hardness drag controls (Ctrl+Alt+RMB)
+            static bool g_IsCtrlAltRmbDragging = false;
+            if (isHovered && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                g_IsCtrlAltRmbDragging = true;
+            }
+            if (g_IsCtrlAltRmbDragging) {
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                    g_IsCtrlAltRmbDragging = false;
+                } else {
+                    ImVec2 mouseDelta = ImGui::GetIO().MouseDelta;
+                    g_Brush.radius = std::clamp(g_Brush.radius + mouseDelta.x * 0.5f, 1.0f, 250.0f);
+                    g_Brush.hardness = std::clamp(g_Brush.hardness - mouseDelta.y * 0.01f, 0.0f, 1.0f);
+
+                    // Show visual feedback tooltip
+                    ImGui::BeginTooltip();
+                    ImGui::Text("Brush Size: %.1f px", g_Brush.radius);
+                    ImGui::Text("Hardness: %.2f", g_Brush.hardness);
+                    ImGui::EndTooltip();
+                }
+            }
+
             // Handle custom brush visualizer and cursor hiding when inside canvas bounds
-            if (isHovered && isInsideCanvas && (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser)) {
+            if (isHovered && isInsideCanvas && !g_IsCtrlAltRmbDragging && (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser)) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
                 // Draw custom outline circle at mouse position
@@ -1055,13 +1355,96 @@ int main(int argc, char* argv[]) {
             }
 
             // Draw interaction logic
-            if (isHovered && !isPanning && (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser)) {
+            static float g_LastStrokeEndX = 0.0f;
+            static float g_LastStrokeEndY = 0.0f;
+            static bool g_HasLastStrokeEnd = false;
+
+            static float g_StrokeStartX = 0.0f;
+            static float g_StrokeStartY = 0.0f;
+            static bool g_LockAxisSelected = false;
+            enum class LockAxis { None, Horizontal, Vertical };
+            static LockAxis g_LockAxis = LockAxis::None;
+
+            bool isShiftHeld = ImGui::GetIO().KeyShift;
+
+            if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging && (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser)) {
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     g_IsPainting = true;
-                    g_Canvas.PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, g_Brush);
+                    if (isShiftHeld && g_HasLastStrokeEnd) {
+                        // Draw line from last stroke end to current mouse
+                        g_Canvas.PaintOnActiveLayer(g_LastStrokeEndX, g_LastStrokeEndY, StrokePhase::Begin, g_Brush);
+                        
+                        // Apply axis lock for the initial line if shift is held and they moved enough
+                        float targetX = canvasX;
+                        float targetY = canvasY;
+                        float dx = targetX - g_LastStrokeEndX;
+                        float dy = targetY - g_LastStrokeEndY;
+                        if (std::sqrt(dx*dx + dy*dy) > 8.0f) {
+                            g_LockAxisSelected = true;
+                            if (std::abs(dx) > std::abs(dy)) {
+                                g_LockAxis = LockAxis::Horizontal;
+                                targetY = g_LastStrokeEndY;
+                            } else {
+                                g_LockAxis = LockAxis::Vertical;
+                                targetX = g_LastStrokeEndX;
+                            }
+                        } else {
+                            g_LockAxisSelected = false;
+                            g_LockAxis = LockAxis::None;
+                        }
+                        
+                        g_Canvas.PaintOnActiveLayer(targetX, targetY, StrokePhase::Update, g_Brush);
+                        
+                        g_StrokeStartX = targetX;
+                        g_StrokeStartY = targetY;
+                        g_LastStrokeEndX = targetX;
+                        g_LastStrokeEndY = targetY;
+                    } else {
+                        // Normal start
+                        g_Canvas.PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, g_Brush);
+                        g_StrokeStartX = canvasX;
+                        g_StrokeStartY = canvasY;
+                        g_LockAxisSelected = false;
+                        g_LockAxis = LockAxis::None;
+                        g_LastStrokeEndX = canvasX;
+                        g_LastStrokeEndY = canvasY;
+                    }
                 } 
                 else if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && g_IsPainting) {
-                    g_Canvas.PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Update, g_Brush);
+                    float targetX = canvasX;
+                    float targetY = canvasY;
+                    
+                    if (isShiftHeld) {
+                        if (!g_LockAxisSelected) {
+                            float dx = canvasX - g_StrokeStartX;
+                            float dy = canvasY - g_StrokeStartY;
+                            float dist = std::sqrt(dx * dx + dy * dy);
+                            if (dist > 8.0f) {
+                                g_LockAxisSelected = true;
+                                if (std::abs(dx) > std::abs(dy)) {
+                                    g_LockAxis = LockAxis::Horizontal;
+                                } else {
+                                    g_LockAxis = LockAxis::Vertical;
+                                }
+                            }
+                        }
+                        
+                        if (g_LockAxisSelected) {
+                            if (g_LockAxis == LockAxis::Horizontal) {
+                                targetY = g_StrokeStartY;
+                            } else if (g_LockAxis == LockAxis::Vertical) {
+                                targetX = g_StrokeStartX;
+                            }
+                        }
+                    } else {
+                        g_LockAxisSelected = false;
+                        g_LockAxis = LockAxis::None;
+                    }
+                    
+                    g_Canvas.PaintOnActiveLayer(targetX, targetY, StrokePhase::Update, g_Brush);
+                    g_LastStrokeEndX = targetX;
+                    g_LastStrokeEndY = targetY;
+                    g_HasLastStrokeEnd = true;
                 }
             }
 
@@ -1083,15 +1466,6 @@ int main(int argc, char* argv[]) {
             ImGui::Text("Pan: (%.1f, %.1f)", g_Canvas.GetPan().x, g_Canvas.GetPan().y);
             
             ImGui::Separator();
-            ImGui::Text("Brush Settings:");
-            ImGui::SliderFloat("Radius", &g_Brush.radius, 1.0f, 250.0f, "%.0f px");
-            ImGui::SliderFloat("Hardness", &g_Brush.hardness, 0.0f, 1.0f, "%.2f");
-            ImGui::SliderFloat("Opacity##brush", &g_Brush.opacity, 0.0f, 1.0f, "%.2f");
-            ImGui::SliderFloat("Spacing##brush", &g_Brush.spacing, 0.01f, 5.0f, "%.2f");
-            ImGui::SliderInt("Stabilization##brush", &g_Brush.stabilization, 1, 50, "%d");
-            ImGui::ColorEdit4("Color##brush", g_Brush.color, ImGuiColorEditFlags_NoInputs);
-
-            ImGui::Separator();
             ImGui::Text("Channel Filter (Vis Mode):");
             int mode = g_Canvas.GetVisualizationMode();
             ImGui::RadioButton("RGBA (Normal)", &mode, 0);
@@ -1104,21 +1478,35 @@ int main(int argc, char* argv[]) {
                 ImGui::ColorEdit3("Mask Color", g_Canvas.GetAlphaMaskColor());
             }
 
+            ImGui::Separator();
+            ImGui::Text("Active Layer Write Channels:");
+            
+            auto DrawChannelToggle = [](const char* label, bool* value) {
+                bool active = *value;
+                if (!active) {
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+                }
+                std::string btnText = std::string(active ? "👁 " : "⤫ ") + label;
+                if (ImGui::Button(btnText.c_str(), ImVec2(40, 24))) {
+                    *value = !(*value);
+                }
+                if (!active) {
+                    ImGui::PopStyleColor();
+                }
+            };
+
+            DrawChannelToggle("R", &g_Brush.writeR); ImGui::SameLine();
+            DrawChannelToggle("G", &g_Brush.writeG); ImGui::SameLine();
+            DrawChannelToggle("B", &g_Brush.writeB); ImGui::SameLine();
+            DrawChannelToggle("A", &g_Brush.writeA);
+            ImGui::NewLine();
+
             ImGui::End();
         }
 
         // 9.6b Draw Layers Panel (Standalone docked window)
         if (showLayers) {
             ImGui::Begin("Layers", &showLayers, ImGuiWindowFlags_NoCollapse);
-            
-            // Channels Write Mask at the top of Layers panel
-            ImGui::Text("Active Layer Write Channels:");
-            ImGui::Checkbox("R", &g_Brush.writeR); ImGui::SameLine();
-            ImGui::Checkbox("G", &g_Brush.writeG); ImGui::SameLine();
-            ImGui::Checkbox("B", &g_Brush.writeB); ImGui::SameLine();
-            ImGui::Checkbox("A", &g_Brush.writeA);
-
-            ImGui::Separator();
             
             if (ImGui::Button("Add Layer", ImVec2(-1, 25))) {
                 std::string lName = "Layer " + std::to_string(g_Canvas.GetLayers().size() + 1);
@@ -1176,6 +1564,35 @@ int main(int argc, char* argv[]) {
                 ImGui::PopID();
             }
             ImGui::EndChild();
+
+            ImGui::End();
+        }
+
+        // 9.6c Draw Standalone Brush Settings Panel
+        if (showBrushSettings) {
+            ImGui::Begin("Brush Settings", &showBrushSettings, ImGuiWindowFlags_NoCollapse);
+            
+            ImGui::SliderFloat("Radius", &g_Brush.radius, 1.0f, 250.0f, "%.0f px");
+            ImGui::Checkbox("Pressure -> Radius", &g_Brush.pressureRadius);
+            
+            ImGui::Spacing();
+            ImGui::SliderFloat("Hardness", &g_Brush.hardness, 0.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("Pressure -> Hardness", &g_Brush.pressureHardness);
+            
+            ImGui::Spacing();
+            ImGui::SliderFloat("Opacity##brush", &g_Brush.opacity, 0.0f, 1.0f, "%.2f");
+            ImGui::Checkbox("Pressure -> Opacity", &g_Brush.pressureOpacity);
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::SliderFloat("Spacing##brush", &g_Brush.spacing, 0.01f, 5.0f, "%.2f");
+            ImGui::SliderInt("Stabilization##brush", &g_Brush.stabilization, 1, 50, "%d");
+            
+            ImGui::Spacing();
+            ImGui::Text("Brush Color:");
+            ImGui::ColorEdit4("Color##brush", g_Brush.color, ImGuiColorEditFlags_NoInputs);
 
             ImGui::End();
         }
@@ -1303,6 +1720,10 @@ int main(int argc, char* argv[]) {
 
     CleanupRenderTarget();
     CleanupDeviceD3D();
+    if (g_OriginalWndProc) {
+        SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)g_OriginalWndProc);
+        g_OriginalWndProc = nullptr;
+    }
     glfwDestroyWindow(window);
     glfwTerminate();
 

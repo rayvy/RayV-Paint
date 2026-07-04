@@ -127,6 +127,11 @@ float4 PSMain(PS_INPUT input) : SV_TARGET
 float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
 {
     float4 col = g_Texture.Sample(g_Sampler, input.uv);
+    int visMode = (int)u_VisModeAndMaskColor.x;
+    if (visMode == 1)
+    {
+        col.a = 1.0f;
+    }
     col.a *= u_LayerParams.x; // Multiply alpha by opacity
     return col;
 }
