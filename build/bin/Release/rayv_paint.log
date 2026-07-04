@@ -30,3 +30,87 @@
 [2026-07-04 12:04:23.851] [INFO]  Shutting down embedded Python interpreter...
 [2026-07-04 12:04:23.854] [INFO]  ThreadPool shut down successfully.
 [2026-07-04 12:04:23.854] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 12:15:05.706] [INFO]  ===================================================
+[2026-07-04 12:15:05.706] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 12:15:05.706] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 12:15:05.706] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 12:15:05.709] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 12:15:05.732] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 12:15:05.952] [INFO]  Created new layer: Background
+[2026-07-04 12:15:05.953] [INFO]  Startup completed in: 247.465500 ms
+[2026-07-04 12:15:53.051] [ERROR] Failed to load image file (STB): "C:\Users\Rayvy\Pictures\ava512.png"
+[2026-07-04 12:15:57.367] [INFO]  Image loaded successfully (512x512): C:\Users\Rayvy\Pictures\ava512.png
+[2026-07-04 12:15:57.387] [INFO]  Successfully imported layer from: C:\Users\Rayvy\Pictures\ava512.png
+[2026-07-04 12:16:36.788] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 12:16:36.793] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 12:16:36.793] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 12:29:50.650] [INFO]  ===================================================
+[2026-07-04 12:29:50.651] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 12:29:50.651] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 12:29:50.651] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 12:29:50.654] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 12:29:50.678] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 12:29:50.914] [INFO]  Created new layer: Background
+[2026-07-04 12:29:50.914] [INFO]  Startup completed in: 263.798200 ms
+[2026-07-04 12:29:52.104] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 12:29:52.108] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 12:29:52.108] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 12:29:55.560] [INFO]  ===================================================
+[2026-07-04 12:29:55.560] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 12:29:55.561] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 12:29:55.561] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 12:29:55.565] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 12:29:55.588] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 12:29:55.805] [INFO]  Created new layer: Background
+[2026-07-04 12:29:55.806] [INFO]  Startup completed in: 245.834000 ms
+[2026-07-04 12:30:01.428] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 12:30:01.431] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 12:30:01.431] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 12:30:02.109] [INFO]  ===================================================
+[2026-07-04 12:30:02.109] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 12:30:02.109] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 12:30:02.109] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 12:30:02.113] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 12:30:02.137] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 12:30:02.359] [INFO]  Created new layer: Background
+[2026-07-04 12:30:02.360] [INFO]  Startup completed in: 250.957900 ms
+[2026-07-04 12:30:06.133] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 12:30:06.136] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 12:30:06.136] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 12:30:55.546] [INFO]  ===================================================
+[2026-07-04 12:30:55.546] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 12:30:55.547] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 12:30:55.547] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 12:30:55.549] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 12:30:55.576] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 12:30:55.794] [INFO]  Created new layer: Background
+[2026-07-04 12:30:55.794] [INFO]  Startup completed in: 248.038300 ms
+[2026-07-04 12:32:29.892] [INFO]  DDS texture loaded successfully (1024x1024): G:\XXMI\GIMI\LLMods\Sandrone Multitoggle - OG Body\SandroneBangsANormalMap.dds
+[2026-07-04 12:32:29.918] [INFO]  Successfully imported layer from: G:\XXMI\GIMI\LLMods\Sandrone Multitoggle - OG Body\SandroneBangsANormalMap.dds
+[2026-07-04 12:43:15.370] [INFO]  Resizing canvas from 1024x1024 to 1024x1152
+[2026-07-04 12:43:15.410] [INFO]  Resizing canvas from 1024x1152 to 1024x1280
+[2026-07-04 12:43:15.451] [INFO]  Resizing canvas from 1024x1280 to 1024x1408
+[2026-07-04 12:43:15.490] [INFO]  Resizing canvas from 1024x1408 to 1024x1536
+[2026-07-04 12:43:15.529] [INFO]  Resizing canvas from 1024x1536 to 1024x1664
+[2026-07-04 12:43:15.575] [INFO]  Resizing canvas from 1024x1664 to 1024x1792
+[2026-07-04 12:43:15.614] [INFO]  Resizing canvas from 1024x1792 to 1024x1920
+[2026-07-04 12:43:15.659] [INFO]  Resizing canvas from 1024x1920 to 1024x2048
+[2026-07-04 12:43:16.904] [INFO]  Resizing canvas from 1024x2048 to 1152x2048
+[2026-07-04 12:43:16.950] [INFO]  Resizing canvas from 1152x2048 to 1280x2048
+[2026-07-04 12:43:16.999] [INFO]  Resizing canvas from 1280x2048 to 1408x2048
+[2026-07-04 12:43:17.045] [INFO]  Resizing canvas from 1408x2048 to 1536x2048
+[2026-07-04 12:43:17.095] [INFO]  Resizing canvas from 1536x2048 to 1664x2048
+[2026-07-04 12:43:17.470] [INFO]  Resizing canvas from 1664x2048 to 1792x2048
+[2026-07-04 12:43:17.556] [INFO]  Resizing canvas from 1792x2048 to 1920x2048
+[2026-07-04 12:43:17.616] [INFO]  Resizing canvas from 1920x2048 to 2048x2048
+[2026-07-04 12:44:13.974] [INFO]  DDS texture saved successfully (2048x2048): C:\123\export.dds
+[2026-07-04 12:49:36.593] [INFO]  Created new layer: Layer 3
+[2026-07-04 12:49:41.647] [INFO]  Deleted layer: Layer 3
+[2026-07-04 12:58:08.870] [INFO]  ===================================================
+[2026-07-04 12:58:08.870] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 12:58:08.870] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 12:58:08.870] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 12:58:08.873] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 12:58:08.896] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 12:58:09.130] [INFO]  Created new layer: Background
+[2026-07-04 12:58:09.131] [INFO]  Startup completed in: 261.048100 ms

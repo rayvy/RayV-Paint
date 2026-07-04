@@ -86,7 +86,7 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/pybind11-src/include" /external:I "C:/Users/Rayvy/AppData/Local/Programs/Python/Python313/Include"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>EnableFastChecks</BasicRuntimeChecks>
@@ -107,10 +107,10 @@
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_DEBUG;_WINDOWS;NOMINMAX;IMGUI_IMPL_API=;CMAKE_INTDIR=\"Debug\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -137,7 +137,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImportLibrary>C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/Debug/RayVPaint.lib</ImportLibrary>
       <ProgramDataBaseFile>C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/bin/Debug/RayVPaint.pdb</ProgramDataBaseFile>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
     </Link>
     <ProjectReference>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
@@ -145,7 +145,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/pybind11-src/include" /external:I "C:/Users/Rayvy/AppData/Local/Programs/Python/Python313/Include"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
@@ -167,10 +167,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;IMGUI_IMPL_API=;CMAKE_INTDIR=\"Release\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -197,7 +197,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImportLibrary>C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/Release/RayVPaint.lib</ImportLibrary>
       <ProgramDataBaseFile>C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/bin/Release/RayVPaint.pdb</ProgramDataBaseFile>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
     </Link>
     <ProjectReference>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
@@ -205,7 +205,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='MinSizeRel|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/pybind11-src/include" /external:I "C:/Users/Rayvy/AppData/Local/Programs/Python/Python313/Include"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
@@ -227,10 +227,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;IMGUI_IMPL_API=;CMAKE_INTDIR=\"MinSizeRel\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -257,7 +257,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImportLibrary>C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/MinSizeRel/RayVPaint.lib</ImportLibrary>
       <ProgramDataBaseFile>C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/bin/MinSizeRel/RayVPaint.pdb</ProgramDataBaseFile>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
     </Link>
     <ProjectReference>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
@@ -265,7 +265,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='RelWithDebInfo|x64'">
     <ClCompile>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>%(AdditionalOptions) /external:I "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/pybind11-src/include" /external:I "C:/Users/Rayvy/AppData/Local/Programs/Python/Python313/Include"</AdditionalOptions>
       <AssemblerListingLocation>$(IntDir)</AssemblerListingLocation>
       <BasicRuntimeChecks>Default</BasicRuntimeChecks>
@@ -286,10 +286,10 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     </ClCompile>
     <ResourceCompile>
       <PreprocessorDefinitions>%(PreprocessorDefinitions);WIN32;_WINDOWS;NDEBUG;NOMINMAX;IMGUI_IMPL_API=;CMAKE_INTDIR=\"RelWithDebInfo\"</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
     <Midl>
-      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\stb-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\imgui-src\backends;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\json-src\include;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\pybind11-src\include;C:\Users\Rayvy\AppData\Local\Programs\Python\Python313\Include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <OutputDirectory>$(ProjectDir)/$(IntDir)</OutputDirectory>
       <HeaderFileName>%(Filename).h</HeaderFileName>
       <TypeLibraryName>%(Filename).tlb</TypeLibraryName>
@@ -316,7 +316,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
       <IgnoreSpecificDefaultLibraries>%(IgnoreSpecificDefaultLibraries)</IgnoreSpecificDefaultLibraries>
       <ImportLibrary>C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/RelWithDebInfo/RayVPaint.lib</ImportLibrary>
       <ProgramDataBaseFile>C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/bin/RelWithDebInfo/RayVPaint.pdb</ProgramDataBaseFile>
-      <SubSystem>Console</SubSystem>
+      <SubSystem>Windows</SubSystem>
     </Link>
     <ProjectReference>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
@@ -389,6 +389,12 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ThreadPool.h" />
     <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ConfigManager.cpp" />
     <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ConfigManager.h" />
+    <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\DdsHelper.cpp" />
+    <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\DdsHelper.h" />
+    <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ImageManager.cpp" />
+    <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ImageManager.h" />
+    <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\PaintEngine.cpp" />
+    <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\PaintEngine.h" />
     <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting\ScriptingEngine.cpp" />
     <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting\ScriptingEngine.h" />
     <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\shaders\Canvas.hlsl" />

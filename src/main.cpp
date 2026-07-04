@@ -7,6 +7,8 @@
 #include <vector>
 #include <chrono>
 #include <thread>
+#include <fcntl.h>
+#include <io.h>
 
 // GLFW
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -46,24 +48,70 @@ static ImVec2 g_LastDragDelta = ImVec2(0.0f, 0.0f);
 // Global startup time
 static double g_StartupTimeMs = 0.0;
 
+// Painting state
+enum class ActiveTool { Brush, Eraser, Pan };
+static ActiveTool g_ActiveTool = ActiveTool::Brush;
+static BrushSettings g_Brush;
+static bool g_IsPainting = false;
+static float g_PrevCanvasMouseX = 0.0f;
+static float g_PrevCanvasMouseY = 0.0f;
+
 // Forward declarations
 bool CreateDeviceD3D(HWND hWnd, bool useNullDriver = false);
 void CleanupDeviceD3D();
 void CreateRenderTarget();
 void CleanupRenderTarget();
-void ResizeCanvasRenderTarget(float width, float height);
+void ResizeCanvasRenderTarget(int width, int height);
 void CleanupCanvasRenderTarget();
-void RenderCanvasToTexture(float width, float height);
+void RenderCanvasToTexture(int width, int height);
+void RedirectIOToConsole();
 
 // Core API bindings exported to Scripting Engine
 void TriggerCanvasResize(int w, int h) {
-    g_Canvas.ResizeCanvas(w, h);
+    g_Canvas.ResizeCanvas(g_pd3dDevice, w, h);
     Logger::Get().Info("Canvas resized to: " + std::to_string(w) + "x" + std::to_string(h));
 }
 float GetCanvasZoom() { return g_Canvas.GetZoom(); }
 void SetCanvasZoom(float zoom) { g_Canvas.SetZoom(zoom); }
 void SetCanvasPan(float x, float y) { g_Canvas.SetPan(DirectX::XMFLOAT2(x, y)); }
 void ResetCanvasView() { g_Canvas.ResetView(); }
+bool LoadCanvasImage(const std::string& filepath) {
+    return g_Canvas.LoadImageToLayer(g_pd3dDevice, filepath);
+}
+bool SaveCanvasDDS(const std::string& filepath, int formatChoice) {
+    DdsFormat fmt = DdsFormat::RGBA8_UNORM;
+    if (formatChoice == 1) fmt = DdsFormat::RGBA32_FLOAT;
+    else if (formatChoice == 2) fmt = DdsFormat::RGBA16_UNORM;
+    else if (formatChoice == 3) fmt = DdsFormat::RGBA16_FLOAT;
+    else if (formatChoice == 4) fmt = DdsFormat::R8_UNORM;
+    else if (formatChoice == 5) fmt = DdsFormat::R16_FLOAT;
+    else if (formatChoice == 6) fmt = DdsFormat::R32_FLOAT;
+    return g_Canvas.SaveCanvas(filepath, fmt);
+}
+bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath) {
+    return g_Canvas.SaveCanvasStandard(filepath, iccProfilePath);
+}
+
+
+// Entry point helper to dynamically spawn or attach console
+void SetupConsole(bool forceConsole) {
+    if (forceConsole) {
+        if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+            AllocConsole();
+        }
+        RedirectIOToConsole();
+    }
+}
+
+void RedirectIOToConsole() {
+    FILE* fDummy;
+    freopen_s(&fDummy, "CONOUT$", "w", stdout);
+    freopen_s(&fDummy, "CONOUT$", "w", stderr);
+    freopen_s(&fDummy, "CONIN$", "r", stdin);
+    std::cout.clear();
+    std::cerr.clear();
+    std::cin.clear();
+}
 
 int main(int argc, char* argv[]) {
     auto startupStart = std::chrono::high_resolution_clock::now();
@@ -71,8 +119,10 @@ int main(int argc, char* argv[]) {
     // 1. CLI Arguments parsing
     bool testMode = false;
     bool headlessMode = false;
+    bool forceConsole = false;
     std::string scriptPath = "";
     std::string configPath = "config.json";
+    std::string startupImagePath = "";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -81,15 +131,27 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--headless") {
             headlessMode = true;
             testMode = true; // Headless implies auto-testing behavior
+        } else if (arg == "--console") {
+            forceConsole = true;
         } else if (arg == "--version") {
-            std::cout << "RayVPaint - Tech Art Editor - Version 0.1.0 (Alpha)" << std::endl;
+            SetupConsole(true);
+            std::cout << "RayVPaint - Tech Art Editor - Version 0.2.0" << std::endl;
             return 0;
         } else if (arg == "--script" && i + 1 < argc) {
             scriptPath = argv[++i];
         } else if (arg == "--config" && i + 1 < argc) {
             configPath = argv[++i];
+        } else if (arg[0] != '-') {
+            startupImagePath = arg;
         }
     }
+
+    // Force console if in test mode or headless mode
+    if (testMode || headlessMode) {
+        forceConsole = true;
+    }
+
+    SetupConsole(forceConsole);
 
     // 2. Initialize Core Logging & Configuration Systems
     Logger::Get().Init("rayv_paint.log");
@@ -114,7 +176,7 @@ int main(int argc, char* argv[]) {
     ScriptingEngine::Get().Initialize();
 
     // Resize canvas default dimensions according to config
-    g_Canvas.ResizeCanvas(ConfigManager::Get().GetDefaultWidth(), ConfigManager::Get().GetDefaultHeight());
+    g_Canvas.ResizeCanvas(nullptr, ConfigManager::Get().GetDefaultWidth(), ConfigManager::Get().GetDefaultHeight());
 
     // 5. Initialize GLFW (if not in true headless mode)
     if (!glfwInit()) {
@@ -127,7 +189,7 @@ int main(int argc, char* argv[]) {
         glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
     }
 
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Using DirectX 11, not OpenGL
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Using DirectX 11
     GLFWwindow* window = glfwCreateWindow(1280, 720, "RayVPaint - Tech Art Editor", nullptr, nullptr);
     if (!window) {
         Logger::Get().Error("Failed to create GLFW window");
@@ -137,10 +199,9 @@ int main(int argc, char* argv[]) {
 
     HWND hWnd = glfwGetWin32Window(window);
 
-    // 6. Initialize DirectX 11 (uses Null Driver in Headless/Test mode if windowing/GPU is missing, else normal hardware)
-    bool useNullDriver = headlessMode;
-    if (!CreateDeviceD3D(hWnd, useNullDriver)) {
-        Logger::Get().Error("Failed to initialize DirectX 11 device and swap chain");
+    // 6. Initialize DirectX 11
+    if (!CreateDeviceD3D(hWnd, headlessMode)) {
+        Logger::Get().Error("Failed to initialize DirectX 11");
         glfwDestroyWindow(window);
         glfwTerminate();
         return 1;
@@ -152,31 +213,28 @@ int main(int argc, char* argv[]) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;     // Enable Keyboard Controls
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;           // Enable Docking
-    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;         // Enable Multi-Viewport / Platform Windows
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 
+    // Apply premium Dark Palette
     ImGui::StyleColorsDark();
-    
-    // Customize styles for a premium modern look
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = 6.0f;
-    style.ChildRounding = 4.0f;
     style.FrameRounding = 4.0f;
-    style.PopupRounding = 4.0f;
-    style.ScrollbarRounding = 4.0f;
     style.GrabRounding = 4.0f;
     style.TabRounding = 4.0f;
     style.WindowBorderSize = 1.0f;
-    
+    style.FrameBorderSize = 0.0f;
+
     ImVec4* colors = style.Colors;
-    colors[ImGuiCol_Text]                   = ImVec4(0.90f, 0.90f, 0.90f, 1.00f);
-    colors[ImGuiCol_WindowBg]               = ImVec4(0.10f, 0.10f, 0.12f, 1.00f);
+    colors[ImGuiCol_WindowBg]               = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);
     colors[ImGuiCol_ChildBg]                = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);
-    colors[ImGuiCol_Border]                 = ImVec4(0.20f, 0.20f, 0.22f, 1.00f);
-    colors[ImGuiCol_FrameBg]                = ImVec4(0.15f, 0.15f, 0.17f, 1.00f);
-    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
-    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.25f, 0.25f, 0.30f, 1.00f);
+    colors[ImGuiCol_PopupBg]                = ImVec4(0.08f, 0.08f, 0.10f, 0.95f);
+    colors[ImGuiCol_Border]                 = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
+    colors[ImGuiCol_FrameBg]                = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.25f, 0.25f, 0.30f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]          = ImVec4(0.30f, 0.30f, 0.38f, 1.00f);
     colors[ImGuiCol_TitleBg]                = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
     colors[ImGuiCol_TitleBgActive]          = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
     colors[ImGuiCol_Header]                 = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
@@ -202,6 +260,11 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Load startup image if specified on CLI
+    if (!startupImagePath.empty()) {
+        g_Canvas.LoadImageToLayer(g_pd3dDevice, startupImagePath);
+    }
+
     // Measure startup time
     auto startupEnd = std::chrono::high_resolution_clock::now();
     g_StartupTimeMs = std::chrono::duration<double, std::milli>(startupEnd - startupStart).count();
@@ -212,8 +275,11 @@ int main(int argc, char* argv[]) {
         ScriptingEngine::Get().RunScript(scriptPath);
     }
 
-    // Performance trackers
-    auto frameStart = std::chrono::high_resolution_clock::now();
+    // Trackers
+    int currentWindowWidth = 1280;
+    int currentWindowHeight = 720;
+    glfwGetFramebufferSize(window, &currentWindowWidth, &currentWindowHeight);
+
     float s_FrameTimeMs = 0.0f;
     float s_FPS = 0.0f;
 
@@ -222,11 +288,27 @@ int main(int argc, char* argv[]) {
     bool showProperties = true;
     bool showToolbar = true;
 
+    // Modals
+    bool openImportModal = false;
+    bool openExportDdsModal = false;
+    bool openExportStdModal = false;
+
     // 9. Main loop
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
-        // Start frame timing
+        // Handle window resizing
+        int winW, winH;
+        glfwGetFramebufferSize(window, &winW, &winH);
+        if (winW > 0 && winH > 0 && (winW != currentWindowWidth || winH != currentWindowHeight)) {
+            CleanupRenderTarget();
+            g_pSwapChain->ResizeBuffers(0, winW, winH, DXGI_FORMAT_UNKNOWN, 0);
+            CreateRenderTarget();
+            currentWindowWidth = winW;
+            currentWindowHeight = winH;
+            Logger::Get().Debug("Swapchain backbuffers resized to " + std::to_string(winW) + "x" + std::to_string(winH));
+        }
+
         auto loopStart = std::chrono::high_resolution_clock::now();
 
         // Start Dear ImGui Frame
@@ -239,7 +321,20 @@ int main(int argc, char* argv[]) {
         // 9.1 Persistent Header (Main Menu Bar)
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                if (ImGui::MenuItem("Save Config", "Ctrl+S")) {
+                if (ImGui::MenuItem("Import Image...", "Ctrl+I")) {
+                    openImportModal = true;
+                }
+                if (ImGui::BeginMenu("Export...")) {
+                    if (ImGui::MenuItem("Natively to DDS...")) {
+                        openExportDdsModal = true;
+                    }
+                    if (ImGui::MenuItem("Standard formats (PNG/JPG)...")) {
+                        openExportStdModal = true;
+                    }
+                    ImGui::EndMenu();
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Save Settings", "Ctrl+S")) {
                     ConfigManager::Get().Save();
                 }
                 ImGui::Separator();
@@ -260,7 +355,7 @@ int main(int argc, char* argv[]) {
             }
             if (ImGui::BeginMenu("Scripting")) {
                 if (ImGui::MenuItem("Run test command")) {
-                    ScriptingEngine::Get().RunString("import rayv; rayv.log_warn('Running test command from UI!')");
+                    ScriptingEngine::Get().RunString("import rayv; rayv.log_warn('Executing scripting check.')");
                 }
                 ImGui::EndMenu();
             }
@@ -271,22 +366,144 @@ int main(int argc, char* argv[]) {
         ImGui::BeginViewportSideBar("##StatusBar", mainViewport, ImGuiDir_Down, 22.0f, 
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
         
-        ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | Zoom: %.0f%% | Threads Active: %d", 
-            g_StartupTimeMs, s_FrameTimeMs, s_FPS, g_Canvas.GetWidth(), g_Canvas.GetHeight(), g_Canvas.GetZoom() * 100.0f, numThreads);
+        ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | Zoom: %.0f%% | Threads: %d | Tool: %s", 
+            g_StartupTimeMs, s_FrameTimeMs, s_FPS, g_Canvas.GetWidth(), g_Canvas.GetHeight(), g_Canvas.GetZoom() * 100.0f, numThreads,
+            (g_ActiveTool == ActiveTool::Brush ? "Brush" : (g_ActiveTool == ActiveTool::Eraser ? "Eraser" : "Pan")));
         
         ImGui::End();
 
         // 9.3 DockSpace Configuration
         ImGui::DockSpaceOverViewport(0, mainViewport);
 
+        // Popups/Modals Integration
+        if (openImportModal) {
+            ImGui::OpenPopup("Import Image");
+            openImportModal = false;
+        }
+        if (openExportDdsModal) {
+            ImGui::OpenPopup("Export DDS");
+            openExportDdsModal = false;
+        }
+        if (openExportStdModal) {
+            ImGui::OpenPopup("Export Standard Image");
+            openExportStdModal = false;
+        }
+
+        // Import Popup Modal
+        if (ImGui::BeginPopupModal("Import Image", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char importPath[512] = "";
+            ImGui::Text("Enter absolute path to image:");
+            ImGui::InputText("##importpath", importPath, IM_ARRAYSIZE(importPath));
+            ImGui::Separator();
+            if (ImGui::Button("Import", ImVec2(120, 0))) {
+                if (g_Canvas.LoadImageToLayer(g_pd3dDevice, importPath)) {
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Export DDS Popup Modal
+        if (ImGui::BeginPopupModal("Export DDS", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char exportPath[512] = "export.dds";
+            static int formatChoice = 0; 
+            ImGui::Text("Enter export path:");
+            ImGui::InputText("##exportpath", exportPath, IM_ARRAYSIZE(exportPath));
+            ImGui::Text("DDS Format:");
+            static const char* formatNames[] = {
+                "8-bit SDR (RGBA8)",
+                "16-bit SDR (RGBA16)",
+                "16-bit float HDR (RGBA16F)",
+                "32-bit float HDR (RGBA32F)",
+                "8-bit Grayscale (R8)",
+                "16-bit float Grayscale (R16F)",
+                "32-bit float Grayscale (R32F)"
+            };
+            ImGui::Combo("##ddsformat", &formatChoice, formatNames, IM_ARRAYSIZE(formatNames));
+            ImGui::Separator();
+            if (ImGui::Button("Export", ImVec2(120, 0))) {
+                DdsFormat fmt = DdsFormat::RGBA8_UNORM;
+                if (formatChoice == 1) fmt = DdsFormat::RGBA16_UNORM;
+                else if (formatChoice == 2) fmt = DdsFormat::RGBA16_FLOAT;
+                else if (formatChoice == 3) fmt = DdsFormat::RGBA32_FLOAT;
+                else if (formatChoice == 4) fmt = DdsFormat::R8_UNORM;
+                else if (formatChoice == 5) fmt = DdsFormat::R16_FLOAT;
+                else if (formatChoice == 6) fmt = DdsFormat::R32_FLOAT;
+                
+                if (g_Canvas.SaveCanvas(exportPath, fmt)) {
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Export Standard Image Popup Modal
+        if (ImGui::BeginPopupModal("Export Standard Image", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char exportPath[512] = "export.png";
+            static char iccPath[512] = "";
+            ImGui::Text("Enter export path (PNG, JPG, BMP, TGA):");
+            ImGui::InputText("##exportpathstd", exportPath, IM_ARRAYSIZE(exportPath));
+            ImGui::Spacing();
+            ImGui::Text("Optional ICC Profile (PNG only):");
+            ImGui::InputText("##iccpath", iccPath, IM_ARRAYSIZE(iccPath));
+            ImGui::SameLine();
+            if (ImGui::Button("Clear")) {
+                iccPath[0] = '\0';
+            }
+            ImGui::TextDisabled("Leave empty for default sRGB colorspace");
+            ImGui::Separator();
+            if (ImGui::Button("Export", ImVec2(120, 0))) {
+                if (g_Canvas.SaveCanvasStandard(exportPath, iccPath)) {
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
         // 9.4 Draw Toolbar Panel
         if (showToolbar) {
             ImGui::Begin("Toolbar", &showToolbar, ImGuiWindowFlags_NoCollapse);
             ImGui::Text("Tools");
             ImGui::Separator();
-            if (ImGui::Button("Brush", ImVec2(-1, 40))) { /* Brush selection */ }
-            if (ImGui::Button("Eraser", ImVec2(-1, 40))) { /* Eraser selection */ }
-            if (ImGui::Button("Pan (MDrag)", ImVec2(-1, 40))) { /* Pan selection */ }
+            
+            // Brush selector button
+            bool isBrush = (g_ActiveTool == ActiveTool::Brush);
+            if (isBrush) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+            if (ImGui::Button("Brush", ImVec2(-1, 40))) { 
+                g_ActiveTool = ActiveTool::Brush; 
+                g_Brush.erase = false;
+            }
+            if (isBrush) ImGui::PopStyleColor();
+
+            // Eraser selector button
+            bool isEraser = (g_ActiveTool == ActiveTool::Eraser);
+            if (isEraser) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+            if (ImGui::Button("Eraser", ImVec2(-1, 40))) { 
+                g_ActiveTool = ActiveTool::Eraser; 
+                g_Brush.erase = true;
+            }
+            if (isEraser) ImGui::PopStyleColor();
+
+            // Pan selector button
+            bool isPan = (g_ActiveTool == ActiveTool::Pan);
+            if (isPan) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+            if (ImGui::Button("Pan (LDrag)", ImVec2(-1, 40))) { 
+                g_ActiveTool = ActiveTool::Pan; 
+            }
+            if (isPan) ImGui::PopStyleColor();
+
             ImGui::Separator();
             if (ImGui::Button("Reset View", ImVec2(-1, 30))) {
                 g_Canvas.ResetView();
@@ -295,27 +512,50 @@ int main(int argc, char* argv[]) {
         }
 
         // 9.5 Draw Canvas Viewport
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::Begin("Canvas Viewport", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        
+        ImGui::PopStyleVar();
+
         ImVec2 viewportPanelSize = ImGui::GetContentRegionAvail();
-        float viewportWidth = viewportPanelSize.x;
-        float viewportHeight = viewportPanelSize.y;
+        int viewportWidth = static_cast<int>(viewportPanelSize.x);
+        int viewportHeight = static_cast<int>(viewportPanelSize.y);
 
         if (viewportWidth > 0 && viewportHeight > 0) {
             ResizeCanvasRenderTarget(viewportWidth, viewportHeight);
 
-            ImVec2 canvasWindowPos = ImGui::GetCursorScreenPos();
+            // Render first to have the texture ready for ImGui::Image
+            RenderCanvasToTexture(viewportWidth, viewportHeight);
+
+            // Draw the viewport image using exact integer dimensions to prevent pixel interpolation blurring
+            ImGui::Image((void*)g_canvasSRV, ImVec2(static_cast<float>(viewportWidth), static_cast<float>(viewportHeight)));
+
+            // Calculate precise mouse coordinates using the actual image bounding box
+            ImVec2 imageMin = ImGui::GetItemRectMin();
             ImVec2 mousePos = ImGui::GetMousePos();
-            float localMouseX = mousePos.x - canvasWindowPos.x;
-            float localMouseY = mousePos.y - canvasWindowPos.y;
+            float localMouseX = mousePos.x - imageMin.x;
+            float localMouseY = mousePos.y - imageMin.y;
 
-            bool isHovered = ImGui::IsWindowHovered();
+            // Precise hover check: only true if mouse is directly over the canvas viewport image
+            bool isHovered = ImGui::IsItemHovered();
 
+            // Map mouse coordinates to Canvas pixel coordinates using floored origin matching the vertex shader
+            float screenOriginX = std::floor(g_Canvas.GetPan().x + static_cast<float>(viewportWidth) * 0.5f);
+            float screenOriginY = std::floor(g_Canvas.GetPan().y + static_cast<float>(viewportHeight) * 0.5f);
+
+            float canvasX = (localMouseX - screenOriginX) / g_Canvas.GetZoom();
+            float canvasY = (localMouseY - screenOriginY) / g_Canvas.GetZoom();
+
+            // Check if cursor is within active canvas boundary
+            bool isInsideCanvas = (canvasX >= 0.0f && canvasX < (float)g_Canvas.GetWidth() &&
+                                   canvasY >= 0.0f && canvasY < (float)g_Canvas.GetHeight());
+
+            // Panning: Middle mouse button drag OR left mouse button drag when Pan tool is selected
             bool isPanning = false;
             float dragDx = 0.0f;
             float dragDy = 0.0f;
-            if (isHovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
-                ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
+            if (isHovered && (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) || (g_ActiveTool == ActiveTool::Pan && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))) {
+                ImGuiMouseButton panButton = ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ? ImGuiMouseButton_Middle : ImGuiMouseButton_Left;
+                ImVec2 drag = ImGui::GetMouseDragDelta(panButton);
                 dragDx = drag.x - g_LastDragDelta.x;
                 dragDy = drag.y - g_LastDragDelta.y;
                 g_LastDragDelta = drag;
@@ -326,11 +566,37 @@ int main(int argc, char* argv[]) {
 
             float wheelDelta = isHovered ? ImGui::GetIO().MouseWheel : 0.0f;
 
+            // Handle custom brush visualizer and cursor hiding when inside canvas bounds
+            if (isHovered && isInsideCanvas && (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser)) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+
+                // Draw custom outline circle at mouse position
+                ImDrawList* drawList = ImGui::GetForegroundDrawList(); // Use foreground draw list so it renders on top of everything
+                float screenRadius = g_Brush.radius * g_Canvas.GetZoom();
+                drawList->AddCircle(mousePos, screenRadius, IM_COL32(0, 0, 0, 255), 32, 1.5f);
+                drawList->AddCircle(mousePos, screenRadius, IM_COL32(255, 255, 255, 255), 32, 1.0f);
+            }
+
+            // Draw interaction logic
+            if (isHovered && !isPanning && (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser)) {
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    g_IsPainting = true;
+                    g_PrevCanvasMouseX = canvasX;
+                    g_PrevCanvasMouseY = canvasY;
+                    g_Canvas.PaintOnActiveLayer(canvasX, canvasY, canvasX, canvasY, g_Brush);
+                } 
+                else if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && g_IsPainting) {
+                    g_Canvas.PaintOnActiveLayer(g_PrevCanvasMouseX, g_PrevCanvasMouseY, canvasX, canvasY, g_Brush);
+                    g_PrevCanvasMouseX = canvasX;
+                    g_PrevCanvasMouseY = canvasY;
+                }
+            }
+
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+                g_IsPainting = false;
+            }
+
             g_Canvas.Update(viewportWidth, viewportHeight, isHovered, localMouseX, localMouseY, isPanning, dragDx, dragDy, wheelDelta);
-
-            RenderCanvasToTexture(viewportWidth, viewportHeight);
-
-            ImGui::Image((void*)g_canvasSRV, ImVec2(viewportWidth, viewportHeight));
         }
 
         ImGui::End();
@@ -346,22 +612,77 @@ int main(int argc, char* argv[]) {
             ImGui::Text("Canvas Size:");
             ImGui::SetNextItemWidth(100);
             if (ImGui::InputInt("Width", &curW, 128, 256)) {
-                g_Canvas.ResizeCanvas(curW, curH);
+                g_Canvas.ResizeCanvas(g_pd3dDevice, curW, curH);
             }
             ImGui::SetNextItemWidth(100);
             if (ImGui::InputInt("Height", &curH, 128, 256)) {
-                g_Canvas.ResizeCanvas(curW, curH);
+                g_Canvas.ResizeCanvas(g_pd3dDevice, curW, curH);
             }
             
             ImGui::Separator();
             ImGui::Text("Zoom: %.0f%%", g_Canvas.GetZoom() * 100.0f);
             ImGui::Text("Pan: (%.1f, %.1f)", g_Canvas.GetPan().x, g_Canvas.GetPan().y);
+            
+            ImGui::Separator();
+            ImGui::Text("Brush Settings:");
+            ImGui::SliderFloat("Radius", &g_Brush.radius, 1.0f, 250.0f, "%.0f px");
+            ImGui::SliderFloat("Hardness", &g_Brush.hardness, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Opacity##brush", &g_Brush.opacity, 0.0f, 1.0f, "%.2f");
+            ImGui::ColorEdit4("Color##brush", g_Brush.color);
+
+            ImGui::Separator();
+            ImGui::Text("Channel Filter (Vis Mode):");
+            int mode = g_Canvas.GetVisualizationMode();
+            ImGui::RadioButton("RGBA (Normal)", &mode, 0);
+            ImGui::RadioButton("RGB (No Alpha)", &mode, 1);
+            ImGui::RadioButton("Alpha channel", &mode, 2);
+            ImGui::RadioButton("Alpha mask", &mode, 3);
+            g_Canvas.SetVisualizationMode(mode);
+
+            if (mode == 3) {
+                ImGui::ColorEdit3("Mask Color", g_Canvas.GetAlphaMaskColor());
+            }
+
             ImGui::Separator();
             ImGui::Text("Layers");
-            if (ImGui::BeginListBox("##layers", ImVec2(-1, 150))) {
-                ImGui::Selectable("Base Layer (diffuse)", true);
-                ImGui::EndListBox();
+            if (ImGui::Button("Add Layer")) {
+                std::string lName = "Layer " + std::to_string(g_Canvas.GetLayers().size() + 1);
+                g_Canvas.CreateNewLayer(g_pd3dDevice, lName);
             }
+
+            ImGui::BeginChild("LayersList", ImVec2(0, 180), true);
+            auto& layers = g_Canvas.GetLayers();
+            for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
+                ImGui::PushID(i);
+                
+                // Visible toggle
+                ImGui::Checkbox("##visible", &layers[i].visible);
+                ImGui::SameLine();
+
+                // Selectable layer name
+                bool isSelected = (g_Canvas.GetActiveLayerIndex() == i);
+                if (ImGui::Selectable(layers[i].name.c_str(), isSelected, ImGuiSelectableFlags_None, ImVec2(ImGui::GetContentRegionAvail().x - 70, 0))) {
+                    g_Canvas.SetActiveLayerIndex(i);
+                }
+                
+                ImGui::SameLine();
+                // Delete button (cannot delete if it's the last layer)
+                if (layers.size() > 1) {
+                    if (ImGui::Button("Del")) {
+                        g_Canvas.DeleteLayer(i);
+                    }
+                }
+
+                // Opacity slider for the layer
+                ImGui::PushItemWidth(100);
+                ImGui::SliderFloat("Opacity", &layers[i].opacity, 0.0f, 1.0f, "%.2f");
+                ImGui::PopItemWidth();
+
+                ImGui::Separator();
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+
             ImGui::End();
         }
 
@@ -458,6 +779,11 @@ int main(int argc, char* argv[]) {
     return 0;
 }
 
+// WinMain entry point for Native WIN32 GUI
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    return main(__argc, __argv);
+}
+
 // DirectX 11 Helper Functions
 
 bool CreateDeviceD3D(HWND hWnd, bool useNullDriver) {
@@ -483,8 +809,6 @@ bool CreateDeviceD3D(HWND hWnd, bool useNullDriver) {
 
     D3D_DRIVER_TYPE driverType = useNullDriver ? D3D_DRIVER_TYPE_NULL : D3D_DRIVER_TYPE_HARDWARE;
     
-    // In headless test mode, we do not need a real swapchain/window output, but CreateDeviceAndSwapChain expects a HWND.
-    // If null driver is used, we can still call it or create device without swapchain.
     D3D_FEATURE_LEVEL featureLevel;
     const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
     
@@ -505,7 +829,6 @@ void CleanupDeviceD3D() {
 }
 
 void CreateRenderTarget() {
-    // Swap chain won't be fully initialized or active in headless Null Driver mode, check for safety
     if (!g_pSwapChain) return;
     ID3D11Texture2D* pBackBuffer = nullptr;
     HRESULT hr = g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&pBackBuffer));
@@ -519,18 +842,16 @@ void CleanupRenderTarget() {
     if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
 }
 
-void ResizeCanvasRenderTarget(float width, float height) {
-    // If the size hasn't changed, do nothing
-    if (g_canvasTexture && g_canvasRTWidth == width && g_canvasRTHeight == height) {
+void ResizeCanvasRenderTarget(int width, int height) {
+    if (g_canvasTexture && static_cast<int>(g_canvasRTWidth) == width && static_cast<int>(g_canvasRTHeight) == height) {
         return;
     }
 
     CleanupCanvasRenderTarget();
 
-    g_canvasRTWidth = width;
-    g_canvasRTHeight = height;
+    g_canvasRTWidth = static_cast<float>(width);
+    g_canvasRTHeight = static_cast<float>(height);
 
-    // Create texture description
     D3D11_TEXTURE2D_DESC desc = {};
     desc.Width = static_cast<UINT>(width);
     desc.Height = static_cast<UINT>(height);
@@ -540,7 +861,6 @@ void ResizeCanvasRenderTarget(float width, float height) {
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-    desc.CPUAccessFlags = 0;
 
     HRESULT hr = g_pd3dDevice->CreateTexture2D(&desc, nullptr, &g_canvasTexture);
     if (SUCCEEDED(hr)) {
@@ -555,28 +875,23 @@ void CleanupCanvasRenderTarget() {
     if (g_canvasSRV) { g_canvasSRV->Release(); g_canvasSRV = nullptr; }
 }
 
-void RenderCanvasToTexture(float width, float height) {
+void RenderCanvasToTexture(int width, int height) {
     if (!g_canvasRTV) return;
 
-    // Set viewport to target texture size
     D3D11_VIEWPORT vp = {};
-    vp.Width = width;
-    vp.Height = height;
+    vp.Width = static_cast<float>(width);
+    vp.Height = static_cast<float>(height);
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
     g_pd3dDeviceContext->RSSetViewports(1, &vp);
 
-    // Clear texture render target
     float clearColor[4] = { 0.12f, 0.12f, 0.14f, 1.0f }; // Slate background matches ImGui Child window
     g_pd3dDeviceContext->ClearRenderTargetView(g_canvasRTV, clearColor);
 
-    // Bind texture RTV
     g_pd3dDeviceContext->OMSetRenderTargets(1, &g_canvasRTV, nullptr);
 
-    // Render the canvas
-    g_Canvas.Render(g_pd3dDeviceContext, width, height);
+    g_Canvas.Render(g_pd3dDeviceContext, static_cast<float>(width), static_cast<float>(height));
 
-    // Unbind render targets
     ID3D11RenderTargetView* nullRTV = nullptr;
     g_pd3dDeviceContext->OMSetRenderTargets(1, &nullRTV, nullptr);
 }

@@ -2,6 +2,20 @@
 
 #include <d3d11.h>
 #include <directxmath.h>
+#include <vector>
+#include <string>
+#include "core/PaintEngine.h"
+#include "core/DdsHelper.h"
+
+struct Layer {
+    std::string name;
+    bool visible = true;
+    float opacity = 1.0f;
+    std::vector<float> pixels; // CPU pixel data: RGBA (32-bit float per channel, size width * height * 4)
+    ID3D11Texture2D* texture = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    bool needsUpload = false;
+};
 
 class Canvas {
 public:
@@ -15,7 +29,7 @@ public:
     void Update(float viewportWidth, float viewportHeight, bool isMouseOverCanvas, 
                 float mouseX, float mouseY, bool isDragging, float dragDx, float dragDy, float wheelDelta);
     
-    // Renders the checkerboard canvas onto the current viewport
+    // Renders the canvas (checkerboard background + blended layers)
     void Render(ID3D11DeviceContext* context, float viewportWidth, float viewportHeight);
 
     void ResetView();
@@ -29,7 +43,29 @@ public:
     int GetWidth() const { return m_Width; }
     int GetHeight() const { return m_Height; }
 
-    void ResizeCanvas(int width, int height);
+    // Resizes canvas and all layers (retaining existing pixel data where possible)
+    void ResizeCanvas(ID3D11Device* device, int width, int height);
+
+    // Layer Management
+    void CreateNewLayer(ID3D11Device* device, const std::string& name);
+    void DeleteLayer(int index);
+    void SetActiveLayerIndex(int idx);
+    int GetActiveLayerIndex() const { return m_ActiveLayerIdx; }
+    std::vector<Layer>& GetLayers() { return m_Layers; }
+
+    // Paint Operation
+    void PaintOnActiveLayer(float prevX, float prevY, float currX, float currY, const BrushSettings& brush);
+
+    // File Import / Export
+    bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath);
+    bool SaveCanvas(const std::string& filepath, DdsFormat ddsFormat);
+    bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath = "");
+
+    // Visualization Mode
+    int GetVisualizationMode() const { return m_VisMode; }
+    void SetVisualizationMode(int mode) { m_VisMode = mode; }
+    
+    float* GetAlphaMaskColor() { return m_AlphaMaskColor; }
 
 private:
     struct Vertex {
@@ -39,19 +75,50 @@ private:
 
     struct CanvasBuffer {
         DirectX::XMFLOAT4 viewportSizeAndZoom;
+        // xy: Pan/Offset, z: Canvas Width, w: Canvas Height
         DirectX::XMFLOAT4 offsetAndCanvasSize;
+        // x: Visualization Mode, yzw: Alpha Mask Color (RGB)
+        DirectX::XMFLOAT4 visModeAndMaskColor;
     };
+
+    struct LayerBuffer {
+        DirectX::XMFLOAT4 layerParams; // x: opacity, yzw: unused
+    };
+
+    void ComposeLayers(ID3D11DeviceContext* context);
+    void CreateCompositeResources(ID3D11Device* device);
+    void ReleaseCompositeResources();
+    void RecreateLayerTexture(ID3D11Device* device, Layer& layer);
 
     int m_Width;
     int m_Height;
     float m_Zoom;
     DirectX::XMFLOAT2 m_Pan;
 
-    ID3D11Buffer* m_VertexBuffer;
-    ID3D11Buffer* m_IndexBuffer;
-    ID3D11Buffer* m_ConstantBuffer;
+    // Visualization Mode: 0 = RGBA, 1 = RGB, 2 = Alpha, 3 = Alpha Mask
+    int m_VisMode = 0;
+    float m_AlphaMaskColor[3] = { 0.0f, 1.0f, 0.0f }; // Green default
 
-    ID3D11VertexShader* m_VertexShader;
-    ID3D11PixelShader* m_PixelShader;
-    ID3D11InputLayout* m_InputLayout;
+    // Layer resources
+    std::vector<Layer> m_Layers;
+    int m_ActiveLayerIdx = -1;
+
+    // Direct3D 11 Resources
+    ID3D11Buffer* m_VertexBuffer = nullptr;
+    ID3D11Buffer* m_IndexBuffer = nullptr;
+    ID3D11Buffer* m_ConstantBuffer = nullptr;
+    ID3D11Buffer* m_LayerConstantBuffer = nullptr;
+
+    ID3D11VertexShader* m_VertexShader = nullptr;
+    ID3D11VertexShader* m_LayerVertexShader = nullptr;
+    ID3D11PixelShader* m_PixelShader = nullptr;
+    ID3D11PixelShader* m_LayerBlendPixelShader = nullptr;
+    ID3D11InputLayout* m_InputLayout = nullptr;
+    ID3D11SamplerState* m_SamplerState = nullptr;
+
+    // Layer Composition Target
+    ID3D11Texture2D* m_CompositeTexture = nullptr;
+    ID3D11RenderTargetView* m_CompositeRTV = nullptr;
+    ID3D11ShaderResourceView* m_CompositeSRV = nullptr;
+    ID3D11BlendState* m_LayerBlendState = nullptr;
 };

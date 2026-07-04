@@ -16,6 +16,15 @@
     <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ConfigManager.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\DdsHelper.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ImageManager.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\PaintEngine.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting\ScriptingEngine.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -31,6 +40,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ConfigManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\DdsHelper.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ImageManager.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\PaintEngine.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting\ScriptingEngine.h">

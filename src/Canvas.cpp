@@ -1,4 +1,6 @@
 #include "Canvas.h"
+#include "core/Logger.h"
+#include "core/ImageManager.h"
 #include <d3dcompiler.h>
 #include <iostream>
 #include <algorithm>
@@ -41,13 +43,7 @@ Canvas::Canvas()
     : m_Width(1024)
     , m_Height(1024)
     , m_Zoom(1.0f)
-    , m_Pan(0.0f, 0.0f)
-    , m_VertexBuffer(nullptr)
-    , m_IndexBuffer(nullptr)
-    , m_ConstantBuffer(nullptr)
-    , m_VertexShader(nullptr)
-    , m_PixelShader(nullptr)
-    , m_InputLayout(nullptr) {
+    , m_Pan(0.0f, 0.0f) {
     ResetView();
 }
 
@@ -57,7 +53,6 @@ Canvas::~Canvas() {
 
 void Canvas::ResetView() {
     m_Zoom = 1.0f;
-    // Default pan places the center of the canvas in the center of the viewport.
     m_Pan.x = -m_Width * 0.5f * m_Zoom;
     m_Pan.y = -m_Height * 0.5f * m_Zoom;
 }
@@ -82,6 +77,22 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
+    // Compile and Create Layer Composition Vertex Shader
+    ID3DBlob* vsLayerBlob = nullptr;
+    hr = CompileShaderFromFile(shaderPath.c_str(), "VSLayerMain", "vs_4_0", &vsLayerBlob);
+    if (FAILED(hr)) {
+        std::cerr << "Failed compiling VSLayerMain" << std::endl;
+        vsBlob->Release();
+        return false;
+    }
+
+    hr = device->CreateVertexShader(vsLayerBlob->GetBufferPointer(), vsLayerBlob->GetBufferSize(), nullptr, &m_LayerVertexShader);
+    vsLayerBlob->Release();
+    if (FAILED(hr)) {
+        vsBlob->Release();
+        return false;
+    }
+
     // Define the input layout for the shader
     D3D11_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
@@ -95,7 +106,7 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 2. Compile and Create Pixel Shader
+    // 2. Compile and Create Pixel Shader (Presentation)
     ID3DBlob* psBlob = nullptr;
     hr = CompileShaderFromFile(shaderPath.c_str(), "PSMain", "ps_4_0", &psBlob);
     if (FAILED(hr)) {
@@ -109,7 +120,21 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 3. Create Vertex Buffer (Unit Quad)
+    // 3. Compile and Create Pixel Shader (Layer Blend)
+    ID3DBlob* layerBlob = nullptr;
+    hr = CompileShaderFromFile(shaderPath.c_str(), "PSLayerBlend", "ps_4_0", &layerBlob);
+    if (FAILED(hr)) {
+        std::cerr << "Failed compiling PSLayerBlend" << std::endl;
+        return false;
+    }
+
+    hr = device->CreatePixelShader(layerBlob->GetBufferPointer(), layerBlob->GetBufferSize(), nullptr, &m_LayerBlendPixelShader);
+    layerBlob->Release();
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // 4. Create Vertex Buffer (Unit Quad)
     Vertex vertices[] = {
         { DirectX::XMFLOAT2(0.0f, 0.0f), DirectX::XMFLOAT2(0.0f, 0.0f) }, // Top-Left
         { DirectX::XMFLOAT2(1.0f, 0.0f), DirectX::XMFLOAT2(1.0f, 0.0f) }, // Top-Right
@@ -130,7 +155,7 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 4. Create Index Buffer
+    // 5. Create Index Buffer
     unsigned short indices[] = {
         0, 1, 2,
         0, 2, 3
@@ -145,7 +170,7 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 5. Create Constant Buffer
+    // 6. Create Constant Buffers
     bd.ByteWidth = sizeof(CanvasBuffer);
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.Usage = D3D11_USAGE_DYNAMIC;
@@ -156,58 +181,276 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
+    bd.ByteWidth = sizeof(LayerBuffer);
+    hr = device->CreateBuffer(&bd, nullptr, &m_LayerConstantBuffer);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // 7. Create Sampler State (Point filtering for crisp pixels)
+    D3D11_SAMPLER_DESC sampDesc = {};
+    sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampDesc.MinLOD = 0;
+    sampDesc.MaxLOD = D3D11_FLOAT32_MAX;
+
+    hr = device->CreateSamplerState(&sampDesc, &m_SamplerState);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // 8. Create Blend State for Layer Composition (Pre-multiplied / Standard Alpha)
+    D3D11_BLEND_DESC blendDesc = {};
+    blendDesc.RenderTarget[0].BlendEnable = TRUE;
+    blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    blendDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blendDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    blendDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blendDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+
+    hr = device->CreateBlendState(&blendDesc, &m_LayerBlendState);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // 9. Create Composite targets
+    CreateCompositeResources(device);
+
+    // 10. Start with one default layer
+    CreateNewLayer(device, "Background");
+
     return true;
 }
 
 void Canvas::Shutdown() {
+    ReleaseCompositeResources();
+
     if (m_VertexBuffer) { m_VertexBuffer->Release(); m_VertexBuffer = nullptr; }
     if (m_IndexBuffer) { m_IndexBuffer->Release(); m_IndexBuffer = nullptr; }
     if (m_ConstantBuffer) { m_ConstantBuffer->Release(); m_ConstantBuffer = nullptr; }
+    if (m_LayerConstantBuffer) { m_LayerConstantBuffer->Release(); m_LayerConstantBuffer = nullptr; }
+
     if (m_VertexShader) { m_VertexShader->Release(); m_VertexShader = nullptr; }
+    if (m_LayerVertexShader) { m_LayerVertexShader->Release(); m_LayerVertexShader = nullptr; }
     if (m_PixelShader) { m_PixelShader->Release(); m_PixelShader = nullptr; }
+    if (m_LayerBlendPixelShader) { m_LayerBlendPixelShader->Release(); m_LayerBlendPixelShader = nullptr; }
     if (m_InputLayout) { m_InputLayout->Release(); m_InputLayout = nullptr; }
+    if (m_SamplerState) { m_SamplerState->Release(); m_SamplerState = nullptr; }
+    if (m_LayerBlendState) { m_LayerBlendState->Release(); m_LayerBlendState = nullptr; }
+
+    for (auto& layer : m_Layers) {
+        if (layer.texture) layer.texture->Release();
+        if (layer.srv) layer.srv->Release();
+    }
+    m_Layers.clear();
+}
+
+void Canvas::CreateCompositeResources(ID3D11Device* device) {
+    ReleaseCompositeResources();
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = m_Width;
+    desc.Height = m_Height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+    HRESULT hr = device->CreateTexture2D(&desc, nullptr, &m_CompositeTexture);
+    if (SUCCEEDED(hr)) {
+        device->CreateRenderTargetView(m_CompositeTexture, nullptr, &m_CompositeRTV);
+        device->CreateShaderResourceView(m_CompositeTexture, nullptr, &m_CompositeSRV);
+    }
+}
+
+void Canvas::ReleaseCompositeResources() {
+    if (m_CompositeTexture) { m_CompositeTexture->Release(); m_CompositeTexture = nullptr; }
+    if (m_CompositeRTV) { m_CompositeRTV->Release(); m_CompositeRTV = nullptr; }
+    if (m_CompositeSRV) { m_CompositeSRV->Release(); m_CompositeSRV = nullptr; }
+}
+
+void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
+    if (layer.texture) { layer.texture->Release(); layer.texture = nullptr; }
+    if (layer.srv) { layer.srv->Release(); layer.srv = nullptr; }
+
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = m_Width;
+    desc.Height = m_Height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = layer.pixels.data();
+    initData.SysMemPitch = m_Width * sizeof(float) * 4;
+
+    HRESULT hr = device->CreateTexture2D(&desc, &initData, &layer.texture);
+    if (SUCCEEDED(hr)) {
+        device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
+    }
+    layer.needsUpload = false;
+}
+
+void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
+    Layer newLayer;
+    newLayer.name = name;
+    newLayer.visible = true;
+    newLayer.opacity = 1.0f;
+    newLayer.pixels.resize((size_t)m_Width * m_Height * 4, 0.0f);
+    newLayer.needsUpload = true;
+
+    // Background starts white or transparent? Let's make it transparent.
+    RecreateLayerTexture(device, newLayer);
+
+    m_Layers.push_back(newLayer);
+    m_ActiveLayerIdx = static_cast<int>(m_Layers.size()) - 1;
+    Logger::Get().Info("Created new layer: " + name);
+}
+
+void Canvas::DeleteLayer(int index) {
+    if (index < 0 || index >= m_Layers.size()) return;
+    
+    Logger::Get().Info("Deleted layer: " + m_Layers[index].name);
+
+    if (m_Layers[index].texture) m_Layers[index].texture->Release();
+    if (m_Layers[index].srv) m_Layers[index].srv->Release();
+    
+    m_Layers.erase(m_Layers.begin() + index);
+
+    if (m_Layers.empty()) {
+        m_ActiveLayerIdx = -1;
+    } else {
+        m_ActiveLayerIdx = std::clamp(m_ActiveLayerIdx, 0, static_cast<int>(m_Layers.size()) - 1);
+    }
+}
+
+void Canvas::SetActiveLayerIndex(int idx) {
+    if (idx >= 0 && idx < m_Layers.size()) {
+        m_ActiveLayerIdx = idx;
+    }
+}
+
+void Canvas::PaintOnActiveLayer(float prevX, float prevY, float currX, float currY, const BrushSettings& brush) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= m_Layers.size()) return;
+
+    PaintEngine::DrawLine(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height, 
+                          prevX, prevY, currX, currY, brush);
+    m_Layers[m_ActiveLayerIdx].needsUpload = true;
+}
+
+void Canvas::ResizeCanvas(ID3D11Device* device, int width, int height) {
+    int oldW = m_Width;
+    int oldH = m_Height;
+    
+    m_Width = std::max(1, std::min(width, 16384));
+    m_Height = std::max(1, std::min(height, 16384));
+
+    if (m_Width == oldW && m_Height == oldH) return;
+
+    Logger::Get().Info("Resizing canvas from " + std::to_string(oldW) + "x" + std::to_string(oldH) + 
+                       " to " + std::to_string(m_Width) + "x" + std::to_string(m_Height));
+
+    // Recreate composition texture
+    CreateCompositeResources(device);
+
+    // Resize each layer's pixel buffers
+    for (auto& layer : m_Layers) {
+        std::vector<float> oldPixels = layer.pixels;
+        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+
+        // Copy old contents top-left aligned
+        int copyW = std::min(oldW, m_Width);
+        int copyH = std::min(oldH, m_Height);
+
+        for (int y = 0; y < copyH; ++y) {
+            for (int x = 0; x < copyW; ++x) {
+                size_t oldIdx = ((size_t)y * oldW + x) * 4;
+                size_t newIdx = ((size_t)y * m_Width + x) * 4;
+                for (int c = 0; c < 4; ++c) {
+                    layer.pixels[newIdx + c] = oldPixels[oldIdx + c];
+                }
+            }
+        }
+
+        RecreateLayerTexture(device, layer);
+    }
 }
 
 void Canvas::Update(float viewportWidth, float viewportHeight, bool isMouseOverCanvas, 
                     float mouseX, float mouseY, bool isDragging, float dragDx, float dragDy, float wheelDelta) {
-    
-    // 1. Drag to Pan
     if (isDragging) {
         m_Pan.x += dragDx;
         m_Pan.y += dragDy;
     }
 
-    // 2. Scroll Wheel to Zoom (centered at mouse pointer)
     if (isMouseOverCanvas && wheelDelta != 0.0f) {
         float zoomFactor = (wheelDelta > 0.0f) ? 1.15f : 0.85f;
         float oldZoom = m_Zoom;
         m_Zoom = std::clamp(m_Zoom * zoomFactor, 0.05f, 64.0f);
 
-        // Zoom to mouse cursor coordinate calculations:
-        // C_mouse = (S_mouse - pan_old - viewport_center) / zoom_old
-        float mouseInCanvasX = (mouseX - m_Pan.x - viewportWidth * 0.5f) / oldZoom;
-        float mouseInCanvasY = (mouseY - m_Pan.y - viewportHeight * 0.5f) / oldZoom;
+        float originX = std::floor(m_Pan.x + viewportWidth * 0.5f);
+        float originY = std::floor(m_Pan.y + viewportHeight * 0.5f);
 
-        // pan_new = S_mouse - C_mouse * zoom_new - viewport_center
+        float mouseInCanvasX = (mouseX - originX) / oldZoom;
+        float mouseInCanvasY = (mouseY - originY) / oldZoom;
+
         m_Pan.x = mouseX - mouseInCanvasX * m_Zoom - viewportWidth * 0.5f;
         m_Pan.y = mouseY - mouseInCanvasY * m_Zoom - viewportHeight * 0.5f;
     }
 }
 
-void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float viewportHeight) {
-    if (!m_VertexBuffer || !m_IndexBuffer || !m_ConstantBuffer) return;
-
-    // 1. Update constant buffer
-    D3D11_MAPPED_SUBRESOURCE mappedResource;
-    HRESULT hr = context->Map(m_ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
-    if (SUCCEEDED(hr)) {
-        CanvasBuffer* cb = (CanvasBuffer*)mappedResource.pData;
-        cb->viewportSizeAndZoom = DirectX::XMFLOAT4(viewportWidth, viewportHeight, m_Zoom, 0.0f);
-        cb->offsetAndCanvasSize = DirectX::XMFLOAT4(m_Pan.x, m_Pan.y, (float)m_Width, (float)m_Height);
-        context->Unmap(m_ConstantBuffer, 0);
+void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
+    // 1. Upload layers with dirty CPU data
+    ID3D11Device* device = nullptr;
+    context->GetDevice(&device);
+    if (device) {
+        for (auto& layer : m_Layers) {
+            if (layer.needsUpload && layer.texture) {
+                context->UpdateSubresource(layer.texture, 0, nullptr, layer.pixels.data(), m_Width * sizeof(float) * 4, 0);
+                layer.needsUpload = false;
+            }
+        }
+        device->Release();
     }
 
-    // 2. Bind shaders and pipeline state
+    if (!m_CompositeRTV) return;
+
+    // 2. Clear composite target
+    float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // Clear to transparent!
+    context->ClearRenderTargetView(m_CompositeRTV, clearColor);
+
+    // Save previous targets & viewport
+    ID3D11RenderTargetView* prevRTV = nullptr;
+    ID3D11DepthStencilView* prevDSV = nullptr;
+    context->OMGetRenderTargets(1, &prevRTV, &prevDSV);
+
+    UINT numViewports = 1;
+    D3D11_VIEWPORT prevViewport = {};
+    context->RSGetViewports(&numViewports, &prevViewport);
+
+    // Set viewport to exact canvas size
+    D3D11_VIEWPORT compViewport = {};
+    compViewport.Width = static_cast<float>(m_Width);
+    compViewport.Height = static_cast<float>(m_Height);
+    compViewport.MinDepth = 0.0f;
+    compViewport.MaxDepth = 1.0f;
+    context->RSSetViewports(1, &compViewport);
+
+    context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr);
+
+    // Bind resources
     UINT stride = sizeof(Vertex);
     UINT offset = 0;
     context->IASetVertexBuffers(0, 1, &m_VertexBuffer, &stride, &offset);
@@ -215,19 +458,217 @@ void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float vie
     context->IASetInputLayout(m_InputLayout);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
+    context->VSSetShader(m_LayerVertexShader, nullptr, 0);
+    context->PSSetShader(m_LayerBlendPixelShader, nullptr, 0);
+    context->PSSetSamplers(0, 1, &m_SamplerState);
+
+    context->OMSetBlendState(m_LayerBlendState, nullptr, 0xFFFFFFFF);
+
+    // Draw visible layers bottom-to-top
+    for (const auto& layer : m_Layers) {
+        if (layer.visible && layer.srv) {
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                LayerBuffer* lb = (LayerBuffer*)mapped.pData;
+                lb->layerParams = DirectX::XMFLOAT4(layer.opacity, 0.0f, 0.0f, 0.0f);
+                context->Unmap(m_LayerConstantBuffer, 0);
+            }
+            context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
+            context->PSSetShaderResources(0, 1, &layer.srv);
+            context->DrawIndexed(6, 0, 0);
+        }
+    }
+
+    // Restore previous target
+    context->OMSetRenderTargets(1, &prevRTV, prevDSV);
+    if (prevRTV) prevRTV->Release();
+    if (prevDSV) prevDSV->Release();
+
+    context->RSSetViewports(1, &prevViewport);
+    context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+}
+
+void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float viewportHeight) {
+    ComposeLayers(context);
+
+    // Draw composite texture onto viewport
+    D3D11_MAPPED_SUBRESOURCE mappedResource;
+    HRESULT hr = context->Map(m_ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
+    if (SUCCEEDED(hr)) {
+        CanvasBuffer* cb = (CanvasBuffer*)mappedResource.pData;
+        cb->viewportSizeAndZoom = DirectX::XMFLOAT4(viewportWidth, viewportHeight, m_Zoom, 0.0f);
+        cb->offsetAndCanvasSize = DirectX::XMFLOAT4(m_Pan.x, m_Pan.y, (float)m_Width, (float)m_Height);
+        cb->visModeAndMaskColor = DirectX::XMFLOAT4((float)m_VisMode, m_AlphaMaskColor[0], m_AlphaMaskColor[1], m_AlphaMaskColor[2]);
+        context->Unmap(m_ConstantBuffer, 0);
+    }
+
     context->VSSetShader(m_VertexShader, nullptr, 0);
-    context->VSSetConstantBuffers(0, 1, &m_ConstantBuffer);
-
     context->PSSetShader(m_PixelShader, nullptr, 0);
+    context->IASetInputLayout(m_InputLayout);
+
+    UINT stride = sizeof(Vertex);
+    UINT offset = 0;
+    context->IASetVertexBuffers(0, 1, &m_VertexBuffer, &stride, &offset);
+    context->IASetIndexBuffer(m_IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    context->VSSetConstantBuffers(0, 1, &m_ConstantBuffer);
     context->PSSetConstantBuffers(0, 1, &m_ConstantBuffer);
+    context->PSSetShaderResources(0, 1, &m_CompositeSRV);
+    context->PSSetSamplers(0, 1, &m_SamplerState);
 
-    // 3. Draw canvas quad
     context->DrawIndexed(6, 0, 0);
+
+    // Clean slot
+    ID3D11ShaderResourceView* nullSRV = nullptr;
+    context->PSSetShaderResources(0, 1, &nullSRV);
 }
 
-void Canvas::ResizeCanvas(int width, int height) {
-    // Clamp to reasonable ranges to prevent allocation crashes later
-    m_Width = std::max(1, std::min(width, 16384));
-    m_Height = std::max(1, std::min(height, 16384));
+bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath) {
+    std::string ext = "";
+    size_t dotPos = filepath.find_last_of('.');
+    if (dotPos != std::string::npos) {
+        ext = filepath.substr(dotPos + 1);
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    }
+
+    int imgWidth = 0;
+    int imgHeight = 0;
+    std::vector<float> loadedPixels;
+
+    if (ext == "dds") {
+        DdsImage dds;
+        if (!DdsHelper::LoadDDS(filepath, dds)) {
+            return false;
+        }
+        imgWidth = dds.width;
+        imgHeight = dds.height;
+        loadedPixels = std::move(dds.pixels);
+    } 
+    else {
+        if (!ImageManager::LoadImageFromFile(filepath, loadedPixels, imgWidth, imgHeight)) {
+            return false;
+        }
+    }
+
+    // Auto resize canvas size to match the imported image if it's the first layer
+    // or if the dimensions differ significantly and user wants to scale
+    if (m_Layers.empty() || (m_Layers.size() == 1 && m_Width == 1024 && m_Height == 1024 && m_Layers[0].name == "Background" && m_Layers[0].pixels == std::vector<float>((size_t)1024*1024*4, 0.0f))) {
+        m_Width = imgWidth;
+        m_Height = imgHeight;
+        CreateCompositeResources(device);
+        m_Layers.clear();
+    }
+
+    // Allocate layer
+    Layer imported;
+    imported.name = filepath.substr(filepath.find_last_of("\\/") + 1);
+    imported.visible = true;
+    imported.opacity = 1.0f;
+    imported.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+
+    // Copy loaded pixels centering them or fitting top-left
+    int copyW = std::min(imgWidth, m_Width);
+    int copyH = std::min(imgHeight, m_Height);
+    for (int y = 0; y < copyH; ++y) {
+        for (int x = 0; x < copyW; ++x) {
+            size_t oldIdx = ((size_t)y * imgWidth + x) * 4;
+            size_t newIdx = ((size_t)y * m_Width + x) * 4;
+            for (int c = 0; c < 4; ++c) {
+                imported.pixels[newIdx + c] = loadedPixels[oldIdx + c];
+            }
+        }
+    }
+
+    RecreateLayerTexture(device, imported);
+    m_Layers.push_back(imported);
+    m_ActiveLayerIdx = static_cast<int>(m_Layers.size()) - 1;
+
+    ResetView();
+    Logger::Get().Info("Successfully imported layer from: " + filepath);
+    return true;
 }
 
+bool Canvas::SaveCanvas(const std::string& filepath, DdsFormat ddsFormat) {
+    if (m_Layers.empty()) {
+        Logger::Get().Error("No layers to save.");
+        return false;
+    }
+
+    // Composite all layers into a single CPU buffer for export
+    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
+
+    for (const auto& layer : m_Layers) {
+        if (!layer.visible) continue;
+        
+        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
+            size_t base = i * 4;
+            float srcR = layer.pixels[base + 0];
+            float srcG = layer.pixels[base + 1];
+            float srcB = layer.pixels[base + 2];
+            float srcA = layer.pixels[base + 3] * layer.opacity;
+
+            if (srcA <= 0.0f) continue;
+
+            float destR = composite[base + 0];
+            float destG = composite[base + 1];
+            float destB = composite[base + 2];
+            float destA = composite[base + 3];
+
+            float outA = srcA + destA * (1.0f - srcA);
+            if (outA > 0.0f) {
+                composite[base + 0] = (srcR * srcA + destR * destA * (1.0f - srcA)) / outA;
+                composite[base + 1] = (srcG * srcA + destG * destA * (1.0f - srcA)) / outA;
+                composite[base + 2] = (srcB * srcA + destB * destA * (1.0f - srcA)) / outA;
+                composite[base + 3] = outA;
+            }
+        }
+    }
+
+    DdsImage dds;
+    dds.width = m_Width;
+    dds.height = m_Height;
+    dds.format = ddsFormat;
+    dds.pixels = std::move(composite);
+
+    return DdsHelper::SaveDDS(filepath, dds);
+}
+
+bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath) {
+    if (m_Layers.empty()) {
+        Logger::Get().Error("No layers to save.");
+        return false;
+    }
+
+    // Composite layers CPU side
+    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
+
+    for (const auto& layer : m_Layers) {
+        if (!layer.visible) continue;
+
+        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
+            size_t base = i * 4;
+            float srcR = layer.pixels[base + 0];
+            float srcG = layer.pixels[base + 1];
+            float srcB = layer.pixels[base + 2];
+            float srcA = layer.pixels[base + 3] * layer.opacity;
+
+            if (srcA <= 0.0f) continue;
+
+            float destR = composite[base + 0];
+            float destG = composite[base + 1];
+            float destB = composite[base + 2];
+            float destA = composite[base + 3];
+
+            float outA = srcA + destA * (1.0f - srcA);
+            if (outA > 0.0f) {
+                composite[base + 0] = (srcR * srcA + destR * destA * (1.0f - srcA)) / outA;
+                composite[base + 1] = (srcG * srcA + destG * destA * (1.0f - srcA)) / outA;
+                composite[base + 2] = (srcB * srcA + destB * destA * (1.0f - srcA)) / outA;
+                composite[base + 3] = outA;
+            }
+        }
+    }
+
+    return ImageManager::SaveImageToFile(filepath, composite, m_Width, m_Height, iccProfilePath);
+}

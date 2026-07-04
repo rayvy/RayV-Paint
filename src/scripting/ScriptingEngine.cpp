@@ -14,6 +14,9 @@ extern float GetCanvasZoom();
 extern void SetCanvasZoom(float zoom);
 extern void SetCanvasPan(float x, float y);
 extern void ResetCanvasView();
+extern bool LoadCanvasImage(const std::string& filepath);
+extern bool SaveCanvasDDS(const std::string& filepath, int formatChoice);
+extern bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath);
 
 // Define embedded module
 PYBIND11_EMBEDDED_MODULE(rayv, m) {
@@ -38,6 +41,9 @@ PYBIND11_EMBEDDED_MODULE(rayv, m) {
     m.def("set_zoom",           [](float z) { SetCanvasZoom(z); });
     m.def("set_pan",            [](float x, float y) { SetCanvasPan(x, y); });
     m.def("reset_view",         []() { ResetCanvasView(); });
+    m.def("load_image",         [](const std::string& path) { return LoadCanvasImage(path); });
+    m.def("save_dds",           [](const std::string& path, int fmt) { return SaveCanvasDDS(path, fmt); });
+    m.def("save_image",         [](const std::string& path, const std::string& iccPath) { return SaveCanvasStandard(path, iccPath); }, py::arg("path"), py::arg("icc_path") = "");
 }
 
 ScriptingEngine& ScriptingEngine::Get() {

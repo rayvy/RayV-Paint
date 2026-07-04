@@ -50,6 +50,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(pybind11)
 
+# Fetch STB (Header-only image loader/writer)
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+)
+FetchContent_MakeAvailable(stb)
+
 # Build Dear ImGui static library
 add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui.cpp
@@ -87,6 +95,12 @@ set(SOURCES
     src/core/ThreadPool.h
     src/core/ConfigManager.cpp
     src/core/ConfigManager.h
+    src/core/DdsHelper.cpp
+    src/core/DdsHelper.h
+    src/core/ImageManager.cpp
+    src/core/ImageManager.h
+    src/core/PaintEngine.cpp
+    src/core/PaintEngine.h
     src/scripting/ScriptingEngine.cpp
     src/scripting/ScriptingEngine.h
 )
@@ -97,8 +111,8 @@ set(SHADER_FILES
 )
 set_source_files_properties(${SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 
-# Create executable
-add_executable(RayVPaint ${SOURCES} ${SHADER_FILES})
+# Create executable (WIN32 target ensures it runs without console window by default)
+add_executable(RayVPaint WIN32 ${SOURCES} ${SHADER_FILES})
 
 # Link dependencies
 target_link_libraries(RayVPaint PRIVATE
@@ -116,6 +130,7 @@ target_include_directories(RayVPaint PRIVATE
     src
     src/core
     src/scripting
+    ${stb_SOURCE_DIR}
 )
 
 # Custom command to copy shader files to the output directory
