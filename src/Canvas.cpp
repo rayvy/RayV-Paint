@@ -10,14 +10,67 @@
 #include <stb_image_write.h>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <filesystem>
 
 // Explicitly declare stbi_zlib_compress which is defined in ImageManager.cpp (via stb_image_write implementation)
 extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, int* out_len, int quality);
 
 using json = nlohmann::json;
 
-// Helper to compile shaders from file at runtime
+// Get the directory containing the running executable
+static std::wstring GetExecutableDir() {
+    wchar_t buffer[MAX_PATH];
+    GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    std::wstring path(buffer);
+    size_t pos = path.find_last_of(L"\\/");
+    return (pos == std::wstring::npos) ? L"" : path.substr(0, pos);
+}
+
+// Helper to compile shaders from file at runtime (with caching support)
 static HRESULT CompileShaderFromFile(const WCHAR* szFileName, LPCSTR szEntryPoint, LPCSTR szShaderModel, ID3DBlob** ppBlobOut) {
+    // Build cache file path: e.g. "shaders/VSMain.cso"
+    std::wstring cachePath = GetExecutableDir() + L"\\shaders\\" + std::wstring(szEntryPoint, szEntryPoint + strlen(szEntryPoint)) + L".cso";
+    
+    // Check if Canvas.hlsl and cache file exist
+    bool hlslExists = std::filesystem::exists(szFileName);
+    bool cacheExists = std::filesystem::exists(cachePath);
+    
+    bool useCache = false;
+    if (cacheExists) {
+        if (hlslExists) {
+            // Compare timestamps
+            auto hlslTime = std::filesystem::last_write_time(szFileName);
+            auto cacheTime = std::filesystem::last_write_time(cachePath);
+            if (cacheTime >= hlslTime) {
+                useCache = true;
+            }
+        } else {
+            // HLSL doesn't exist but cache does
+            useCache = true;
+        }
+    }
+    
+    if (useCache) {
+        // Read compiled shader bytecode directly from disk
+        std::ifstream file(cachePath, std::ios::binary | std::ios::ate);
+        if (file.is_open()) {
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            
+            HRESULT hr = D3DCreateBlob(static_cast<SIZE_T>(size), ppBlobOut);
+            if (SUCCEEDED(hr)) {
+                if (file.read(reinterpret_cast<char*>((*ppBlobOut)->GetBufferPointer()), size)) {
+                    Logger::Get().Debug("Loaded cached shader bytecode: " + std::string(szEntryPoint));
+                    return S_OK;
+                }
+                (*ppBlobOut)->Release();
+                *ppBlobOut = nullptr;
+            }
+        }
+    }
+
+    // Otherwise, compile it
+    Logger::Get().Info("Compiling shader: " + std::string(szEntryPoint));
     DWORD dwShaderFlags = D3DCOMPILE_ENABLE_STRICTNESS;
 #ifdef _DEBUG
     dwShaderFlags |= D3DCOMPILE_DEBUG;
@@ -38,16 +91,19 @@ static HRESULT CompileShaderFromFile(const WCHAR* szFileName, LPCSTR szEntryPoin
         return hr;
     }
     if (pErrorBlob) pErrorBlob->Release();
-    return S_OK;
-}
 
-// Get the directory containing the running executable
-static std::wstring GetExecutableDir() {
-    wchar_t buffer[MAX_PATH];
-    GetModuleFileNameW(nullptr, buffer, MAX_PATH);
-    std::wstring path(buffer);
-    size_t pos = path.find_last_of(L"\\/");
-    return (pos == std::wstring::npos) ? L"" : path.substr(0, pos);
+    // Cache the compiled bytecode to disk
+    if (SUCCEEDED(hr) && *ppBlobOut) {
+        // Ensure directory exists
+        std::filesystem::create_directories(GetExecutableDir() + L"\\shaders");
+        std::ofstream file(cachePath, std::ios::binary);
+        if (file.is_open()) {
+            file.write(reinterpret_cast<const char*>((*ppBlobOut)->GetBufferPointer()), (*ppBlobOut)->GetBufferSize());
+            Logger::Get().Debug("Cached compiled shader bytecode to disk: " + std::string(szEntryPoint));
+        }
+    }
+
+    return S_OK;
 }
 
 Canvas::Canvas()
@@ -289,6 +345,7 @@ void Canvas::ReleaseCompositeResources() {
 }
 
 void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
+    if (!device) return;
     if (layer.texture) { layer.texture->Release(); layer.texture = nullptr; }
     if (layer.srv) { layer.srv->Release(); layer.srv = nullptr; }
 
@@ -303,11 +360,16 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
-    D3D11_SUBRESOURCE_DATA initData = {};
-    initData.pSysMem = layer.pixels.data();
-    initData.SysMemPitch = m_Width * sizeof(float) * 4;
-
-    HRESULT hr = device->CreateTexture2D(&desc, &initData, &layer.texture);
+    HRESULT hr;
+    if (layer.pixels.empty()) {
+        hr = device->CreateTexture2D(&desc, nullptr, &layer.texture);
+    } else {
+        D3D11_SUBRESOURCE_DATA initData = {};
+        initData.pSysMem = layer.pixels.data();
+        initData.SysMemPitch = m_Width * sizeof(float) * 4;
+        hr = device->CreateTexture2D(&desc, &initData, &layer.texture);
+    }
+    
     if (SUCCEEDED(hr)) {
         device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
     }
@@ -319,15 +381,16 @@ void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
     newLayer.name = name;
     newLayer.visible = true;
     newLayer.opacity = 1.0f;
-    newLayer.pixels.resize((size_t)m_Width * m_Height * 4, 0.0f);
-    newLayer.needsUpload = true;
+    // Leave pixels empty (lazy loading)
+    newLayer.needsUpload = false;
 
-    // Background starts white or transparent? Let's make it transparent.
-    RecreateLayerTexture(device, newLayer);
+    if (device) {
+        RecreateLayerTexture(device, newLayer);
+    }
 
     m_Layers.push_back(newLayer);
     m_ActiveLayerIdx = static_cast<int>(m_Layers.size()) - 1;
-    Logger::Get().Info("Created new layer: " + name);
+    Logger::Get().Info("Created new lazy layer: " + name);
 }
 
 void Canvas::DeleteLayer(int index) {
@@ -430,6 +493,12 @@ extern float g_PenPressure;
 
 void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush) {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
+
+    auto& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.pixels.empty()) {
+        Logger::Get().Info("Lazy allocating active layer pixel buffer: " + layer.name);
+        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+    }
 
     BrushSettings activeBrush = brush;
     activeBrush.writeR = m_ChannelR;
@@ -576,7 +645,13 @@ void Canvas::ResizeCanvas(ID3D11Device* device, int width, int height) {
 
     // Resize each layer's pixel buffers
     for (auto& layer : m_Layers) {
-        std::vector<float> oldPixels = layer.pixels;
+        if (layer.pixels.empty()) {
+            if (device) {
+                RecreateLayerTexture(device, layer);
+            }
+            continue;
+        }
+        std::vector<float> oldPixels = std::move(layer.pixels);
         layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
 
         // Copy old contents top-left aligned
@@ -782,7 +857,7 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
 
     // Auto resize canvas size to match the imported image if it's the first layer
     // or if the dimensions differ significantly and user wants to scale
-    if (m_Layers.empty() || (m_Layers.size() == 1 && m_Width == 1024 && m_Height == 1024 && m_Layers[0].name == "Background" && m_Layers[0].pixels == std::vector<float>((size_t)1024*1024*4, 0.0f))) {
+    if (m_Layers.empty() || (m_Layers.size() == 1 && m_Width == 1024 && m_Height == 1024 && m_Layers[0].name == "Background" && (m_Layers[0].pixels.empty() || m_Layers[0].pixels == std::vector<float>((size_t)1024*1024*4, 0.0f)))) {
         m_Width = imgWidth;
         m_Height = imgHeight;
         CreateCompositeResources(device);
@@ -832,10 +907,16 @@ bool Canvas::SaveCanvas(const std::string& filepath, DdsFormat ddsFormat) {
         
         for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
             size_t base = i * 4;
-            float srcR = layer.pixels[base + 0];
-            float srcG = layer.pixels[base + 1];
-            float srcB = layer.pixels[base + 2];
-            float srcA = layer.pixels[base + 3] * layer.opacity;
+            float srcR = 0.0f;
+            float srcG = 0.0f;
+            float srcB = 0.0f;
+            float srcA = 0.0f;
+            if (!layer.pixels.empty()) {
+                srcR = layer.pixels[base + 0];
+                srcG = layer.pixels[base + 1];
+                srcB = layer.pixels[base + 2];
+                srcA = layer.pixels[base + 3] * layer.opacity;
+            }
 
             if (srcA <= 0.0f) continue;
 
@@ -877,10 +958,16 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
 
         for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
             size_t base = i * 4;
-            float srcR = layer.pixels[base + 0];
-            float srcG = layer.pixels[base + 1];
-            float srcB = layer.pixels[base + 2];
-            float srcA = layer.pixels[base + 3] * layer.opacity;
+            float srcR = 0.0f;
+            float srcG = 0.0f;
+            float srcB = 0.0f;
+            float srcA = 0.0f;
+            if (!layer.pixels.empty()) {
+                srcR = layer.pixels[base + 0];
+                srcG = layer.pixels[base + 1];
+                srcB = layer.pixels[base + 2];
+                srcA = layer.pixels[base + 3] * layer.opacity;
+            }
 
             if (srcA <= 0.0f) continue;
 
@@ -983,7 +1070,10 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         out.write(metadataStr.data(), metadataStr.size());
 
         // 3. Compress and write pixel data for each layer
-        for (const auto& layer : m_Layers) {
+        for (auto& layer : m_Layers) {
+            if (layer.pixels.empty()) {
+                layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+            }
             uint64_t uncompressedSize = layer.pixels.size() * sizeof(float);
             
             int compSize = 0;
@@ -1202,11 +1292,16 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
     opacities.reserve(m_Layers.size());
     pixels.reserve(m_Layers.size());
     
-    for (const auto& layer : m_Layers) {
+    for (size_t i = 0; i < m_Layers.size(); ++i) {
+        const auto& layer = m_Layers[i];
         names.push_back(layer.name);
         visibles.push_back(layer.visible);
         opacities.push_back(layer.opacity);
-        pixels.push_back(layer.pixels);
+        if (layer.pixels.empty()) {
+            pixels.push_back(std::vector<float>((size_t)width * height * 4, 0.0f));
+        } else {
+            pixels.push_back(layer.pixels);
+        }
     }
     
     std::thread([=, pixels = std::move(pixels)]() {

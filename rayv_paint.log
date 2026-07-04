@@ -828,3 +828,105 @@
 [2026-07-04 22:16:54.000] [INFO]  Shutting down embedded Python interpreter...
 [2026-07-04 22:16:54.004] [INFO]  ThreadPool shut down successfully.
 [2026-07-04 22:16:54.004] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 22:34:42.686] [INFO]  ===================================================
+[2026-07-04 22:34:42.686] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 22:34:42.686] [INFO]  [Profiler] Step 'CLI & Console Setup' took: 0.783000 ms
+[2026-07-04 22:34:42.686] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 22:34:42.686] [INFO]  [Profiler] Step 'Logger & Config Systems' took: 0.292200 ms
+[2026-07-04 22:34:42.686] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 22:34:42.689] [INFO]  [Profiler] Step 'Concurrency (ThreadPool)' took: 2.645900 ms
+[2026-07-04 22:34:42.689] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 22:34:42.704] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 22:34:42.704] [INFO]  [Profiler] Step 'Scripting Engine Init Link/Start' took: 15.242200 ms
+[2026-07-04 22:34:42.704] [INFO]  [Profiler] Step 'Initial Canvas Resize' took: 0.105900 ms
+[2026-07-04 22:34:42.721] [INFO]  [Profiler] Step 'GLFW Window Creation' took: 17.062100 ms
+[2026-07-04 22:34:42.721] [DEBUG] Resolved scancode for EraserTool (E): 18
+[2026-07-04 22:34:42.721] [DEBUG] Resolved scancode for Undo (Ctrl+Z): 44
+[2026-07-04 22:34:42.722] [DEBUG] Resolved scancode for Redo (Ctrl+Y): 21
+[2026-07-04 22:34:42.722] [DEBUG] Resolved scancode for BrushTool (B): 48
+[2026-07-04 22:34:42.722] [DEBUG] Resolved scancode for SaveProject (Ctrl+S): 31
+[2026-07-04 22:34:42.722] [DEBUG] Resolved scancode for OpenProject (Ctrl+O): 24
+[2026-07-04 22:34:42.722] [DEBUG] Resolved scancode for PanTool (H): 35
+[2026-07-04 22:34:42.722] [WARN]  Failed to open keymap config: keymap.json. Using defaults.
+[2026-07-04 22:34:42.722] [INFO]  [Profiler] Step 'Keymap Manager Init' took: 0.647100 ms
+[2026-07-04 22:34:42.863] [INFO]  [Profiler] Step 'DirectX 11 Device Creation' took: 140.851600 ms
+[2026-07-04 22:34:42.864] [INFO]  [Profiler] Step 'ImGui Context & Backend Init' took: 0.799200 ms
+[2026-07-04 22:34:42.864] [INFO]  Compiling shader: VSMain
+[2026-07-04 22:34:42.868] [DEBUG] Cached compiled shader bytecode to disk: VSMain
+[2026-07-04 22:34:42.871] [INFO]  Compiling shader: VSLayerMain
+[2026-07-04 22:34:42.874] [DEBUG] Cached compiled shader bytecode to disk: VSLayerMain
+[2026-07-04 22:34:42.874] [INFO]  Compiling shader: PSMain
+[2026-07-04 22:34:42.884] [DEBUG] Cached compiled shader bytecode to disk: PSMain
+[2026-07-04 22:34:42.884] [INFO]  Compiling shader: PSLayerBlend
+[2026-07-04 22:34:42.888] [DEBUG] Cached compiled shader bytecode to disk: PSLayerBlend
+[2026-07-04 22:34:42.889] [INFO]  Created new lazy layer: Background
+[2026-07-04 22:34:42.889] [INFO]  [Profiler] Step 'Canvas Renderer D3D Init (including Shader Loading/Compiling)' took: 25.062600 ms
+[2026-07-04 22:34:42.889] [INFO]  Startup completed in: 203.611800 ms
+[2026-07-04 22:34:42.894] [INFO]  [TEST] Render completed. Saving config and exiting successfully.
+[2026-07-04 22:34:42.925] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 22:34:42.928] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 22:34:42.928] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 22:34:42.955] [INFO]  ===================================================
+[2026-07-04 22:34:42.955] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 22:34:42.955] [INFO]  [Profiler] Step 'CLI & Console Setup' took: 1.035600 ms
+[2026-07-04 22:34:42.955] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 22:34:42.955] [INFO]  [Profiler] Step 'Logger & Config Systems' took: 0.340000 ms
+[2026-07-04 22:34:42.955] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 22:34:42.958] [INFO]  [Profiler] Step 'Concurrency (ThreadPool)' took: 2.700700 ms
+[2026-07-04 22:34:42.958] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 22:34:42.973] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 22:34:42.973] [INFO]  [Profiler] Step 'Scripting Engine Init Link/Start' took: 15.471100 ms
+[2026-07-04 22:34:42.974] [INFO]  [Profiler] Step 'Initial Canvas Resize' took: 0.098000 ms
+[2026-07-04 22:34:42.994] [INFO]  [Profiler] Step 'GLFW Window Creation' took: 20.735000 ms
+[2026-07-04 22:34:42.994] [DEBUG] Resolved scancode for EraserTool (E): 18
+[2026-07-04 22:34:42.995] [DEBUG] Resolved scancode for Undo (Ctrl+Z): 44
+[2026-07-04 22:34:42.995] [DEBUG] Resolved scancode for Redo (Ctrl+Y): 21
+[2026-07-04 22:34:42.995] [DEBUG] Resolved scancode for BrushTool (B): 48
+[2026-07-04 22:34:42.995] [DEBUG] Resolved scancode for SaveProject (Ctrl+S): 31
+[2026-07-04 22:34:42.995] [DEBUG] Resolved scancode for OpenProject (Ctrl+O): 24
+[2026-07-04 22:34:42.995] [DEBUG] Resolved scancode for PanTool (H): 35
+[2026-07-04 22:34:42.996] [WARN]  Failed to open keymap config: keymap.json. Using defaults.
+[2026-07-04 22:34:42.996] [INFO]  [Profiler] Step 'Keymap Manager Init' took: 1.390300 ms
+[2026-07-04 22:34:43.002] [INFO]  [Profiler] Step 'DirectX 11 Device Creation' took: 6.135100 ms
+[2026-07-04 22:34:43.003] [INFO]  [Profiler] Step 'ImGui Context & Backend Init' took: 0.766200 ms
+[2026-07-04 22:34:43.003] [DEBUG] Loaded cached shader bytecode: VSMain
+[2026-07-04 22:34:43.003] [DEBUG] Loaded cached shader bytecode: VSLayerMain
+[2026-07-04 22:34:43.003] [DEBUG] Loaded cached shader bytecode: PSMain
+[2026-07-04 22:34:43.003] [DEBUG] Loaded cached shader bytecode: PSLayerBlend
+[2026-07-04 22:34:43.004] [INFO]  Created new lazy layer: Background
+[2026-07-04 22:34:43.004] [INFO]  [Profiler] Step 'Canvas Renderer D3D Init (including Shader Loading/Compiling)' took: 1.120400 ms
+[2026-07-04 22:34:43.004] [INFO]  Startup completed in: 49.957600 ms
+[2026-07-04 22:34:43.004] [INFO]  Executing Python script: test_script.py
+[2026-07-04 22:34:43.005] [INFO]  [Python] === Python API Integration Test Starting ===
+[2026-07-04 22:34:43.005] [DEBUG] [Python] This is a debug message from Python.
+[2026-07-04 22:34:43.005] [WARN]  [Python] This is a warning from Python.
+[2026-07-04 22:34:43.005] [INFO]  [Python] Config default dimensions: 1024x1024
+[2026-07-04 22:34:43.005] [INFO]  [Python] Resizing canvas via Python to 2048x1024...
+[2026-07-04 22:34:43.005] [INFO]  Resizing canvas from 1024x1024 to 2048x1024
+[2026-07-04 22:34:43.005] [INFO]  Canvas resized to: 2048x1024
+[2026-07-04 22:34:43.005] [INFO]  [Python] Testing native DDS load: testfield/SandroneBangsADiffuse.dds
+[2026-07-04 22:34:43.024] [INFO]  DDS texture loaded successfully (1024x1024): testfield/SandroneBangsADiffuse.dds
+[2026-07-04 22:34:43.036] [INFO]  Successfully imported layer from: testfield/SandroneBangsADiffuse.dds
+[2026-07-04 22:34:43.361] [INFO]  Image saved successfully: testfield/temp_diffuse_export.png
+[2026-07-04 22:34:43.363] [INFO]  [Python] Testing save_dds with format index 1 to testfield/temp_diffuse_export_1.dds
+[2026-07-04 22:34:43.401] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_1.dds
+[2026-07-04 22:34:43.405] [INFO]  [Python] Testing save_dds with format index 2 to testfield/temp_diffuse_export_2.dds
+[2026-07-04 22:34:43.434] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_2.dds
+[2026-07-04 22:34:43.437] [INFO]  [Python] Testing save_dds with format index 3 to testfield/temp_diffuse_export_3.dds
+[2026-07-04 22:34:43.477] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_3.dds
+[2026-07-04 22:34:43.481] [INFO]  [Python] Testing save_dds with format index 4 to testfield/temp_diffuse_export_4.dds
+[2026-07-04 22:34:43.502] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_4.dds
+[2026-07-04 22:34:43.504] [INFO]  [Python] Testing save_dds with format index 5 to testfield/temp_diffuse_export_5.dds
+[2026-07-04 22:34:43.525] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_5.dds
+[2026-07-04 22:34:43.527] [INFO]  [Python] Testing save_dds with format index 6 to testfield/temp_diffuse_export_6.dds
+[2026-07-04 22:34:43.548] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_6.dds
+[2026-07-04 22:34:43.550] [INFO]  [Python] Testing save_image with ICC profile: testfield/dummy_test.icc
+[2026-07-04 22:34:43.863] [INFO]  Embedded ICC profile 'dummy_test' into PNG file: testfield/temp_icc_export.png
+[2026-07-04 22:34:43.864] [INFO]  Image saved successfully: testfield/temp_icc_export.png
+[2026-07-04 22:34:43.866] [INFO]  [Python] Verified: 'iCCP' chunk is embedded in the exported PNG!
+[2026-07-04 22:34:43.867] [INFO]  [Python] DDS native validation check and ICC profile test: PASSED.
+[2026-07-04 22:34:43.867] [INFO]  [Python] === Python API Integration Test Completed Successfully ===
+[2026-07-04 22:34:43.874] [INFO]  [TEST] Render completed. Saving config and exiting successfully.
+[2026-07-04 22:34:43.879] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 22:34:43.883] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 22:34:43.883] [INFO]  RayVPaint shut down cleanly.

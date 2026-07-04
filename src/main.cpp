@@ -425,6 +425,15 @@ int main(int argc, char* argv[]) {
     Logger::Get().Info("===================================================");
     Logger::Get().Info("Starting RayVPaint tech-art editor...");
 
+    auto time_prev = startupStart;
+    auto log_step = [&](const std::string& stepName) {
+        auto now = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(now - time_prev).count();
+        Logger::Get().Info("[Profiler] Step '" + stepName + "' took: " + std::to_string(ms) + " ms");
+        time_prev = now;
+    };
+    log_step("CLI & Console Setup");
+
     ConfigManager::Get().Load(configPath);
     
     // Set logger level from config
@@ -433,11 +442,13 @@ int main(int argc, char* argv[]) {
     else if (cfgLevel == "warn") Logger::Get().SetMinLevel(LogLevel::LogLevel_Warning);
     else if (cfgLevel == "error") Logger::Get().SetMinLevel(LogLevel::LogLevel_Error);
     else Logger::Get().SetMinLevel(LogLevel::LogLevel_Info);
+    log_step("Logger & Config Systems");
 
     // 3. Initialize Concurrency (ThreadPool)
     unsigned int numThreads = std::thread::hardware_concurrency();
     if (numThreads == 0) numThreads = 2;
     ThreadPool::Get().Init(numThreads);
+    log_step("Concurrency (ThreadPool)");
 
     // 4. Initialize Scripting Engine
     if (!scriptPath.empty() || headlessMode || testMode) {
@@ -447,9 +458,11 @@ int main(int argc, char* argv[]) {
             ScriptingEngine::Get().Initialize();
         }).detach();
     }
+    log_step("Scripting Engine Init Link/Start");
 
     // Resize canvas default dimensions according to config
     g_Canvas.ResizeCanvas(nullptr, ConfigManager::Get().GetDefaultWidth(), ConfigManager::Get().GetDefaultHeight());
+    log_step("Initial Canvas Resize");
 
     // 5. Initialize GLFW (if not in true headless mode)
     if (!glfwInit()) {
@@ -469,6 +482,7 @@ int main(int argc, char* argv[]) {
         glfwTerminate();
         return 1;
     }
+    log_step("GLFW Window Creation");
 
     HWND hWnd = glfwGetWin32Window(window);
 
@@ -478,6 +492,7 @@ int main(int argc, char* argv[]) {
     // Initialize KeymapManager (requires GLFW initialized and window created for scancode resolution)
     KeymapManager::Get().Initialize();
     KeymapManager::Get().Load();
+    log_step("Keymap Manager Init");
 
     // 6. Initialize DirectX 11
     if (!CreateDeviceD3D(hWnd, headlessMode)) {
@@ -488,6 +503,7 @@ int main(int argc, char* argv[]) {
     }
 
     CreateRenderTarget();
+    log_step("DirectX 11 Device Creation");
 
     // 7. Initialize Dear ImGui
     IMGUI_CHECKVERSION();
@@ -511,6 +527,7 @@ int main(int argc, char* argv[]) {
     ImGui_ImplGlfw_InitForOther(window, true);
     g_PrevKeyCallback = glfwSetKeyCallback(window, CustomKeyCallback);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
+    log_step("ImGui Context & Backend Init");
 
     // 8. Initialize Canvas Renderer
     if (!g_Canvas.Initialize(g_pd3dDevice)) {
@@ -520,6 +537,7 @@ int main(int argc, char* argv[]) {
         glfwTerminate();
         return 1;
     }
+    log_step("Canvas Renderer D3D Init (including Shader Loading/Compiling)");
 
     // Check for crash recovery / autosave restore
     std::string backupDir = ConfigManager::Get().GetBackupDir();
