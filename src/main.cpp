@@ -287,6 +287,7 @@ int main(int argc, char* argv[]) {
     bool showConsole = true;
     bool showProperties = true;
     bool showToolbar = true;
+    bool showColors = true;
 
     // Modals
     bool openImportModal = false;
@@ -346,6 +347,7 @@ int main(int argc, char* argv[]) {
             if (ImGui::BeginMenu("View")) {
                 ImGui::MenuItem("Toolbar", nullptr, &showToolbar);
                 ImGui::MenuItem("Properties", nullptr, &showProperties);
+                ImGui::MenuItem("Colors Window", nullptr, &showColors);
                 ImGui::MenuItem("Console logs", nullptr, &showConsole);
                 ImGui::Separator();
                 if (ImGui::MenuItem("Reset View")) {
@@ -581,18 +583,15 @@ int main(int argc, char* argv[]) {
             if (isHovered && !isPanning && (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser)) {
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     g_IsPainting = true;
-                    g_PrevCanvasMouseX = canvasX;
-                    g_PrevCanvasMouseY = canvasY;
-                    g_Canvas.PaintOnActiveLayer(canvasX, canvasY, canvasX, canvasY, g_Brush);
+                    g_Canvas.PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, g_Brush);
                 } 
                 else if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && g_IsPainting) {
-                    g_Canvas.PaintOnActiveLayer(g_PrevCanvasMouseX, g_PrevCanvasMouseY, canvasX, canvasY, g_Brush);
-                    g_PrevCanvasMouseX = canvasX;
-                    g_PrevCanvasMouseY = canvasY;
+                    g_Canvas.PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Update, g_Brush);
                 }
             }
 
-            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            if (g_IsPainting && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+                g_Canvas.PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
                 g_IsPainting = false;
             }
 
@@ -628,7 +627,9 @@ int main(int argc, char* argv[]) {
             ImGui::SliderFloat("Radius", &g_Brush.radius, 1.0f, 250.0f, "%.0f px");
             ImGui::SliderFloat("Hardness", &g_Brush.hardness, 0.0f, 1.0f, "%.2f");
             ImGui::SliderFloat("Opacity##brush", &g_Brush.opacity, 0.0f, 1.0f, "%.2f");
-            ImGui::ColorEdit4("Color##brush", g_Brush.color);
+            ImGui::SliderFloat("Spacing##brush", &g_Brush.spacing, 0.01f, 5.0f, "%.2f");
+            ImGui::SliderInt("Stabilization##brush", &g_Brush.stabilization, 1, 50, "%d");
+            ImGui::ColorEdit4("Color##brush", g_Brush.color, ImGuiColorEditFlags_NoInputs);
 
             ImGui::Separator();
             ImGui::Text("Channel Filter (Vis Mode):");
@@ -710,6 +711,39 @@ int main(int argc, char* argv[]) {
                 ImGui::SetScrollHereY(1.0f);
             }
             ImGui::EndChild();
+            ImGui::End();
+        }
+
+        // 9.8 Draw Colors Panel
+        if (showColors) {
+            ImGui::Begin("Colors", &showColors);
+            
+            ImGuiColorEditFlags flags = ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_AlphaPreview;
+            ImGui::ColorPicker4("##color_picker", g_Brush.color, flags);
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            ImGui::Text("Quick Palette:");
+            static const ImVec4 paletteColors[] = {
+                ImVec4(0, 0, 0, 1), ImVec4(1, 1, 1, 1), ImVec4(0.5f, 0.5f, 0.5f, 1), ImVec4(0.75f, 0.75f, 0.75f, 1),
+                ImVec4(1, 0, 0, 1), ImVec4(1, 1, 0, 1), ImVec4(0, 1, 0, 1), ImVec4(0, 1, 1, 1),
+                ImVec4(0, 0, 1, 1), ImVec4(1, 0, 1, 1), ImVec4(0.5f, 0, 0, 1), ImVec4(0.5f, 0.5f, 0, 1),
+                ImVec4(0, 0.5f, 0, 1), ImVec4(0, 0.5f, 0.5f, 1), ImVec4(0, 0, 0.5f, 1), ImVec4(0.5f, 0, 0.5f, 1)
+            };
+            for (int i = 0; i < IM_ARRAYSIZE(paletteColors); ++i) {
+                ImGui::PushID(i);
+                if (i > 0 && i % 8 != 0) ImGui::SameLine();
+                if (ImGui::ColorButton("##palette_color", paletteColors[i], ImGuiColorEditFlags_NoTooltip, ImVec2(22, 22))) {
+                    g_Brush.color[0] = paletteColors[i].x;
+                    g_Brush.color[1] = paletteColors[i].y;
+                    g_Brush.color[2] = paletteColors[i].z;
+                    g_Brush.color[3] = paletteColors[i].w;
+                }
+                ImGui::PopID();
+            }
+
             ImGui::End();
         }
 

@@ -1,9 +1,0 @@
-C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/CMakeFiles/imgui.dir
-C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/CMakeFiles/RayVPaint.dir
-C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/CMakeFiles/ALL_BUILD.dir
-C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/CMakeFiles/ZERO_CHECK.dir
-C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-build/CMakeFiles/ALL_BUILD.dir
-C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-build/src/CMakeFiles/glfw.dir
-C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/glfw-build/src/CMakeFiles/update_mappings.dir
-C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-build/CMakeFiles/ALL_BUILD.dir
-C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/pybind11-build/CMakeFiles/ALL_BUILD.dir

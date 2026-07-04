@@ -1,9 +1,0 @@
-C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\main.cpp;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint.dir\Release\main.obj
-C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint.dir\Release\Canvas.obj
-C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\Logger.cpp;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint.dir\Release\Logger.obj
-C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ThreadPool.cpp;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint.dir\Release\ThreadPool.obj
-C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ConfigManager.cpp;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint.dir\Release\ConfigManager.obj
-C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\DdsHelper.cpp;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint.dir\Release\DdsHelper.obj
-C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\ImageManager.cpp;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint.dir\Release\ImageManager.obj
-C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\core\PaintEngine.cpp;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint.dir\Release\PaintEngine.obj
-C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\scripting\ScriptingEngine.cpp;C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint.dir\Release\ScriptingEngine.obj

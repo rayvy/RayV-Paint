@@ -342,12 +342,42 @@ void Canvas::SetActiveLayerIndex(int idx) {
     }
 }
 
-void Canvas::PaintOnActiveLayer(float prevX, float prevY, float currX, float currY, const BrushSettings& brush) {
+void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush) {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= m_Layers.size()) return;
 
-    PaintEngine::DrawLine(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height, 
-                          prevX, prevY, currX, currY, brush);
-    m_Layers[m_ActiveLayerIdx].needsUpload = true;
+    if (phase == StrokePhase::Begin) {
+        m_IsStrokeActive = true;
+        m_StrokeDistanceAccumulator = 0.0f;
+        m_LastDabX = currRawX;
+        m_LastDabY = currRawY;
+        m_PrevStabilizedX = currRawX;
+        m_PrevStabilizedY = currRawY;
+
+        // Place the very first stamp immediately
+        PaintEngine::DrawStamp(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height, 
+                               currRawX, currRawY, brush);
+        m_Layers[m_ActiveLayerIdx].needsUpload = true;
+    }
+    else if (phase == StrokePhase::Update && m_IsStrokeActive) {
+        // Apply stabilization
+        float weight = 1.0f / static_cast<float>(std::max(1, brush.stabilization));
+        float stabilizedX = m_PrevStabilizedX + weight * (currRawX - m_PrevStabilizedX);
+        float stabilizedY = m_PrevStabilizedY + weight * (currRawY - m_PrevStabilizedY);
+
+        // Draw segment from previous stabilized position to current stabilized position
+        PaintEngine::DrawStrokeSegment(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height,
+                                       m_PrevStabilizedX, m_PrevStabilizedY,
+                                       stabilizedX, stabilizedY,
+                                       brush, m_StrokeDistanceAccumulator,
+                                       m_LastDabX, m_LastDabY);
+
+        m_PrevStabilizedX = stabilizedX;
+        m_PrevStabilizedY = stabilizedY;
+        m_Layers[m_ActiveLayerIdx].needsUpload = true;
+    }
+    else if (phase == StrokePhase::End) {
+        m_IsStrokeActive = false;
+    }
 }
 
 void Canvas::ResizeCanvas(ID3D11Device* device, int width, int height) {

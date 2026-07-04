@@ -79,3 +79,41 @@ void PaintEngine::DrawLine(std::vector<float>& pixels, int width, int height,
         DrawStamp(pixels, width, height, cx, cy, brush);
     }
 }
+
+void PaintEngine::DrawStrokeSegment(std::vector<float>& pixels, int width, int height,
+                                    float x0, float y0, float x1, float y1,
+                                    const BrushSettings& brush, float& distanceAccumulator,
+                                    float& lastDabX, float& lastDabY) {
+    float dx = x1 - x0;
+    float dy = y1 - y0;
+    float segmentLength = std::sqrt(dx * dx + dy * dy);
+
+    float spacingDistance = std::max(1.0f, brush.radius * 2.0f * brush.spacing);
+
+    if (segmentLength == 0.0f) {
+        return;
+    }
+
+    float dirX = dx / segmentLength;
+    float dirY = dy / segmentLength;
+
+    float traveled = 0.0f;
+    while (traveled <= segmentLength) {
+        float needed = spacingDistance - distanceAccumulator;
+        
+        if (traveled + needed <= segmentLength) {
+            traveled += needed;
+            float dabX = x0 + dirX * traveled;
+            float dabY = y0 + dirY * traveled;
+            DrawStamp(pixels, width, height, dabX, dabY, brush);
+            lastDabX = dabX;
+            lastDabY = dabY;
+            distanceAccumulator = 0.0f;
+        } else {
+            float dxLast = x1 - lastDabX;
+            float dyLast = y1 - lastDabY;
+            distanceAccumulator = std::sqrt(dxLast * dxLast + dyLast * dyLast);
+            break;
+        }
+    }
+}

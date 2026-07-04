@@ -302,3 +302,57 @@
 [2026-07-04 12:58:28.527] [INFO]  Shutting down embedded Python interpreter...
 [2026-07-04 12:58:28.531] [INFO]  ThreadPool shut down successfully.
 [2026-07-04 12:58:28.531] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 13:46:48.128] [INFO]  ===================================================
+[2026-07-04 13:46:48.129] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 13:46:48.129] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 13:46:48.129] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 13:46:48.131] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 13:46:48.157] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 13:46:48.355] [INFO]  Created new layer: Background
+[2026-07-04 13:46:48.356] [INFO]  Startup completed in: 227.648500 ms
+[2026-07-04 13:46:48.362] [INFO]  [TEST] Render completed. Saving config and exiting successfully.
+[2026-07-04 13:46:48.400] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 13:46:48.404] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 13:46:48.404] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 13:46:48.430] [INFO]  ===================================================
+[2026-07-04 13:46:48.430] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 13:46:48.430] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 13:46:48.431] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 13:46:48.433] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 13:46:48.457] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 13:46:48.504] [INFO]  Created new layer: Background
+[2026-07-04 13:46:48.505] [INFO]  Startup completed in: 75.690500 ms
+[2026-07-04 13:46:48.505] [INFO]  Executing Python script: test_script.py
+[2026-07-04 13:46:48.506] [INFO]  [Python] === Python API Integration Test Starting ===
+[2026-07-04 13:46:48.506] [DEBUG] [Python] This is a debug message from Python.
+[2026-07-04 13:46:48.506] [WARN]  [Python] This is a warning from Python.
+[2026-07-04 13:46:48.507] [INFO]  [Python] Config default dimensions: 1024x1024
+[2026-07-04 13:46:48.507] [INFO]  [Python] Resizing canvas via Python to 2048x1024...
+[2026-07-04 13:46:48.507] [INFO]  Resizing canvas from 1024x1024 to 2048x1024
+[2026-07-04 13:46:48.517] [INFO]  Canvas resized to: 2048x1024
+[2026-07-04 13:46:48.517] [INFO]  [Python] Testing native DDS load: testfield/SandroneBangsADiffuse.dds
+[2026-07-04 13:46:48.538] [INFO]  DDS texture loaded successfully (1024x1024): testfield/SandroneBangsADiffuse.dds
+[2026-07-04 13:46:48.550] [INFO]  Successfully imported layer from: testfield/SandroneBangsADiffuse.dds
+[2026-07-04 13:46:48.881] [INFO]  Image saved successfully: testfield/temp_diffuse_export.png
+[2026-07-04 13:46:48.883] [INFO]  [Python] Testing save_dds with format index 1 to testfield/temp_diffuse_export_1.dds
+[2026-07-04 13:46:48.921] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_1.dds
+[2026-07-04 13:46:48.926] [INFO]  [Python] Testing save_dds with format index 2 to testfield/temp_diffuse_export_2.dds
+[2026-07-04 13:46:48.957] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_2.dds
+[2026-07-04 13:46:48.961] [INFO]  [Python] Testing save_dds with format index 3 to testfield/temp_diffuse_export_3.dds
+[2026-07-04 13:46:49.001] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_3.dds
+[2026-07-04 13:46:49.004] [INFO]  [Python] Testing save_dds with format index 4 to testfield/temp_diffuse_export_4.dds
+[2026-07-04 13:46:49.031] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_4.dds
+[2026-07-04 13:46:49.033] [INFO]  [Python] Testing save_dds with format index 5 to testfield/temp_diffuse_export_5.dds
+[2026-07-04 13:46:49.057] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_5.dds
+[2026-07-04 13:46:49.059] [INFO]  [Python] Testing save_dds with format index 6 to testfield/temp_diffuse_export_6.dds
+[2026-07-04 13:46:49.083] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_6.dds
+[2026-07-04 13:46:49.086] [INFO]  [Python] Testing save_image with ICC profile: testfield/dummy_test.icc
+[2026-07-04 13:46:49.429] [INFO]  Embedded ICC profile 'dummy_test' into PNG file: testfield/temp_icc_export.png
+[2026-07-04 13:46:49.429] [INFO]  Image saved successfully: testfield/temp_icc_export.png
+[2026-07-04 13:46:49.431] [INFO]  [Python] Verified: 'iCCP' chunk is embedded in the exported PNG!
+[2026-07-04 13:46:49.432] [INFO]  [Python] DDS native validation check and ICC profile test: PASSED.
+[2026-07-04 13:46:49.432] [INFO]  [Python] === Python API Integration Test Completed Successfully ===
+[2026-07-04 13:46:49.439] [INFO]  [TEST] Render completed. Saving config and exiting successfully.
+[2026-07-04 13:46:49.444] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 13:46:49.448] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 13:46:49.448] [INFO]  RayVPaint shut down cleanly.

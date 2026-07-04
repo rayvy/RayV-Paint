@@ -17,6 +17,12 @@ struct Layer {
     bool needsUpload = false;
 };
 
+enum class StrokePhase {
+    Begin,
+    Update,
+    End
+};
+
 class Canvas {
 public:
     Canvas();
@@ -54,7 +60,7 @@ public:
     std::vector<Layer>& GetLayers() { return m_Layers; }
 
     // Paint Operation
-    void PaintOnActiveLayer(float prevX, float prevY, float currX, float currY, const BrushSettings& brush);
+    void PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush);
 
     // File Import / Export
     bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath);
@@ -121,4 +127,12 @@ private:
     ID3D11RenderTargetView* m_CompositeRTV = nullptr;
     ID3D11ShaderResourceView* m_CompositeSRV = nullptr;
     ID3D11BlendState* m_LayerBlendState = nullptr;
+
+    // Stroke state tracking
+    bool m_IsStrokeActive = false;
+    float m_LastDabX = 0.0f;
+    float m_LastDabY = 0.0f;
+    float m_StrokeDistanceAccumulator = 0.0f;
+    float m_PrevStabilizedX = 0.0f;
+    float m_PrevStabilizedY = 0.0f;
 };

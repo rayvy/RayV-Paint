@@ -7,6 +7,8 @@ struct BrushSettings {
     float hardness = 0.5f; // 0 (soft) to 1 (hard)
     float opacity = 1.0f;
     bool erase = false;
+    float spacing = 0.1f; // 10% spacing by default
+    int stabilization = 1; // 1 to 50 smoothing strength
 };
 
 class PaintEngine {
@@ -16,4 +18,9 @@ public:
 
     static void DrawLine(std::vector<float>& pixels, int width, int height, 
                          float x0, float y0, float x1, float y1, const BrushSettings& brush);
+
+    static void DrawStrokeSegment(std::vector<float>& pixels, int width, int height,
+                                  float x0, float y0, float x1, float y1,
+                                  const BrushSettings& brush, float& distanceAccumulator,
+                                  float& lastDabX, float& lastDabY);
 };
