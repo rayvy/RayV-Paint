@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_definitions(NOMINMAX)
 
 # Configure output directories
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 
 # FetchContent for dependencies
 include(FetchContent)
@@ -115,11 +115,14 @@ set(SHADER_FILES
 )
 set_source_files_properties(${SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 
-# Create executable (WIN32 target ensures it runs without console window by default)
-add_executable(RayVPaint WIN32 ${SOURCES} ${SHADER_FILES})
+# Create Core executable (WIN32 target ensures it runs without console window by default)
+add_executable(RayVPaint_Core WIN32 ${SOURCES} ${SHADER_FILES})
+set_target_properties(RayVPaint_Core PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin"
+)
 
-# Link dependencies
-target_link_libraries(RayVPaint PRIVATE
+# Link dependencies to Core
+target_link_libraries(RayVPaint_Core PRIVATE
     glfw
     imgui
     d3d11
@@ -129,22 +132,33 @@ target_link_libraries(RayVPaint PRIVATE
     pybind11::embed
 )
 
-# Set include directories
-target_include_directories(RayVPaint PRIVATE
+# Set include directories for Core
+target_include_directories(RayVPaint_Core PRIVATE
     src
     src/core
     src/scripting
     ${stb_SOURCE_DIR}
 )
 
+# Create Launchers
+add_executable(RayVPaint WIN32 src/launchers/RayVPaint_Launcher.cpp)
+add_executable(RayVPaint_Console src/launchers/RayVPaint_Console_Launcher.cpp)
+set_target_properties(RayVPaint RayVPaint_Console PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+)
+
+# Ensure launchers depend on Core so it builds first
+add_dependencies(RayVPaint RayVPaint_Core)
+add_dependencies(RayVPaint_Console RayVPaint_Core)
+
 # Custom command to copy shader files to the output directory
 foreach(shader_file ${SHADER_FILES})
     get_filename_component(shader_name ${shader_file} NAME)
     add_custom_command(
-        TARGET RayVPaint POST_BUILD
+        TARGET RayVPaint_Core POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/${shader_file}
-        $<TARGET_FILE_DIR:RayVPaint>/shaders/${shader_name}
+        $<TARGET_FILE_DIR:RayVPaint_Core>/shaders/${shader_name}
         COMMENT "Copying shader ${shader_name} to output directory"
     )
 endforeach()
@@ -175,14 +189,14 @@ if(WIN32)
     if(EXISTS "${PY_EMBED_DOWNLOAD_PATH}")
         # Extract and organize Python runtime directory
         add_custom_command(
-            TARGET RayVPaint POST_BUILD
+            TARGET RayVPaint_Core POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E tar xf "${PY_EMBED_DOWNLOAD_PATH}"
-            WORKING_DIRECTORY $<TARGET_FILE_DIR:RayVPaint>
+            WORKING_DIRECTORY $<TARGET_FILE_DIR:RayVPaint_Core>
             
-            COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:RayVPaint>/python_runtime
+            COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:RayVPaint_Core>/python_runtime
             
             COMMAND powershell -NoProfile -Command "Move-Item -Path *.pyd, *.zip -Destination python_runtime -Force -ErrorAction SilentlyContinue; Move-Item -Path libcrypto-3.dll, libffi-8.dll, libssl-3.dll, sqlite3.dll, vcruntime140.dll, vcruntime140_1.dll -Destination python_runtime -Force -ErrorAction SilentlyContinue; Set-Content -Path python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}._pth -Value @('python_runtime/python${Python3_VERSION_MAJOR}${Python3_VERSION_MINOR}.zip', 'python_runtime', '.')"
-            WORKING_DIRECTORY $<TARGET_FILE_DIR:RayVPaint>
+            WORKING_DIRECTORY $<TARGET_FILE_DIR:RayVPaint_Core>
             
             COMMENT "Organizing Python embeddable runtime environment into python_runtime subdirectory"
         )
@@ -193,10 +207,10 @@ if(WIN32)
         set(PYTHON_DLL_PATH "${PYTHON_DIR}/${PYTHON_DLL_NAME}")
         if(EXISTS "${PYTHON_DLL_PATH}")
             add_custom_command(
-                TARGET RayVPaint POST_BUILD
+                TARGET RayVPaint_Core POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${PYTHON_DLL_PATH}"
-                "$<TARGET_FILE_DIR:RayVPaint>/${PYTHON_DLL_NAME}"
+                "$<TARGET_FILE_DIR:RayVPaint_Core>/${PYTHON_DLL_NAME}"
                 COMMENT "Fallback: Copying local ${PYTHON_DLL_NAME} to output directory"
             )
         endif()

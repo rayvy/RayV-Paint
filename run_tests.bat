@@ -12,7 +12,7 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 
-set "EXE_PATH=build\bin\Release\RayVPaint.exe"
+set "EXE_PATH=build\Release\RayVPaint.exe"
 if not exist "!EXE_PATH!" (
     echo Error: Executable not found at !EXE_PATH!
     exit /b 1

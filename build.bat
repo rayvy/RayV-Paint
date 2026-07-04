@@ -38,5 +38,5 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 
-echo Build succeeded! Executive can be found at build\bin\Release\RayVPaint.exe
+echo Build succeeded! Launchers can be found at build\Release\RayVPaint.exe and build\Release\RayVPaint_Console.exe
 exit /b 0

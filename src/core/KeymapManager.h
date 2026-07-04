@@ -19,8 +19,8 @@ public:
     static KeymapManager& Get();
 
     void Initialize();
-    bool Load(const std::string& path = "keymap.json");
-    bool Save(const std::string& path = "keymap.json");
+    bool Load(const std::string& path = "");
+    bool Save(const std::string& path = "");
 
     // Process a key event. Returns true if an action was matched.
     bool ProcessKeyEvent(int key, int scancode, int action, int mods);

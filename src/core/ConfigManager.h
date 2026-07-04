@@ -5,9 +5,11 @@
 class ConfigManager {
 public:
     static ConfigManager& Get();
+    static std::string GetUserDirectory();
+    static std::string GetUserSubdirectory(const std::string& sub);
 
-    bool Load(const std::string& configFilePath = "config.json");
-    bool Save(const std::string& configFilePath = "config.json");
+    bool Load(const std::string& configFilePath = "");
+    bool Save(const std::string& configFilePath = "");
 
     // Getters & Setters (thread-safe)
     int GetDefaultWidth() const;

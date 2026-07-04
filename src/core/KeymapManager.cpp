@@ -1,4 +1,5 @@
 #include "KeymapManager.h"
+#include "ConfigManager.h"
 #include "Logger.h"
 #include <GLFW/glfw3.h>
 #include <nlohmann/json.hpp>
@@ -115,9 +116,14 @@ void KeymapManager::ResolveScancodes() {
 }
 
 bool KeymapManager::Load(const std::string& path) {
-    std::ifstream in(path);
+    std::string filePath = path;
+    if (filePath.empty()) {
+        filePath = ConfigManager::GetUserSubdirectory("user") + "/keymap.json";
+    }
+
+    std::ifstream in(filePath);
     if (!in.is_open()) {
-        Logger::Get().Warn("Failed to open keymap config: " + path + ". Using defaults.");
+        Logger::Get().Warn("Failed to open keymap config: " + filePath + ". Using defaults.");
         return false;
     }
 
@@ -130,7 +136,7 @@ bool KeymapManager::Load(const std::string& path) {
             m_Bindings[actionName] = KeyCombination::FromString(comboStr);
         }
         ResolveScancodes();
-        Logger::Get().Info("Loaded custom keymap configuration from " + path);
+        Logger::Get().Info("Loaded custom keymap configuration from " + filePath);
         return true;
     }
     catch (const std::exception& e) {
@@ -140,9 +146,14 @@ bool KeymapManager::Load(const std::string& path) {
 }
 
 bool KeymapManager::Save(const std::string& path) {
-    std::ofstream out(path);
+    std::string filePath = path;
+    if (filePath.empty()) {
+        filePath = ConfigManager::GetUserSubdirectory("user") + "/keymap.json";
+    }
+
+    std::ofstream out(filePath);
     if (!out.is_open()) {
-        Logger::Get().Error("Failed to open keymap config for saving: " + path);
+        Logger::Get().Error("Failed to open keymap config for saving: " + filePath);
         return false;
     }
 
@@ -152,7 +163,7 @@ bool KeymapManager::Save(const std::string& path) {
             data[pair.first] = pair.second.ToString();
         }
         out << data.dump(4);
-        Logger::Get().Info("Saved custom keymap configuration to " + path);
+        Logger::Get().Info("Saved custom keymap configuration to " + filePath);
         return true;
     }
     catch (const std::exception& e) {

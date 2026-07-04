@@ -2,6 +2,9 @@
 #include "Logger.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <shlobj.h>
+#include <filesystem>
+#include <cstdlib>
 
 using json = nlohmann::json;
 
@@ -10,15 +13,43 @@ ConfigManager& ConfigManager::Get() {
     return instance;
 }
 
+std::string ConfigManager::GetUserDirectory() {
+    wchar_t path[MAX_PATH];
+    std::filesystem::path rayvPath;
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_MYDOCUMENTS, NULL, 0, path))) {
+        rayvPath = std::filesystem::path(path) / "RayVPaint";
+    } else {
+        const char* userProfile = std::getenv("USERPROFILE");
+        if (userProfile) {
+            rayvPath = std::filesystem::path(userProfile) / "Documents" / "RayVPaint";
+        } else {
+            rayvPath = std::filesystem::current_path() / "RayVPaint";
+        }
+    }
+    return rayvPath.string();
+}
+
+std::string ConfigManager::GetUserSubdirectory(const std::string& sub) {
+    std::filesystem::path p = std::filesystem::path(GetUserDirectory()) / sub;
+    std::error_code ec;
+    std::filesystem::create_directories(p, ec);
+    return p.string();
+}
+
 bool ConfigManager::Load(const std::string& configFilePath) {
+    std::string path = configFilePath;
+    if (path.empty()) {
+        path = GetUserSubdirectory("user") + "/config.json";
+    }
+
     std::unique_lock<std::mutex> lock(m_Mutex);
     
-    std::ifstream file(configFilePath);
+    std::ifstream file(path);
     if (!file.is_open()) {
-        Logger::Get().Warn("Could not open config file: " + configFilePath + ". Creating default config.");
+        Logger::Get().Warn("Could not open config file: " + path + ". Creating default config.");
         // We will save default settings immediately
         lock.unlock(); // Release lock before calling Save to avoid deadlock
-        Save(configFilePath);
+        Save(path);
         return true;
     }
 
@@ -37,7 +68,7 @@ bool ConfigManager::Load(const std::string& configFilePath) {
         if (j.contains("max_undo_steps")) m_MaxUndoSteps = j["max_undo_steps"].get<int>();
         if (j.contains("max_undo_memory_mb")) m_MaxUndoMemoryMB = j["max_undo_memory_mb"].get<int>();
 
-        Logger::Get().Info("Configuration loaded successfully from " + configFilePath);
+        Logger::Get().Info("Configuration loaded successfully from " + path);
         return true;
     }
     catch (const std::exception& e) {
@@ -47,6 +78,11 @@ bool ConfigManager::Load(const std::string& configFilePath) {
 }
 
 bool ConfigManager::Save(const std::string& configFilePath) {
+    std::string path = configFilePath;
+    if (path.empty()) {
+        path = GetUserSubdirectory("user") + "/config.json";
+    }
+
     std::lock_guard<std::mutex> lock(m_Mutex);
 
     try {
@@ -62,14 +98,14 @@ bool ConfigManager::Save(const std::string& configFilePath) {
         j["max_undo_steps"] = m_MaxUndoSteps;
         j["max_undo_memory_mb"] = m_MaxUndoMemoryMB;
 
-        std::ofstream file(configFilePath);
+        std::ofstream file(path);
         if (!file.is_open()) {
-            Logger::Get().Error("Failed to open config file for writing: " + configFilePath);
+            Logger::Get().Error("Failed to open config file for writing: " + path);
             return false;
         }
 
         file << j.dump(4);
-        Logger::Get().Info("Configuration saved successfully to " + configFilePath);
+        Logger::Get().Info("Configuration saved successfully to " + path);
         return true;
     }
     catch (const std::exception& e) {
@@ -120,6 +156,9 @@ void ConfigManager::SetZoomSpeed(float speed) {
 
 std::string ConfigManager::GetLogFilePath() const {
     std::lock_guard<std::mutex> lock(m_Mutex);
+    if (m_LogFilePath == "rayv_paint.log" || m_LogFilePath.empty()) {
+        return GetUserSubdirectory("user") + "/rayv_paint.log";
+    }
     return m_LogFilePath;
 }
 
@@ -140,6 +179,9 @@ void ConfigManager::SetTheme(const std::string& theme) {
 
 std::string ConfigManager::GetBackupDir() const {
     std::lock_guard<std::mutex> lock(m_Mutex);
+    if (m_BackupDir == "backups" || m_BackupDir.empty()) {
+        return GetUserSubdirectory("autosaves");
+    }
     return m_BackupDir;
 }
 

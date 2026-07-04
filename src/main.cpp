@@ -388,7 +388,7 @@ int main(int argc, char* argv[]) {
     bool headlessMode = false;
     bool forceConsole = false;
     std::string scriptPath = "";
-    std::string configPath = "config.json";
+    std::string configPath = "";
     std::string startupImagePath = "";
 
     for (int i = 1; i < argc; ++i) {
@@ -420,8 +420,14 @@ int main(int argc, char* argv[]) {
 
     SetupConsole(forceConsole);
 
+    // If configPath was not overridden by CLI, resolve to the user directory config
+    if (configPath.empty()) {
+        configPath = ConfigManager::GetUserSubdirectory("user") + "/config.json";
+    }
+
     // 2. Initialize Core Logging & Configuration Systems
-    Logger::Get().Init("rayv_paint.log");
+    std::string logPath = ConfigManager::GetUserSubdirectory("user") + "/rayv_paint.log";
+    Logger::Get().Init(logPath);
     Logger::Get().Info("===================================================");
     Logger::Get().Info("Starting RayVPaint tech-art editor...");
 
@@ -512,6 +518,10 @@ int main(int argc, char* argv[]) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+
+    // Set custom ini path in documents folder
+    static std::string imguiIniPath = ConfigManager::GetUserSubdirectory("user") + "/imgui.ini";
+    io.IniFilename = imguiIniPath.c_str();
 
     // Load Segoe UI from system fonts for premium typography
     std::string fontPath = "C:\\Windows\\Fonts\\segoeui.ttf";
@@ -732,7 +742,36 @@ int main(int argc, char* argv[]) {
         ImGui::PopStyleVar();
 
         // 9.3 DockSpace Configuration
-        ImGui::DockSpaceOverViewport(0, mainViewport);
+        ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, mainViewport);
+
+        static bool firstTimeDock = !std::filesystem::exists(ConfigManager::GetUserSubdirectory("user") + "/imgui.ini");
+        if (firstTimeDock) {
+            firstTimeDock = false;
+            
+            // Build the default premium editor layout programmatically
+            ImGui::DockBuilderRemoveNode(dockspace_id); // Clear any existing node
+            ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(dockspace_id, mainViewport->Size);
+
+            ImGuiID dock_main_id = dockspace_id;
+            // Split: Left (8% width) for Toolbar, Right (remaining)
+            ImGuiID dock_left_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Left, 0.08f, NULL, &dock_main_id);
+            // Split: Right (25% width) for Side Panels, Center (remaining) for Canvas Viewport
+            ImGuiID dock_right_id = ImGui::DockBuilderSplitNode(dock_main_id, ImGuiDir_Right, 0.25f, NULL, &dock_main_id);
+            
+            // Split Right side panel vertically into: Top-Right (Properties), Middle-Right (Layers), Bottom-Right (Brush Settings)
+            ImGuiID dock_right_top_id = ImGui::DockBuilderSplitNode(dock_right_id, ImGuiDir_Up, 0.35f, NULL, &dock_right_id);
+            ImGuiID dock_right_middle_id = ImGui::DockBuilderSplitNode(dock_right_id, ImGuiDir_Up, 0.50f, NULL, &dock_right_id);
+            ImGuiID dock_right_bottom_id = dock_right_id;
+
+            ImGui::DockBuilderDockWindow("Toolbar", dock_left_id);
+            ImGui::DockBuilderDockWindow("Canvas Viewport", dock_main_id);
+            ImGui::DockBuilderDockWindow("Properties", dock_right_top_id);
+            ImGui::DockBuilderDockWindow("Layers", dock_right_middle_id);
+            ImGui::DockBuilderDockWindow("Brush Settings", dock_right_bottom_id);
+
+            ImGui::DockBuilderFinish(dockspace_id);
+        }
 
         // Popups/Modals Integration
         if (openImportModal) {

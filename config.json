@@ -1,7 +1,0 @@
-{
-    "default_width": 1024,
-    "default_height": 1024,
-    "log_level": "debug",
-    "zoom_speed": 1.15,
-    "log_file_path": "rayv_paint.log"
-}
