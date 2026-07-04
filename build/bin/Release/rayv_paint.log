@@ -114,3 +114,26 @@
 [2026-07-04 12:58:08.896] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
 [2026-07-04 12:58:09.130] [INFO]  Created new layer: Background
 [2026-07-04 12:58:09.131] [INFO]  Startup completed in: 261.048100 ms
+[2026-07-04 13:05:23.702] [INFO]  Configuration saved successfully to config.json
+[2026-07-04 13:05:25.234] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 13:05:25.238] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 13:05:25.238] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 13:05:28.714] [INFO]  ===================================================
+[2026-07-04 13:05:28.714] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 13:05:28.714] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 13:05:28.714] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 13:05:28.717] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 13:05:28.740] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 13:05:28.976] [INFO]  Created new layer: Background
+[2026-07-04 13:05:28.977] [INFO]  Startup completed in: 262.663100 ms
+[2026-07-04 13:10:47.134] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 13:10:47.138] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 13:10:47.138] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 13:19:47.573] [INFO]  ===================================================
+[2026-07-04 13:19:47.573] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 13:19:47.573] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 13:19:47.573] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 13:19:47.576] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 13:19:47.598] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 13:19:47.828] [INFO]  Created new layer: Background
+[2026-07-04 13:19:47.829] [INFO]  Startup completed in: 256.523100 ms
