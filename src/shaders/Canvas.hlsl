@@ -141,6 +141,13 @@ float4 PSMain(PS_INPUT input) : SV_TARGET
 float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
 {
     float4 col = g_Texture.Sample(g_Sampler, input.uv);
+    
+    // If master Alpha channel is disabled, treat the layer as fully opaque
+    if (u_ChannelMasksAndFlags.w < 0.5f)
+    {
+        col.a = 1.0f;
+    }
+    
     col.a *= u_LayerParams.x; // Multiply alpha by opacity
     return col;
 }

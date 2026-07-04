@@ -42,8 +42,11 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
     switch (uMsg) {
         case WM_LBUTTONDOWN:
         case WM_MOUSEMOVE: {
-            g_PenPressure = 1.0f;
-            g_IsPenActive = false;
+            // Only reset if this is a genuine mouse event, not a synthesized one from a pen/tablet
+            if ((GetMessageExtraInfo() & 0xFFFFFF00) != 0xFF515700) {
+                g_PenPressure = 1.0f;
+                g_IsPenActive = false;
+            }
             break;
         }
         case WM_POINTERDOWN:
@@ -437,7 +440,13 @@ int main(int argc, char* argv[]) {
     ThreadPool::Get().Init(numThreads);
 
     // 4. Initialize Scripting Engine
-    ScriptingEngine::Get().Initialize();
+    if (!scriptPath.empty() || headlessMode || testMode) {
+        ScriptingEngine::Get().Initialize();
+    } else {
+        std::thread([]() {
+            ScriptingEngine::Get().Initialize();
+        }).detach();
+    }
 
     // Resize canvas default dimensions according to config
     g_Canvas.ResizeCanvas(nullptr, ConfigManager::Get().GetDefaultWidth(), ConfigManager::Get().GetDefaultHeight());
@@ -1353,16 +1362,32 @@ int main(int argc, char* argv[]) {
 
             // Photoshop-like Brush Resize/Hardness drag controls (Ctrl+Alt+RMB)
             static bool g_IsCtrlAltRmbDragging = false;
+            static double g_CtrlAltRmbStartX = 0.0;
+            static double g_CtrlAltRmbStartY = 0.0;
+
             if (isHovered && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 g_IsCtrlAltRmbDragging = true;
+                GLFWwindow* win = glfwGetCurrentContext();
+                if (win) {
+                    glfwGetCursorPos(win, &g_CtrlAltRmbStartX, &g_CtrlAltRmbStartY);
+                    glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+                }
             }
             if (g_IsCtrlAltRmbDragging) {
+                GLFWwindow* win = glfwGetCurrentContext();
                 if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
                     g_IsCtrlAltRmbDragging = false;
+                    if (win) {
+                        glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+                    }
                 } else {
                     ImVec2 mouseDelta = ImGui::GetIO().MouseDelta;
                     g_Brush.radius = std::clamp(g_Brush.radius + mouseDelta.x * 0.5f, 1.0f, 250.0f);
                     g_Brush.hardness = std::clamp(g_Brush.hardness - mouseDelta.y * 0.01f, 0.0f, 1.0f);
+
+                    if (win) {
+                        glfwSetCursorPos(win, g_CtrlAltRmbStartX, g_CtrlAltRmbStartY);
+                    }
 
                     // Show visual feedback tooltip
                     ImGui::BeginTooltip();
@@ -1417,34 +1442,16 @@ int main(int argc, char* argv[]) {
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     g_IsPainting = true;
                     if (isShiftHeld && g_HasLastStrokeEnd) {
-                        // Draw line from last stroke end to current mouse
+                        // Draw line from last stroke end to current mouse at an arbitrary angle (NO axis lock)
                         g_Canvas.PaintOnActiveLayer(g_LastStrokeEndX, g_LastStrokeEndY, StrokePhase::Begin, g_Brush);
+                        g_Canvas.PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Update, g_Brush);
                         
-                        // Apply axis lock for the initial line if shift is held and they moved enough
-                        float targetX = canvasX;
-                        float targetY = canvasY;
-                        float dx = targetX - g_LastStrokeEndX;
-                        float dy = targetY - g_LastStrokeEndY;
-                        if (std::sqrt(dx*dx + dy*dy) > 8.0f) {
-                            g_LockAxisSelected = true;
-                            if (std::abs(dx) > std::abs(dy)) {
-                                g_LockAxis = LockAxis::Horizontal;
-                                targetY = g_LastStrokeEndY;
-                            } else {
-                                g_LockAxis = LockAxis::Vertical;
-                                targetX = g_LastStrokeEndX;
-                            }
-                        } else {
-                            g_LockAxisSelected = false;
-                            g_LockAxis = LockAxis::None;
-                        }
-                        
-                        g_Canvas.PaintOnActiveLayer(targetX, targetY, StrokePhase::Update, g_Brush);
-                        
-                        g_StrokeStartX = targetX;
-                        g_StrokeStartY = targetY;
-                        g_LastStrokeEndX = targetX;
-                        g_LastStrokeEndY = targetY;
+                        g_StrokeStartX = canvasX;
+                        g_StrokeStartY = canvasY;
+                        g_LastStrokeEndX = canvasX;
+                        g_LastStrokeEndY = canvasY;
+                        g_LockAxisSelected = false;
+                        g_LockAxis = LockAxis::None;
                     } else {
                         // Normal start
                         g_Canvas.PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, g_Brush);
