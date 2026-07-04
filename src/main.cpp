@@ -40,6 +40,12 @@ static WNDPROC g_OriginalWndProc = nullptr;
 
 LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
+        case WM_LBUTTONDOWN:
+        case WM_MOUSEMOVE: {
+            g_PenPressure = 1.0f;
+            g_IsPenActive = false;
+            break;
+        }
         case WM_POINTERDOWN:
         case WM_POINTERUPDATE: {
             UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
@@ -51,6 +57,9 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
                         g_PenPressure = (float)penInfo.pressure / 1024.0f;
                         g_IsPenActive = true;
                     }
+                } else {
+                    g_PenPressure = 1.0f;
+                    g_IsPenActive = false;
                 }
             }
             break;
@@ -256,6 +265,117 @@ void ApplyTheme(const std::string& themeName) {
         colors[ImGuiCol_DockingEmptyBg]         = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
     }
 }
+
+static void DrawToolIcon(const char* actionName, ImVec2 min, ImVec2 max, ImU32 color) {
+    ImDrawList* drawList = ImGui::GetWindowDrawList();
+    float w = max.x - min.x;
+    float h = max.y - min.y;
+    float cx = min.x + w * 0.5f;
+    float cy = min.y + h * 0.5f;
+    float pad = w * 0.25f;
+
+    if (strcmp(actionName, "BrushTool") == 0) {
+        ImVec2 tip = ImVec2(min.x + pad + 2.0f, max.y - pad - 2.0f);
+        ImVec2 end = ImVec2(max.x - pad - 2.0f, min.y + pad + 2.0f);
+        drawList->AddLine(end, tip, color, 4.0f);
+        drawList->AddCircleFilled(tip, 5.0f, color);
+    }
+    else if (strcmp(actionName, "EraserTool") == 0) {
+        ImVec2 p1 = ImVec2(min.x + pad, cy + pad * 0.5f);
+        ImVec2 p2 = ImVec2(cx - pad * 0.5f, min.y + pad);
+        ImVec2 p3 = ImVec2(max.x - pad, cy - pad * 0.5f);
+        ImVec2 p4 = ImVec2(cx + pad * 0.5f, max.y - pad);
+        ImVec2 pts[4] = { p1, p2, p3, p4 };
+        drawList->AddConvexPolyFilled(pts, 4, color);
+    }
+    else if (strcmp(actionName, "PanTool") == 0) {
+        float r = w * 0.25f;
+        drawList->AddLine(ImVec2(cx - r, cy), ImVec2(cx + r, cy), color, 2.0f);
+        drawList->AddLine(ImVec2(cx, cy - r), ImVec2(cx, cy + r), color, 2.0f);
+        drawList->AddTriangleFilled(ImVec2(cx - r, cy - 3.0f), ImVec2(cx - r, cy + 3.0f), ImVec2(cx - r - 4.0f, cy), color);
+        drawList->AddTriangleFilled(ImVec2(cx + r, cy - 3.0f), ImVec2(cx + r, cy + 3.0f), ImVec2(cx + r + 4.0f, cy), color);
+        drawList->AddTriangleFilled(ImVec2(cx - 3.0f, cy - r), ImVec2(cx + 3.0f, cy - r), ImVec2(cx, cy - r - 4.0f), color);
+        drawList->AddTriangleFilled(ImVec2(cx - 3.0f, cy + r), ImVec2(cx + 3.0f, cy + r), ImVec2(cx, cy + r + 4.0f), color);
+    }
+    else {
+        float r = w * 0.22f;
+        drawList->AddCircle(ImVec2(cx, cy), r, color, 16, 2.0f);
+        drawList->AddTriangleFilled(ImVec2(cx + r - 3.0f, cy - 3.0f), ImVec2(cx + r + 3.0f, cy - 3.0f), ImVec2(cx + r, cy + 2.0f), color);
+    }
+}
+
+static void RenderToolButton(const char* actionName, const char* displayName, ActiveTool targetTool, bool isEraseTool, std::string keybindString, float size, std::string& rebindAction) {
+    bool isActive = (g_ActiveTool == targetTool && (targetTool != ActiveTool::Brush || isEraseTool == g_Brush.erase));
+    if (strcmp(actionName, "Reset") == 0) isActive = false;
+
+    ImGui::PushID(actionName);
+    
+    if (isActive) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_Button]);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
+    }
+    
+    ImGui::BeginGroup();
+    ImGui::Button("##toolBtn", ImVec2(size, size));
+    
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+        if (strcmp(actionName, "Reset") == 0) {
+            g_Canvas.ResetView();
+        } else {
+            g_ActiveTool = targetTool;
+            if (targetTool == ActiveTool::Brush) {
+                g_Brush.erase = isEraseTool;
+            }
+        }
+    }
+    if (strcmp(actionName, "Reset") != 0 && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+        rebindAction = actionName;
+        ImGui::OpenPopup("RebindToolPopup");
+    }
+    if (ImGui::IsItemHovered()) {
+        if (strcmp(actionName, "Reset") == 0) {
+            ImGui::SetTooltip("Reset View");
+        } else {
+            ImGui::SetTooltip("%s (%s)\nRight-click to rebind", displayName, keybindString.c_str());
+        }
+    }
+    
+    ImVec2 btnMin = ImGui::GetItemRectMin();
+    ImVec2 btnMax = ImGui::GetItemRectMax();
+    DrawToolIcon(actionName, btnMin, btnMax, ImGui::GetColorU32(isActive ? ImGuiCol_Text : ImGuiCol_TextDisabled));
+    
+    if (strcmp(actionName, "Reset") != 0 && !keybindString.empty()) {
+        std::string badgeText = "";
+        size_t plusPos = keybindString.find_last_of('+');
+        if (plusPos != std::string::npos) {
+            badgeText = keybindString.substr(plusPos + 1);
+        } else {
+            badgeText = keybindString;
+        }
+        if (!badgeText.empty()) {
+            std::string singleChar = badgeText.substr(0, 1);
+            float badgeSize = 14.0f;
+            ImVec2 badgeMin = ImVec2(btnMax.x - badgeSize, btnMax.y - badgeSize);
+            ImVec2 badgeMax = btnMax;
+            
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            drawList->AddRectFilled(badgeMin, badgeMax, ImGui::GetColorU32(ImGuiCol_FrameBgActive), 2.0f);
+            drawList->AddRect(badgeMin, badgeMax, ImGui::GetColorU32(ImGuiCol_Border), 2.0f);
+            
+            ImVec2 textSize = ImGui::CalcTextSize(singleChar.c_str());
+            ImVec2 textPos = ImVec2(badgeMin.x + (badgeSize - textSize.x) * 0.5f, badgeMin.y + (badgeSize - textSize.y) * 0.5f - 1.0f);
+            drawList->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), singleChar.c_str());
+        }
+    }
+    
+    ImGui::EndGroup();
+    ImGui::PopStyleColor(2);
+    ImGui::PopID();
+}
+
 
 int main(int argc, char* argv[]) {
     auto startupStart = std::chrono::high_resolution_clock::now();
@@ -1080,126 +1200,35 @@ int main(int argc, char* argv[]) {
             std::string panBind = KeymapManager::Get().GetActionShortcutString("PanTool");
             
             static std::string s_RebindAction = "";
+            float btnSize = 44.0f;
 
             if (isVertical) {
-                ImGui::Text("Tools");
-                ImGui::Separator();
-                
                 // Brush
-                bool isBrush = (g_ActiveTool == ActiveTool::Brush);
-                if (isBrush) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-                std::string brushLabel = "🖌 Brush (" + brushBind + ")";
-                if (ImGui::Button(brushLabel.c_str(), ImVec2(-1, 40))) { 
-                    g_ActiveTool = ActiveTool::Brush; 
-                    g_Brush.erase = false;
-                }
-                if (isBrush) ImGui::PopStyleColor();
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    s_RebindAction = "BrushTool";
-                    ImGui::OpenPopup("RebindToolPopup");
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Right-click to rebind Brush tool");
-                }
-
+                RenderToolButton("BrushTool", "Brush", ActiveTool::Brush, false, brushBind, btnSize, s_RebindAction);
+                ImGui::Spacing();
                 // Eraser
-                bool isEraser = (g_ActiveTool == ActiveTool::Eraser);
-                if (isEraser) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-                std::string eraserLabel = "⌫ Eraser (" + eraserBind + ")";
-                if (ImGui::Button(eraserLabel.c_str(), ImVec2(-1, 40))) { 
-                    g_ActiveTool = ActiveTool::Eraser; 
-                    g_Brush.erase = true;
-                }
-                if (isEraser) ImGui::PopStyleColor();
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    s_RebindAction = "EraserTool";
-                    ImGui::OpenPopup("RebindToolPopup");
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Right-click to rebind Eraser tool");
-                }
-
+                RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction);
+                ImGui::Spacing();
                 // Pan
-                bool isPan = (g_ActiveTool == ActiveTool::Pan);
-                if (isPan) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-                std::string panLabel = "✥ Pan (" + panBind + ")";
-                if (ImGui::Button(panLabel.c_str(), ImVec2(-1, 40))) { 
-                    g_ActiveTool = ActiveTool::Pan; 
-                }
-                if (isPan) ImGui::PopStyleColor();
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    s_RebindAction = "PanTool";
-                    ImGui::OpenPopup("RebindToolPopup");
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Right-click to rebind Pan tool");
-                }
-
+                RenderToolButton("PanTool", "Pan", ActiveTool::Pan, false, panBind, btnSize, s_RebindAction);
+                ImGui::Spacing();
                 ImGui::Separator();
-                if (ImGui::Button("⟲ Reset View", ImVec2(-1, 30))) {
-                    g_Canvas.ResetView();
-                }
+                ImGui::Spacing();
+                
+                // Reset View
+                std::string emptyBind = "";
+                RenderToolButton("Reset", "Reset View", g_ActiveTool, false, emptyBind, btnSize, s_RebindAction);
             } else {
                 // Horizontal Layout
-                // Brush
-                bool isBrush = (g_ActiveTool == ActiveTool::Brush);
-                if (isBrush) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-                if (ImGui::Button("🖌", ImVec2(40, 40))) { 
-                    g_ActiveTool = ActiveTool::Brush; 
-                    g_Brush.erase = false;
-                }
-                if (isBrush) ImGui::PopStyleColor();
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    s_RebindAction = "BrushTool";
-                    ImGui::OpenPopup("RebindToolPopup");
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Brush (%s)\nRight-click to rebind", brushBind.c_str());
-                }
-
+                RenderToolButton("BrushTool", "Brush", ActiveTool::Brush, false, brushBind, btnSize, s_RebindAction);
                 ImGui::SameLine();
-
-                // Eraser
-                bool isEraser = (g_ActiveTool == ActiveTool::Eraser);
-                if (isEraser) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-                if (ImGui::Button("⌫", ImVec2(40, 40))) { 
-                    g_ActiveTool = ActiveTool::Eraser; 
-                    g_Brush.erase = true;
-                }
-                if (isEraser) ImGui::PopStyleColor();
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    s_RebindAction = "EraserTool";
-                    ImGui::OpenPopup("RebindToolPopup");
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Eraser (%s)\nRight-click to rebind", eraserBind.c_str());
-                }
-
+                RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction);
                 ImGui::SameLine();
-
-                // Pan
-                bool isPan = (g_ActiveTool == ActiveTool::Pan);
-                if (isPan) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-                if (ImGui::Button("✥", ImVec2(40, 40))) { 
-                    g_ActiveTool = ActiveTool::Pan; 
-                }
-                if (isPan) ImGui::PopStyleColor();
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                    s_RebindAction = "PanTool";
-                    ImGui::OpenPopup("RebindToolPopup");
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Pan (%s)\nRight-click to rebind", panBind.c_str());
-                }
-
+                RenderToolButton("PanTool", "Pan", ActiveTool::Pan, false, panBind, btnSize, s_RebindAction);
                 ImGui::SameLine();
-
-                if (ImGui::Button("⟲", ImVec2(40, 40))) {
-                    g_Canvas.ResetView();
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Reset View");
-                }
+                
+                std::string emptyBind = "";
+                RenderToolButton("Reset", "Reset View", g_ActiveTool, false, emptyBind, btnSize, s_RebindAction);
             }
 
             // Shared Rebind Popup Modal
@@ -1340,6 +1369,23 @@ int main(int argc, char* argv[]) {
                     ImGui::Text("Brush Size: %.1f px", g_Brush.radius);
                     ImGui::Text("Hardness: %.2f", g_Brush.hardness);
                     ImGui::EndTooltip();
+
+                    // Draw Photoshop-like preview
+                    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+                    float rScreen = g_Brush.radius * g_Canvas.GetZoom();
+                    float hScreen = rScreen * g_Brush.hardness;
+                    
+                    ImU32 outerColor = IM_COL32(235, 64, 52, 200);      // Ring
+                    ImU32 solidColor = IM_COL32(235, 64, 52, 90);       // Solid core
+                    ImU32 falloffColor = IM_COL32(235, 64, 52, 35);     // Falloff region
+                    
+                    if (g_Brush.hardness < 1.0f) {
+                        drawList->AddCircleFilled(mousePos, rScreen, falloffColor, 64);
+                    }
+                    if (hScreen > 0.0f) {
+                        drawList->AddCircleFilled(mousePos, hScreen, solidColor, 64);
+                    }
+                    drawList->AddCircle(mousePos, rScreen, outerColor, 64, 2.0f);
                 }
             }
 
@@ -1466,39 +1512,40 @@ int main(int argc, char* argv[]) {
             ImGui::Text("Pan: (%.1f, %.1f)", g_Canvas.GetPan().x, g_Canvas.GetPan().y);
             
             ImGui::Separator();
-            ImGui::Text("Channel Filter (Vis Mode):");
-            int mode = g_Canvas.GetVisualizationMode();
-            ImGui::RadioButton("RGBA (Normal)", &mode, 0);
-            ImGui::RadioButton("RGB (No Alpha)", &mode, 1);
-            ImGui::RadioButton("Alpha channel", &mode, 2);
-            ImGui::RadioButton("Alpha mask", &mode, 3);
-            g_Canvas.SetVisualizationMode(mode);
-
-            if (mode == 3) {
-                ImGui::ColorEdit3("Mask Color", g_Canvas.GetAlphaMaskColor());
-            }
-
-            ImGui::Separator();
-            ImGui::Text("Active Layer Write Channels:");
+            ImGui::Text("Active Channels:");
             
-            auto DrawChannelToggle = [](const char* label, bool* value) {
-                bool active = *value;
-                if (!active) {
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.5f, 0.5f, 0.5f, 0.5f));
+            auto DrawUnifiedChannelToggle = [](const char* label, bool active, ImVec4 activeColor) -> bool {
+                if (active) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, activeColor);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(activeColor.x * 1.1f, activeColor.y * 1.1f, activeColor.z * 1.1f, activeColor.w));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(activeColor.x * 0.9f, activeColor.y * 0.9f, activeColor.z * 0.9f, activeColor.w));
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_Button]);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
                 }
-                std::string btnText = std::string(active ? "👁 " : "⤫ ") + label;
-                if (ImGui::Button(btnText.c_str(), ImVec2(40, 24))) {
-                    *value = !(*value);
-                }
-                if (!active) {
-                    ImGui::PopStyleColor();
-                }
+                
+                bool clicked = ImGui::Button(label, ImVec2(44, 30));
+                
+                ImGui::PopStyleColor(4);
+                return clicked;
             };
 
-            DrawChannelToggle("R", &g_Brush.writeR); ImGui::SameLine();
-            DrawChannelToggle("G", &g_Brush.writeG); ImGui::SameLine();
-            DrawChannelToggle("B", &g_Brush.writeB); ImGui::SameLine();
-            DrawChannelToggle("A", &g_Brush.writeA);
+            bool r = g_Canvas.GetChannelR();
+            bool g = g_Canvas.GetChannelG();
+            bool b = g_Canvas.GetChannelB();
+            bool a = g_Canvas.GetChannelA();
+
+            if (DrawUnifiedChannelToggle("R", r, ImVec4(0.8f, 0.2f, 0.2f, 1.0f))) g_Canvas.SetChannelR(!r);
+            ImGui::SameLine();
+            if (DrawUnifiedChannelToggle("G", g, ImVec4(0.2f, 0.7f, 0.2f, 1.0f))) g_Canvas.SetChannelG(!g);
+            ImGui::SameLine();
+            if (DrawUnifiedChannelToggle("B", b, ImVec4(0.2f, 0.4f, 0.8f, 1.0f))) g_Canvas.SetChannelB(!b);
+            ImGui::SameLine();
+            if (DrawUnifiedChannelToggle("A", a, ImVec4(0.6f, 0.6f, 0.6f, 1.0f))) g_Canvas.SetChannelA(!a);
+            
             ImGui::NewLine();
 
             ImGui::End();

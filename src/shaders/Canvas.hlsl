@@ -15,7 +15,7 @@ cbuffer CanvasBuffer : register(b0)
 {
     float4 u_ViewportSizeAndZoom; // xy: Viewport size in pixels, z: Zoom, w: Padding
     float4 u_OffsetAndCanvasSize; // xy: Offset/Pan in pixels, zw: Canvas size in pixels
-    float4 u_VisModeAndMaskColor; // x: Vis Mode, yzw: Alpha Mask Color
+    float4 u_ChannelMasksAndFlags; // x: R active, y: G active, z: B active, w: A active (1.0f or 0.0f)
 };
 
 cbuffer LayerBuffer : register(b1)
@@ -89,25 +89,39 @@ float4 PSMain(PS_INPUT input) : SV_TARGET
     // Sample composed layer texture
     float4 texCol = g_Texture.Sample(g_Sampler, input.uv);
     
-    float3 finalColor = checkColor;
-    int visMode = (int)u_VisModeAndMaskColor.x;
+    bool r = u_ChannelMasksAndFlags.x > 0.5f;
+    bool g = u_ChannelMasksAndFlags.y > 0.5f;
+    bool b = u_ChannelMasksAndFlags.z > 0.5f;
+    bool a = u_ChannelMasksAndFlags.w > 0.5f;
     
-    if (visMode == 0) // Normal RGBA blended
+    float3 finalColor = checkColor;
+    
+    int activeCount = 0;
+    if (r) activeCount++;
+    if (g) activeCount++;
+    if (b) activeCount++;
+    if (a) activeCount++;
+    
+    if (activeCount == 1)
     {
-        finalColor = lerp(checkColor, texCol.rgb, texCol.a);
+        float val = 0.0f;
+        if (r) val = texCol.r;
+        else if (g) val = texCol.g;
+        else if (b) val = texCol.b;
+        else if (a) val = texCol.a;
+        finalColor = float3(val, val, val);
     }
-    else if (visMode == 1) // RGB only (no alpha blending, show flat color or checkered)
+    else
     {
-        finalColor = texCol.rgb;
-    }
-    else if (visMode == 2) // Alpha channel only
-    {
-        finalColor = float3(texCol.a, texCol.a, texCol.a);
-    }
-    else if (visMode == 3) // Alpha mask (custom color blended by alpha)
-    {
-        float3 maskColor = u_VisModeAndMaskColor.yzw;
-        finalColor = lerp(checkColor, maskColor, texCol.a);
+        float3 rgb = float3(r ? texCol.r : 0.0f, g ? texCol.g : 0.0f, b ? texCol.b : 0.0f);
+        if (a)
+        {
+            finalColor = lerp(checkColor, rgb, texCol.a);
+        }
+        else
+        {
+            finalColor = rgb;
+        }
     }
     
     // Draw canvas border (adapts to zoom so it remains 1 pixel wide on screen)
@@ -127,11 +141,6 @@ float4 PSMain(PS_INPUT input) : SV_TARGET
 float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
 {
     float4 col = g_Texture.Sample(g_Sampler, input.uv);
-    int visMode = (int)u_VisModeAndMaskColor.x;
-    if (visMode == 1)
-    {
-        col.a = 1.0f;
-    }
     col.a *= u_LayerParams.x; // Multiply alpha by opacity
     return col;
 }

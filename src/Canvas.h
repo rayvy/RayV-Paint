@@ -72,13 +72,17 @@ public:
     bool SaveCanvas(const std::string& filepath, DdsFormat ddsFormat);
     bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath = "");
 
-    // Visualization Mode
-    int GetVisualizationMode() const { return m_VisMode; }
-    void SetVisualizationMode(int mode) { m_VisMode = mode; }
-    
-    float* GetAlphaMaskColor() { return m_AlphaMaskColor; }
 
-    // Undo / Redo Interface
+
+    bool GetChannelR() const { return m_ChannelR; }
+    void SetChannelR(bool v) { m_ChannelR = v; }
+    bool GetChannelG() const { return m_ChannelG; }
+    void SetChannelG(bool v) { m_ChannelG = v; }
+    bool GetChannelB() const { return m_ChannelB; }
+    void SetChannelB(bool v) { m_ChannelB = v; }
+    bool GetChannelA() const { return m_ChannelA; }
+    void SetChannelA(bool v) { m_ChannelA = v; }
+
     bool Undo();
     bool Redo();
     bool CanUndo() const;
@@ -106,14 +110,12 @@ private:
 
     struct CanvasBuffer {
         DirectX::XMFLOAT4 viewportSizeAndZoom;
-        // xy: Pan/Offset, z: Canvas Width, w: Canvas Height
         DirectX::XMFLOAT4 offsetAndCanvasSize;
-        // x: Visualization Mode, yzw: Alpha Mask Color (RGB)
-        DirectX::XMFLOAT4 visModeAndMaskColor;
+        DirectX::XMFLOAT4 channelMasks;
     };
 
     struct LayerBuffer {
-        DirectX::XMFLOAT4 layerParams; // x: opacity, yzw: unused
+        DirectX::XMFLOAT4 layerParams;
     };
 
     void ComposeLayers(ID3D11DeviceContext* context);
@@ -126,13 +128,15 @@ private:
     float m_Zoom;
     DirectX::XMFLOAT2 m_Pan;
 
-    // Visualization Mode: 0 = RGBA, 1 = RGB, 2 = Alpha, 3 = Alpha Mask
-    int m_VisMode = 0;
-    float m_AlphaMaskColor[3] = { 0.0f, 1.0f, 0.0f }; // Green default
+    bool m_ChannelR = true;
+    bool m_ChannelG = true;
+    bool m_ChannelB = true;
+    bool m_ChannelA = true;
 
-    // Layer resources
     std::vector<Layer> m_Layers;
     int m_ActiveLayerIdx = -1;
+
+
 
     // Layer Isolation State
     bool m_IsIsolatedMode = false;

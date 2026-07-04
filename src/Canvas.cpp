@@ -432,6 +432,10 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
 
     BrushSettings activeBrush = brush;
+    activeBrush.writeR = m_ChannelR;
+    activeBrush.writeG = m_ChannelG;
+    activeBrush.writeB = m_ChannelB;
+    activeBrush.writeA = m_ChannelA;
     if (brush.pressureRadius) {
         activeBrush.radius = brush.radius * g_PenPressure;
         if (activeBrush.radius < 1.0f) activeBrush.radius = 1.0f;
@@ -702,7 +706,7 @@ void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float vie
         CanvasBuffer* cb = (CanvasBuffer*)mappedResource.pData;
         cb->viewportSizeAndZoom = DirectX::XMFLOAT4(viewportWidth, viewportHeight, m_Zoom, 0.0f);
         cb->offsetAndCanvasSize = DirectX::XMFLOAT4(m_Pan.x, m_Pan.y, (float)m_Width, (float)m_Height);
-        cb->visModeAndMaskColor = DirectX::XMFLOAT4((float)m_VisMode, m_AlphaMaskColor[0], m_AlphaMaskColor[1], m_AlphaMaskColor[2]);
+        cb->channelMasks = DirectX::XMFLOAT4(m_ChannelR ? 1.0f : 0.0f, m_ChannelG ? 1.0f : 0.0f, m_ChannelB ? 1.0f : 0.0f, m_ChannelA ? 1.0f : 0.0f);
         context->Unmap(m_ConstantBuffer, 0);
     }
 
@@ -752,11 +756,28 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
         imgWidth = dds.width;
         imgHeight = dds.height;
         loadedPixels = std::move(dds.pixels);
+        if (dds.format == DdsFormat::R8_UNORM || dds.format == DdsFormat::R16_FLOAT || dds.format == DdsFormat::R32_FLOAT) {
+            m_ChannelR = true;
+            m_ChannelG = false;
+            m_ChannelB = false;
+            m_ChannelA = false;
+            Logger::Get().Info("Single-channel DDS detected. Auto-configured channels: R=ON, G=OFF, B=OFF, A=OFF");
+        }
     } 
     else {
         if (!ImageManager::LoadImageFromFile(filepath, loadedPixels, imgWidth, imgHeight)) {
             return false;
         }
+    }
+
+    std::string lowerPath = filepath;
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower);
+    if (lowerPath.find("normal") != std::string::npos || lowerPath.find("nrm") != std::string::npos || lowerPath.find("bc5") != std::string::npos) {
+        m_ChannelR = true;
+        m_ChannelG = true;
+        m_ChannelB = false;
+        m_ChannelA = false;
+        Logger::Get().Info("Normal map / 2-channel texture detected. Auto-configured channels: R=ON, G=ON, B=OFF, A=OFF");
     }
 
     // Auto resize canvas size to match the imported image if it's the first layer
