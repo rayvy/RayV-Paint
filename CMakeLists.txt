@@ -103,6 +103,8 @@ set(SOURCES
     src/core/PaintEngine.h
     src/core/UndoRedoManager.cpp
     src/core/UndoRedoManager.h
+    src/core/KeymapManager.cpp
+    src/core/KeymapManager.h
     src/scripting/ScriptingEngine.cpp
     src/scripting/ScriptingEngine.h
 )

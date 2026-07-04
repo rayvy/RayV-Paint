@@ -28,6 +28,16 @@
 #include "ConfigManager.h"
 #include "ScriptingEngine.h"
 #include "Canvas.h"
+#include "core/KeymapManager.h"
+
+// Chained GLFW Key Callback for Layout-Independent OEM Shortcuts
+static GLFWkeyfun g_PrevKeyCallback = nullptr;
+static void CustomKeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
+    KeymapManager::Get().ProcessKeyEvent(key, scancode, action, mods);
+    if (g_PrevKeyCallback) {
+        g_PrevKeyCallback(window, key, scancode, action, mods);
+    }
+}
 
 // DirectX 11 Global Objects
 static ID3D11Device*           g_pd3dDevice = nullptr;
@@ -115,44 +125,101 @@ void RedirectIOToConsole() {
 }
 
 void ApplyTheme(const std::string& themeName) {
+    ImGuiStyle& style = ImGui::GetStyle();
+    
+    // Core structure / spacings common to modern premium interfaces
+    style.WindowRounding = 6.0f;
+    style.ChildRounding = 4.0f;
+    style.FrameRounding = 4.0f;
+    style.PopupRounding = 6.0f;
+    style.ScrollbarRounding = 9.0f;
+    style.GrabRounding = 4.0f;
+    style.TabRounding = 4.0f;
+    
+    style.WindowBorderSize = 1.0f;
+    style.ChildBorderSize = 1.0f;
+    style.PopupBorderSize = 1.0f;
+    style.FrameBorderSize = 0.0f;
+    style.TabBorderSize = 0.0f;
+    
+    style.WindowPadding = ImVec2(12.0f, 12.0f);
+    style.FramePadding = ImVec2(8.0f, 6.0f);
+    style.ItemSpacing = ImVec2(8.0f, 6.0f);
+    style.ItemInnerSpacing = ImVec2(6.0f, 6.0f);
+    style.ScrollbarSize = 13.0f;
+    style.GrabMinSize = 10.0f;
+
     if (themeName == "Classic") {
         ImGui::StyleColorsClassic();
-        ImGui::GetStyle().FrameRounding = 0.0f;
-        ImGui::GetStyle().WindowRounding = 0.0f;
+        style.FrameRounding = 0.0f;
+        style.WindowRounding = 0.0f;
     } else if (themeName == "Light") {
         ImGui::StyleColorsLight();
-        ImGui::GetStyle().FrameRounding = 4.0f;
-        ImGui::GetStyle().WindowRounding = 6.0f;
-    } else { // "Dark"
-        ImGui::StyleColorsDark();
-        ImGuiStyle& style = ImGui::GetStyle();
-        style.WindowRounding = 6.0f;
-        style.FrameRounding = 4.0f;
-        style.GrabRounding = 4.0f;
-        style.TabRounding = 4.0f;
-        style.WindowBorderSize = 1.0f;
-        style.FrameBorderSize = 0.0f;
-
         ImVec4* colors = style.Colors;
-        colors[ImGuiCol_WindowBg]               = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);
-        colors[ImGuiCol_ChildBg]                = ImVec4(0.12f, 0.12f, 0.14f, 1.00f);
-        colors[ImGuiCol_PopupBg]                = ImVec4(0.08f, 0.08f, 0.10f, 0.95f);
-        colors[ImGuiCol_Border]                 = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
-        colors[ImGuiCol_FrameBg]                = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
-        colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.25f, 0.25f, 0.30f, 1.00f);
-        colors[ImGuiCol_FrameBgActive]          = ImVec4(0.30f, 0.30f, 0.38f, 1.00f);
-        colors[ImGuiCol_TitleBg]                = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
-        colors[ImGuiCol_TitleBgActive]          = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
-        colors[ImGuiCol_Header]                 = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
-        colors[ImGuiCol_HeaderHovered]          = ImVec4(0.25f, 0.25f, 0.35f, 1.00f);
-        colors[ImGuiCol_HeaderActive]           = ImVec4(0.30f, 0.30f, 0.45f, 1.00f);
-        colors[ImGuiCol_Button]                 = ImVec4(0.20f, 0.20f, 0.25f, 1.00f);
-        colors[ImGuiCol_ButtonHovered]          = ImVec4(0.30f, 0.30f, 0.40f, 1.00f);
-        colors[ImGuiCol_ButtonActive]           = ImVec4(0.40f, 0.40f, 0.55f, 1.00f);
-        colors[ImGuiCol_Tab]                    = ImVec4(0.12f, 0.12f, 0.15f, 1.00f);
-        colors[ImGuiCol_TabHovered]             = ImVec4(0.25f, 0.25f, 0.35f, 1.00f);
-        colors[ImGuiCol_TabActive]              = ImVec4(0.20f, 0.20f, 0.28f, 1.00f);
-        colors[ImGuiCol_DockingPreview]         = ImVec4(0.35f, 0.45f, 0.65f, 0.70f);
+        colors[ImGuiCol_WindowBg]           = ImVec4(0.95f, 0.95f, 0.96f, 1.00f);
+        colors[ImGuiCol_ChildBg]            = ImVec4(0.98f, 0.98f, 0.98f, 1.00f);
+        colors[ImGuiCol_PopupBg]            = ImVec4(1.00f, 1.00f, 1.00f, 0.98f);
+        colors[ImGuiCol_Border]             = ImVec4(0.80f, 0.80f, 0.85f, 1.00f);
+        colors[ImGuiCol_FrameBg]            = ImVec4(0.88f, 0.88f, 0.90f, 1.00f);
+        colors[ImGuiCol_FrameBgHovered]     = ImVec4(0.82f, 0.82f, 0.86f, 1.00f);
+        colors[ImGuiCol_FrameBgActive]      = ImVec4(0.78f, 0.78f, 0.82f, 1.00f);
+        colors[ImGuiCol_TitleBg]            = ImVec4(0.90f, 0.90f, 0.92f, 1.00f);
+        colors[ImGuiCol_TitleBgActive]      = ImVec4(0.85f, 0.85f, 0.88f, 1.00f);
+        colors[ImGuiCol_Button]             = ImVec4(0.80f, 0.80f, 0.85f, 1.00f);
+        colors[ImGuiCol_ButtonHovered]      = ImVec4(0.26f, 0.38f, 0.70f, 0.80f);
+        colors[ImGuiCol_ButtonActive]       = ImVec4(0.26f, 0.38f, 0.70f, 1.00f);
+        colors[ImGuiCol_Header]             = ImVec4(0.85f, 0.85f, 0.90f, 1.00f);
+        colors[ImGuiCol_HeaderHovered]      = ImVec4(0.26f, 0.38f, 0.70f, 0.70f);
+        colors[ImGuiCol_HeaderActive]       = ImVec4(0.26f, 0.38f, 0.70f, 1.00f);
+        colors[ImGuiCol_TabActive]          = ImVec4(0.88f, 0.88f, 0.92f, 1.00f);
+    } else { // "Dark" - Charcoal Figma/Adobe Premium Palette
+        ImGui::StyleColorsDark();
+        ImVec4* colors = style.Colors;
+        
+        // Window & Child Panels
+        colors[ImGuiCol_WindowBg]               = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
+        colors[ImGuiCol_ChildBg]                = ImVec4(0.12f, 0.12f, 0.13f, 1.00f);
+        colors[ImGuiCol_PopupBg]                = ImVec4(0.07f, 0.07f, 0.08f, 0.98f);
+        colors[ImGuiCol_Border]                 = ImVec4(0.18f, 0.18f, 0.20f, 1.00f);
+        
+        // Input Fields & Frames
+        colors[ImGuiCol_FrameBg]                = ImVec4(0.15f, 0.15f, 0.17f, 1.00f);
+        colors[ImGuiCol_FrameBgHovered]         = ImVec4(0.20f, 0.20f, 0.23f, 1.00f);
+        colors[ImGuiCol_FrameBgActive]          = ImVec4(0.24f, 0.24f, 0.28f, 1.00f);
+        
+        // Title Bars
+        colors[ImGuiCol_TitleBg]                = ImVec4(0.07f, 0.07f, 0.08f, 1.00f);
+        colors[ImGuiCol_TitleBgActive]          = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
+        colors[ImGuiCol_TitleBgCollapsed]       = ImVec4(0.07f, 0.07f, 0.08f, 0.75f);
+        
+        // Headers & Trees
+        colors[ImGuiCol_Header]                 = ImVec4(0.15f, 0.15f, 0.17f, 1.00f);
+        colors[ImGuiCol_HeaderHovered]          = ImVec4(0.24f, 0.32f, 0.52f, 1.00f);
+        colors[ImGuiCol_HeaderActive]           = ImVec4(0.26f, 0.38f, 0.70f, 1.00f);
+        
+        // Buttons
+        colors[ImGuiCol_Button]                 = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+        colors[ImGuiCol_ButtonHovered]          = ImVec4(0.24f, 0.32f, 0.52f, 1.00f);
+        colors[ImGuiCol_ButtonActive]           = ImVec4(0.26f, 0.38f, 0.70f, 1.00f);
+        
+        // Tabs
+        colors[ImGuiCol_Tab]                    = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
+        colors[ImGuiCol_TabHovered]             = ImVec4(0.18f, 0.18f, 0.22f, 1.00f);
+        colors[ImGuiCol_TabActive]              = ImVec4(0.12f, 0.12f, 0.13f, 1.00f);
+        colors[ImGuiCol_TabUnfocused]           = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
+        colors[ImGuiCol_TabUnfocusedActive]     = ImVec4(0.12f, 0.12f, 0.13f, 1.00f);
+        
+        // Scrollbar & Sliders
+        colors[ImGuiCol_ScrollbarBg]            = ImVec4(0.09f, 0.09f, 0.10f, 0.50f);
+        colors[ImGuiCol_ScrollbarGrab]          = ImVec4(0.25f, 0.25f, 0.28f, 1.00f);
+        colors[ImGuiCol_ScrollbarGrabHovered]   = ImVec4(0.32f, 0.32f, 0.36f, 1.00f);
+        colors[ImGuiCol_ScrollbarGrabActive]    = ImVec4(0.40f, 0.40f, 0.45f, 1.00f);
+        colors[ImGuiCol_SliderGrab]             = ImVec4(0.26f, 0.38f, 0.70f, 0.90f);
+        colors[ImGuiCol_SliderGrabActive]       = ImVec4(0.26f, 0.38f, 0.70f, 1.00f);
+        
+        // Docking & Viewports
+        colors[ImGuiCol_DockingPreview]         = ImVec4(0.26f, 0.38f, 0.70f, 0.70f);
+        colors[ImGuiCol_DockingEmptyBg]         = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
     }
 }
 
@@ -242,6 +309,10 @@ int main(int argc, char* argv[]) {
 
     HWND hWnd = glfwGetWin32Window(window);
 
+    // Initialize KeymapManager (requires GLFW initialized and window created for scancode resolution)
+    KeymapManager::Get().Initialize();
+    KeymapManager::Get().Load();
+
     // 6. Initialize DirectX 11
     if (!CreateDeviceD3D(hWnd, headlessMode)) {
         Logger::Get().Error("Failed to initialize DirectX 11");
@@ -260,10 +331,19 @@ int main(int argc, char* argv[]) {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
 
+    // Load Segoe UI from system fonts for premium typography
+    std::string fontPath = "C:\\Windows\\Fonts\\segoeui.ttf";
+    if (std::filesystem::exists(fontPath)) {
+        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 17.0f);
+    } else {
+        io.Fonts->AddFontDefault();
+    }
+
     // Apply configured theme
     ApplyTheme(ConfigManager::Get().GetTheme());
 
     ImGui_ImplGlfw_InitForOther(window, true);
+    g_PrevKeyCallback = glfwSetKeyCallback(window, CustomKeyCallback);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
     // 8. Initialize Canvas Renderer
@@ -306,6 +386,7 @@ int main(int argc, char* argv[]) {
     // UI state flags
     bool showConsole = true;
     bool showProperties = true;
+    bool showLayers = true;
     bool showToolbar = true;
     bool showColors = true;
 
@@ -316,6 +397,7 @@ int main(int argc, char* argv[]) {
     bool openSettingsModal = false;
     bool openSaveRaypModal = false;
     bool openLoadRaypModal = false;
+    bool openCanvasSizeModal = false;
 
     auto lastAutoSaveTime = std::chrono::steady_clock::now();
     bool isAutoSaving = false;
@@ -348,10 +430,10 @@ int main(int argc, char* argv[]) {
         // 9.1 Persistent Header (Main Menu Bar)
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                if (ImGui::MenuItem("Open Project (.rayp)", "Ctrl+O")) {
+                if (ImGui::MenuItem("Open Project (.rayp)", KeymapManager::Get().GetActionShortcutString("OpenProject").c_str())) {
                     openLoadRaypModal = true;
                 }
-                if (ImGui::MenuItem("Save Project (.rayp)", "Ctrl+S")) {
+                if (ImGui::MenuItem("Save Project (.rayp)", KeymapManager::Get().GetActionShortcutString("SaveProject").c_str())) {
                     openSaveRaypModal = true;
                 }
                 ImGui::Separator();
@@ -385,7 +467,7 @@ int main(int argc, char* argv[]) {
                 if (g_Canvas.CanUndo()) {
                     undoLabel += " (" + g_Canvas.GetUndoName() + ")";
                 }
-                if (ImGui::MenuItem(undoLabel.c_str(), "Ctrl+Z", false, g_Canvas.CanUndo())) {
+                if (ImGui::MenuItem(undoLabel.c_str(), KeymapManager::Get().GetActionShortcutString("Undo").c_str(), false, g_Canvas.CanUndo())) {
                     g_Canvas.Undo();
                 }
 
@@ -393,14 +475,21 @@ int main(int argc, char* argv[]) {
                 if (g_Canvas.CanRedo()) {
                     redoLabel += " (" + g_Canvas.GetRedoName() + ")";
                 }
-                if (ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Y", false, g_Canvas.CanRedo())) {
+                if (ImGui::MenuItem(redoLabel.c_str(), KeymapManager::Get().GetActionShortcutString("Redo").c_str(), false, g_Canvas.CanRedo())) {
                     g_Canvas.Redo();
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Canvas")) {
+                if (ImGui::MenuItem("Canvas Size...")) {
+                    openCanvasSizeModal = true;
                 }
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("View")) {
                 ImGui::MenuItem("Toolbar", nullptr, &showToolbar);
                 ImGui::MenuItem("Properties", nullptr, &showProperties);
+                ImGui::MenuItem("Layers", nullptr, &showLayers);
                 ImGui::MenuItem("Colors Window", nullptr, &showColors);
                 ImGui::MenuItem("Console logs", nullptr, &showConsole);
                 ImGui::Separator();
@@ -447,6 +536,10 @@ int main(int argc, char* argv[]) {
         if (openSettingsModal) {
             ImGui::OpenPopup("Settings");
             openSettingsModal = false;
+        }
+        if (openCanvasSizeModal) {
+            ImGui::OpenPopup("Canvas Size");
+            openCanvasSizeModal = false;
         }
         if (openSaveRaypModal) {
             ImGui::OpenPopup("Save Project");
@@ -543,10 +636,9 @@ int main(int argc, char* argv[]) {
             }
             ImGui::EndPopup();
         }
-
         // Settings / Preferences Popup Modal
         if (ImGui::BeginPopupModal("Settings", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-            static std::string activeTheme = ConfigManager::Get().GetTheme();
+            static char activeTheme[64] = "";
             static int defW = ConfigManager::Get().GetDefaultWidth();
             static int defH = ConfigManager::Get().GetDefaultHeight();
             static char backupDir[256] = "";
@@ -556,43 +648,138 @@ int main(int argc, char* argv[]) {
             static bool settingsInitialized = false;
 
             if (!settingsInitialized) {
+                std::strncpy(activeTheme, ConfigManager::Get().GetTheme().c_str(), sizeof(activeTheme));
                 std::strncpy(backupDir, ConfigManager::Get().GetBackupDir().c_str(), sizeof(backupDir));
                 settingsInitialized = true;
             }
 
-            ImGui::Text("Interface Settings");
-            ImGui::Separator();
-            
-            const char* themes[] = { "Dark", "Light", "Classic" };
-            int currentThemeIdx = 0;
-            if (activeTheme == "Light") currentThemeIdx = 1;
-            else if (activeTheme == "Classic") currentThemeIdx = 2;
+            if (ImGui::BeginTabBar("SettingsTabs")) {
+                if (ImGui::BeginTabItem("General")) {
+                    ImGui::Spacing();
+                    ImGui::Text("Interface Settings");
+                    ImGui::Separator();
+                    
+                    const char* themes[] = { "Dark", "Light", "Classic" };
+                    int currentThemeIdx = 0;
+                    if (std::strcmp(activeTheme, "Light") == 0) currentThemeIdx = 1;
+                    else if (std::strcmp(activeTheme, "Classic") == 0) currentThemeIdx = 2;
 
-            if (ImGui::Combo("Theme", &currentThemeIdx, themes, IM_ARRAYSIZE(themes))) {
-                activeTheme = themes[currentThemeIdx];
-                ApplyTheme(activeTheme); // Instantly apply styling for visual feedback!
+                    if (ImGui::Combo("Theme", &currentThemeIdx, themes, IM_ARRAYSIZE(themes))) {
+                        std::strncpy(activeTheme, themes[currentThemeIdx], sizeof(activeTheme));
+                        ApplyTheme(activeTheme); // Instantly apply styling for visual feedback!
+                    }
+
+                    ImGui::Spacing();
+                    ImGui::Text("Canvas Defaults");
+                    ImGui::Separator();
+                    ImGui::InputInt("Default Width", &defW, 128, 256);
+                    ImGui::InputInt("Default Height", &defH, 128, 256);
+
+                    ImGui::Spacing();
+                    ImGui::Text("Autosave & Backup System");
+                    ImGui::Separator();
+                    ImGui::InputText("Backups Directory", backupDir, IM_ARRAYSIZE(backupDir));
+                    ImGui::SliderInt("Autosave (minutes)", &autoSaveMins, 0, 60, "%d min");
+                    ImGui::TextDisabled("Set to 0 to disable periodic auto-saves");
+
+                    ImGui::Spacing();
+                    ImGui::Text("Undo / Redo Cache Limits");
+                    ImGui::Separator();
+                    ImGui::SliderInt("Max History Steps", &maxUndo, 5, 200, "%d steps");
+                    ImGui::SliderInt("Max RAM Cache Size", &maxUndoMem, 64, 2048, "%d MB");
+                    
+                    ImGui::EndTabItem();
+                }
+
+                if (ImGui::BeginTabItem("Keybindings")) {
+                    ImGui::Spacing();
+                    ImGui::Text("Click 'Rebind' next to an action to assign a new physical hotkey.");
+                    ImGui::Separator();
+                    ImGui::Spacing();
+
+                    static std::string rebindingAction = "";
+                    static bool listeningForKey = false;
+
+                    // Get a local copy of bindings
+                    auto bindings = KeymapManager::Get().GetBindings();
+                    for (const auto& pair : bindings) {
+                        ImGui::PushID(pair.first.c_str());
+                        ImGui::Text("%s:", pair.first.c_str());
+                        ImGui::SameLine(180);
+
+                        if (listeningForKey && rebindingAction == pair.first) {
+                            ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "[Press any key + Ctrl/Shift/Alt...]");
+                            
+                            ImGuiIO& io = ImGui::GetIO();
+                            for (int k = 0; k < ImGuiKey_NamedKey_END; ++k) {
+                                ImGuiKey imguiKey = (ImGuiKey)k;
+                                if (ImGui::IsKeyPressed(imguiKey)) {
+                                    int glfwKey = 0;
+                                    if (imguiKey >= ImGuiKey_A && imguiKey <= ImGuiKey_Z) glfwKey = GLFW_KEY_A + (imguiKey - ImGuiKey_A);
+                                    else if (imguiKey >= ImGuiKey_0 && imguiKey <= ImGuiKey_9) glfwKey = GLFW_KEY_0 + (imguiKey - ImGuiKey_0);
+                                    else if (imguiKey >= ImGuiKey_F1 && imguiKey <= ImGuiKey_F12) glfwKey = GLFW_KEY_F1 + (imguiKey - ImGuiKey_F1);
+                                    else if (imguiKey == ImGuiKey_Space) glfwKey = GLFW_KEY_SPACE;
+                                    else if (imguiKey == ImGuiKey_Enter || imguiKey == ImGuiKey_KeypadEnter) glfwKey = GLFW_KEY_ENTER;
+                                    else if (imguiKey == ImGuiKey_Escape) glfwKey = GLFW_KEY_ESCAPE;
+                                    else if (imguiKey == ImGuiKey_Tab) glfwKey = GLFW_KEY_TAB;
+                                    else if (imguiKey == ImGuiKey_Backspace) glfwKey = GLFW_KEY_BACKSPACE;
+                                    else if (imguiKey == ImGuiKey_Insert) glfwKey = GLFW_KEY_INSERT;
+                                    else if (imguiKey == ImGuiKey_Delete) glfwKey = GLFW_KEY_DELETE;
+                                    else if (imguiKey == ImGuiKey_RightArrow) glfwKey = GLFW_KEY_RIGHT;
+                                    else if (imguiKey == ImGuiKey_LeftArrow) glfwKey = GLFW_KEY_LEFT;
+                                    else if (imguiKey == ImGuiKey_DownArrow) glfwKey = GLFW_KEY_DOWN;
+                                    else if (imguiKey == ImGuiKey_UpArrow) glfwKey = GLFW_KEY_UP;
+                                    else if (imguiKey == ImGuiKey_Comma) glfwKey = GLFW_KEY_COMMA;
+                                    else if (imguiKey == ImGuiKey_Period) glfwKey = GLFW_KEY_PERIOD;
+                                    else if (imguiKey == ImGuiKey_Slash) glfwKey = GLFW_KEY_SLASH;
+                                    else if (imguiKey == ImGuiKey_Semicolon) glfwKey = GLFW_KEY_SEMICOLON;
+                                    else if (imguiKey == ImGuiKey_Equal) glfwKey = GLFW_KEY_EQUAL;
+                                    else if (imguiKey == ImGuiKey_Minus) glfwKey = GLFW_KEY_MINUS;
+                                    else if (imguiKey == ImGuiKey_LeftBracket) glfwKey = GLFW_KEY_LEFT_BRACKET;
+                                    else if (imguiKey == ImGuiKey_RightBracket) glfwKey = GLFW_KEY_RIGHT_BRACKET;
+                                    else if (imguiKey == ImGuiKey_Backslash) glfwKey = GLFW_KEY_BACKSLASH;
+                                    else if (imguiKey == ImGuiKey_GraveAccent) glfwKey = GLFW_KEY_GRAVE_ACCENT;
+
+                                    if (imguiKey != ImGuiKey_LeftCtrl && imguiKey != ImGuiKey_RightCtrl &&
+                                        imguiKey != ImGuiKey_LeftShift && imguiKey != ImGuiKey_RightShift &&
+                                        imguiKey != ImGuiKey_LeftAlt && imguiKey != ImGuiKey_RightAlt) {
+                                        
+                                        if (glfwKey != 0) {
+                                            KeyCombination pendingCombo;
+                                            pendingCombo.key = glfwKey;
+                                            pendingCombo.ctrl = io.KeyCtrl;
+                                            pendingCombo.shift = io.KeyShift;
+                                            pendingCombo.alt = io.KeyAlt;
+                                            
+                                            KeymapManager::Get().BindAction(rebindingAction, pendingCombo);
+                                            listeningForKey = false;
+                                            rebindingAction = "";
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            ImGui::Text("%s", pair.second.ToString().c_str());
+                            ImGui::SameLine(320);
+                            if (ImGui::Button("Rebind")) {
+                                rebindingAction = pair.first;
+                                listeningForKey = true;
+                            }
+                        }
+                        ImGui::PopID();
+                    }
+
+                    ImGui::EndTabItem();
+                }
+
+                ImGui::EndTabBar();
             }
 
             ImGui::Spacing();
-            ImGui::Text("Canvas Defaults");
             ImGui::Separator();
-            ImGui::InputInt("Default Width", &defW, 128, 256);
-            ImGui::InputInt("Default Height", &defH, 128, 256);
-
             ImGui::Spacing();
-            ImGui::Text("Autosave & Backup System");
-            ImGui::Separator();
-            ImGui::InputText("Backups Directory", backupDir, IM_ARRAYSIZE(backupDir));
-            ImGui::SliderInt("Autosave (minutes)", &autoSaveMins, 0, 60, "%d min");
-            ImGui::TextDisabled("Set to 0 to disable periodic auto-saves");
 
-            ImGui::Spacing();
-            ImGui::Text("Undo / Redo Cache Limits");
-            ImGui::Separator();
-            ImGui::SliderInt("Max History Steps", &maxUndo, 5, 200, "%d steps");
-            ImGui::SliderInt("Max RAM Cache Size", &maxUndoMem, 64, 2048, "%d MB");
-
-            ImGui::Separator();
             if (ImGui::Button("Save & Close", ImVec2(120, 0))) {
                 ConfigManager::Get().SetTheme(activeTheme);
                 ConfigManager::Get().SetDefaultWidth(defW);
@@ -603,14 +790,52 @@ int main(int argc, char* argv[]) {
                 ConfigManager::Get().SetMaxUndoMemoryMB(maxUndoMem);
                 ConfigManager::Get().Save();
                 
+                // Persist keyboard map configuration
+                KeymapManager::Get().Save();
+                
                 settingsInitialized = false;
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                // Re-apply original theme on cancel
+             if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                // Re-apply original theme and reload keymaps on cancel
                 ApplyTheme(ConfigManager::Get().GetTheme());
+                KeymapManager::Get().Load();
                 settingsInitialized = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Canvas Size Popup Modal
+        if (ImGui::BeginPopupModal("Canvas Size", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static int targetW = 0;
+            static int targetH = 0;
+            static bool initSize = false;
+            if (!initSize) {
+                targetW = g_Canvas.GetWidth();
+                targetH = g_Canvas.GetHeight();
+                initSize = true;
+            }
+
+            ImGui::Text("Resize Canvas Dimensions:");
+            ImGui::Separator();
+            ImGui::InputInt("Width", &targetW, 128, 256);
+            ImGui::InputInt("Height", &targetH, 128, 256);
+
+            // Clamp positive dimensions
+            if (targetW < 1) targetW = 1;
+            if (targetH < 1) targetH = 1;
+
+            ImGui::Separator();
+            if (ImGui::Button("Resize", ImVec2(120, 0))) {
+                g_Canvas.ResizeCanvas(g_pd3dDevice, targetW, targetH);
+                initSize = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                initSize = false;
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
@@ -675,19 +900,30 @@ int main(int argc, char* argv[]) {
             ImGui::EndPopup();
         }
 
-        // Keyboard Shortcuts Handler
+        // Keyboard Shortcuts Handler (Layout-Independent via KeymapManager)
         if (!io.WantTextInput) {
-            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Z)) {
+            if (KeymapManager::Get().ConsumeActionTrigger("Undo")) {
                 g_Canvas.Undo();
             }
-            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Y)) {
+            if (KeymapManager::Get().ConsumeActionTrigger("Redo")) {
                 g_Canvas.Redo();
             }
-            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
+            if (KeymapManager::Get().ConsumeActionTrigger("SaveProject")) {
                 openSaveRaypModal = true;
             }
-            if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_O)) {
+            if (KeymapManager::Get().ConsumeActionTrigger("OpenProject")) {
                 openLoadRaypModal = true;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("BrushTool")) {
+                g_ActiveTool = ActiveTool::Brush;
+                g_Brush.erase = false;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("EraserTool")) {
+                g_ActiveTool = ActiveTool::Eraser;
+                g_Brush.erase = true;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("PanTool")) {
+                g_ActiveTool = ActiveTool::Pan;
             }
         }
 
@@ -843,21 +1079,6 @@ int main(int argc, char* argv[]) {
         if (showProperties) {
             ImGui::Begin("Properties", &showProperties, ImGuiWindowFlags_NoCollapse);
             
-            // Allow manual resizing of the Canvas
-            int curW = g_Canvas.GetWidth();
-            int curH = g_Canvas.GetHeight();
-            
-            ImGui::Text("Canvas Size:");
-            ImGui::SetNextItemWidth(100);
-            if (ImGui::InputInt("Width", &curW, 128, 256)) {
-                g_Canvas.ResizeCanvas(g_pd3dDevice, curW, curH);
-            }
-            ImGui::SetNextItemWidth(100);
-            if (ImGui::InputInt("Height", &curH, 128, 256)) {
-                g_Canvas.ResizeCanvas(g_pd3dDevice, curW, curH);
-            }
-            
-            ImGui::Separator();
             ImGui::Text("Zoom: %.0f%%", g_Canvas.GetZoom() * 100.0f);
             ImGui::Text("Pan: (%.1f, %.1f)", g_Canvas.GetPan().x, g_Canvas.GetPan().y);
             
@@ -883,20 +1104,53 @@ int main(int argc, char* argv[]) {
                 ImGui::ColorEdit3("Mask Color", g_Canvas.GetAlphaMaskColor());
             }
 
+            ImGui::End();
+        }
+
+        // 9.6b Draw Layers Panel (Standalone docked window)
+        if (showLayers) {
+            ImGui::Begin("Layers", &showLayers, ImGuiWindowFlags_NoCollapse);
+            
+            // Channels Write Mask at the top of Layers panel
+            ImGui::Text("Active Layer Write Channels:");
+            ImGui::Checkbox("R", &g_Brush.writeR); ImGui::SameLine();
+            ImGui::Checkbox("G", &g_Brush.writeG); ImGui::SameLine();
+            ImGui::Checkbox("B", &g_Brush.writeB); ImGui::SameLine();
+            ImGui::Checkbox("A", &g_Brush.writeA);
+
             ImGui::Separator();
-            ImGui::Text("Layers");
-            if (ImGui::Button("Add Layer")) {
+            
+            if (ImGui::Button("Add Layer", ImVec2(-1, 25))) {
                 std::string lName = "Layer " + std::to_string(g_Canvas.GetLayers().size() + 1);
                 g_Canvas.CreateNewLayer(g_pd3dDevice, lName);
             }
 
-            ImGui::BeginChild("LayersList", ImVec2(0, 180), true);
+            ImGui::BeginChild("LayersList", ImVec2(0, 0), true);
             auto& layers = g_Canvas.GetLayers();
             for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
                 ImGui::PushID(i);
                 
-                // Visible toggle
-                ImGui::Checkbox("##visible", &layers[i].visible);
+                // Visible toggle (Alt+Click to Isolate Layer)
+                bool isIsolated = g_Canvas.IsLayerIsolated(i);
+                if (isIsolated) {
+                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
+                }
+                
+                bool vis = layers[i].visible;
+                if (ImGui::Checkbox("##visible", &vis)) {
+                    if (ImGui::GetIO().KeyAlt) {
+                        g_Canvas.ToggleLayerIsolation(i);
+                    } else {
+                        layers[i].visible = vis;
+                    }
+                }
+                if (isIsolated) {
+                    ImGui::PopStyleColor();
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Alt+Click to Isolate this layer");
+                }
+                
                 ImGui::SameLine();
 
                 // Selectable layer name
@@ -906,7 +1160,7 @@ int main(int argc, char* argv[]) {
                 }
                 
                 ImGui::SameLine();
-                // Delete button (cannot delete if it's the last layer)
+                // Delete button
                 if (layers.size() > 1) {
                     if (ImGui::Button("Del")) {
                         g_Canvas.DeleteLayer(i);

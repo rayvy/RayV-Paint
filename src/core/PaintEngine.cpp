@@ -33,10 +33,10 @@ void PaintEngine::DrawStamp(std::vector<float>& pixels, int width, int height,
                 
                 size_t idx = ((size_t)y * width + x) * 4;
                 if (brush.erase) {
-                    pixels[idx + 0] *= (1.0f - stampAlpha);
-                    pixels[idx + 1] *= (1.0f - stampAlpha);
-                    pixels[idx + 2] *= (1.0f - stampAlpha);
-                    pixels[idx + 3] *= (1.0f - stampAlpha);
+                    if (brush.writeR) pixels[idx + 0] *= (1.0f - stampAlpha);
+                    if (brush.writeG) pixels[idx + 1] *= (1.0f - stampAlpha);
+                    if (brush.writeB) pixels[idx + 2] *= (1.0f - stampAlpha);
+                    if (brush.writeA) pixels[idx + 3] *= (1.0f - stampAlpha);
                 } 
                 else {
                     float destR = pixels[idx + 0];
@@ -46,10 +46,10 @@ void PaintEngine::DrawStamp(std::vector<float>& pixels, int width, int height,
                     
                     float outA = stampAlpha + destA * (1.0f - stampAlpha);
                     if (outA > 0.0f) {
-                        pixels[idx + 0] = (brush.color[0] * stampAlpha + destR * destA * (1.0f - stampAlpha)) / outA;
-                        pixels[idx + 1] = (brush.color[1] * stampAlpha + destG * destA * (1.0f - stampAlpha)) / outA;
-                        pixels[idx + 2] = (brush.color[2] * stampAlpha + destB * destA * (1.0f - stampAlpha)) / outA;
-                        pixels[idx + 3] = outA;
+                        if (brush.writeR) pixels[idx + 0] = (brush.color[0] * stampAlpha + destR * destA * (1.0f - stampAlpha)) / outA;
+                        if (brush.writeG) pixels[idx + 1] = (brush.color[1] * stampAlpha + destG * destA * (1.0f - stampAlpha)) / outA;
+                        if (brush.writeB) pixels[idx + 2] = (brush.color[2] * stampAlpha + destB * destA * (1.0f - stampAlpha)) / outA;
+                        if (brush.writeA) pixels[idx + 3] = outA;
                     }
                 }
             }

@@ -9,6 +9,12 @@ struct BrushSettings {
     bool erase = false;
     float spacing = 0.1f; // 10% spacing by default
     int stabilization = 1; // 1 to 50 smoothing strength
+
+    // Channel Write Mask (RGBA)
+    bool writeR = true;
+    bool writeG = true;
+    bool writeB = true;
+    bool writeA = true;
 };
 
 class PaintEngine {

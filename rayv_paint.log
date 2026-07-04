@@ -530,3 +530,73 @@
 [2026-07-04 16:55:58.473] [INFO]  Shutting down embedded Python interpreter...
 [2026-07-04 16:55:58.477] [INFO]  ThreadPool shut down successfully.
 [2026-07-04 16:55:58.477] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 17:21:36.970] [INFO]  ===================================================
+[2026-07-04 17:21:36.970] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 17:21:36.970] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 17:21:36.971] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 17:21:36.973] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 17:21:36.989] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 17:21:37.005] [DEBUG] Resolved scancode for EraserTool (E): 18
+[2026-07-04 17:21:37.005] [DEBUG] Resolved scancode for Undo (Ctrl+Z): 44
+[2026-07-04 17:21:37.005] [DEBUG] Resolved scancode for Redo (Ctrl+Y): 21
+[2026-07-04 17:21:37.005] [DEBUG] Resolved scancode for BrushTool (B): 48
+[2026-07-04 17:21:37.005] [DEBUG] Resolved scancode for SaveProject (Ctrl+S): 31
+[2026-07-04 17:21:37.005] [DEBUG] Resolved scancode for OpenProject (Ctrl+O): 24
+[2026-07-04 17:21:37.005] [DEBUG] Resolved scancode for PanTool (H): 35
+[2026-07-04 17:21:37.005] [WARN]  Failed to open keymap config: keymap.json. Using defaults.
+[2026-07-04 17:21:37.210] [INFO]  Created new layer: Background
+[2026-07-04 17:21:37.211] [INFO]  Startup completed in: 241.520000 ms
+[2026-07-04 17:21:37.217] [INFO]  [TEST] Render completed. Saving config and exiting successfully.
+[2026-07-04 17:21:37.257] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 17:21:37.260] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 17:21:37.260] [INFO]  RayVPaint shut down cleanly.
+[2026-07-04 17:21:37.287] [INFO]  ===================================================
+[2026-07-04 17:21:37.287] [INFO]  Starting RayVPaint tech-art editor...
+[2026-07-04 17:21:37.287] [INFO]  Configuration loaded successfully from config.json
+[2026-07-04 17:21:37.288] [INFO]  Initializing ThreadPool with 16 worker threads.
+[2026-07-04 17:21:37.291] [INFO]  Initializing embedded Python interpreter...
+[2026-07-04 17:21:37.309] [INFO]  [Python] Python Interpreter Initialized. Version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+[2026-07-04 17:21:37.325] [DEBUG] Resolved scancode for EraserTool (E): 18
+[2026-07-04 17:21:37.325] [DEBUG] Resolved scancode for Undo (Ctrl+Z): 44
+[2026-07-04 17:21:37.325] [DEBUG] Resolved scancode for Redo (Ctrl+Y): 21
+[2026-07-04 17:21:37.325] [DEBUG] Resolved scancode for BrushTool (B): 48
+[2026-07-04 17:21:37.325] [DEBUG] Resolved scancode for SaveProject (Ctrl+S): 31
+[2026-07-04 17:21:37.325] [DEBUG] Resolved scancode for OpenProject (Ctrl+O): 24
+[2026-07-04 17:21:37.325] [DEBUG] Resolved scancode for PanTool (H): 35
+[2026-07-04 17:21:37.325] [WARN]  Failed to open keymap config: keymap.json. Using defaults.
+[2026-07-04 17:21:37.357] [INFO]  Created new layer: Background
+[2026-07-04 17:21:37.358] [INFO]  Startup completed in: 71.180500 ms
+[2026-07-04 17:21:37.358] [INFO]  Executing Python script: test_script.py
+[2026-07-04 17:21:37.359] [INFO]  [Python] === Python API Integration Test Starting ===
+[2026-07-04 17:21:37.359] [DEBUG] [Python] This is a debug message from Python.
+[2026-07-04 17:21:37.359] [WARN]  [Python] This is a warning from Python.
+[2026-07-04 17:21:37.359] [INFO]  [Python] Config default dimensions: 1024x1024
+[2026-07-04 17:21:37.359] [INFO]  [Python] Resizing canvas via Python to 2048x1024...
+[2026-07-04 17:21:37.359] [INFO]  Resizing canvas from 1024x1024 to 2048x1024
+[2026-07-04 17:21:37.369] [INFO]  Canvas resized to: 2048x1024
+[2026-07-04 17:21:37.369] [INFO]  [Python] Testing native DDS load: testfield/SandroneBangsADiffuse.dds
+[2026-07-04 17:21:37.390] [INFO]  DDS texture loaded successfully (1024x1024): testfield/SandroneBangsADiffuse.dds
+[2026-07-04 17:21:37.402] [INFO]  Successfully imported layer from: testfield/SandroneBangsADiffuse.dds
+[2026-07-04 17:21:37.747] [INFO]  Image saved successfully: testfield/temp_diffuse_export.png
+[2026-07-04 17:21:37.748] [INFO]  [Python] Testing save_dds with format index 1 to testfield/temp_diffuse_export_1.dds
+[2026-07-04 17:21:37.788] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_1.dds
+[2026-07-04 17:21:37.793] [INFO]  [Python] Testing save_dds with format index 2 to testfield/temp_diffuse_export_2.dds
+[2026-07-04 17:21:37.826] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_2.dds
+[2026-07-04 17:21:37.830] [INFO]  [Python] Testing save_dds with format index 3 to testfield/temp_diffuse_export_3.dds
+[2026-07-04 17:21:37.874] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_3.dds
+[2026-07-04 17:21:37.877] [INFO]  [Python] Testing save_dds with format index 4 to testfield/temp_diffuse_export_4.dds
+[2026-07-04 17:21:37.896] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_4.dds
+[2026-07-04 17:21:37.898] [INFO]  [Python] Testing save_dds with format index 5 to testfield/temp_diffuse_export_5.dds
+[2026-07-04 17:21:37.921] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_5.dds
+[2026-07-04 17:21:37.923] [INFO]  [Python] Testing save_dds with format index 6 to testfield/temp_diffuse_export_6.dds
+[2026-07-04 17:21:37.944] [INFO]  DDS texture saved successfully (2048x1024): testfield/temp_diffuse_export_6.dds
+[2026-07-04 17:21:37.947] [INFO]  [Python] Testing save_image with ICC profile: testfield/dummy_test.icc
+[2026-07-04 17:21:38.271] [INFO]  Embedded ICC profile 'dummy_test' into PNG file: testfield/temp_icc_export.png
+[2026-07-04 17:21:38.271] [INFO]  Image saved successfully: testfield/temp_icc_export.png
+[2026-07-04 17:21:38.273] [INFO]  [Python] Verified: 'iCCP' chunk is embedded in the exported PNG!
+[2026-07-04 17:21:38.274] [INFO]  [Python] DDS native validation check and ICC profile test: PASSED.
+[2026-07-04 17:21:38.274] [INFO]  [Python] === Python API Integration Test Completed Successfully ===
+[2026-07-04 17:21:38.280] [INFO]  [TEST] Render completed. Saving config and exiting successfully.
+[2026-07-04 17:21:38.286] [INFO]  Shutting down embedded Python interpreter...
+[2026-07-04 17:21:38.289] [INFO]  ThreadPool shut down successfully.
+[2026-07-04 17:21:38.289] [INFO]  RayVPaint shut down cleanly.

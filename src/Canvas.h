@@ -58,6 +58,9 @@ public:
     void CreateNewLayer(ID3D11Device* device, const std::string& name);
     void DeleteLayer(int index);
     void SetActiveLayerIndex(int idx);
+    void ToggleLayerIsolation(int layerIdx);
+    bool IsLayerIsolated(int layerIdx) const { return m_IsIsolatedMode && m_IsolatedLayerIdx == layerIdx; }
+    bool IsInIsolationMode() const { return m_IsIsolatedMode; }
     int GetActiveLayerIndex() const { return m_ActiveLayerIdx; }
     std::vector<Layer>& GetLayers() { return m_Layers; }
 
@@ -128,6 +131,11 @@ private:
     // Layer resources
     std::vector<Layer> m_Layers;
     int m_ActiveLayerIdx = -1;
+
+    // Layer Isolation State
+    bool m_IsIsolatedMode = false;
+    int m_IsolatedLayerIdx = -1;
+    std::vector<bool> m_PreIsolationVisibility;
 
     // Direct3D 11 Resources
     ID3D11Buffer* m_VertexBuffer = nullptr;

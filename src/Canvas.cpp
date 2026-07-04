@@ -353,6 +353,42 @@ void Canvas::SetActiveLayerIndex(int idx) {
     }
 }
 
+void Canvas::ToggleLayerIsolation(int layerIdx) {
+    if (layerIdx < 0 || layerIdx >= static_cast<int>(m_Layers.size())) return;
+
+    if (m_IsIsolatedMode && m_IsolatedLayerIdx == layerIdx) {
+        // Turn off isolation: restore visibility states
+        for (size_t i = 0; i < m_Layers.size(); ++i) {
+            if (i < m_PreIsolationVisibility.size()) {
+                m_Layers[i].visible = m_PreIsolationVisibility[i];
+            } else {
+                m_Layers[i].visible = true;
+            }
+        }
+        m_IsIsolatedMode = false;
+        m_IsolatedLayerIdx = -1;
+        m_PreIsolationVisibility.clear();
+    } else {
+        // If already in isolated mode, first restore visibility before new isolation
+        if (m_IsIsolatedMode) {
+            for (size_t i = 0; i < m_Layers.size(); ++i) {
+                if (i < m_PreIsolationVisibility.size()) {
+                    m_Layers[i].visible = m_PreIsolationVisibility[i];
+                }
+            }
+        }
+
+        // Turn on isolation for layerIdx
+        m_PreIsolationVisibility.resize(m_Layers.size());
+        for (size_t i = 0; i < m_Layers.size(); ++i) {
+            m_PreIsolationVisibility[i] = m_Layers[i].visible;
+            m_Layers[i].visible = (static_cast<int>(i) == layerIdx);
+        }
+        m_IsIsolatedMode = true;
+        m_IsolatedLayerIdx = layerIdx;
+    }
+}
+
 void Canvas::BackupTile(int tileX, int tileY) {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
     int numTilesX = (m_Width + 255) / 256;
