@@ -105,6 +105,12 @@ public:
     void CommitMovePixels(ID3D11Device* device);
     void CancelMovePixels(ID3D11Device* device);
     void DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen);
+    float GetFloatingScaleX() const { return m_FloatingScaleX; }
+    float GetFloatingScaleY() const { return m_FloatingScaleY; }
+    float GetFloatingRotation() const { return m_FloatingRotation; }
+    void SetFloatingScaleX(float sx) { m_FloatingScaleX = sx; }
+    void SetFloatingScaleY(float sy) { m_FloatingScaleY = sy; }
+    void SetFloatingRotation(float rot) { m_FloatingRotation = rot; }
 
     // File Import / Export
     bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath);
@@ -204,7 +210,9 @@ private:
     };
 
     struct LayerBuffer {
-        DirectX::XMFLOAT4 layerParams;
+        DirectX::XMFLOAT4 layerParams;     // x: opacity, y: hasMask, zw: translation (uOff, vOff)
+        DirectX::XMFLOAT4 transformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
+        DirectX::XMFLOAT4 centerParams;    // x: centerX, y: centerY, zw: unused
     };
 
     void ComposeLayers(ID3D11DeviceContext* context);
@@ -301,6 +309,9 @@ private:
     int m_FloatingOffsetX = 0;
     int m_FloatingOffsetY = 0;
     int m_StartActiveLayerIdx = -1;
+    float m_FloatingScaleX = 1.0f;
+    float m_FloatingScaleY = 1.0f;
+    float m_FloatingRotation = 0.0f; // in radians
 
     ID3D11Texture2D* m_FloatingTexture = nullptr;
     ID3D11ShaderResourceView* m_FloatingSRV = nullptr;

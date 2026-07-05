@@ -589,6 +589,9 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("RotateTool")) {
                 g_ActiveTool = ActiveTool::Pan;
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("TransformTool")) {
+                g_ActiveTool = ActiveTool::MovePixels;
+            }
             if (KeymapManager::Get().ConsumeActionTrigger("QuickExport") || uiState.openQuickExportTrigger) {
                 uiState.openQuickExportTrigger = false;
                 std::string path = g_Canvas.GetExportPath();
@@ -996,14 +999,21 @@ int main(int argc, char* argv[]) {
                 g_IsPainting = false;
             }
 
-            // Commit / Cancel Move Pixels
-            if (g_Canvas.IsMovingPixels() && !ImGui::GetIO().WantTextInput) {
-                if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+            // Commit / Cancel Move Pixels (keyboard or Tool Settings panel buttons)
+            if (g_Canvas.IsMovingPixels()) {
+                bool doCommit = uiState.commitTransform ||
+                    (!ImGui::GetIO().WantTextInput && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)));
+                bool doCancel = uiState.cancelTransform ||
+                    (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape));
+                uiState.commitTransform = false;
+                uiState.cancelTransform = false;
+
+                if (doCommit) {
                     g_Canvas.CommitMovePixels(g_pd3dDevice);
                     g_MoveAccumulatedOffsetX = 0;
                     g_MoveAccumulatedOffsetY = 0;
                 }
-                else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                else if (doCancel) {
                     g_Canvas.CancelMovePixels(g_pd3dDevice);
                     g_MoveAccumulatedOffsetX = 0;
                     g_MoveAccumulatedOffsetY = 0;

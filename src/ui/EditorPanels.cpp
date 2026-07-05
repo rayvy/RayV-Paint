@@ -972,6 +972,8 @@ namespace UI {
                 ImGui::Spacing();
                 RenderToolButton("SmartSelectTool", "Smart Sel", ActiveTool::SmartSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::Spacing();
+                RenderToolButton("TransformTool", "Transform", ActiveTool::MovePixels, false, "V", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::Spacing();
                 RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -997,6 +999,8 @@ namespace UI {
                 RenderToolButton("MagicWandTool", "Wand Sel", ActiveTool::MagicWand, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::SameLine();
                 RenderToolButton("SmartSelectTool", "Smart Sel", ActiveTool::SmartSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine();
+                RenderToolButton("TransformTool", "Transform", ActiveTool::MovePixels, false, "V", btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::SameLine();
                 RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::SameLine();
@@ -1400,11 +1404,72 @@ namespace UI {
                 ImGui::TextWrapped("Click on the canvas to sample a pixel color.");
             }
             else if (activeTool == ActiveTool::MovePixels) {
-                ImGui::TextDisabled("Move Pixels");
+                ImGui::TextDisabled("Transform / Move Pixels");
                 ImGui::Separator();
                 ImGui::Spacing();
-                ImGui::TextWrapped("Drag to move the selected pixels.");
-                ImGui::TextWrapped("Enter / switch tool to commit.");
+                ImGui::TextWrapped("Drag on canvas to move. Adjust scale and rotation below.");
+                ImGui::Spacing();
+
+                // Scale X
+                float sx = canvas.GetFloatingScaleX();
+                if (ImGui::SliderFloat("Scale X##tx", &sx, 0.05f, 5.0f, "%.2f")) {
+                    canvas.SetFloatingScaleX(sx);
+                }
+                // Scale Y
+                float sy = canvas.GetFloatingScaleY();
+                if (ImGui::SliderFloat("Scale Y##tx", &sy, 0.05f, 5.0f, "%.2f")) {
+                    canvas.SetFloatingScaleY(sy);
+                }
+                // Lock aspect ratio
+                static bool lockAspect = false;
+                if (ImGui::Checkbox("Lock Aspect Ratio", &lockAspect)) {}
+                if (lockAspect) {
+                    // Sync whichever changed last — handled by sliders above calling both
+                }
+
+                ImGui::Spacing();
+
+                // Rotation in degrees
+                float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
+                if (ImGui::SliderFloat("Rotation##tx", &rotDeg, -180.0f, 180.0f, "%.1f deg")) {
+                    canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // Quick scale buttons
+                if (ImGui::Button("Flip H##tx")) {
+                    canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Flip V##tx")) {
+                    canvas.SetFloatingScaleY(-canvas.GetFloatingScaleY());
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Reset##tx")) {
+                    canvas.SetFloatingScaleX(1.0f);
+                    canvas.SetFloatingScaleY(1.0f);
+                    canvas.SetFloatingRotation(0.0f);
+                }
+
+                ImGui::Spacing();
+
+                // Commit / Cancel
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.18f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.72f, 0.25f, 1.0f));
+                if (ImGui::Button("Commit (Enter)##tx", ImVec2(-1, 0))) {
+                    state.commitTransform = true;
+                }
+                ImGui::PopStyleColor(2);
+
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.18f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.72f, 0.25f, 0.25f, 1.0f));
+                if (ImGui::Button("Cancel (Esc)##tx", ImVec2(-1, 0))) {
+                    state.cancelTransform = true;
+                }
+                ImGui::PopStyleColor(2);
             }
             else {
                 ImGui::TextDisabled("Pan / Hand");

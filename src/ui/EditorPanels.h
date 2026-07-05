@@ -36,6 +36,10 @@ namespace UI {
         bool openSaveConfigModal = false;
         bool showRecoveryModal = false;
 
+        // Transform tool action signals
+        bool commitTransform = false;
+        bool cancelTransform = false;
+
         // Rebinding helper state
         std::string rebindingAction = "";
         bool listeningForKey = false;

@@ -21,7 +21,9 @@ cbuffer CanvasBuffer : register(b0)
 
 cbuffer LayerBuffer : register(b1)
 {
-    float4 u_LayerParams; // x: opacity, yzw: unused
+    float4 u_LayerParams;     // x: opacity, y: hasMask, zw: translation (uOff, vOff)
+    float4 u_TransformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
+    float4 u_CenterParams;    // x: centerX, y: centerY, zw: unused
 };
 
 Texture2D g_Texture : register(t0);
@@ -163,9 +165,44 @@ Texture2D g_LayerMask : register(t1);
 // Simple pixel shader to output layer contents multiplied by layer opacity
 float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
 {
-    float2 uv = input.uv - u_LayerParams.zw;
+    float2 uv = input.uv;
+    
+    // Check if we are drawing floating pixels
+    if (u_TransformParams.w > 0.5f)
+    {
+        // Center of transformation in UV space
+        float2 center = u_CenterParams.xy;
+        float2 rel = uv - center;
+        
+        // Inverse translation (translation is in UV space)
+        rel -= u_LayerParams.zw;
+        
+        // Inverse rotation (angle is u_TransformParams.z, inverse is -z)
+        float angle = -u_TransformParams.z;
+        float cosA = cos(angle);
+        float sinA = sin(angle);
+        float2 rotated;
+        rotated.x = rel.x * cosA - rel.y * sinA;
+        rotated.y = rel.x * sinA + rel.y * cosA;
+        
+        // Inverse scale (scale is u_TransformParams.xy)
+        float2 scale = u_TransformParams.xy;
+        if (scale.x > 0.0001f && scale.y > 0.0001f)
+        {
+            rotated /= scale;
+        }
+        
+        uv = rotated + center;
+    }
+    else
+    {
+        // Normal layer offset translation
+        uv -= u_LayerParams.zw;
+    }
+
     if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
     {
+        discard; // or return transparent
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 

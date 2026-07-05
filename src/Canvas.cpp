@@ -1037,6 +1037,8 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 LayerBuffer* lb = (LayerBuffer*)mapped.pData;
                 float hasMaskVal = (layer.hasMask && layer.maskSRV) ? 1.0f : 0.0f;
                 lb->layerParams = DirectX::XMFLOAT4(layer.opacity, hasMaskVal, 0.0f, 0.0f);
+                lb->transformParams = DirectX::XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f); // default scale=1, rot=0, non-floating
+                lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, 0.0f, 0.0f);
                 context->Unmap(m_LayerConstantBuffer, 0);
             }
             context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -1053,11 +1055,32 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 float uOff = (float)m_FloatingOffsetX / (float)m_Width;
                 float vOff = (float)m_FloatingOffsetY / (float)m_Height;
                 
+                // Calculate bounding box center of floating selection
+                int minX = m_Width, maxX = 0, minY = m_Height, maxY = 0;
+                bool hasPixels = false;
+                for (int y = 0; y < m_Height; ++y) {
+                    for (int x = 0; x < m_Width; ++x) {
+                        if (m_OriginalSelectionMask[y * m_Width + x] > 0.0f) {
+                            if (x < minX) minX = x;
+                            if (x > maxX) maxX = x;
+                            if (y < minY) minY = y;
+                            if (y > maxY) maxY = y;
+                            hasPixels = true;
+                        }
+                    }
+                }
+                float cx_box = hasPixels ? (minX + maxX) * 0.5f : m_Width * 0.5f;
+                float cy_box = hasPixels ? (minY + maxY) * 0.5f : m_Height * 0.5f;
+                float centerX = cx_box / (float)m_Width;
+                float centerY = cy_box / (float)m_Height;
+
                 D3D11_MAPPED_SUBRESOURCE fMapped;
                 if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &fMapped))) {
                     LayerBuffer* lb = (LayerBuffer*)fMapped.pData;
                     float hasFMaskVal = m_FloatingMaskSRV ? 1.0f : 0.0f;
                     lb->layerParams = DirectX::XMFLOAT4(layer.opacity, hasFMaskVal, uOff, vOff);
+                    lb->transformParams = DirectX::XMFLOAT4(m_FloatingScaleX, m_FloatingScaleY, m_FloatingRotation, 1.0f); // isFloating = 1.0f
+                    lb->centerParams = DirectX::XMFLOAT4(centerX, centerY, 0.0f, 0.0f);
                     context->Unmap(m_LayerConstantBuffer, 0);
                 }
                 context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -2894,6 +2917,9 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
     m_IsMovingPixels = true;
     m_FloatingOffsetX = 0;
     m_FloatingOffsetY = 0;
+    m_FloatingScaleX = 1.0f;
+    m_FloatingScaleY = 1.0f;
+    m_FloatingRotation = 0.0f;
     m_StartActiveLayerIdx = m_ActiveLayerIdx;
     
     m_OriginalSelectionMask.assign(m_Width * m_Height, 1.0f);
@@ -3028,28 +3054,119 @@ void Canvas::UpdateMovePixels(ID3D11Device* device, int dx, int dy) {
     m_FloatingOffsetY = dy;
 }
 
+static float sampleBilinearChannel(const std::vector<float>& pixels, int width, int height, float fx, float fy, int channel) {
+    int x1 = (int)std::floor(fx);
+    int y1 = (int)std::floor(fy);
+    int x2 = x1 + 1;
+    int y2 = y1 + 1;
+    
+    float tx = fx - x1;
+    float ty = fy - y1;
+    
+    x1 = std::clamp(x1, 0, width - 1);
+    x2 = std::clamp(x2, 0, width - 1);
+    y1 = std::clamp(y1, 0, height - 1);
+    y2 = std::clamp(y2, 0, height - 1);
+    
+    float c00 = pixels[(y1 * width + x1) * 4 + channel];
+    float c10 = pixels[(y1 * width + x2) * 4 + channel];
+    float c01 = pixels[(y2 * width + x1) * 4 + channel];
+    float c11 = pixels[(y2 * width + x2) * 4 + channel];
+    
+    float r1 = c00 * (1.0f - tx) + c10 * tx;
+    float r2 = c01 * (1.0f - tx) + c11 * tx;
+    return r1 * (1.0f - ty) + r2 * ty;
+}
+
+static float sampleBilinearMask(const std::vector<float>& mask, int width, int height, float fx, float fy) {
+    int x1 = (int)std::floor(fx);
+    int y1 = (int)std::floor(fy);
+    int x2 = x1 + 1;
+    int y2 = y1 + 1;
+    
+    float tx = fx - x1;
+    float ty = fy - y1;
+    
+    x1 = std::clamp(x1, 0, width - 1);
+    x2 = std::clamp(x2, 0, width - 1);
+    y1 = std::clamp(y1, 0, height - 1);
+    y2 = std::clamp(y2, 0, height - 1);
+    
+    float c00 = mask[y1 * width + x1];
+    float c10 = mask[y1 * width + x2];
+    float c01 = mask[y2 * width + x1];
+    float c11 = mask[y2 * width + x2];
+    
+    float r1 = c00 * (1.0f - tx) + c10 * tx;
+    float r2 = c01 * (1.0f - tx) + c11 * tx;
+    return r1 * (1.0f - ty) + r2 * ty;
+}
+
 void Canvas::CommitMovePixels(ID3D11Device* device) {
     if (!m_IsMovingPixels) return;
     
     if (m_StartActiveLayerIdx >= 0 && m_StartActiveLayerIdx < m_Layers.size()) {
         Layer& layer = m_Layers[m_StartActiveLayerIdx];
         
+        // Calculate bounding box center of floating selection
+        int minX = m_Width, maxX = 0, minY = m_Height, maxY = 0;
+        bool hasPixels = false;
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                if (m_OriginalSelectionMask[y * m_Width + x] > 0.0f) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                    hasPixels = true;
+                }
+            }
+        }
+        float cx = hasPixels ? (minX + maxX) * 0.5f : m_Width * 0.5f;
+        float cy = hasPixels ? (minY + maxY) * 0.5f : m_Height * 0.5f;
+        
         std::vector<float> finalPixels = layer.pixels;
         for (int y = 0; y < m_Height; ++y) {
             for (int x = 0; x < m_Width; ++x) {
-                int srcX = x - m_FloatingOffsetX;
-                int srcY = y - m_FloatingOffsetY;
-                if (srcX >= 0 && srcX < m_Width && srcY >= 0 && srcY < m_Height) {
-                    size_t srcIdx = (srcY * m_Width + srcX) * 4;
-                    float srcAlpha = m_FloatingPixels[srcIdx + 3];
+                // Compute inverse transformation
+                float px = (float)x - cx;
+                float py = (float)y - cy;
+                
+                // Inverse translation
+                px -= (float)m_FloatingOffsetX;
+                py -= (float)m_FloatingOffsetY;
+                
+                // Inverse rotation
+                float angle = -m_FloatingRotation;
+                float cosA = std::cos(angle);
+                float sinA = std::sin(angle);
+                float rx = px * cosA - py * sinA;
+                float ry = px * sinA + py * cosA;
+                
+                // Inverse scale
+                float sx = rx;
+                float sy = ry;
+                if (m_FloatingScaleX > 0.0001f) sx /= m_FloatingScaleX;
+                if (m_FloatingScaleY > 0.0001f) sy /= m_FloatingScaleY;
+                
+                // Translate back to center
+                float srcX = sx + cx;
+                float srcY = sy + cy;
+                
+                if (srcX >= 0.0f && srcX <= (float)m_Width - 1.0f && srcY >= 0.0f && srcY <= (float)m_Height - 1.0f) {
+                    float srcAlpha = sampleBilinearChannel(m_FloatingPixels, m_Width, m_Height, srcX, srcY, 3);
                     if (srcAlpha > 0.0f) {
                         size_t destIdx = (y * m_Width + x) * 4;
                         float destAlpha = finalPixels[destIdx + 3];
                         float outAlpha = srcAlpha + destAlpha * (1.0f - srcAlpha);
                         if (outAlpha > 0.0f) {
-                            finalPixels[destIdx + 0] = (m_FloatingPixels[srcIdx + 0] * srcAlpha + finalPixels[destIdx + 0] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
-                            finalPixels[destIdx + 1] = (m_FloatingPixels[srcIdx + 1] * srcAlpha + finalPixels[destIdx + 1] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
-                            finalPixels[destIdx + 2] = (m_FloatingPixels[srcIdx + 2] * srcAlpha + finalPixels[destIdx + 2] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                            float srcR = sampleBilinearChannel(m_FloatingPixels, m_Width, m_Height, srcX, srcY, 0);
+                            float srcG = sampleBilinearChannel(m_FloatingPixels, m_Width, m_Height, srcX, srcY, 1);
+                            float srcB = sampleBilinearChannel(m_FloatingPixels, m_Width, m_Height, srcX, srcY, 2);
+                            
+                            finalPixels[destIdx + 0] = (srcR * srcAlpha + finalPixels[destIdx + 0] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                            finalPixels[destIdx + 1] = (srcG * srcAlpha + finalPixels[destIdx + 1] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                            finalPixels[destIdx + 2] = (srcB * srcAlpha + finalPixels[destIdx + 2] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
                         }
                         finalPixels[destIdx + 3] = outAlpha;
                     }
@@ -3063,13 +3180,30 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
             std::vector<float> finalMask = layer.mask;
             for (int y = 0; y < m_Height; ++y) {
                 for (int x = 0; x < m_Width; ++x) {
-                    int srcX = x - m_FloatingOffsetX;
-                    int srcY = y - m_FloatingOffsetY;
-                    if (srcX >= 0 && srcX < m_Width && srcY >= 0 && srcY < m_Height) {
-                        size_t srcIdx = srcY * m_Width + srcX;
-                        if (m_OriginalSelectionMask[srcIdx] > 0.0f) {
+                    float px = (float)x - cx;
+                    float py = (float)y - cy;
+                    px -= (float)m_FloatingOffsetX;
+                    py -= (float)m_FloatingOffsetY;
+                    
+                    float angle = -m_FloatingRotation;
+                    float cosA = std::cos(angle);
+                    float sinA = std::sin(angle);
+                    float rx = px * cosA - py * sinA;
+                    float ry = px * sinA + py * cosA;
+                    
+                    float sx = rx;
+                    float sy = ry;
+                    if (m_FloatingScaleX > 0.0001f) sx /= m_FloatingScaleX;
+                    if (m_FloatingScaleY > 0.0001f) sy /= m_FloatingScaleY;
+                    
+                    float srcX = sx + cx;
+                    float srcY = sy + cy;
+                    
+                    if (srcX >= 0.0f && srcX <= (float)m_Width - 1.0f && srcY >= 0.0f && srcY <= (float)m_Height - 1.0f) {
+                        float maskWeight = sampleBilinearMask(m_OriginalSelectionMask, m_Width, m_Height, srcX, srcY);
+                        if (maskWeight > 0.0f) {
                             size_t destIdx = y * m_Width + x;
-                            finalMask[destIdx] = m_OriginalSelectionMask[srcIdx];
+                            finalMask[destIdx] = maskWeight;
                         }
                     }
                 }
@@ -3082,10 +3216,28 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
             std::vector<float> shiftedSelection(m_Width * m_Height, 0.0f);
             for (int y = 0; y < m_Height; ++y) {
                 for (int x = 0; x < m_Width; ++x) {
-                    int srcX = x - m_FloatingOffsetX;
-                    int srcY = y - m_FloatingOffsetY;
-                    if (srcX >= 0 && srcX < m_Width && srcY >= 0 && srcY < m_Height) {
-                        shiftedSelection[y * m_Width + x] = m_OriginalSelectionMask[srcY * m_Width + srcX];
+                    float px = (float)x - cx;
+                    float py = (float)y - cy;
+                    px -= (float)m_FloatingOffsetX;
+                    py -= (float)m_FloatingOffsetY;
+                    
+                    float angle = -m_FloatingRotation;
+                    float cosA = std::cos(angle);
+                    float sinA = std::sin(angle);
+                    float rx = px * cosA - py * sinA;
+                    float ry = px * sinA + py * cosA;
+                    
+                    float sx = rx;
+                    float sy = ry;
+                    if (m_FloatingScaleX > 0.0001f) sx /= m_FloatingScaleX;
+                    if (m_FloatingScaleY > 0.0001f) sy /= m_FloatingScaleY;
+                    
+                    float srcX = sx + cx;
+                    float srcY = sy + cy;
+                    
+                    if (srcX >= 0.0f && srcX <= (float)m_Width - 1.0f && srcY >= 0.0f && srcY <= (float)m_Height - 1.0f) {
+                        float maskWeight = sampleBilinearMask(m_OriginalSelectionMask, m_Width, m_Height, srcX, srcY);
+                        shiftedSelection[y * m_Width + x] = maskWeight;
                     }
                 }
             }
@@ -3153,32 +3305,60 @@ void Canvas::DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, flo
     }
     
     if (hasPixels) {
-        float x1 = (float)minX + m_FloatingOffsetX;
-        float y1 = (float)minY + m_FloatingOffsetY;
-        float x2 = (float)maxX + m_FloatingOffsetX;
-        float y2 = (float)maxY + m_FloatingOffsetY;
+        float cx = (minX + maxX) * 0.5f;
+        float cy = (minY + maxY) * 0.5f;
+        float cosA = std::cos(m_FloatingRotation);
+        float sinA = std::sin(m_FloatingRotation);
         
-        ImVec2 p1 = canvasToScreen(x1, y1);
-        ImVec2 p2 = canvasToScreen(x2, y1);
-        ImVec2 p3 = canvasToScreen(x2, y2);
-        ImVec2 p4 = canvasToScreen(x1, y2);
+        // Forward transform: scale then rotate around bounding box center, then translate
+        auto transformCorner = [&](float px, float py) -> ImVec2 {
+            float rx = (px - cx) * m_FloatingScaleX;
+            float ry = (py - cy) * m_FloatingScaleY;
+            float tx = rx * cosA - ry * sinA + cx + (float)m_FloatingOffsetX;
+            float ty = rx * sinA + ry * cosA + cy + (float)m_FloatingOffsetY;
+            return canvasToScreen(tx, ty);
+        };
         
-        ImU32 gizmoCol = IM_COL32(0, 120, 215, 255);
+        ImVec2 p1 = transformCorner((float)minX, (float)minY); // TL
+        ImVec2 p2 = transformCorner((float)maxX, (float)minY); // TR
+        ImVec2 p3 = transformCorner((float)maxX, (float)maxY); // BR
+        ImVec2 p4 = transformCorner((float)minX, (float)maxY); // BL
+        
+        // Midpoints for edge handles
+        ImVec2 mT = { (p1.x + p2.x) * 0.5f, (p1.y + p2.y) * 0.5f };
+        ImVec2 mR = { (p2.x + p3.x) * 0.5f, (p2.y + p3.y) * 0.5f };
+        ImVec2 mB = { (p3.x + p4.x) * 0.5f, (p3.y + p4.y) * 0.5f };
+        ImVec2 mL = { (p4.x + p1.x) * 0.5f, (p4.y + p1.y) * 0.5f };
+        
+        ImU32 gizmoCol  = IM_COL32(0, 120, 215, 255);
+        ImU32 shadowCol = IM_COL32(0, 0, 0, 120);
         float thickness = 2.0f;
-        
+
+        // Shadow
+        dl->AddLine(ImVec2(p1.x+1,p1.y+1), ImVec2(p2.x+1,p2.y+1), shadowCol, thickness);
+        dl->AddLine(ImVec2(p2.x+1,p2.y+1), ImVec2(p3.x+1,p3.y+1), shadowCol, thickness);
+        dl->AddLine(ImVec2(p3.x+1,p3.y+1), ImVec2(p4.x+1,p4.y+1), shadowCol, thickness);
+        dl->AddLine(ImVec2(p4.x+1,p4.y+1), ImVec2(p1.x+1,p1.y+1), shadowCol, thickness);
+        // Border
         dl->AddLine(p1, p2, gizmoCol, thickness);
         dl->AddLine(p2, p3, gizmoCol, thickness);
         dl->AddLine(p3, p4, gizmoCol, thickness);
         dl->AddLine(p4, p1, gizmoCol, thickness);
         
-        float hs = 4.0f;
+        float hs = 5.0f;
         auto drawHandle = [&](ImVec2 p) {
-            dl->AddRectFilled(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), IM_COL32(255, 255, 255, 255));
-            dl->AddRect(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), gizmoCol, 0.0f, 0, 1.0f);
+            dl->AddRectFilled(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), IM_COL32(255, 255, 255, 230));
+            dl->AddRect(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), gizmoCol, 0.0f, 0, 1.5f);
         };
-        drawHandle(p1);
-        drawHandle(p2);
-        drawHandle(p3);
-        drawHandle(p4);
+        auto drawEdgeHandle = [&](ImVec2 p) {
+            float hs2 = 4.0f;
+            dl->AddRectFilled(ImVec2(p.x - hs2, p.y - hs2), ImVec2(p.x + hs2, p.y + hs2), IM_COL32(200, 220, 255, 200));
+            dl->AddRect(ImVec2(p.x - hs2, p.y - hs2), ImVec2(p.x + hs2, p.y + hs2), gizmoCol, 0.0f, 0, 1.0f);
+        };
+        // Corner handles
+        drawHandle(p1); drawHandle(p2); drawHandle(p3); drawHandle(p4);
+        // Edge handles
+        drawEdgeHandle(mT); drawEdgeHandle(mR); drawEdgeHandle(mB); drawEdgeHandle(mL);
     }
 }
+
