@@ -109,6 +109,8 @@ set(SOURCES
     src/core/KeymapManager.h
     src/scripting/ScriptingEngine.cpp
     src/scripting/ScriptingEngine.h
+    src/ui/EditorPanels.cpp
+    src/ui/EditorPanels.h
 )
 
 # Shaders

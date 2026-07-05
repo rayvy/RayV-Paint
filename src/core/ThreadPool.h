@@ -14,6 +14,7 @@ public:
 
     void Init(size_t threads);
     void Shutdown();
+    size_t GetThreadCount() const { return m_Workers.size(); }
 
     template<class F, class... Args>
     auto Enqueue(F&& f, Args&&... args) 
