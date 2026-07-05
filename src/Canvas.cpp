@@ -14,6 +14,7 @@
 
 // Explicitly declare stbi_zlib_compress which is defined in ImageManager.cpp (via stb_image_write implementation)
 extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, int* out_len, int quality);
+extern "C" char* stbi_zlib_decode_malloc(const char* buffer, int len, int* outlen);
 
 using json = nlohmann::json;
 
@@ -288,6 +289,17 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
+    // Create rasterizer state with CullMode = D3D11_CULL_NONE
+    D3D11_RASTERIZER_DESC rd = {};
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.FrontCounterClockwise = FALSE;
+    rd.DepthClipEnable = TRUE;
+    hr = device->CreateRasterizerState(&rd, &m_RasterizerState);
+    if (FAILED(hr)) {
+        return false;
+    }
+
     // 9. Create Composite targets
     CreateCompositeResources(device);
 
@@ -312,6 +324,7 @@ void Canvas::Shutdown() {
     if (m_InputLayout) { m_InputLayout->Release(); m_InputLayout = nullptr; }
     if (m_SamplerState) { m_SamplerState->Release(); m_SamplerState = nullptr; }
     if (m_LayerBlendState) { m_LayerBlendState->Release(); m_LayerBlendState = nullptr; }
+    if (m_RasterizerState) { m_RasterizerState->Release(); m_RasterizerState = nullptr; }
 
     for (auto& layer : m_Layers) {
         if (layer.texture) layer.texture->Release();
@@ -838,11 +851,103 @@ void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float vie
     context->PSSetShaderResources(0, 1, &m_CompositeSRV);
     context->PSSetSamplers(0, 1, &m_SamplerState);
 
+    context->RSSetState(m_RasterizerState);
     context->DrawIndexed(6, 0, 0);
+    context->RSSetState(nullptr);
 
     // Clean slot
     ID3D11ShaderResourceView* nullSRV = nullptr;
     context->PSSetShaderResources(0, 1, &nullSRV);
+}
+
+static bool ExtractICCFromPNG(const std::string& pngPath, std::vector<uint8_t>& outIccData, std::string& outProfileName) {
+    std::ifstream file(pngPath, std::ios::binary);
+    if (!file.is_open()) return false;
+
+    // Check PNG signature
+    uint8_t sig[8];
+    if (!file.read(reinterpret_cast<char*>(sig), 8)) return false;
+    if (sig[0] != 0x89 || sig[1] != 0x50 || sig[2] != 0x4E || sig[3] != 0x47) return false;
+
+    while (true) {
+        uint8_t lenBytes[4];
+        if (!file.read(reinterpret_cast<char*>(lenBytes), 4)) break;
+        uint32_t len = (lenBytes[0] << 24) | (lenBytes[1] << 16) | (lenBytes[2] << 8) | lenBytes[3];
+
+        char type[4];
+        if (!file.read(type, 4)) break;
+
+        if (std::memcmp(type, "iCCP", 4) == 0) {
+            std::vector<uint8_t> chunkData(len);
+            if (!file.read(reinterpret_cast<char*>(chunkData.data()), len)) break;
+
+            size_t nameLen = 0;
+            while (nameLen < len && chunkData[nameLen] != 0) {
+                nameLen++;
+            }
+            if (nameLen >= len || nameLen > 79) return false;
+
+            outProfileName = std::string(reinterpret_cast<char*>(chunkData.data()), nameLen);
+
+            if (nameLen + 2 >= len) return false;
+            uint8_t compMethod = chunkData[nameLen + 1];
+            if (compMethod != 0) return false;
+
+            size_t compSize = len - (nameLen + 2);
+            const uint8_t* compPtr = chunkData.data() + nameLen + 2;
+
+            int decompSize = 0;
+            char* decomp = stbi_zlib_decode_malloc(reinterpret_cast<const char*>(compPtr), static_cast<int>(compSize), &decompSize);
+            if (decomp && decompSize > 0) {
+                outIccData.assign(decomp, decomp + decompSize);
+                free(decomp);
+                return true;
+            }
+            return false;
+        } else {
+            file.seekg(len + 4, std::ios::cur);
+        }
+    }
+    return false;
+}
+
+bool Canvas::ExtractAndSetICCProfile(const std::string& pngPath) {
+    std::vector<uint8_t> iccData;
+    std::string profileName;
+    if (ExtractICCFromPNG(pngPath, iccData, profileName)) {
+        std::string iccPath = pngPath;
+        size_t dotPos = iccPath.find_last_of('.');
+        if (dotPos != std::string::npos) {
+            iccPath = iccPath.substr(0, dotPos) + ".icc";
+        } else {
+            iccPath += ".icc";
+        }
+        std::ofstream outFile(iccPath, std::ios::binary);
+        if (outFile.is_open()) {
+            outFile.write(reinterpret_cast<const char*>(iccData.data()), iccData.size());
+            outFile.close();
+            m_ExportPngColorSpace = iccPath;
+            Logger::Get().Info("Extracted embedded ICC profile '" + profileName + "' to: " + iccPath);
+            return true;
+        }
+    }
+
+    // Fallback: check for next-to-image .icc or .icm files
+    std::string base = pngPath;
+    size_t dot = base.find_last_of('.');
+    if (dot != std::string::npos) base = base.substr(0, dot);
+    if (std::filesystem::exists(base + ".icc")) {
+        m_ExportPngColorSpace = base + ".icc";
+        Logger::Get().Info("Found external ICC profile next to image: " + m_ExportPngColorSpace);
+        return true;
+    } else if (std::filesystem::exists(base + ".icm")) {
+        m_ExportPngColorSpace = base + ".icm";
+        Logger::Get().Info("Found external ICM profile next to image: " + m_ExportPngColorSpace);
+        return true;
+    }
+
+    m_ExportPngColorSpace = "sRGB";
+    return false;
 }
 
 bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath) {
@@ -856,6 +961,7 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     int imgWidth = 0;
     int imgHeight = 0;
     std::vector<float> loadedPixels;
+    DdsFormat loadedDdsFormat = DdsFormat::RGBA8_UNORM;
 
     if (ext == "dds") {
         DdsImage dds;
@@ -865,6 +971,7 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
         imgWidth = dds.width;
         imgHeight = dds.height;
         loadedPixels = std::move(dds.pixels);
+        loadedDdsFormat = dds.format;
         if (dds.format == DdsFormat::R8_UNORM || dds.format == DdsFormat::R16_FLOAT || dds.format == DdsFormat::R32_FLOAT) {
             m_ChannelR = true;
             m_ChannelG = false;
@@ -897,6 +1004,20 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
         m_Layers.clear();
         m_ProjectType = ProjectType::Simple;
         m_CurrentProjectFilePath = filepath;
+        m_ExportPath = filepath;
+
+        if (ext == "dds") {
+            if (loadedDdsFormat == DdsFormat::RGBA32_FLOAT) m_ExportFormat = "RGBA32_FLOAT";
+            else if (loadedDdsFormat == DdsFormat::RGBA16_UNORM) m_ExportFormat = "RGBA16_UNORM";
+            else if (loadedDdsFormat == DdsFormat::RGBA16_FLOAT) m_ExportFormat = "RGBA16_FLOAT";
+            else if (loadedDdsFormat == DdsFormat::R8_UNORM) m_ExportFormat = "R8_UNORM";
+            else if (loadedDdsFormat == DdsFormat::R16_FLOAT) m_ExportFormat = "R16_FLOAT";
+            else if (loadedDdsFormat == DdsFormat::R32_FLOAT) m_ExportFormat = "R32_FLOAT";
+            else m_ExportFormat = "RGBA8_UNORM";
+            Logger::Get().Info("Auto-configured DDS export format from loaded file: " + m_ExportFormat);
+        } else if (ext == "png") {
+            ExtractAndSetICCProfile(filepath);
+        }
     }
 
     // Allocate layer

@@ -14,6 +14,67 @@ extern void ApplyTheme(const std::string& themeName);
 extern bool g_IsLayersHovered;
 extern bool g_IsViewportHovered;
 
+#ifdef _WIN32
+#include <windows.h>
+#include <commdlg.h>
+#pragma comment(lib, "comdlg32.lib")
+
+static bool ShowOpenFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") {
+    OPENFILENAMEA ofn;
+    char szFile[512] = { 0 };
+    if (outPath && strlen(outPath) > 0) {
+        std::strncpy(szFile, outPath, sizeof(szFile) - 1);
+    }
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile);
+    ofn.lpstrFilter = filter;
+    ofn.nFilterIndex = 1;
+    ofn.lpstrFileTitle = NULL;
+    ofn.nMaxFileTitle = 0;
+    ofn.lpstrInitialDir = NULL;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+
+    if (GetOpenFileNameA(&ofn) == TRUE) {
+        std::strncpy(outPath, ofn.lpstrFile, maxLen - 1);
+        outPath[maxLen - 1] = '\0';
+        return true;
+    }
+    return false;
+}
+
+static bool ShowSaveFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") {
+    OPENFILENAMEA ofn;
+    char szFile[512] = { 0 };
+    if (outPath && strlen(outPath) > 0) {
+        std::strncpy(szFile, outPath, sizeof(szFile) - 1);
+    }
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile);
+    ofn.lpstrFilter = filter;
+    ofn.nFilterIndex = 1;
+    ofn.lpstrFileTitle = NULL;
+    ofn.nMaxFileTitle = 0;
+    ofn.lpstrInitialDir = NULL;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+
+    if (GetSaveFileNameA(&ofn) == TRUE) {
+        std::strncpy(outPath, ofn.lpstrFile, maxLen - 1);
+        outPath[maxLen - 1] = '\0';
+        return true;
+    }
+    return false;
+}
+#else
+static bool ShowOpenFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") { return false; }
+static bool ShowSaveFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") { return false; }
+#endif
+
 namespace UI {
 
     static void DrawToolIcon(const char* actionName, ImVec2 min, ImVec2 max, ImU32 color) {
@@ -337,6 +398,10 @@ namespace UI {
             static char importPath[512] = "";
             ImGui::Text("Enter absolute path to image:");
             ImGui::InputText("##importpath", importPath, IM_ARRAYSIZE(importPath));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse...##import")) {
+                ShowOpenFileWin32(importPath, IM_ARRAYSIZE(importPath), "Image Files (*.dds;*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.dds;*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All Files (*.*)\0*.*\0");
+            }
             ImGui::Separator();
             if (ImGui::Button("Import", ImVec2(120, 0))) {
                 if (canvas.LoadImageToLayer(device, importPath)) {
@@ -356,6 +421,10 @@ namespace UI {
             static int formatChoice = 0; 
             ImGui::Text("Enter export path:");
             ImGui::InputText("##exportpath", exportPath, IM_ARRAYSIZE(exportPath));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse...##exportdds")) {
+                ShowSaveFileWin32(exportPath, IM_ARRAYSIZE(exportPath), "DDS Files (*.dds)\0*.dds\0All Files (*.*)\0*.*\0");
+            }
             ImGui::Text("DDS Format:");
             static const char* formatNames[] = {
                 "8-bit SDR (RGBA8)",
@@ -394,9 +463,17 @@ namespace UI {
             static char iccPath[512] = "";
             ImGui::Text("Enter export path (PNG, JPG, BMP, TGA):");
             ImGui::InputText("##exportpathstd", exportPath, IM_ARRAYSIZE(exportPath));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse...##exportstd")) {
+                ShowSaveFileWin32(exportPath, IM_ARRAYSIZE(exportPath), "Image Files (*.png;*.jpg;*.jpeg;*.bmp;*.tga)\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files (*.*)\0*.*\0");
+            }
             ImGui::Spacing();
             ImGui::Text("Optional ICC Profile (PNG only):");
             ImGui::InputText("##iccpath", iccPath, IM_ARRAYSIZE(iccPath));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse...##icc")) {
+                ShowOpenFileWin32(iccPath, IM_ARRAYSIZE(iccPath), "ICC Profiles (*.icc;*.icm)\0*.icc;*.icm\0All Files (*.*)\0*.*\0");
+            }
             ImGui::SameLine();
             if (ImGui::Button("Clear")) {
                 iccPath[0] = '\0';
@@ -429,6 +506,10 @@ namespace UI {
             
             ImGui::Text("Export File Path:");
             ImGui::InputText("##advpath", exportPath, IM_ARRAYSIZE(exportPath));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse...##adv")) {
+                ShowSaveFileWin32(exportPath, IM_ARRAYSIZE(exportPath), "DDS Files (*.dds)\0*.dds\0PNG Files (*.png)\0*.png\0All Files (*.*)\0*.*\0");
+            }
             
             std::string pathStr = exportPath;
             size_t dot = pathStr.find_last_of('.');
@@ -491,6 +572,10 @@ namespace UI {
                 }
                 
                 ImGui::InputText("ICC Color Profile Path", iccPath, IM_ARRAYSIZE(iccPath));
+                ImGui::SameLine();
+                if (ImGui::Button("Browse...##iccpathadv")) {
+                    ShowOpenFileWin32(iccPath, IM_ARRAYSIZE(iccPath), "ICC Profiles (*.icc;*.icm)\0*.icc;*.icm\0All Files (*.*)\0*.*\0");
+                }
                 ImGui::TextDisabled("Leave empty for standard sRGB colorspace");
                 
                 canvas.SetExportPngColorSpace(strlen(iccPath) > 0 ? iccPath : "sRGB");
@@ -531,8 +616,8 @@ namespace UI {
         // Settings / Preferences Popup Modal
         if (ImGui::BeginPopupModal("Settings", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
             if (!state.settingsInitialized) {
-                std::strncpy(state.activeTheme.data(), ConfigManager::Get().GetTheme().c_str(), 63);
-                std::strncpy(state.backupDir.data(), ConfigManager::Get().GetBackupDir().c_str(), 255);
+                state.activeTheme = ConfigManager::Get().GetTheme();
+                state.backupDir = ConfigManager::Get().GetBackupDir();
                 state.defW = ConfigManager::Get().GetDefaultWidth();
                 state.defH = ConfigManager::Get().GetDefaultHeight();
                 state.autoSaveMins = ConfigManager::Get().GetAutoSaveIntervalMinutes();
@@ -732,6 +817,10 @@ namespace UI {
             static char savePath[512] = "project.rayp";
             ImGui::Text("Enter project file path (.rayp):");
             ImGui::InputText("##savepathrayp", savePath, IM_ARRAYSIZE(savePath));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse...##saveproject")) {
+                ShowSaveFileWin32(savePath, IM_ARRAYSIZE(savePath), "RayP Projects (*.rayp)\0*.rayp\0All Files (*.*)\0*.*\0");
+            }
             ImGui::Separator();
             if (ImGui::Button("Save", ImVec2(120, 0))) {
                 if (canvas.SaveCanvasRayp(savePath)) {
@@ -750,6 +839,10 @@ namespace UI {
             static char loadPath[512] = "project.rayp";
             ImGui::Text("Enter project file path (.rayp):");
             ImGui::InputText("##loadpathrayp", loadPath, IM_ARRAYSIZE(loadPath));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse...##loadproject")) {
+                ShowOpenFileWin32(loadPath, IM_ARRAYSIZE(loadPath), "RayP Projects (*.rayp)\0*.rayp\0All Files (*.*)\0*.*\0");
+            }
             ImGui::Separator();
             if (ImGui::Button("Load", ImVec2(120, 0))) {
                 if (canvas.LoadCanvasRayp(loadPath, device)) {
@@ -959,8 +1052,12 @@ namespace UI {
 
             char propProjPath[512] = "";
             std::strncpy(propProjPath, canvas.GetCurrentProjectFilePath().c_str(), sizeof(propProjPath));
-            if (ImGui::InputText("Project Path", propProjPath, IM_ARRAYSIZE(propProjPath))) {
-                canvas.SetCurrentProjectFilePath(propProjPath);
+            ImGui::InputText("Project Path", propProjPath, IM_ARRAYSIZE(propProjPath));
+            ImGui::SameLine();
+            if (ImGui::Button("...##propProjPath")) {
+                if (ShowOpenFileWin32(propProjPath, IM_ARRAYSIZE(propProjPath), "RayP Projects (*.rayp)\0*.rayp\0All Files (*.*)\0*.*\0")) {
+                    canvas.SetCurrentProjectFilePath(propProjPath);
+                }
             }
 
             ImGui::NewLine();
@@ -969,8 +1066,12 @@ namespace UI {
             
             char propExportPath[512] = "";
             std::strncpy(propExportPath, canvas.GetExportPath().c_str(), sizeof(propExportPath));
-            if (ImGui::InputText("Export Path", propExportPath, IM_ARRAYSIZE(propExportPath))) {
-                canvas.SetExportPath(propExportPath);
+            ImGui::InputText("Export Path", propExportPath, IM_ARRAYSIZE(propExportPath));
+            ImGui::SameLine();
+            if (ImGui::Button("...##propExportPath")) {
+                if (ShowSaveFileWin32(propExportPath, IM_ARRAYSIZE(propExportPath), "DDS Files (*.dds)\0*.dds\0PNG Files (*.png)\0*.png\0All Files (*.*)\0*.*\0")) {
+                    canvas.SetExportPath(propExportPath);
+                }
             }
             
             std::string pathStr = propExportPath;
@@ -1014,8 +1115,12 @@ namespace UI {
                 if (currentIcc != "sRGB" && currentIcc != "Linear") {
                     std::strncpy(propIccPath, currentIcc.c_str(), sizeof(propIccPath));
                 }
-                if (ImGui::InputText("ICC Profile", propIccPath, IM_ARRAYSIZE(propIccPath))) {
-                    canvas.SetExportPngColorSpace(strlen(propIccPath) > 0 ? propIccPath : "sRGB");
+                ImGui::InputText("ICC Profile", propIccPath, IM_ARRAYSIZE(propIccPath));
+                ImGui::SameLine();
+                if (ImGui::Button("...##propIccPath")) {
+                    if (ShowOpenFileWin32(propIccPath, IM_ARRAYSIZE(propIccPath), "ICC Profiles (*.icc;*.icm)\0*.icc;*.icm\0All Files (*.*)\0*.*\0")) {
+                        canvas.SetExportPngColorSpace(strlen(propIccPath) > 0 ? propIccPath : "sRGB");
+                    }
                 }
             }
 

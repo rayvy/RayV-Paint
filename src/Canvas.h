@@ -210,6 +210,9 @@ private:
     ID3D11RenderTargetView* m_CompositeRTV = nullptr;
     ID3D11ShaderResourceView* m_CompositeSRV = nullptr;
     ID3D11BlendState* m_LayerBlendState = nullptr;
+    ID3D11RasterizerState* m_RasterizerState = nullptr;
+
+    bool ExtractAndSetICCProfile(const std::string& pngPath);
 
     // Stroke state tracking
     bool m_IsStrokeActive = false;

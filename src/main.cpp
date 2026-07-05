@@ -737,6 +737,9 @@ int main(int argc, char* argv[]) {
                     wantPan = true;
                 }
 
+                static bool s_IsDraggingRotation = false;
+                static float s_StartRotationAngle = 0.0f;
+
                 if (wantPan) {
                     ImGuiMouseButton panButton = ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ? ImGuiMouseButton_Middle : ImGuiMouseButton_Left;
                     ImVec2 drag = ImGui::GetMouseDragDelta(panButton);
@@ -744,14 +747,26 @@ int main(int argc, char* argv[]) {
                     dragDy = drag.y - g_LastDragDelta.y;
                     g_LastDragDelta = drag;
                     isPanning = true;
+                    s_IsDraggingRotation = false;
                 } else if (wantRotate) {
+                    if (!s_IsDraggingRotation) {
+                        s_IsDraggingRotation = true;
+                        s_StartRotationAngle = g_Canvas.GetRotationAngle();
+                    }
                     ImGuiMouseButton rotateButton = ImGui::IsMouseDragging(ImGuiMouseButton_Right) ? ImGuiMouseButton_Right : ImGuiMouseButton_Left;
                     ImVec2 drag = ImGui::GetMouseDragDelta(rotateButton);
                     dragDx = drag.x - g_LastDragDelta.x;
                     g_LastDragDelta = drag;
-                    g_Canvas.SetRotationAngle(g_Canvas.GetRotationAngle() + dragDx * 0.005f);
+                    
+                    float targetAngle = s_StartRotationAngle + drag.x * 0.005f;
+                    if (ImGui::GetIO().KeyCtrl) {
+                        float snapStep = 45.0f * (3.14159265f / 180.0f);
+                        targetAngle = std::round(targetAngle / snapStep) * snapStep;
+                    }
+                    g_Canvas.SetRotationAngle(targetAngle);
                     isRotating = true;
                 } else {
+                    s_IsDraggingRotation = false;
                     g_LastDragDelta = ImVec2(0.0f, 0.0f);
                 }
             } else {
