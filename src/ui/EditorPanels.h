@@ -20,7 +20,7 @@ namespace UI {
         bool showLayers = true;
         bool showToolbar = true;
         bool showColors = true;
-        bool showBrushSettings = true;
+        bool showToolSettings = true;
 
         // Modal visibility triggers
         bool openImportModal = false;
@@ -49,6 +49,11 @@ namespace UI {
         int autoSaveMins = 5;
         int maxUndo = 100;
         int maxUndoMem = 512;
+
+        // Per-tool settings
+        float magicWandTolerance = 0.15f;
+        bool  magicWandContiguous = true;
+        float bucketFillTolerance = 0.15f;
 
         // Recovery path
         std::string backupPath = "";

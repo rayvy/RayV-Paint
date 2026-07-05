@@ -468,6 +468,11 @@ void Canvas::ApplyLayerMask(int index) {
         }
     }
     
+    if (layer.mask.size() != (size_t)m_Width * m_Height) {
+        Logger::Get().Error("ApplyLayerMask: Mask size mismatch! Reallocating mask.");
+        layer.mask.resize((size_t)m_Width * m_Height, 1.0f);
+    }
+
     for (size_t y = 0; y < m_Height; ++y) {
         for (size_t x = 0; x < m_Width; ++x) {
             size_t pixelIdx = (y * m_Width + x) * 4;
@@ -889,7 +894,8 @@ void Canvas::ResizeCanvas(ID3D11Device* device, int width, int height) {
     }
 
     // Resize each layer's pixel buffers
-    for (auto& layer : m_Layers) {
+    for (size_t i = 0; i < m_Layers.size(); ++i) {
+        auto& layer = m_Layers[i];
         if (layer.pixels.empty()) {
             if (device) {
                 RecreateLayerTexture(device, layer);
@@ -914,6 +920,21 @@ void Canvas::ResizeCanvas(ID3D11Device* device, int width, int height) {
         }
 
         RecreateLayerTexture(device, layer);
+
+        if (layer.hasMask) {
+            std::vector<float> oldMask = std::move(layer.mask);
+            layer.mask.assign((size_t)m_Width * m_Height, 1.0f);
+            if (!oldMask.empty()) {
+                for (int y = 0; y < copyH; ++y) {
+                    for (int x = 0; x < copyW; ++x) {
+                        layer.mask[(size_t)y * m_Width + x] = oldMask[(size_t)y * oldW + x];
+                    }
+                }
+            }
+            if (device) {
+                UpdateLayerMaskTexture(device, static_cast<int>(i));
+            }
+        }
     }
 }
 
@@ -950,6 +971,10 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 context->UpdateSubresource(layer.texture, 0, nullptr, layer.pixels.data(), m_Width * sizeof(float) * 4, 0);
                 layer.needsUpload = false;
             }
+        }
+        if (m_SelectionMaskNeedsUpload && m_SelectionMaskTexture) {
+            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, m_SelectionMask.data(), m_Width * sizeof(float), 0);
+            m_SelectionMaskNeedsUpload = false;
         }
         device->Release();
     }
@@ -2293,8 +2318,15 @@ bool Canvas::SaveProjectAuto() {
 }
 
 void Canvas::ClearSelection() {
+    if (!m_HasSelection) return;
+    std::vector<float> oldMask = m_SelectionMask;
+    bool oldHasSelection = m_HasSelection;
+
     m_SelectionMask.assign(m_Width * m_Height, 0.0f);
     m_HasSelection = false;
+    m_SelectionMaskNeedsUpload = true;
+
+    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Deselect", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
 }
 
 void Canvas::SetSelectionMask(const std::vector<float>& mask) {
@@ -2307,6 +2339,7 @@ void Canvas::SetSelectionMask(const std::vector<float>& mask) {
                 break;
             }
         }
+        m_SelectionMaskNeedsUpload = true;
     }
 }
 
@@ -2351,6 +2384,9 @@ void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
 }
 
 void Canvas::ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
+    std::vector<float> oldMask = m_SelectionMask;
+    bool oldHasSelection = m_HasSelection;
+
     cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
     cv::rectangle(temp, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255), -1);
 
@@ -2375,9 +2411,15 @@ void Canvas::ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool s
             }
         }
     }
+    m_SelectionMaskNeedsUpload = true;
+
+    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
 }
 
 void Canvas::ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
+    std::vector<float> oldMask = m_SelectionMask;
+    bool oldHasSelection = m_HasSelection;
+
     cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
     cv::Point center((x1 + x2) / 2, (y1 + y2) / 2);
     cv::Size axes(std::abs(x2 - x1) / 2, std::abs(y2 - y1) / 2);
@@ -2406,9 +2448,15 @@ void Canvas::ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, boo
             }
         }
     }
+    m_SelectionMaskNeedsUpload = true;
+
+    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
 }
 
 void Canvas::ApplyLassoSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract) {
+    std::vector<float> oldMask = m_SelectionMask;
+    bool oldHasSelection = m_HasSelection;
+
     cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
     if (points.size() >= 3) {
         std::vector<cv::Point> cvPoints;
@@ -2440,10 +2488,16 @@ void Canvas::ApplyLassoSelection(const std::vector<std::pair<int, int>>& points,
             }
         }
     }
+    m_SelectionMaskNeedsUpload = true;
+
+    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
 }
 
 void Canvas::ApplyMagicWandSelection(ID3D11Device* device, int startX, int startY, float tolerance, bool add, bool subtract, bool contiguous) {
     if (startX < 0 || startX >= m_Width || startY < 0 || startY >= m_Height) return;
+
+    std::vector<float> oldMask = m_SelectionMask;
+    bool oldHasSelection = m_HasSelection;
 
     std::vector<float> srcPixels;
     if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
@@ -2497,15 +2551,23 @@ void Canvas::ApplyMagicWandSelection(ID3D11Device* device, int startX, int start
             }
         }
     }
+    m_SelectionMaskNeedsUpload = true;
 
     UpdateSelectionMaskTexture(device);
+
+    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
 }
 
-void Canvas::ApplySmartSelectSelection(ID3D11Device* device, int x1, int y1, int x2, int y2, bool add, bool subtract) {
+void Canvas::ApplySmartSelectSelection(ID3D11Device* device, const std::vector<std::pair<int, int>>& points, bool add, bool subtract) {
+    if (points.empty()) return;
+
     m_SmartSelectInProgress.store(true);
     m_SmartSelectCancelled.store(false);
 
-    std::thread t([this, device, x1, y1, x2, y2, add, subtract]() {
+    std::vector<float> oldMask = m_SelectionMask;
+    bool oldHasSelection = m_HasSelection;
+
+    std::thread t([this, device, points, add, subtract, oldMask, oldHasSelection]() {
         std::vector<float> srcPixels;
         if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
             srcPixels = m_Layers[m_ActiveLayerIdx].pixels;
@@ -2514,23 +2576,65 @@ void Canvas::ApplySmartSelectSelection(ID3D11Device* device, int x1, int y1, int
         }
 
         cv::Mat mat = ImageManager::PixelsToMat8UC3(srcPixels, m_Width, m_Height);
-        cv::Mat mask = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-        cv::Mat bgdModel, fgdModel;
 
-        cv::Rect rect(cv::Point(std::min(x1, x2), std::min(y1, y2)), cv::Point(std::max(x1, x2), std::max(y1, y2)));
-        rect.x = std::max(0, rect.x);
-        rect.y = std::max(0, rect.y);
-        rect.width = std::min(m_Width - rect.x, rect.width);
-        rect.height = std::min(m_Height - rect.y, rect.height);
+        // Find bounding box
+        int minX = m_Width;
+        int maxX = 0;
+        int minY = m_Height;
+        int maxY = 0;
+        for (const auto& p : points) {
+            minX = std::min(minX, p.first);
+            maxX = std::max(maxX, p.first);
+            minY = std::min(minY, p.second);
+            maxY = std::max(maxY, p.second);
+        }
 
-        if (rect.width > 2 && rect.height > 2) {
-            try {
-                if (!m_SmartSelectCancelled.load()) {
-                    cv::grabCut(mat, mask, rect, bgdModel, fgdModel, 3, cv::GC_INIT_WITH_RECT);
-                }
-            } catch (...) {
-                // Ignore errors
+        // Add 15px margin for GrabCut context
+        const int margin = 15;
+        minX = std::max(0, minX - margin);
+        minY = std::max(0, minY - margin);
+        maxX = std::min(m_Width - 1, maxX + margin);
+        maxY = std::min(m_Height - 1, maxY + margin);
+
+        int rectW = maxX - minX + 1;
+        int rectH = maxY - minY + 1;
+
+        if (rectW <= 2 || rectH <= 2) {
+            m_SmartSelectInProgress.store(false);
+            return;
+        }
+
+        cv::Rect roiRect(minX, minY, rectW, rectH);
+        cv::Mat croppedMat = mat(roiRect).clone();
+        cv::Mat croppedMask = cv::Mat::zeros(rectH, rectW, CV_8UC1); // Initialized to cv::GC_BGD
+
+        // Shift points relative to ROI
+        std::vector<cv::Point> shiftedPoints;
+        for (const auto& p : points) {
+            shiftedPoints.push_back(cv::Point(
+                std::clamp(p.first - minX, 0, rectW - 1),
+                std::clamp(p.second - minY, 0, rectH - 1)
+            ));
+        }
+
+        // Fill probable foreground area (inside lasso)
+        if (shiftedPoints.size() >= 3) {
+            std::vector<std::vector<cv::Point>> polys = { shiftedPoints };
+            cv::fillPoly(croppedMask, polys, cv::Scalar(cv::GC_PR_FGD));
+        } else {
+            // Draw a thick line if too few points
+            for (size_t i = 0; i < shiftedPoints.size() - 1; ++i) {
+                cv::line(croppedMask, shiftedPoints[i], shiftedPoints[i+1], cv::Scalar(cv::GC_PR_FGD), 5);
             }
+        }
+
+        cv::Mat bgdModel, fgdModel;
+        try {
+            if (!m_SmartSelectCancelled.load()) {
+                cv::grabCut(croppedMat, croppedMask, cv::Rect(), bgdModel, fgdModel, 2, cv::GC_INIT_WITH_MASK);
+            }
+        } catch (...) {
+            // Ignore errors
         }
 
         if (m_SmartSelectCancelled.load()) {
@@ -2538,17 +2642,18 @@ void Canvas::ApplySmartSelectSelection(ID3D11Device* device, int x1, int y1, int
             return;
         }
 
+        // Map back to full selection mask
         cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-        for (int y = 0; y < m_Height; ++y) {
-            for (int x = 0; x < m_Width; ++x) {
-                uint8_t val = mask.at<uint8_t>(y, x);
+        for (int y = 0; y < rectH; ++y) {
+            for (int x = 0; x < rectW; ++x) {
+                uint8_t val = croppedMask.at<uint8_t>(y, x);
                 if (val == cv::GC_PR_FGD || val == cv::GC_FGD) {
-                    temp.at<uint8_t>(y, x) = 255;
+                    temp.at<uint8_t>(minY + y, minX + x) = 255;
                 }
             }
         }
 
-        cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+        cv::Mat current = ImageManager::PixelsToMat8UC1(oldMask, m_Width, m_Height);
         cv::Mat combined;
         if (add) {
             cv::bitwise_or(current, temp, combined);
@@ -2569,8 +2674,10 @@ void Canvas::ApplySmartSelectSelection(ID3D11Device* device, int x1, int y1, int
                 }
             }
         }
+        m_SelectionMaskNeedsUpload = true;
 
         UpdateSelectionMaskTexture(device);
+        m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Smart Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
         m_SmartSelectInProgress.store(false);
     });
     t.detach();

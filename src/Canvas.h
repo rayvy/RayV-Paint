@@ -92,7 +92,7 @@ public:
     void ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, bool subtract);
     void ApplyLassoSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
     void ApplyMagicWandSelection(ID3D11Device* device, int startX, int startY, float tolerance, bool add, bool subtract, bool contiguous);
-    void ApplySmartSelectSelection(ID3D11Device* device, int x1, int y1, int x2, int y2, bool add, bool subtract);
+    void ApplySmartSelectSelection(ID3D11Device* device, const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
     bool IsSmartSelectInProgress() const { return m_SmartSelectInProgress.load(); }
     void CancelSmartSelect() { m_SmartSelectCancelled.store(true); }
     void ApplyBucketFill(int startX, int startY, float tolerance, const float color[4], bool contiguous);
@@ -290,6 +290,7 @@ private:
     ID3D11Texture2D* m_SelectionMaskTexture = nullptr;
     ID3D11ShaderResourceView* m_SelectionMaskSRV = nullptr;
     float m_SelectionOutlineTime = 0.0f;
+    bool m_SelectionMaskNeedsUpload = false;
     std::atomic<bool> m_SmartSelectInProgress{false};
     std::atomic<bool> m_SmartSelectCancelled{false};
 

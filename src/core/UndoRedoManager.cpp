@@ -80,6 +80,29 @@ size_t PaintStrokeCommand::GetMemorySize() const {
     return size;
 }
 
+SelectionCommand::SelectionCommand(const std::string& name, 
+                                   std::vector<float> oldMask, bool oldHasSelection,
+                                   std::vector<float> newMask, bool newHasSelection)
+    : m_Name(name)
+    , m_OldMask(std::move(oldMask))
+    , m_OldHasSelection(oldHasSelection)
+    , m_NewMask(std::move(newMask))
+    , m_NewHasSelection(newHasSelection) {}
+
+void SelectionCommand::Undo(Canvas* canvas) {
+    canvas->SetSelectionMask(m_OldMask);
+}
+
+void SelectionCommand::Redo(Canvas* canvas) {
+    canvas->SetSelectionMask(m_NewMask);
+}
+
+size_t SelectionCommand::GetMemorySize() const {
+    return sizeof(SelectionCommand) + m_Name.capacity() + 
+           m_OldMask.capacity() * sizeof(float) + 
+           m_NewMask.capacity() * sizeof(float);
+}
+
 UndoRedoManager::UndoRedoManager() {}
 
 void UndoRedoManager::PushCommand(std::shared_ptr<UndoCommand> command) {

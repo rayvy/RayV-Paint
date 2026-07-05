@@ -866,8 +866,8 @@ int main(int argc, char* argv[]) {
                 float rotX = rx * cosA - ry * sinA;
                 float rotY = rx * sinA + ry * cosA;
                 return ImVec2(
-                    imageMin.x + screenOriginX + rotX * zoom,
-                    imageMin.y + screenOriginY + rotY * zoom
+                    imageMin.x + screenOriginX + (rotX + cw * 0.5f) * zoom,
+                    imageMin.y + screenOriginY + (rotY + ch * 0.5f) * zoom
                 );
             };
 
@@ -1046,7 +1046,7 @@ int main(int argc, char* argv[]) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                         bool add = ImGui::GetIO().KeyShift;
                         bool subtract = ImGui::GetIO().KeyAlt;
-                        g_Canvas.ApplyMagicWandSelection(g_pd3dDevice, (int)canvasX, (int)canvasY, 0.15f, add, subtract, true);
+                        g_Canvas.ApplyMagicWandSelection(g_pd3dDevice, (int)canvasX, (int)canvasY, uiState.magicWandTolerance, add, subtract, uiState.magicWandContiguous);
                     }
                 }
                 // Pipette
@@ -1065,7 +1065,7 @@ int main(int argc, char* argv[]) {
                 // Bucket Fill
                 else if (g_ActiveTool == ActiveTool::BucketFill) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        g_Canvas.ApplyBucketFill((int)canvasX, (int)canvasY, 0.15f, g_Brush.color, true);
+                        g_Canvas.ApplyBucketFill((int)canvasX, (int)canvasY, uiState.bucketFillTolerance, g_Brush.color, true);
                     }
                 }
                 // Gradient (drag to define vector)
@@ -1099,8 +1099,8 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Accumulate points if lasso is active
-            if (g_IsSelectionDragging && g_ActiveTool == ActiveTool::LassoSelect) {
+            // Accumulate points if lasso or smart select is active
+            if (g_IsSelectionDragging && (g_ActiveTool == ActiveTool::LassoSelect || g_ActiveTool == ActiveTool::SmartSelect)) {
                 int cx = (int)canvasX;
                 int cy = (int)canvasY;
                 if (g_LassoPoints.empty() || g_LassoPoints.back() != std::make_pair(cx, cy)) {
@@ -1132,7 +1132,7 @@ int main(int argc, char* argv[]) {
                     g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
                 }
                 else if (g_ActiveTool == ActiveTool::SmartSelect) {
-                    g_Canvas.ApplySmartSelectSelection(g_pd3dDevice, x1, y1, x2, y2, add, subtract);
+                    g_Canvas.ApplySmartSelectSelection(g_pd3dDevice, g_LassoPoints, add, subtract);
                 }
                 g_LassoPoints.clear();
             }
@@ -1165,7 +1165,7 @@ int main(int argc, char* argv[]) {
                 ImU32 outlineCol = IM_COL32(255, 255, 0, 255);
                 float thickness = 2.0f;
 
-                if (g_ActiveTool == ActiveTool::RectSelect || g_ActiveTool == ActiveTool::SmartSelect) {
+                if (g_ActiveTool == ActiveTool::RectSelect) {
                     ImVec2 p1 = canvasToScreen(g_SelectionDragStartX, g_SelectionDragStartY);
                     ImVec2 p2 = canvasToScreen(canvasX, g_SelectionDragStartY);
                     ImVec2 p3 = canvasToScreen(canvasX, canvasY);
@@ -1192,7 +1192,7 @@ int main(int argc, char* argv[]) {
                         dl->AddLine(pts[i], pts[(i + 1) % numSegments], outlineCol, thickness);
                     }
                 }
-                else if (g_ActiveTool == ActiveTool::LassoSelect) {
+                else if (g_ActiveTool == ActiveTool::LassoSelect || g_ActiveTool == ActiveTool::SmartSelect) {
                     if (g_LassoPoints.size() >= 2) {
                         for (size_t i = 0; i < g_LassoPoints.size() - 1; ++i) {
                             dl->AddLine(canvasToScreen((float)g_LassoPoints[i].first, (float)g_LassoPoints[i].second),

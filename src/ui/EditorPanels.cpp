@@ -323,7 +323,7 @@ namespace UI {
                 ImGui::MenuItem("Properties", nullptr, &state.showProperties);
                 ImGui::MenuItem("Layers", nullptr, &state.showLayers);
                 ImGui::MenuItem("Colors Window", nullptr, &state.showColors);
-                ImGui::MenuItem("Brush Settings", nullptr, &state.showBrushSettings);
+                ImGui::MenuItem("Tool Settings", nullptr, &state.showToolSettings);
                 ImGui::MenuItem("Console logs", nullptr, &state.showConsole);
                 ImGui::Separator();
                 if (ImGui::MenuItem("Reset View")) {
@@ -374,7 +374,7 @@ namespace UI {
             ImGui::DockBuilderDockWindow("Canvas Viewport", dock_main_id);
             ImGui::DockBuilderDockWindow("Properties", dock_right_top_id);
             ImGui::DockBuilderDockWindow("Layers", dock_right_middle_id);
-            ImGui::DockBuilderDockWindow("Brush Settings", dock_right_bottom_id);
+            ImGui::DockBuilderDockWindow("Tool Settings", dock_right_bottom_id);
 
             ImGui::DockBuilderFinish(dockspace_id);
         }
@@ -1301,43 +1301,116 @@ namespace UI {
             ImGui::End();
         }
 
-        // 8. Draw Standalone Brush Settings Panel
-        if (state.showBrushSettings) {
-            ImGui::Begin("Brush Settings", &state.showBrushSettings, ImGuiWindowFlags_NoCollapse);
-            
-            ImGui::SliderFloat("Radius", &brush.radius, 1.0f, 250.0f, "%.0f px");
-            ImGui::Checkbox("Pressure -> Radius", &brush.pressureRadius);
-            
-            ImGui::Spacing();
-            ImGui::SliderFloat("Hardness", &brush.hardness, 0.0f, 1.0f, "%.2f");
-            ImGui::Checkbox("Pressure -> Hardness", &brush.pressureHardness);
-            
-            ImGui::Spacing();
-            ImGui::SliderFloat("Opacity##brush", &brush.opacity, 0.0f, 1.0f, "%.2f");
-            ImGui::Checkbox("Pressure -> Opacity", &brush.pressureOpacity);
-            
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
+        // 8. Draw Standalone Tool Settings Panel (adapts to active tool)
+        if (state.showToolSettings) {
+            ImGui::Begin("Tool Settings", &state.showToolSettings, ImGuiWindowFlags_NoCollapse);
 
-            ImGui::SliderFloat("Spacing##brush", &brush.spacing, 0.01f, 5.0f, "%.2f");
-            ImGui::SliderInt("Stabilization##brush", &brush.stabilization, 1, 50, "%d");
-            
-            ImGui::Spacing();
-            ImGui::Text("Brush Color:");
-            ImGui::ColorEdit4("Color##brush", brush.color, ImGuiColorEditFlags_NoInputs);
+            bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser);
 
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-            ImGui::Text("Symmetry / Mirror Paint:");
-            bool mirrorH = canvas.GetMirrorHorizontal();
-            if (ImGui::Checkbox("Horizontal Mirror (Left/Right)", &mirrorH)) {
-                canvas.SetMirrorHorizontal(mirrorH);
+            if (isBrushLike) {
+                // ---- Brush / Eraser ----
+                ImGui::TextDisabled(activeTool == ActiveTool::Eraser ? "Eraser" : "Brush");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::SliderFloat("Radius##ts", &brush.radius, 1.0f, 250.0f, "%.0f px");
+                ImGui::Checkbox("Pressure -> Radius", &brush.pressureRadius);
+
+                ImGui::Spacing();
+                ImGui::SliderFloat("Hardness##ts", &brush.hardness, 0.0f, 1.0f, "%.2f");
+                ImGui::Checkbox("Pressure -> Hardness", &brush.pressureHardness);
+
+                ImGui::Spacing();
+                ImGui::SliderFloat("Opacity##ts", &brush.opacity, 0.0f, 1.0f, "%.2f");
+                ImGui::Checkbox("Pressure -> Opacity", &brush.pressureOpacity);
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::SliderFloat("Spacing##ts", &brush.spacing, 0.01f, 5.0f, "%.2f");
+                ImGui::SliderInt("Stabilization##ts", &brush.stabilization, 1, 50, "%d");
+
+                if (activeTool == ActiveTool::Brush) {
+                    ImGui::Spacing();
+                    ImGui::Separator();
+                    ImGui::Spacing();
+                    ImGui::Text("Symmetry / Mirror Paint:");
+                    bool mirrorH = canvas.GetMirrorHorizontal();
+                    if (ImGui::Checkbox("Horizontal Mirror (Left/Right)", &mirrorH))
+                        canvas.SetMirrorHorizontal(mirrorH);
+                    bool mirrorV = canvas.GetMirrorVertical();
+                    if (ImGui::Checkbox("Vertical Mirror (Top/Bottom)", &mirrorV))
+                        canvas.SetMirrorVertical(mirrorV);
+                }
             }
-            bool mirrorV = canvas.GetMirrorVertical();
-            if (ImGui::Checkbox("Vertical Mirror (Top/Bottom)", &mirrorV)) {
-                canvas.SetMirrorVertical(mirrorV);
+            else if (activeTool == ActiveTool::MagicWand) {
+                // ---- Magic Wand ----
+                ImGui::TextDisabled("Magic Wand");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::SliderFloat("Tolerance##mw", &state.magicWandTolerance, 0.0f, 1.0f, "%.2f");
+                ImGui::Checkbox("Contiguous", &state.magicWandContiguous);
+                ImGui::Spacing();
+                ImGui::TextWrapped("Shift: add  |  Alt: subtract");
+            }
+            else if (activeTool == ActiveTool::BucketFill) {
+                // ---- Bucket Fill ----
+                ImGui::TextDisabled("Bucket Fill");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                ImGui::SliderFloat("Tolerance##bf", &state.bucketFillTolerance, 0.0f, 1.0f, "%.2f");
+            }
+            else if (activeTool == ActiveTool::RectSelect ||
+                     activeTool == ActiveTool::EllipseSelect ||
+                     activeTool == ActiveTool::LassoSelect) {
+                // ---- Geometric selections ----
+                const char* selName =
+                    activeTool == ActiveTool::RectSelect    ? "Rectangular Selection" :
+                    activeTool == ActiveTool::EllipseSelect ? "Ellipse Selection" : "Lasso Selection";
+                ImGui::TextDisabled(selName);
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextWrapped("Shift: add to selection");
+                ImGui::TextWrapped("Alt: subtract from selection");
+            }
+            else if (activeTool == ActiveTool::SmartSelect) {
+                // ---- Smart Select ----
+                ImGui::TextDisabled("Smart Select (GrabCut)");
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextWrapped("Draw a freehand contour around the subject.");
+                ImGui::TextWrapped("GrabCut runs on a background thread within the contour bounding box.");
+                ImGui::Spacing();
+                ImGui::TextWrapped("Shift: add  |  Alt: subtract");
+            }
+            else if (activeTool == ActiveTool::Gradient) {
+                ImGui::TextDisabled("Gradient");
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextWrapped("Drag from start to end to define the gradient direction.");
+                ImGui::TextWrapped("Primary color -> Secondary color.");
+            }
+            else if (activeTool == ActiveTool::Pipette) {
+                ImGui::TextDisabled("Color Picker (Pipette)");
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextWrapped("Click on the canvas to sample a pixel color.");
+            }
+            else if (activeTool == ActiveTool::MovePixels) {
+                ImGui::TextDisabled("Move Pixels");
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextWrapped("Drag to move the selected pixels.");
+                ImGui::TextWrapped("Enter / switch tool to commit.");
+            }
+            else {
+                ImGui::TextDisabled("Pan / Hand");
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextWrapped("Middle-click or hold Space to pan the canvas.");
             }
 
             ImGui::End();
