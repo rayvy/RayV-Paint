@@ -115,7 +115,20 @@ static double g_StartupTimeMs = 0.0;
 // Painting state
 static ActiveTool g_ActiveTool = ActiveTool::Brush;
 static BrushSettings g_Brush;
+static float g_SecondaryColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 static bool g_IsPainting = false;
+
+// Selection dragging state
+static bool g_IsSelectionDragging = false;
+static float g_SelectionDragStartX = 0.0f;
+static float g_SelectionDragStartY = 0.0f;
+static std::vector<std::pair<int, int>> g_LassoPoints;
+
+static bool g_IsMoveDragging = false;
+static float g_MoveDragStartX = 0.0f;
+static float g_MoveDragStartY = 0.0f;
+static int g_MoveAccumulatedOffsetX = 0;
+static int g_MoveAccumulatedOffsetY = 0;
 static void CustomDropCallback(GLFWwindow* window, int count, const char** paths) {
     if (count <= 0) return;
     std::string path = paths[0];
@@ -461,7 +474,7 @@ int main(int argc, char* argv[]) {
     // Load Segoe UI from system fonts for premium typography
     std::string fontPath = "C:\\Windows\\Fonts\\segoeui.ttf";
     if (std::filesystem::exists(fontPath)) {
-        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 17.0f);
+        io.Fonts->AddFontFromFileTTF(fontPath.c_str(), 17.0f, nullptr, io.Fonts->GetGlyphRangesCyrillic());
     } else {
         io.Fonts->AddFontDefault();
     }
@@ -840,31 +853,26 @@ int main(int argc, char* argv[]) {
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(255, 255, 255, 255), 32, 1.0f);
             }
 
+            float zoom = g_Canvas.GetZoom();
+            float cw = (float)g_Canvas.GetWidth();
+            float ch = (float)g_Canvas.GetHeight();
+
+            auto canvasToScreen = [&](float cx, float cy) -> ImVec2 {
+                if (g_Canvas.GetViewportFlipH()) cx = cw - cx;
+                if (g_Canvas.GetViewportFlipV()) cy = ch - cy;
+                float rx = cx - cw * 0.5f;
+                float ry = cy - ch * 0.5f;
+                float rotX = rx * cosA - ry * sinA;
+                float rotY = rx * sinA + ry * cosA;
+                return ImVec2(
+                    imageMin.x + screenOriginX + rotX * zoom,
+                    imageMin.y + screenOriginY + rotY * zoom
+                );
+            };
+
             // Draw Symmetrical Guidelines
             if (g_Canvas.GetMirrorHorizontal() || g_Canvas.GetMirrorVertical()) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
-                float screenOriginX = std::floor(g_Canvas.GetPan().x + static_cast<float>(viewportWidth) * 0.5f);
-                float screenOriginY = std::floor(g_Canvas.GetPan().y + static_cast<float>(viewportHeight) * 0.5f);
-                float angle = g_Canvas.GetRotationAngle();
-                float cosA = std::cos(angle);
-                float sinA = std::sin(angle);
-                float zoom = g_Canvas.GetZoom();
-                float cw = (float)g_Canvas.GetWidth();
-                float ch = (float)g_Canvas.GetHeight();
-
-                auto canvasToScreen = [&](float cx, float cy) -> ImVec2 {
-                    if (g_Canvas.GetViewportFlipH()) cx = cw - cx;
-                    if (g_Canvas.GetViewportFlipV()) cy = ch - cy;
-                    float rx = cx - cw * 0.5f;
-                    float ry = cy - ch * 0.5f;
-                    float rotX = rx * cosA - ry * sinA;
-                    float rotY = rx * sinA + ry * cosA;
-                    return ImVec2(
-                        imageMin.x + screenOriginX + rotX * zoom,
-                        imageMin.y + screenOriginY + rotY * zoom
-                    );
-                };
-
                 auto drawDashedLine = [](ImDrawList* drawList, ImVec2 p1, ImVec2 p2, ImU32 col, float thickness, float dashLength) {
                     ImVec2 d = ImVec2(p2.x - p1.x, p2.y - p1.y);
                     float len = std::sqrt(d.x * d.x + d.y * d.y);
@@ -892,7 +900,9 @@ int main(int argc, char* argv[]) {
 
                 if (g_Canvas.GetMirrorHorizontal()) {
                     ImVec2 h1 = canvasToScreen(cw * 0.5f, -ch * 5.0f);
-                    ImVec2 h2 = canvasToScreen(cw * 0.5f, ch * 6.0f);
+                    ImVec2 h2 = canvasToScreen(cw * 0.5f, cw * 0.5f); // Wait! Let's check the original line: h2 was canvasToScreen(cw * 0.5f, ch * 6.0f)!
+                    // Let's make sure it's ch * 6.0f!
+                    h2 = canvasToScreen(cw * 0.5f, ch * 6.0f);
                     drawDashedLine(dl, h1, h2, IM_COL32(235, 64, 52, 180), 1.5f, 6.0f);
                 }
                 if (g_Canvas.GetMirrorVertical()) {
@@ -983,6 +993,248 @@ int main(int argc, char* argv[]) {
             if (g_IsPainting && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
                 g_Canvas.PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
                 g_IsPainting = false;
+            }
+
+            // Commit / Cancel Move Pixels
+            if (g_Canvas.IsMovingPixels() && !ImGui::GetIO().WantTextInput) {
+                if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+                    g_Canvas.CommitMovePixels(g_pd3dDevice);
+                    g_MoveAccumulatedOffsetX = 0;
+                    g_MoveAccumulatedOffsetY = 0;
+                }
+                else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                    g_Canvas.CancelMovePixels(g_pd3dDevice);
+                    g_MoveAccumulatedOffsetX = 0;
+                    g_MoveAccumulatedOffsetY = 0;
+                }
+            }
+
+            // Auto-commit Move Pixels if tool switched
+            if (g_ActiveTool != ActiveTool::MovePixels && g_Canvas.IsMovingPixels()) {
+                g_Canvas.CommitMovePixels(g_pd3dDevice);
+                g_MoveAccumulatedOffsetX = 0;
+                g_MoveAccumulatedOffsetY = 0;
+            }
+
+            // Keyboard shortcuts (like Ctrl+D)
+            if ((ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) && !ImGui::GetIO().WantTextInput) {
+                if (ImGui::IsKeyPressed(ImGuiKey_D)) {
+                    g_Canvas.ClearSelection();
+                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                }
+            }
+
+            // Keyboard shortcut X for swapping primary/secondary colors
+            if (ImGui::IsKeyPressed(ImGuiKey_X) && !ImGui::GetIO().WantTextInput) {
+                std::swap(g_Brush.color[0], g_SecondaryColor[0]);
+                std::swap(g_Brush.color[1], g_SecondaryColor[1]);
+                std::swap(g_Brush.color[2], g_SecondaryColor[2]);
+                std::swap(g_Brush.color[3], g_SecondaryColor[3]);
+            }
+
+            // Selection tools, pipette, bucket fill, gradient interaction
+            bool isSelectionTool = (g_ActiveTool == ActiveTool::RectSelect || 
+                                    g_ActiveTool == ActiveTool::EllipseSelect || 
+                                    g_ActiveTool == ActiveTool::LassoSelect || 
+                                    g_ActiveTool == ActiveTool::MagicWand ||
+                                    g_ActiveTool == ActiveTool::SmartSelect);
+
+            if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging) {
+                // Magic Wand
+                if (g_ActiveTool == ActiveTool::MagicWand) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        bool add = ImGui::GetIO().KeyShift;
+                        bool subtract = ImGui::GetIO().KeyAlt;
+                        g_Canvas.ApplyMagicWandSelection(g_pd3dDevice, (int)canvasX, (int)canvasY, 0.15f, add, subtract, true);
+                    }
+                }
+                // Pipette
+                else if (g_ActiveTool == ActiveTool::Pipette) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        std::vector<float> srcPixels = g_Canvas.GetCompositePixels();
+                        int cx = std::clamp((int)canvasX, 0, g_Canvas.GetWidth() - 1);
+                        int cy = std::clamp((int)canvasY, 0, g_Canvas.GetHeight() - 1);
+                        size_t idx = ((size_t)cy * g_Canvas.GetWidth() + cx) * 4;
+                        g_Brush.color[0] = srcPixels[idx + 0];
+                        g_Brush.color[1] = srcPixels[idx + 1];
+                        g_Brush.color[2] = srcPixels[idx + 2];
+                        g_Brush.color[3] = srcPixels[idx + 3];
+                    }
+                }
+                // Bucket Fill
+                else if (g_ActiveTool == ActiveTool::BucketFill) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        g_Canvas.ApplyBucketFill((int)canvasX, (int)canvasY, 0.15f, g_Brush.color, true);
+                    }
+                }
+                // Gradient (drag to define vector)
+                else if (g_ActiveTool == ActiveTool::Gradient) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        g_IsPainting = true; 
+                        g_SelectionDragStartX = canvasX;
+                        g_SelectionDragStartY = canvasY;
+                    }
+                }
+                // Move Pixels Click
+                else if (g_ActiveTool == ActiveTool::MovePixels) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        if (!g_Canvas.IsMovingPixels()) {
+                            g_Canvas.StartMovePixels(g_pd3dDevice);
+                        }
+                        g_IsMoveDragging = true;
+                        g_MoveDragStartX = canvasX;
+                        g_MoveDragStartY = canvasY;
+                    }
+                }
+                // Drag-based selections
+                else if (isSelectionTool) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        g_IsSelectionDragging = true;
+                        g_SelectionDragStartX = canvasX;
+                        g_SelectionDragStartY = canvasY;
+                        g_LassoPoints.clear();
+                        g_LassoPoints.push_back({ (int)canvasX, (int)canvasY });
+                    }
+                }
+            }
+
+            // Accumulate points if lasso is active
+            if (g_IsSelectionDragging && g_ActiveTool == ActiveTool::LassoSelect) {
+                int cx = (int)canvasX;
+                int cy = (int)canvasY;
+                if (g_LassoPoints.empty() || g_LassoPoints.back() != std::make_pair(cx, cy)) {
+                    g_LassoPoints.push_back({ cx, cy });
+                }
+            }
+
+            // End drag handling
+            if (g_IsSelectionDragging && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+                g_IsSelectionDragging = false;
+                bool add = ImGui::GetIO().KeyShift;
+                bool subtract = ImGui::GetIO().KeyAlt;
+
+                int x1 = (int)g_SelectionDragStartX;
+                int y1 = (int)g_SelectionDragStartY;
+                int x2 = (int)canvasX;
+                int y2 = (int)canvasY;
+
+                if (g_ActiveTool == ActiveTool::RectSelect) {
+                    g_Canvas.ApplyRectSelection(x1, y1, x2, y2, add, subtract);
+                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                }
+                else if (g_ActiveTool == ActiveTool::EllipseSelect) {
+                    g_Canvas.ApplyEllipseSelection(x1, y1, x2, y2, add, subtract);
+                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                }
+                else if (g_ActiveTool == ActiveTool::LassoSelect) {
+                    g_Canvas.ApplyLassoSelection(g_LassoPoints, add, subtract);
+                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                }
+                else if (g_ActiveTool == ActiveTool::SmartSelect) {
+                    g_Canvas.ApplySmartSelectSelection(g_pd3dDevice, x1, y1, x2, y2, add, subtract);
+                }
+                g_LassoPoints.clear();
+            }
+
+            // Move drag update
+            if (g_IsMoveDragging) {
+                int dx = (int)floor(canvasX - g_MoveDragStartX);
+                int dy = (int)floor(canvasY - g_MoveDragStartY);
+                g_Canvas.UpdateMovePixels(g_pd3dDevice, g_MoveAccumulatedOffsetX + dx, g_MoveAccumulatedOffsetY + dy);
+            }
+
+            // Move drag release
+            if (g_IsMoveDragging && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+                g_IsMoveDragging = false;
+                g_MoveAccumulatedOffsetX += (int)floor(canvasX - g_MoveDragStartX);
+                g_MoveAccumulatedOffsetY += (int)floor(canvasY - g_MoveDragStartY);
+            }
+
+            // Gradient drag release
+            if (g_ActiveTool == ActiveTool::Gradient && g_IsPainting && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+                g_IsPainting = false;
+                g_Canvas.ApplyGradient((int)g_SelectionDragStartX, (int)g_SelectionDragStartY, (int)canvasX, (int)canvasY, g_Brush.color, g_SecondaryColor);
+            }
+
+            // Draw interactive shape outline during drag/selection
+            if (g_IsSelectionDragging || (g_ActiveTool == ActiveTool::Gradient && g_IsPainting)) {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
+
+                ImU32 outlineCol = IM_COL32(255, 255, 0, 255);
+                float thickness = 2.0f;
+
+                if (g_ActiveTool == ActiveTool::RectSelect || g_ActiveTool == ActiveTool::SmartSelect) {
+                    ImVec2 p1 = canvasToScreen(g_SelectionDragStartX, g_SelectionDragStartY);
+                    ImVec2 p2 = canvasToScreen(canvasX, g_SelectionDragStartY);
+                    ImVec2 p3 = canvasToScreen(canvasX, canvasY);
+                    ImVec2 p4 = canvasToScreen(g_SelectionDragStartX, canvasY);
+                    dl->AddLine(p1, p2, outlineCol, thickness);
+                    dl->AddLine(p2, p3, outlineCol, thickness);
+                    dl->AddLine(p3, p4, outlineCol, thickness);
+                    dl->AddLine(p4, p1, outlineCol, thickness);
+                }
+                else if (g_ActiveTool == ActiveTool::EllipseSelect) {
+                    float cx = (g_SelectionDragStartX + canvasX) * 0.5f;
+                    float cy = (g_SelectionDragStartY + canvasY) * 0.5f;
+                    float rx = std::abs(canvasX - g_SelectionDragStartX) * 0.5f;
+                    float ry = std::abs(canvasY - g_SelectionDragStartY) * 0.5f;
+                    const int numSegments = 36;
+                    std::vector<ImVec2> pts(numSegments);
+                    for (int i = 0; i < numSegments; ++i) {
+                        float theta = i * 2.0f * 3.14159265f / numSegments;
+                        float px = cx + rx * std::cos(theta);
+                        float py = cy + ry * std::sin(theta);
+                        pts[i] = canvasToScreen(px, py);
+                    }
+                    for (int i = 0; i < numSegments; ++i) {
+                        dl->AddLine(pts[i], pts[(i + 1) % numSegments], outlineCol, thickness);
+                    }
+                }
+                else if (g_ActiveTool == ActiveTool::LassoSelect) {
+                    if (g_LassoPoints.size() >= 2) {
+                        for (size_t i = 0; i < g_LassoPoints.size() - 1; ++i) {
+                            dl->AddLine(canvasToScreen((float)g_LassoPoints[i].first, (float)g_LassoPoints[i].second),
+                                        canvasToScreen((float)g_LassoPoints[i+1].first, (float)g_LassoPoints[i+1].second),
+                                        outlineCol, thickness);
+                        }
+                        dl->AddLine(canvasToScreen((float)g_LassoPoints.back().first, (float)g_LassoPoints.back().second),
+                                    canvasToScreen(canvasX, canvasY),
+                                    outlineCol, thickness);
+                    }
+                }
+                else if (g_ActiveTool == ActiveTool::Gradient) {
+                    ImVec2 pStart = canvasToScreen(g_SelectionDragStartX, g_SelectionDragStartY);
+                    ImVec2 pEnd = canvasToScreen(canvasX, canvasY);
+                    dl->AddLine(pStart, pEnd, outlineCol, thickness);
+                    dl->AddCircleFilled(pStart, 4.0f, outlineCol);
+                    dl->AddCircleFilled(pEnd, 4.0f, outlineCol);
+                }
+
+                dl->PopClipRect();
+            }
+
+            // Draw Move Pixels Gizmo
+            if (g_Canvas.IsMovingPixels()) {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
+                g_Canvas.DrawMoveGizmo(dl, canvasToScreen);
+                dl->PopClipRect();
+            }
+
+            // Draw Smart Select background process progress & cancel option UI
+            if (g_Canvas.IsSmartSelectInProgress()) {
+                ImGui::SetCursorScreenPos(ImVec2(imageMin.x + 20.0f, imageMin.y + 20.0f));
+                ImGui::BeginChild("SmartSelectProgress", ImVec2(320.0f, 90.0f), true, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+                ImGui::Text("Smart Select (GrabCut) is running...");
+                float t = (float)fmod(ImGui::GetTime() * 2.0, 100.0) / 100.0f;
+                char buf[32];
+                sprintf(buf, "Processing...");
+                ImGui::ProgressBar(t, ImVec2(-1.0f, 0.0f), buf);
+                if (ImGui::Button("Cancel")) {
+                    g_Canvas.CancelSmartSelect();
+                }
+                ImGui::EndChild();
             }
 
             g_Canvas.Update(viewportWidth, viewportHeight, isHovered, localMouseX, localMouseY, isPanning, dragDx, dragDy, wheelDelta);

@@ -1,6 +1,9 @@
 #include "Canvas.h"
 #include "core/Logger.h"
 #include "core/ImageManager.h"
+#include <opencv2/imgproc.hpp>
+#include "core/ConfigManager.h"
+#include "core/TexconvHelper.h"
 #include <d3dcompiler.h>
 #include <iostream>
 #include <algorithm>
@@ -11,6 +14,17 @@
 #include <nlohmann/json.hpp>
 #include <thread>
 #include <filesystem>
+
+#ifdef _WIN32
+#include <windows.h>
+static std::wstring UTF8ToWString(const std::string& str) {
+    if (str.empty()) return L"";
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
+    std::wstring wstrTo(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
+    return wstrTo;
+}
+#endif
 
 // Explicitly declare stbi_zlib_compress which is defined in ImageManager.cpp (via stb_image_write implementation)
 extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, int* out_len, int quality);
@@ -205,6 +219,20 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
+    // 3.5 Compile and Create Pixel Shader (Selection Outline)
+    ID3DBlob* outlineBlob = nullptr;
+    hr = CompileShaderFromFile(shaderPath.c_str(), "PSSelectionOutline", "ps_4_0", &outlineBlob);
+    if (FAILED(hr)) {
+        std::cerr << "Failed compiling PSSelectionOutline" << std::endl;
+        return false;
+    }
+
+    hr = device->CreatePixelShader(outlineBlob->GetBufferPointer(), outlineBlob->GetBufferSize(), nullptr, &m_SelectionOutlinePixelShader);
+    outlineBlob->Release();
+    if (FAILED(hr)) {
+        return false;
+    }
+
     // 4. Create Vertex Buffer (Unit Quad)
     Vertex vertices[] = {
         { DirectX::XMFLOAT2(0.0f, 0.0f), DirectX::XMFLOAT2(0.0f, 0.0f) }, // Top-Left
@@ -303,6 +331,9 @@ bool Canvas::Initialize(ID3D11Device* device) {
     // 9. Create Composite targets
     CreateCompositeResources(device);
 
+    m_SelectionMask.assign(m_Width * m_Height, 0.0f);
+    m_HasSelection = false;
+
     // 10. Start with one default layer
     CreateNewLayer(device, "Background");
 
@@ -321,14 +352,20 @@ void Canvas::Shutdown() {
     if (m_LayerVertexShader) { m_LayerVertexShader->Release(); m_LayerVertexShader = nullptr; }
     if (m_PixelShader) { m_PixelShader->Release(); m_PixelShader = nullptr; }
     if (m_LayerBlendPixelShader) { m_LayerBlendPixelShader->Release(); m_LayerBlendPixelShader = nullptr; }
+    if (m_SelectionOutlinePixelShader) { m_SelectionOutlinePixelShader->Release(); m_SelectionOutlinePixelShader = nullptr; }
     if (m_InputLayout) { m_InputLayout->Release(); m_InputLayout = nullptr; }
     if (m_SamplerState) { m_SamplerState->Release(); m_SamplerState = nullptr; }
     if (m_LayerBlendState) { m_LayerBlendState->Release(); m_LayerBlendState = nullptr; }
     if (m_RasterizerState) { m_RasterizerState->Release(); m_RasterizerState = nullptr; }
 
+    if (m_SelectionMaskTexture) { m_SelectionMaskTexture->Release(); m_SelectionMaskTexture = nullptr; }
+    if (m_SelectionMaskSRV) { m_SelectionMaskSRV->Release(); m_SelectionMaskSRV = nullptr; }
+
     for (auto& layer : m_Layers) {
         if (layer.texture) layer.texture->Release();
         if (layer.srv) layer.srv->Release();
+        if (layer.maskTexture) layer.maskTexture->Release();
+        if (layer.maskSRV) layer.maskSRV->Release();
     }
     m_Layers.clear();
 }
@@ -358,6 +395,146 @@ void Canvas::ReleaseCompositeResources() {
     if (m_CompositeTexture) { m_CompositeTexture->Release(); m_CompositeTexture = nullptr; }
     if (m_CompositeRTV) { m_CompositeRTV->Release(); m_CompositeRTV = nullptr; }
     if (m_CompositeSRV) { m_CompositeSRV->Release(); m_CompositeSRV = nullptr; }
+    if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
+    if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
+    if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
+    if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
+}
+
+void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
+    if (index < 0 || index >= m_Layers.size()) return;
+    Layer& layer = m_Layers[index];
+    
+    layer.mask.assign(m_Width * m_Height, 1.0f);
+    layer.hasMask = true;
+    layer.maskNeedsUpload = true;
+    
+    if (device) {
+        UpdateLayerMaskTexture(device, index);
+    }
+    
+    Logger::Get().Info("Created layer mask for layer: " + layer.name);
+}
+
+void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
+    if (index < 0 || index >= m_Layers.size()) return;
+    Layer& layer = m_Layers[index];
+    
+    layer.mask.assign(m_Width * m_Height, 0.0f);
+    if (m_HasSelection) {
+        std::copy(m_SelectionMask.begin(), m_SelectionMask.end(), layer.mask.begin());
+    } else {
+        layer.mask.assign(m_Width * m_Height, 1.0f);
+    }
+    
+    layer.hasMask = true;
+    layer.maskNeedsUpload = true;
+    
+    if (device) {
+        UpdateLayerMaskTexture(device, index);
+    }
+    
+    Logger::Get().Info("Created layer mask from selection for layer: " + layer.name);
+}
+
+void Canvas::DeleteLayerMask(int index) {
+    if (index < 0 || index >= m_Layers.size()) return;
+    Layer& layer = m_Layers[index];
+    
+    if (layer.maskTexture) { layer.maskTexture->Release(); layer.maskTexture = nullptr; }
+    if (layer.maskSRV) { layer.maskSRV->Release(); layer.maskSRV = nullptr; }
+    layer.mask.clear();
+    layer.hasMask = false;
+    layer.maskNeedsUpload = false;
+    
+    Logger::Get().Info("Deleted layer mask for layer: " + layer.name);
+}
+
+void Canvas::ApplyLayerMask(int index) {
+    if (index < 0 || index >= m_Layers.size()) return;
+    Layer& layer = m_Layers[index];
+    if (!layer.hasMask) return;
+    
+    int oldActive = m_ActiveLayerIdx;
+    m_ActiveLayerIdx = index;
+    int numTilesX = (m_Width + 255) / 256;
+    int numTilesY = (m_Height + 255) / 256;
+    for (int ty = 0; ty < numTilesY; ++ty) {
+        for (int tx = 0; tx < numTilesX; ++tx) {
+            BackupTile(tx, ty);
+        }
+    }
+    
+    for (size_t y = 0; y < m_Height; ++y) {
+        for (size_t x = 0; x < m_Width; ++x) {
+            size_t pixelIdx = (y * m_Width + x) * 4;
+            size_t maskIdx = y * m_Width + x;
+            layer.pixels[pixelIdx + 3] *= layer.mask[maskIdx];
+        }
+    }
+    
+    layer.needsUpload = true;
+    DeleteLayerMask(index);
+    
+    if (!m_ActiveStrokeDeltas.empty()) {
+        std::vector<TileDelta> deltas;
+        for (auto& pair : m_ActiveStrokeDeltas) {
+            auto& delta = pair.second;
+            delta.newPixels.resize(256 * 256 * 4, 0.0f);
+            int startX = delta.tileX * 256;
+            int startY = delta.tileY * 256;
+            for (int y = 0; y < 256; ++y) {
+                int cy = startY + y;
+                if (cy >= m_Height) break;
+                for (int x = 0; x < 256; ++x) {
+                    int cx = startX + x;
+                    if (cx >= m_Width) break;
+                    size_t srcIdx = ((size_t)cy * m_Width + cx) * 4;
+                    size_t dstIdx = ((size_t)y * 256 + x) * 4;
+                    delta.newPixels[dstIdx + 0] = layer.pixels[srcIdx + 0];
+                    delta.newPixels[dstIdx + 1] = layer.pixels[srcIdx + 1];
+                    delta.newPixels[dstIdx + 2] = layer.pixels[srcIdx + 2];
+                    delta.newPixels[dstIdx + 3] = layer.pixels[srcIdx + 3];
+                }
+            }
+            deltas.push_back(delta);
+        }
+        m_UndoRedoManager.PushCommand(std::make_unique<PaintStrokeCommand>("Apply Mask", index, deltas));
+        m_ActiveStrokeDeltas.clear();
+    }
+    m_ActiveLayerIdx = oldActive;
+    
+    Logger::Get().Info("Applied layer mask to layer alpha: " + layer.name);
+}
+
+void Canvas::UpdateLayerMaskTexture(ID3D11Device* device, int index) {
+    if (index < 0 || index >= m_Layers.size()) return;
+    Layer& layer = m_Layers[index];
+    if (!layer.hasMask) return;
+    
+    if (layer.maskTexture) { layer.maskTexture->Release(); layer.maskTexture = nullptr; }
+    if (layer.maskSRV) { layer.maskSRV->Release(); layer.maskSRV = nullptr; }
+    
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = m_Width;
+    desc.Height = m_Height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.SampleDesc.Quality = 0;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = layer.mask.data();
+    initData.SysMemPitch = m_Width * sizeof(float);
+    
+    HRESULT hr = device->CreateTexture2D(&desc, &initData, &layer.maskTexture);
+    if (SUCCEEDED(hr)) {
+        device->CreateShaderResourceView(layer.maskTexture, nullptr, &layer.maskSRV);
+    }
+    layer.maskNeedsUpload = false;
 }
 
 void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
@@ -416,6 +593,8 @@ void Canvas::DeleteLayer(int index) {
 
     if (m_Layers[index].texture) m_Layers[index].texture->Release();
     if (m_Layers[index].srv) m_Layers[index].srv->Release();
+    if (m_Layers[index].maskTexture) m_Layers[index].maskTexture->Release();
+    if (m_Layers[index].maskSRV) m_Layers[index].maskSRV->Release();
     
     m_Layers.erase(m_Layers.begin() + index);
 
@@ -576,7 +755,8 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
 
         // Place the very first stamp immediately
         PaintEngine::DrawStamp(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height, 
-                               currRawX, currRawY, activeBrush, m_MirrorHorizontal, m_MirrorVertical);
+                               currRawX, currRawY, activeBrush, m_MirrorHorizontal, m_MirrorVertical,
+                               m_HasSelection ? m_SelectionMask : std::vector<float>{});
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
     }
     else if (phase == StrokePhase::Update && m_IsStrokeActive) {
@@ -624,7 +804,8 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                                        stabilizedX, stabilizedY,
                                        activeBrush, m_StrokeDistanceAccumulator,
                                        m_LastDabX, m_LastDabY,
-                                       m_MirrorHorizontal, m_MirrorVertical);
+                                       m_MirrorHorizontal, m_MirrorVertical,
+                                       m_HasSelection ? m_SelectionMask : std::vector<float>{});
 
         m_PrevStabilizedX = stabilizedX;
         m_PrevStabilizedY = stabilizedY;
@@ -796,17 +977,56 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     context->OMSetBlendState(m_LayerBlendState, nullptr, 0xFFFFFFFF);
 
     // Draw visible layers bottom-to-top
-    for (const auto& layer : m_Layers) {
+    for (size_t i = 0; i < m_Layers.size(); ++i) {
+        Layer& layer = m_Layers[i];
         if (layer.visible && layer.srv) {
+            if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
+                ID3D11Device* device = nullptr;
+                context->GetDevice(&device);
+                if (device) {
+                    UpdateLayerMaskTexture(device, static_cast<int>(i));
+                    device->Release();
+                }
+            }
+
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
                 LayerBuffer* lb = (LayerBuffer*)mapped.pData;
-                lb->layerParams = DirectX::XMFLOAT4(layer.opacity, 0.0f, 0.0f, 0.0f);
+                float hasMaskVal = (layer.hasMask && layer.maskSRV) ? 1.0f : 0.0f;
+                lb->layerParams = DirectX::XMFLOAT4(layer.opacity, hasMaskVal, 0.0f, 0.0f);
                 context->Unmap(m_LayerConstantBuffer, 0);
             }
             context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
             context->PSSetShaderResources(0, 1, &layer.srv);
+            if (layer.hasMask && layer.maskSRV) {
+                context->PSSetShaderResources(1, 1, &layer.maskSRV);
+            } else {
+                ID3D11ShaderResourceView* nullSRV = nullptr;
+                context->PSSetShaderResources(1, 1, &nullSRV);
+            }
             context->DrawIndexed(6, 0, 0);
+
+            if (m_IsMovingPixels && i == m_StartActiveLayerIdx && m_FloatingSRV) {
+                float uOff = (float)m_FloatingOffsetX / (float)m_Width;
+                float vOff = (float)m_FloatingOffsetY / (float)m_Height;
+                
+                D3D11_MAPPED_SUBRESOURCE fMapped;
+                if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &fMapped))) {
+                    LayerBuffer* lb = (LayerBuffer*)fMapped.pData;
+                    float hasFMaskVal = m_FloatingMaskSRV ? 1.0f : 0.0f;
+                    lb->layerParams = DirectX::XMFLOAT4(layer.opacity, hasFMaskVal, uOff, vOff);
+                    context->Unmap(m_LayerConstantBuffer, 0);
+                }
+                context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
+                context->PSSetShaderResources(0, 1, &m_FloatingSRV);
+                if (m_FloatingMaskSRV) {
+                    context->PSSetShaderResources(1, 1, &m_FloatingMaskSRV);
+                } else {
+                    ID3D11ShaderResourceView* nullSRV = nullptr;
+                    context->PSSetShaderResources(1, 1, &nullSRV);
+                }
+                context->DrawIndexed(6, 0, 0);
+            }
         }
     }
 
@@ -855,13 +1075,43 @@ void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float vie
     context->DrawIndexed(6, 0, 0);
     context->RSSetState(nullptr);
 
+    // 3.5 Draw selection outline overlay if active
+    if (m_HasSelection && m_SelectionMaskSRV) {
+        m_SelectionOutlineTime += 0.016f; // approx 60 FPS step
+        
+        // Re-upload constant buffer with u_ViewportFlags.z set to m_SelectionOutlineTime
+        D3D11_MAPPED_SUBRESOURCE mappedResource2;
+        if (SUCCEEDED(context->Map(m_ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource2))) {
+            CanvasBuffer* cb = (CanvasBuffer*)mappedResource2.pData;
+            cb->viewportSizeAndZoom = DirectX::XMFLOAT4(viewportWidth, viewportHeight, m_Zoom, m_RotationAngle);
+            cb->offsetAndCanvasSize = DirectX::XMFLOAT4(m_Pan.x, m_Pan.y, (float)m_Width, (float)m_Height);
+            cb->channelMasks = DirectX::XMFLOAT4(m_ChannelR ? 1.0f : 0.0f, m_ChannelG ? 1.0f : 0.0f, m_ChannelB ? 1.0f : 0.0f, m_ChannelA ? 1.0f : 0.0f);
+            cb->viewportFlags = DirectX::XMFLOAT4(m_ViewportFlipH ? 1.0f : 0.0f, m_ViewportFlipV ? 1.0f : 0.0f, m_SelectionOutlineTime, 0.0f);
+            context->Unmap(m_ConstantBuffer, 0);
+        }
+
+        context->PSSetShader(m_SelectionOutlinePixelShader, nullptr, 0);
+        context->PSSetShaderResources(1, 1, &m_SelectionMaskSRV);
+        
+        context->RSSetState(m_RasterizerState);
+        context->DrawIndexed(6, 0, 0);
+        context->RSSetState(nullptr);
+        
+        ID3D11ShaderResourceView* nullSRV1 = nullptr;
+        context->PSSetShaderResources(1, 1, &nullSRV1);
+    }
+
     // Clean slot
     ID3D11ShaderResourceView* nullSRV = nullptr;
     context->PSSetShaderResources(0, 1, &nullSRV);
 }
 
 static bool ExtractICCFromPNG(const std::string& pngPath, std::vector<uint8_t>& outIccData, std::string& outProfileName) {
+#ifdef _WIN32
+    std::ifstream file(UTF8ToWString(pngPath), std::ios::binary);
+#else
     std::ifstream file(pngPath, std::ios::binary);
+#endif
     if (!file.is_open()) return false;
 
     // Check PNG signature
@@ -922,7 +1172,11 @@ bool Canvas::ExtractAndSetICCProfile(const std::string& pngPath) {
         } else {
             iccPath += ".icc";
         }
+#ifdef _WIN32
+        std::ofstream outFile(UTF8ToWString(iccPath), std::ios::binary);
+#else
         std::ofstream outFile(iccPath, std::ios::binary);
+#endif
         if (outFile.is_open()) {
             outFile.write(reinterpret_cast<const char*>(iccData.data()), iccData.size());
             outFile.close();
@@ -1189,6 +1443,56 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
     return ImageManager::SaveImageToFile(filepath, composite, m_Width, m_Height, iccProfilePath);
 }
 
+bool Canvas::SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed) {
+    DdsFormat ddsFmt;
+    bool isNative = false;
+    if (formatStr == "R8G8B8A8_UNORM" || formatStr == "RGBA8_UNORM") { ddsFmt = DdsFormat::RGBA8_UNORM; isNative = true; }
+    else if (formatStr == "R16G16B16A16_UNORM" || formatStr == "RGBA16_UNORM") { ddsFmt = DdsFormat::RGBA16_UNORM; isNative = true; }
+    else if (formatStr == "R16G16B16A16_FLOAT" || formatStr == "RGBA16_FLOAT") { ddsFmt = DdsFormat::RGBA16_FLOAT; isNative = true; }
+    else if (formatStr == "R32G32B32A32_FLOAT" || formatStr == "RGBA32_FLOAT") { ddsFmt = DdsFormat::RGBA32_FLOAT; isNative = true; }
+    else if (formatStr == "R8_UNORM") { ddsFmt = DdsFormat::R8_UNORM; isNative = true; }
+    else if (formatStr == "R16_FLOAT") { ddsFmt = DdsFormat::R16_FLOAT; isNative = true; }
+    else if (formatStr == "R32_FLOAT") { ddsFmt = DdsFormat::R32_FLOAT; isNative = true; }
+
+    if (isNative) {
+        return SaveCanvas(filepath, ddsFmt);
+    }
+
+    std::string tempDir = ConfigManager::GetUserSubdirectory("temp");
+    std::string tempFile = tempDir + "/temp_export_uncompressed.dds";
+
+    struct FileCleanupGuard {
+        std::wstring path;
+        ~FileCleanupGuard() {
+            if (!path.empty()) {
+                std::error_code ec;
+                std::filesystem::remove(path, ec);
+            }
+        }
+    } guard;
+#ifdef _WIN32
+    guard.path = UTF8ToWString(tempFile);
+#else
+    guard.path = std::wstring(tempFile.begin(), tempFile.end());
+#endif
+
+    if (!SaveCanvas(tempFile, DdsFormat::RGBA8_UNORM)) {
+        Logger::Get().Error("Failed to save temporary uncompressed DDS for texconv.");
+        return false;
+    }
+
+    ExportSettings settings;
+    settings.isDds = true;
+    settings.ddsFormatStr = formatStr;
+    settings.advancedMode = true;
+    settings.compressionSpeed = speed;
+    settings.generateMipMaps = generateMips;
+    settings.mipFilter = mipFilter;
+    settings.exportPath = filepath;
+
+    return TexconvHelper::CompressDDS(tempFile, filepath, settings);
+}
+
 std::vector<float> Canvas::GetCompositePixels() const {
     if (m_Layers.empty()) {
         return std::vector<float>((size_t)m_Width * m_Height * 4, 0.0f);
@@ -1376,7 +1680,11 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         std::string metadataStr = metadata.dump();
 
         // 2. Open binary file for writing
+#ifdef _WIN32
+        std::ofstream out(UTF8ToWString(filepath), std::ios::binary);
+#else
         std::ofstream out(filepath, std::ios::binary);
+#endif
         if (!out.is_open()) {
             Logger::Get().Error("Could not open file for saving RAYP: " + filepath);
             return false;
@@ -1436,7 +1744,11 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
 bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
     try {
         // 1. Open binary file for reading
+#ifdef _WIN32
+        std::ifstream in(UTF8ToWString(filepath), std::ios::binary);
+#else
         std::ifstream in(filepath, std::ios::binary);
+#endif
         if (!in.is_open()) {
             Logger::Get().Error("Could not open file for loading RAYP: " + filepath);
             return false;
@@ -1590,7 +1902,11 @@ static bool SaveCanvasRaypInternal(const std::string& filepath, int width, int h
 
         std::string metadataStr = metadata.dump();
 
+#ifdef _WIN32
+        std::ofstream out(UTF8ToWString(filepath), std::ios::binary);
+#else
         std::ofstream out(filepath, std::ios::binary);
+#endif
         if (!out.is_open()) {
             return false;
         }
@@ -1933,15 +2249,7 @@ bool Canvas::SaveProjectAuto() {
 
         bool success = false;
         if (ext == "dds") {
-            DdsFormat fmt = DdsFormat::RGBA8_UNORM;
-            if (m_ExportFormat == "RGBA32_FLOAT") fmt = DdsFormat::RGBA32_FLOAT;
-            else if (m_ExportFormat == "RGBA16_UNORM") fmt = DdsFormat::RGBA16_UNORM;
-            else if (m_ExportFormat == "RGBA16_FLOAT") fmt = DdsFormat::RGBA16_FLOAT;
-            else if (m_ExportFormat == "R8_UNORM") fmt = DdsFormat::R8_UNORM;
-            else if (m_ExportFormat == "R16_FLOAT") fmt = DdsFormat::R16_FLOAT;
-            else if (m_ExportFormat == "R32_FLOAT") fmt = DdsFormat::R32_FLOAT;
-            
-            success = SaveCanvas(path, fmt);
+            success = SaveCanvasCompressed(path, m_ExportFormat, m_ExportGenerateMipMaps, m_ExportMipFilter, m_ExportCompressionSpeed);
         } else {
             std::string icc = m_ExportPngColorSpace;
             success = SaveCanvasStandard(path, icc == "sRGB" ? "" : icc);
@@ -1963,5 +2271,789 @@ bool Canvas::SaveProjectAuto() {
             Logger::Get().Error("Failed to save advanced project to RAYP package: " + m_CurrentProjectFilePath);
         }
         return success;
+    }
+}
+
+void Canvas::ClearSelection() {
+    m_SelectionMask.assign(m_Width * m_Height, 0.0f);
+    m_HasSelection = false;
+}
+
+void Canvas::SetSelectionMask(const std::vector<float>& mask) {
+    if (mask.size() == (size_t)m_Width * m_Height) {
+        m_SelectionMask = mask;
+        m_HasSelection = false;
+        for (float val : m_SelectionMask) {
+            if (val > 0.01f) {
+                m_HasSelection = true;
+                break;
+            }
+        }
+    }
+}
+
+void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
+    if (!device) return;
+    
+    if (m_SelectionMaskTexture) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        m_SelectionMaskTexture->GetDesc(&desc);
+        if (desc.Width != m_Width || desc.Height != m_Height) {
+            m_SelectionMaskTexture->Release(); m_SelectionMaskTexture = nullptr;
+            m_SelectionMaskSRV->Release(); m_SelectionMaskSRV = nullptr;
+        }
+    }
+    
+    if (!m_SelectionMaskTexture) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = m_Width;
+        desc.Height = m_Height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        
+        HRESULT hr = device->CreateTexture2D(&desc, nullptr, &m_SelectionMaskTexture);
+        if (SUCCEEDED(hr)) {
+            device->CreateShaderResourceView(m_SelectionMaskTexture, nullptr, &m_SelectionMaskSRV);
+        }
+    }
+    
+    if (m_SelectionMaskTexture) {
+        ID3D11DeviceContext* context = nullptr;
+        device->GetImmediateContext(&context);
+        if (context) {
+            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, m_SelectionMask.data(), m_Width * sizeof(float), 0);
+            context->Release();
+        }
+    }
+}
+
+void Canvas::ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
+    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    cv::rectangle(temp, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255), -1);
+
+    cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+    cv::Mat combined;
+    if (add) {
+        cv::bitwise_or(current, temp, combined);
+    } else if (subtract) {
+        cv::bitwise_and(current, ~temp, combined);
+    } else {
+        combined = temp.clone();
+    }
+
+    m_SelectionMask.resize((size_t)m_Width * m_Height);
+    m_HasSelection = false;
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            float val = combined.at<uint8_t>(y, x) / 255.0f;
+            m_SelectionMask[(size_t)y * m_Width + x] = val;
+            if (val > 0.01f) {
+                m_HasSelection = true;
+            }
+        }
+    }
+}
+
+void Canvas::ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
+    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    cv::Point center((x1 + x2) / 2, (y1 + y2) / 2);
+    cv::Size axes(std::abs(x2 - x1) / 2, std::abs(y2 - y1) / 2);
+    if (axes.width > 0 && axes.height > 0) {
+        cv::ellipse(temp, center, axes, 0.0, 0.0, 360.0, cv::Scalar(255), -1);
+    }
+
+    cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+    cv::Mat combined;
+    if (add) {
+        cv::bitwise_or(current, temp, combined);
+    } else if (subtract) {
+        cv::bitwise_and(current, ~temp, combined);
+    } else {
+        combined = temp.clone();
+    }
+
+    m_SelectionMask.resize((size_t)m_Width * m_Height);
+    m_HasSelection = false;
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            float val = combined.at<uint8_t>(y, x) / 255.0f;
+            m_SelectionMask[(size_t)y * m_Width + x] = val;
+            if (val > 0.01f) {
+                m_HasSelection = true;
+            }
+        }
+    }
+}
+
+void Canvas::ApplyLassoSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract) {
+    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    if (points.size() >= 3) {
+        std::vector<cv::Point> cvPoints;
+        for (const auto& p : points) {
+            cvPoints.push_back(cv::Point(p.first, p.second));
+        }
+        std::vector<std::vector<cv::Point>> polys = { cvPoints };
+        cv::fillPoly(temp, polys, cv::Scalar(255));
+    }
+
+    cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+    cv::Mat combined;
+    if (add) {
+        cv::bitwise_or(current, temp, combined);
+    } else if (subtract) {
+        cv::bitwise_and(current, ~temp, combined);
+    } else {
+        combined = temp.clone();
+    }
+
+    m_SelectionMask.resize((size_t)m_Width * m_Height);
+    m_HasSelection = false;
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            float val = combined.at<uint8_t>(y, x) / 255.0f;
+            m_SelectionMask[(size_t)y * m_Width + x] = val;
+            if (val > 0.01f) {
+                m_HasSelection = true;
+            }
+        }
+    }
+}
+
+void Canvas::ApplyMagicWandSelection(ID3D11Device* device, int startX, int startY, float tolerance, bool add, bool subtract, bool contiguous) {
+    if (startX < 0 || startX >= m_Width || startY < 0 || startY >= m_Height) return;
+
+    std::vector<float> srcPixels;
+    if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
+        srcPixels = m_Layers[m_ActiveLayerIdx].pixels;
+    } else {
+        srcPixels = GetCompositePixels();
+    }
+
+    cv::Mat mat = ImageManager::PixelsToMat8UC3(srcPixels, m_Width, m_Height);
+    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+
+    if (contiguous) {
+        cv::Mat mask = cv::Mat::zeros(m_Height + 2, m_Width + 2, CV_8UC1);
+        cv::Scalar loDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
+        cv::Scalar upDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
+        cv::floodFill(mat, mask, cv::Point(startX, startY), cv::Scalar(255), nullptr, loDiff, upDiff, 4 | cv::FLOODFILL_MASK_ONLY | (255 << 8));
+        temp = mask(cv::Range(1, m_Height + 1), cv::Range(1, m_Width + 1)).clone();
+    } else {
+        cv::Vec3b seedColor = mat.at<cv::Vec3b>(startY, startX);
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                cv::Vec3b color = mat.at<cv::Vec3b>(y, x);
+                float diff = std::sqrt(
+                    std::pow(static_cast<float>(color[0]) - seedColor[0], 2) +
+                    std::pow(static_cast<float>(color[1]) - seedColor[1], 2) +
+                    std::pow(static_cast<float>(color[2]) - seedColor[2], 2)
+                ) / 255.0f;
+                temp.at<uint8_t>(y, x) = (diff <= tolerance * std::sqrt(3.0f)) ? 255 : 0;
+            }
+        }
+    }
+
+    cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+    cv::Mat combined;
+    if (add) {
+        cv::bitwise_or(current, temp, combined);
+    } else if (subtract) {
+        cv::bitwise_and(current, ~temp, combined);
+    } else {
+        combined = temp.clone();
+    }
+
+    m_SelectionMask.resize((size_t)m_Width * m_Height);
+    m_HasSelection = false;
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            float val = combined.at<uint8_t>(y, x) / 255.0f;
+            m_SelectionMask[(size_t)y * m_Width + x] = val;
+            if (val > 0.01f) {
+                m_HasSelection = true;
+            }
+        }
+    }
+
+    UpdateSelectionMaskTexture(device);
+}
+
+void Canvas::ApplySmartSelectSelection(ID3D11Device* device, int x1, int y1, int x2, int y2, bool add, bool subtract) {
+    m_SmartSelectInProgress.store(true);
+    m_SmartSelectCancelled.store(false);
+
+    std::thread t([this, device, x1, y1, x2, y2, add, subtract]() {
+        std::vector<float> srcPixels;
+        if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
+            srcPixels = m_Layers[m_ActiveLayerIdx].pixels;
+        } else {
+            srcPixels = GetCompositePixels();
+        }
+
+        cv::Mat mat = ImageManager::PixelsToMat8UC3(srcPixels, m_Width, m_Height);
+        cv::Mat mask = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+        cv::Mat bgdModel, fgdModel;
+
+        cv::Rect rect(cv::Point(std::min(x1, x2), std::min(y1, y2)), cv::Point(std::max(x1, x2), std::max(y1, y2)));
+        rect.x = std::max(0, rect.x);
+        rect.y = std::max(0, rect.y);
+        rect.width = std::min(m_Width - rect.x, rect.width);
+        rect.height = std::min(m_Height - rect.y, rect.height);
+
+        if (rect.width > 2 && rect.height > 2) {
+            try {
+                if (!m_SmartSelectCancelled.load()) {
+                    cv::grabCut(mat, mask, rect, bgdModel, fgdModel, 3, cv::GC_INIT_WITH_RECT);
+                }
+            } catch (...) {
+                // Ignore errors
+            }
+        }
+
+        if (m_SmartSelectCancelled.load()) {
+            m_SmartSelectInProgress.store(false);
+            return;
+        }
+
+        cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                uint8_t val = mask.at<uint8_t>(y, x);
+                if (val == cv::GC_PR_FGD || val == cv::GC_FGD) {
+                    temp.at<uint8_t>(y, x) = 255;
+                }
+            }
+        }
+
+        cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+        cv::Mat combined;
+        if (add) {
+            cv::bitwise_or(current, temp, combined);
+        } else if (subtract) {
+            cv::bitwise_and(current, ~temp, combined);
+        } else {
+            combined = temp.clone();
+        }
+
+        m_SelectionMask.resize((size_t)m_Width * m_Height);
+        m_HasSelection = false;
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                float val = combined.at<uint8_t>(y, x) / 255.0f;
+                m_SelectionMask[(size_t)y * m_Width + x] = val;
+                if (val > 0.01f) {
+                    m_HasSelection = true;
+                }
+            }
+        }
+
+        UpdateSelectionMaskTexture(device);
+        m_SmartSelectInProgress.store(false);
+    });
+    t.detach();
+}
+
+void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const float color[4], bool contiguous) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    if (startX < 0 || startX >= m_Width || startY < 0 || startY >= m_Height) return;
+
+    auto& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.pixels.empty()) {
+        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+    }
+
+    cv::Mat mat = ImageManager::PixelsToMat8UC3(layer.pixels, m_Width, m_Height);
+    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+
+    if (contiguous) {
+        cv::Mat mask = cv::Mat::zeros(m_Height + 2, m_Width + 2, CV_8UC1);
+        cv::Scalar loDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
+        cv::Scalar upDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
+        cv::floodFill(mat, mask, cv::Point(startX, startY), cv::Scalar(255), nullptr, loDiff, upDiff, 4 | cv::FLOODFILL_MASK_ONLY | (255 << 8));
+        temp = mask(cv::Range(1, m_Height + 1), cv::Range(1, m_Width + 1)).clone();
+    } else {
+        cv::Vec3b seedColor = mat.at<cv::Vec3b>(startY, startX);
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                cv::Vec3b colorVal = mat.at<cv::Vec3b>(y, x);
+                float diff = std::sqrt(
+                    std::pow(static_cast<float>(colorVal[0]) - seedColor[0], 2) +
+                    std::pow(static_cast<float>(colorVal[1]) - seedColor[1], 2) +
+                    std::pow(static_cast<float>(colorVal[2]) - seedColor[2], 2)
+                ) / 255.0f;
+                if (diff <= tolerance * std::sqrt(3.0f)) {
+                    temp.at<uint8_t>(y, x) = 255;
+                }
+            }
+        }
+    }
+
+    for (int ty = 0; ty < (m_Height + 255) / 256; ++ty) {
+        for (int tx = 0; tx < (m_Width + 255) / 256; ++tx) {
+            bool tileAffected = false;
+            for (int y = ty * 256; y < std::min((ty + 1) * 256, m_Height); ++y) {
+                for (int x = tx * 256; x < std::min((tx + 1) * 256, m_Width); ++x) {
+                    if (temp.at<uint8_t>(y, x) > 0) {
+                        tileAffected = true;
+                        break;
+                    }
+                }
+                if (tileAffected) break;
+            }
+            if (tileAffected) {
+                BackupTile(tx, ty);
+            }
+        }
+    }
+
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            float selectionVal = m_HasSelection ? m_SelectionMask[(size_t)y * m_Width + x] : 1.0f;
+            float maskVal = temp.at<uint8_t>(y, x) / 255.0f;
+            float fillAlpha = maskVal * selectionVal * color[3];
+
+            if (fillAlpha > 0.0f) {
+                size_t idx = ((size_t)y * m_Width + x) * 4;
+                float destR = layer.pixels[idx + 0];
+                float destG = layer.pixels[idx + 1];
+                float destB = layer.pixels[idx + 2];
+                float destA = layer.pixels[idx + 3];
+
+                float outA = fillAlpha + destA * (1.0f - fillAlpha);
+                if (outA > 0.0f) {
+                    layer.pixels[idx + 0] = (color[0] * fillAlpha + destR * destA * (1.0f - fillAlpha)) / outA;
+                    layer.pixels[idx + 1] = (color[1] * fillAlpha + destG * destA * (1.0f - fillAlpha)) / outA;
+                    layer.pixels[idx + 2] = (color[2] * fillAlpha + destB * destA * (1.0f - fillAlpha)) / outA;
+                    layer.pixels[idx + 3] = outA;
+                }
+            }
+        }
+    }
+
+    layer.needsUpload = true;
+    m_IsDocumentModified = true;
+
+    if (!m_ActiveStrokeDeltas.empty()) {
+        std::vector<TileDelta> deltas;
+        for (auto& pair : m_ActiveStrokeDeltas) {
+            auto& delta = pair.second;
+            delta.newPixels.resize(256 * 256 * 4, 0.0f);
+            int startX = delta.tileX * 256;
+            int startY = delta.tileY * 256;
+            for (int y = 0; y < 256; ++y) {
+                int cy = startY + y;
+                if (cy >= m_Height) break;
+                for (int x = 0; x < 256; ++x) {
+                    int cx = startX + x;
+                    if (cx >= m_Width) break;
+                    size_t srcIdx = ((size_t)cy * m_Width + cx) * 4;
+                    size_t dstIdx = ((size_t)y * 256 + x) * 4;
+                    delta.newPixels[dstIdx + 0] = layer.pixels[srcIdx + 0];
+                    delta.newPixels[dstIdx + 1] = layer.pixels[srcIdx + 1];
+                    delta.newPixels[dstIdx + 2] = layer.pixels[srcIdx + 2];
+                    delta.newPixels[dstIdx + 3] = layer.pixels[srcIdx + 3];
+                }
+            }
+            deltas.push_back(delta);
+        }
+        m_UndoRedoManager.PushCommand(std::make_unique<PaintStrokeCommand>("Bucket Fill", m_ActiveLayerIdx, deltas));
+        m_ActiveStrokeDeltas.clear();
+    }
+}
+
+void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColor[4], const float endColor[4]) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+
+    auto& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.pixels.empty()) {
+        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+    }
+
+    float dx = (float)(x2 - x1);
+    float dy = (float)(y2 - y1);
+    float lenSq = dx * dx + dy * dy;
+
+    for (int ty = 0; ty < (m_Height + 255) / 256; ++ty) {
+        for (int tx = 0; tx < (m_Width + 255) / 256; ++tx) {
+            BackupTile(tx, ty);
+        }
+    }
+
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            float t = 0.0f;
+            if (lenSq > 0.001f) {
+                float vx = (float)(x - x1);
+                float vy = (float)(y - y1);
+                t = (vx * dx + vy * dy) / lenSq;
+                t = std::clamp(t, 0.0f, 1.0f);
+            }
+
+            float lerpColor[4];
+            lerpColor[0] = startColor[0] * (1.0f - t) + endColor[0] * t;
+            lerpColor[1] = startColor[1] * (1.0f - t) + endColor[1] * t;
+            lerpColor[2] = startColor[2] * (1.0f - t) + endColor[2] * t;
+            lerpColor[3] = startColor[3] * (1.0f - t) + endColor[3] * t;
+
+            float selectionVal = m_HasSelection ? m_SelectionMask[(size_t)y * m_Width + x] : 1.0f;
+            float alphaVal = lerpColor[3] * selectionVal;
+
+            if (alphaVal > 0.0f) {
+                size_t idx = ((size_t)y * m_Width + x) * 4;
+                float destR = layer.pixels[idx + 0];
+                float destG = layer.pixels[idx + 1];
+                float destB = layer.pixels[idx + 2];
+                float destA = layer.pixels[idx + 3];
+
+                float outA = alphaVal + destA * (1.0f - alphaVal);
+                if (outA > 0.0f) {
+                    layer.pixels[idx + 0] = (lerpColor[0] * alphaVal + destR * destA * (1.0f - alphaVal)) / outA;
+                    layer.pixels[idx + 1] = (lerpColor[1] * alphaVal + destG * destA * (1.0f - alphaVal)) / outA;
+                    layer.pixels[idx + 2] = (lerpColor[2] * alphaVal + destB * destA * (1.0f - alphaVal)) / outA;
+                    layer.pixels[idx + 3] = outA;
+                }
+            }
+        }
+    }
+
+    layer.needsUpload = true;
+    m_IsDocumentModified = true;
+
+    if (!m_ActiveStrokeDeltas.empty()) {
+        std::vector<TileDelta> deltas;
+        for (auto& pair : m_ActiveStrokeDeltas) {
+            auto& delta = pair.second;
+            delta.newPixels.resize(256 * 256 * 4, 0.0f);
+            int startX = delta.tileX * 256;
+            int startY = delta.tileY * 256;
+            for (int y = 0; y < 256; ++y) {
+                int cy = startY + y;
+                if (cy >= m_Height) break;
+                for (int x = 0; x < 256; ++x) {
+                    int cx = startX + x;
+                    if (cx >= m_Width) break;
+                    size_t srcIdx = ((size_t)cy * m_Width + cx) * 4;
+                    size_t dstIdx = ((size_t)y * 256 + x) * 4;
+                    delta.newPixels[dstIdx + 0] = layer.pixels[srcIdx + 0];
+                    delta.newPixels[dstIdx + 1] = layer.pixels[srcIdx + 1];
+                    delta.newPixels[dstIdx + 2] = layer.pixels[srcIdx + 2];
+                    delta.newPixels[dstIdx + 3] = layer.pixels[srcIdx + 3];
+                }
+            }
+            deltas.push_back(delta);
+        }
+        m_UndoRedoManager.PushCommand(std::make_unique<PaintStrokeCommand>("Gradient", m_ActiveLayerIdx, deltas));
+        m_ActiveStrokeDeltas.clear();
+    }
+}
+
+void Canvas::StartMovePixels(ID3D11Device* device) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= m_Layers.size()) return;
+    if (m_IsMovingPixels) {
+        CommitMovePixels(device);
+    }
+    
+    int numTilesX = (m_Width + 255) / 256;
+    int numTilesY = (m_Height + 255) / 256;
+    for (int ty = 0; ty < numTilesY; ++ty) {
+        for (int tx = 0; tx < numTilesX; ++tx) {
+            BackupTile(tx, ty);
+        }
+    }
+    
+    m_IsMovingPixels = true;
+    m_FloatingOffsetX = 0;
+    m_FloatingOffsetY = 0;
+    m_StartActiveLayerIdx = m_ActiveLayerIdx;
+    
+    m_OriginalSelectionMask.assign(m_Width * m_Height, 1.0f);
+    if (m_HasSelection) {
+        std::copy(m_SelectionMask.begin(), m_SelectionMask.end(), m_OriginalSelectionMask.begin());
+    }
+    
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    m_FloatingPixels.assign(m_Width * m_Height * 4, 0.0f);
+    
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            size_t maskIdx = y * m_Width + x;
+            float weight = m_OriginalSelectionMask[maskIdx];
+            if (weight > 0.0f) {
+                size_t pixelIdx = maskIdx * 4;
+                m_FloatingPixels[pixelIdx + 0] = layer.pixels[pixelIdx + 0];
+                m_FloatingPixels[pixelIdx + 1] = layer.pixels[pixelIdx + 1];
+                m_FloatingPixels[pixelIdx + 2] = layer.pixels[pixelIdx + 2];
+                m_FloatingPixels[pixelIdx + 3] = layer.pixels[pixelIdx + 3] * weight;
+                
+                layer.pixels[pixelIdx + 0] *= (1.0f - weight);
+                layer.pixels[pixelIdx + 1] *= (1.0f - weight);
+                layer.pixels[pixelIdx + 2] *= (1.0f - weight);
+                layer.pixels[pixelIdx + 3] *= (1.0f - weight);
+            }
+        }
+    }
+    
+    layer.needsUpload = true;
+    
+    for (int iter = 0; iter < 4; ++iter) {
+        std::vector<float> nextFloating = m_FloatingPixels;
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                size_t idx = (y * m_Width + x) * 4;
+                if (m_FloatingPixels[idx + 3] <= 0.05f) {
+                    int dxs[] = { 0, 0, -1, 1 };
+                    int dys[] = { -1, 1, 0, 0 };
+                    float bestAlpha = 0.0f;
+                    float padR = 0.0f, padG = 0.0f, padB = 0.0f;
+                    for (int n = 0; n < 4; ++n) {
+                        int nx = x + dxs[n];
+                        int ny = y + dys[n];
+                        if (nx >= 0 && nx < m_Width && ny >= 0 && ny < m_Height) {
+                            size_t nIdx = (ny * m_Width + nx) * 4;
+                            if (m_FloatingPixels[nIdx + 3] > bestAlpha) {
+                                bestAlpha = m_FloatingPixels[nIdx + 3];
+                                padR = m_FloatingPixels[nIdx + 0];
+                                padG = m_FloatingPixels[nIdx + 1];
+                                padB = m_FloatingPixels[nIdx + 2];
+                            }
+                        }
+                    }
+                    if (bestAlpha > 0.05f) {
+                        nextFloating[idx + 0] = padR;
+                        nextFloating[idx + 1] = padG;
+                        nextFloating[idx + 2] = padB;
+                    }
+                }
+            }
+        }
+        m_FloatingPixels = nextFloating;
+    }
+    
+    if (device) {
+        if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
+        if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
+        
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = m_Width;
+        desc.Height = m_Height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        
+        D3D11_SUBRESOURCE_DATA initData = {};
+        initData.pSysMem = m_FloatingPixels.data();
+        initData.SysMemPitch = m_Width * sizeof(float) * 4;
+        
+        HRESULT hr = device->CreateTexture2D(&desc, &initData, &m_FloatingTexture);
+        if (SUCCEEDED(hr)) {
+            device->CreateShaderResourceView(m_FloatingTexture, nullptr, &m_FloatingSRV);
+        }
+        
+        if (layer.hasMask) {
+            if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
+            if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
+            
+            std::vector<float> floatingMask(m_Width * m_Height, 0.0f);
+            for (int y = 0; y < m_Height; ++y) {
+                for (int x = 0; x < m_Width; ++x) {
+                    size_t idx = y * m_Width + x;
+                    if (m_OriginalSelectionMask[idx] > 0.0f) {
+                        floatingMask[idx] = layer.mask[idx];
+                        layer.mask[idx] = 1.0f;
+                    }
+                }
+            }
+            layer.maskNeedsUpload = true;
+            
+            D3D11_TEXTURE2D_DESC mDesc = {};
+            mDesc.Width = m_Width;
+            mDesc.Height = m_Height;
+            mDesc.MipLevels = 1;
+            mDesc.ArraySize = 1;
+            mDesc.Format = DXGI_FORMAT_R32_FLOAT;
+            mDesc.SampleDesc.Count = 1;
+            mDesc.SampleDesc.Quality = 0;
+            mDesc.Usage = D3D11_USAGE_DEFAULT;
+            mDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            
+            D3D11_SUBRESOURCE_DATA mInitData = {};
+            mInitData.pSysMem = floatingMask.data();
+            mInitData.SysMemPitch = m_Width * sizeof(float);
+            
+            hr = device->CreateTexture2D(&mDesc, &mInitData, &m_FloatingMaskTexture);
+            if (SUCCEEDED(hr)) {
+                device->CreateShaderResourceView(m_FloatingMaskTexture, nullptr, &m_FloatingMaskSRV);
+            }
+        }
+    }
+}
+
+void Canvas::UpdateMovePixels(ID3D11Device* device, int dx, int dy) {
+    if (!m_IsMovingPixels) return;
+    m_FloatingOffsetX = dx;
+    m_FloatingOffsetY = dy;
+}
+
+void Canvas::CommitMovePixels(ID3D11Device* device) {
+    if (!m_IsMovingPixels) return;
+    
+    if (m_StartActiveLayerIdx >= 0 && m_StartActiveLayerIdx < m_Layers.size()) {
+        Layer& layer = m_Layers[m_StartActiveLayerIdx];
+        
+        std::vector<float> finalPixels = layer.pixels;
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                int srcX = x - m_FloatingOffsetX;
+                int srcY = y - m_FloatingOffsetY;
+                if (srcX >= 0 && srcX < m_Width && srcY >= 0 && srcY < m_Height) {
+                    size_t srcIdx = (srcY * m_Width + srcX) * 4;
+                    float srcAlpha = m_FloatingPixels[srcIdx + 3];
+                    if (srcAlpha > 0.0f) {
+                        size_t destIdx = (y * m_Width + x) * 4;
+                        float destAlpha = finalPixels[destIdx + 3];
+                        float outAlpha = srcAlpha + destAlpha * (1.0f - srcAlpha);
+                        if (outAlpha > 0.0f) {
+                            finalPixels[destIdx + 0] = (m_FloatingPixels[srcIdx + 0] * srcAlpha + finalPixels[destIdx + 0] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                            finalPixels[destIdx + 1] = (m_FloatingPixels[srcIdx + 1] * srcAlpha + finalPixels[destIdx + 1] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                            finalPixels[destIdx + 2] = (m_FloatingPixels[srcIdx + 2] * srcAlpha + finalPixels[destIdx + 2] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                        }
+                        finalPixels[destIdx + 3] = outAlpha;
+                    }
+                }
+            }
+        }
+        layer.pixels = finalPixels;
+        layer.needsUpload = true;
+        
+        if (layer.hasMask && m_FloatingMaskSRV) {
+            std::vector<float> finalMask = layer.mask;
+            for (int y = 0; y < m_Height; ++y) {
+                for (int x = 0; x < m_Width; ++x) {
+                    int srcX = x - m_FloatingOffsetX;
+                    int srcY = y - m_FloatingOffsetY;
+                    if (srcX >= 0 && srcX < m_Width && srcY >= 0 && srcY < m_Height) {
+                        size_t srcIdx = srcY * m_Width + srcX;
+                        if (m_OriginalSelectionMask[srcIdx] > 0.0f) {
+                            size_t destIdx = y * m_Width + x;
+                            finalMask[destIdx] = m_OriginalSelectionMask[srcIdx];
+                        }
+                    }
+                }
+            }
+            layer.mask = finalMask;
+            layer.maskNeedsUpload = true;
+        }
+        
+        if (m_HasSelection) {
+            std::vector<float> shiftedSelection(m_Width * m_Height, 0.0f);
+            for (int y = 0; y < m_Height; ++y) {
+                for (int x = 0; x < m_Width; ++x) {
+                    int srcX = x - m_FloatingOffsetX;
+                    int srcY = y - m_FloatingOffsetY;
+                    if (srcX >= 0 && srcX < m_Width && srcY >= 0 && srcY < m_Height) {
+                        shiftedSelection[y * m_Width + x] = m_OriginalSelectionMask[srcY * m_Width + srcX];
+                    }
+                }
+            }
+            m_SelectionMask = shiftedSelection;
+            UpdateSelectionMaskTexture(device);
+        }
+    }
+    
+    if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
+    if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
+    if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
+    if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
+    m_FloatingPixels.clear();
+    m_OriginalSelectionMask.clear();
+    
+    m_IsMovingPixels = false;
+}
+
+void Canvas::CancelMovePixels(ID3D11Device* device) {
+    if (!m_IsMovingPixels) return;
+    
+    if (m_StartActiveLayerIdx >= 0 && m_StartActiveLayerIdx < m_Layers.size()) {
+        Layer& layer = m_Layers[m_StartActiveLayerIdx];
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                size_t maskIdx = y * m_Width + x;
+                float weight = m_OriginalSelectionMask[maskIdx];
+                if (weight > 0.0f) {
+                    size_t pixelIdx = maskIdx * 4;
+                    layer.pixels[pixelIdx + 0] = m_FloatingPixels[pixelIdx + 0];
+                    layer.pixels[pixelIdx + 1] = m_FloatingPixels[pixelIdx + 1];
+                    layer.pixels[pixelIdx + 2] = m_FloatingPixels[pixelIdx + 2];
+                    layer.pixels[pixelIdx + 3] = m_FloatingPixels[pixelIdx + 3];
+                }
+            }
+        }
+        layer.needsUpload = true;
+    }
+    
+    if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
+    if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
+    if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
+    if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
+    m_FloatingPixels.clear();
+    m_OriginalSelectionMask.clear();
+    
+    m_IsMovingPixels = false;
+}
+
+void Canvas::DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen) {
+    if (!m_IsMovingPixels) return;
+    
+    int minX = m_Width, maxX = 0, minY = m_Height, maxY = 0;
+    bool hasPixels = false;
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            if (m_OriginalSelectionMask[y * m_Width + x] > 0.0f) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+                hasPixels = true;
+            }
+        }
+    }
+    
+    if (hasPixels) {
+        float x1 = (float)minX + m_FloatingOffsetX;
+        float y1 = (float)minY + m_FloatingOffsetY;
+        float x2 = (float)maxX + m_FloatingOffsetX;
+        float y2 = (float)maxY + m_FloatingOffsetY;
+        
+        ImVec2 p1 = canvasToScreen(x1, y1);
+        ImVec2 p2 = canvasToScreen(x2, y1);
+        ImVec2 p3 = canvasToScreen(x2, y2);
+        ImVec2 p4 = canvasToScreen(x1, y2);
+        
+        ImU32 gizmoCol = IM_COL32(0, 120, 215, 255);
+        float thickness = 2.0f;
+        
+        dl->AddLine(p1, p2, gizmoCol, thickness);
+        dl->AddLine(p2, p3, gizmoCol, thickness);
+        dl->AddLine(p3, p4, gizmoCol, thickness);
+        dl->AddLine(p4, p1, gizmoCol, thickness);
+        
+        float hs = 4.0f;
+        auto drawHandle = [&](ImVec2 p) {
+            dl->AddRectFilled(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), IM_COL32(255, 255, 255, 255));
+            dl->AddRect(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), gizmoCol, 0.0f, 0, 1.0f);
+        };
+        drawHandle(p1);
+        drawHandle(p2);
+        drawHandle(p3);
+        drawHandle(p4);
     }
 }

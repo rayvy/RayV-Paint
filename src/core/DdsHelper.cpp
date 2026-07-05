@@ -4,6 +4,18 @@
 #include <cstring>
 #include <algorithm>
 
+#ifdef _WIN32
+#include <windows.h>
+static std::wstring UTF8ToWString(const std::string& str) {
+    if (str.empty()) return L"";
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
+    std::wstring wstrTo(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
+    return wstrTo;
+}
+#endif
+
+
 #define BCDEC_IMPLEMENTATION
 #include "bcdec.h"
 
@@ -60,7 +72,11 @@ struct DDS_HEADER_DXT10 {
 };
 
 bool DdsHelper::LoadDDS(const std::string& filename, DdsImage& outImage) {
+#ifdef _WIN32
+    std::ifstream file(UTF8ToWString(filename), std::ios::binary);
+#else
     std::ifstream file(filename, std::ios::binary);
+#endif
     if (!file.is_open()) {
         Logger::Get().Error("Failed to open DDS file for reading: " + filename);
         return false;
@@ -349,7 +365,11 @@ static uint16_t FloatToHalf(float f) {
 }
 
 bool DdsHelper::SaveDDS(const std::string& filename, const DdsImage& image) {
+#ifdef _WIN32
+    std::ofstream file(UTF8ToWString(filename), std::ios::binary);
+#else
     std::ofstream file(filename, std::ios::binary);
+#endif
     if (!file.is_open()) {
         Logger::Get().Error("Failed to open DDS file for writing: " + filename);
         return false;

@@ -19,26 +19,65 @@ extern bool g_IsViewportHovered;
 #include <commdlg.h>
 #pragma comment(lib, "comdlg32.lib")
 
+static std::wstring UTF8ToWString(const std::string& str) {
+    if (str.empty()) return L"";
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
+    std::wstring wstrTo(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
+    return wstrTo;
+}
+
+static std::string WStringToUTF8(const std::wstring& wstr) {
+    if (wstr.empty()) return "";
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
+}
+
+static std::wstring ConvertFilterToWString(const char* filter) {
+    if (!filter) return L"";
+    std::vector<char> filterBuffer;
+    const char* p = filter;
+    while (true) {
+        if (*p == '\0' && *(p + 1) == '\0') {
+            filterBuffer.push_back('\0');
+            filterBuffer.push_back('\0');
+            break;
+        }
+        filterBuffer.push_back(*p);
+        p++;
+    }
+    int size = static_cast<int>(filterBuffer.size());
+    int size_needed = MultiByteToWideChar(CP_UTF8, 0, filterBuffer.data(), size, NULL, 0);
+    std::wstring wfilter(size_needed, 0);
+    MultiByteToWideChar(CP_UTF8, 0, filterBuffer.data(), size, &wfilter[0], size_needed);
+    return wfilter;
+}
+
 static bool ShowOpenFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") {
-    OPENFILENAMEA ofn;
-    char szFile[512] = { 0 };
+    OPENFILENAMEW ofn;
+    wchar_t szFile[512] = { 0 };
     if (outPath && strlen(outPath) > 0) {
-        std::strncpy(szFile, outPath, sizeof(szFile) - 1);
+        std::wstring wpath = UTF8ToWString(outPath);
+        std::wcsncpy(szFile, wpath.c_str(), sizeof(szFile)/sizeof(wchar_t) - 1);
     }
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = NULL;
     ofn.lpstrFile = szFile;
-    ofn.nMaxFile = sizeof(szFile);
-    ofn.lpstrFilter = filter;
+    ofn.nMaxFile = sizeof(szFile)/sizeof(wchar_t);
+    std::wstring wfilter = ConvertFilterToWString(filter);
+    ofn.lpstrFilter = wfilter.c_str();
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
     ofn.lpstrInitialDir = NULL;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
 
-    if (GetOpenFileNameA(&ofn) == TRUE) {
-        std::strncpy(outPath, ofn.lpstrFile, maxLen - 1);
+    if (GetOpenFileNameW(&ofn) == TRUE) {
+        std::string utf8Path = WStringToUTF8(ofn.lpstrFile);
+        std::strncpy(outPath, utf8Path.c_str(), maxLen - 1);
         outPath[maxLen - 1] = '\0';
         return true;
     }
@@ -46,25 +85,28 @@ static bool ShowOpenFileWin32(char* outPath, size_t maxLen, const char* filter =
 }
 
 static bool ShowSaveFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") {
-    OPENFILENAMEA ofn;
-    char szFile[512] = { 0 };
+    OPENFILENAMEW ofn;
+    wchar_t szFile[512] = { 0 };
     if (outPath && strlen(outPath) > 0) {
-        std::strncpy(szFile, outPath, sizeof(szFile) - 1);
+        std::wstring wpath = UTF8ToWString(outPath);
+        std::wcsncpy(szFile, wpath.c_str(), sizeof(szFile)/sizeof(wchar_t) - 1);
     }
     ZeroMemory(&ofn, sizeof(ofn));
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = NULL;
     ofn.lpstrFile = szFile;
-    ofn.nMaxFile = sizeof(szFile);
-    ofn.lpstrFilter = filter;
+    ofn.nMaxFile = sizeof(szFile)/sizeof(wchar_t);
+    std::wstring wfilter = ConvertFilterToWString(filter);
+    ofn.lpstrFilter = wfilter.c_str();
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
     ofn.lpstrInitialDir = NULL;
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
 
-    if (GetSaveFileNameA(&ofn) == TRUE) {
-        std::strncpy(outPath, ofn.lpstrFile, maxLen - 1);
+    if (GetSaveFileNameW(&ofn) == TRUE) {
+        std::string utf8Path = WStringToUTF8(ofn.lpstrFile);
+        std::strncpy(outPath, utf8Path.c_str(), maxLen - 1);
         outPath[maxLen - 1] = '\0';
         return true;
     }
@@ -427,26 +469,36 @@ namespace UI {
             }
             ImGui::Text("DDS Format:");
             static const char* formatNames[] = {
-                "8-bit SDR (RGBA8)",
-                "16-bit SDR (RGBA16)",
-                "16-bit float HDR (RGBA16F)",
-                "32-bit float HDR (RGBA32F)",
-                "8-bit Grayscale (R8)",
-                "16-bit float Grayscale (R16F)",
-                "32-bit float Grayscale (R32F)"
+                "BC7 (sRGB)",
+                "BC7 (Linear)",
+                "BC1 (sRGB)",
+                "BC1 (Linear)",
+                "BC2 (sRGB)",
+                "BC2 (Linear)",
+                "BC3 (sRGB)",
+                "BC3 (Linear, DXT5)",
+                "BC3 (Linear, RXGB)",
+                "BC4 (Linear, Unsigned)",
+                "BC5 (Linear, Unsigned)",
+                "BC5 (Linear, Signed)",
+                "BC6H (Linear, Unsigned)",
+                "BC6H (Linear, Signed)",
+                "B8G8R8A8 (Linear)",
+                "B8G8R8A8 (sRGB)",
+                "B8G8R8X8 (Linear)",
+                "B8G8R8X8 (sRGB)",
+                "R8G8B8A8 (Linear)",
+                "R8G8B8A8 (sRGB)",
+                "R8 (Linear, Unsigned)",
+                "R8G8 (Linear, Unsigned)",
+                "R8G8 (Linear, Signed)",
+                "R32 (Linear, Float)"
             };
             ImGui::Combo("##ddsformat", &formatChoice, formatNames, IM_ARRAYSIZE(formatNames));
             ImGui::Separator();
             if (ImGui::Button("Export", ImVec2(120, 0))) {
-                DdsFormat fmt = DdsFormat::RGBA8_UNORM;
-                if (formatChoice == 1) fmt = DdsFormat::RGBA16_UNORM;
-                else if (formatChoice == 2) fmt = DdsFormat::RGBA16_FLOAT;
-                else if (formatChoice == 3) fmt = DdsFormat::RGBA32_FLOAT;
-                else if (formatChoice == 4) fmt = DdsFormat::R8_UNORM;
-                else if (formatChoice == 5) fmt = DdsFormat::R16_FLOAT;
-                else if (formatChoice == 6) fmt = DdsFormat::R32_FLOAT;
-                
-                if (canvas.SaveCanvas(exportPath, fmt)) {
+                std::string chosenFormat = formatNames[formatChoice];
+                if (canvas.SaveCanvasCompressed(exportPath, chosenFormat, true, "Bicubic", "Medium")) {
                     ImGui::CloseCurrentPopup();
                 }
             }
@@ -593,8 +645,13 @@ namespace UI {
                 
                 bool success = false;
                 if (ext == "dds") {
-                    DdsFormat fmt = DdsFormat::RGBA8_UNORM;
-                    success = canvas.SaveCanvas(exportPath, fmt);
+                    success = canvas.SaveCanvasCompressed(
+                        exportPath,
+                        canvas.GetExportFormat(),
+                        canvas.GetExportGenerateMipMaps(),
+                        canvas.GetExportMipFilter(),
+                        canvas.GetExportCompressionSpeed()
+                    );
                 } else {
                     std::string icc = canvas.GetExportPngColorSpace();
                     success = canvas.SaveCanvasStandard(exportPath, icc == "sRGB" ? "" : icc);
@@ -899,6 +956,22 @@ namespace UI {
                 ImGui::Spacing();
                 RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::Spacing();
+                RenderToolButton("BucketFillTool", "Fill", ActiveTool::BucketFill, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::Spacing();
+                RenderToolButton("GradientTool", "Gradient", ActiveTool::Gradient, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::Spacing();
+                RenderToolButton("PipetteTool", "Pipette", ActiveTool::Pipette, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::Spacing();
+                RenderToolButton("RectSelectTool", "Rect Sel", ActiveTool::RectSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::Spacing();
+                RenderToolButton("EllipseSelectTool", "Ellip Sel", ActiveTool::EllipseSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::Spacing();
+                RenderToolButton("LassoSelectTool", "Lasso Sel", ActiveTool::LassoSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::Spacing();
+                RenderToolButton("MagicWandTool", "Wand Sel", ActiveTool::MagicWand, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::Spacing();
+                RenderToolButton("SmartSelectTool", "Smart Sel", ActiveTool::SmartSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::Spacing();
                 RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::Spacing();
                 ImGui::Separator();
@@ -908,6 +981,22 @@ namespace UI {
                 RenderToolButton("BrushTool", "Brush", ActiveTool::Brush, false, brushBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::SameLine();
                 RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine();
+                RenderToolButton("BucketFillTool", "Fill", ActiveTool::BucketFill, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine();
+                RenderToolButton("GradientTool", "Gradient", ActiveTool::Gradient, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine();
+                RenderToolButton("PipetteTool", "Pipette", ActiveTool::Pipette, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine();
+                RenderToolButton("RectSelectTool", "Rect Sel", ActiveTool::RectSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine();
+                RenderToolButton("EllipseSelectTool", "Ellip Sel", ActiveTool::EllipseSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine();
+                RenderToolButton("LassoSelectTool", "Lasso Sel", ActiveTool::LassoSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine();
+                RenderToolButton("MagicWandTool", "Wand Sel", ActiveTool::MagicWand, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine();
+                RenderToolButton("SmartSelectTool", "Smart Sel", ActiveTool::SmartSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::SameLine();
                 RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::SameLine();
@@ -1180,6 +1269,29 @@ namespace UI {
                 ImGui::PushItemWidth(100);
                 ImGui::SliderFloat("Opacity", &layers[i].opacity, 0.0f, 1.0f, "%.2f");
                 ImGui::PopItemWidth();
+
+                if (isSelected) {
+                    ImGui::Spacing();
+                    if (layers[i].hasMask) {
+                        ImGui::Text("Mask: Active");
+                        ImGui::SameLine();
+                        if (ImGui::Button("Apply Mask")) {
+                            canvas.ApplyLayerMask(i);
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Delete Mask")) {
+                            canvas.DeleteLayerMask(i);
+                        }
+                    } else {
+                        if (ImGui::Button("Create Mask")) {
+                            canvas.CreateLayerMask(device, i);
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Mask from Sel")) {
+                            canvas.CreateLayerMaskFromSelection(device, i);
+                        }
+                    }
+                }
 
                 ImGui::Separator();
                 ImGui::PopID();

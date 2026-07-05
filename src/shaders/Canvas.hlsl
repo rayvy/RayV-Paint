@@ -158,10 +158,18 @@ float4 PSMain(PS_INPUT input) : SV_TARGET
     return float4(finalColor, 1.0f);
 }
 
+Texture2D g_LayerMask : register(t1);
+
 // Simple pixel shader to output layer contents multiplied by layer opacity
 float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
 {
-    float4 col = g_Texture.Sample(g_Sampler, input.uv);
+    float2 uv = input.uv - u_LayerParams.zw;
+    if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
+    {
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    float4 col = g_Texture.Sample(g_Sampler, uv);
     
     // If master Alpha channel is disabled, treat the layer as fully opaque
     if (u_ChannelMasksAndFlags.w < 0.5f)
@@ -170,5 +178,42 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
     }
     
     col.a *= u_LayerParams.x; // Multiply alpha by opacity
+
+    // If layer mask is enabled, sample it and modulate alpha
+    if (u_LayerParams.y > 0.5f)
+    {
+        float maskVal = g_LayerMask.Sample(g_Sampler, uv).r;
+        col.a *= maskVal;
+    }
+    
     return col;
+}
+
+Texture2D g_SelectionMask : register(t1);
+
+float4 PSSelectionOutline(PS_INPUT input) : SV_TARGET
+{
+    float mask = g_SelectionMask.Sample(g_Sampler, input.uv).r;
+    
+    float2 canvasSize = u_OffsetAndCanvasSize.zw;
+    float zoom = u_ViewportSizeAndZoom.z;
+    float2 uvStep = 1.0f / (canvasSize * zoom);
+    
+    float mLeft  = g_SelectionMask.Sample(g_Sampler, input.uv - float2(uvStep.x, 0.0f)).r;
+    float mRight = g_SelectionMask.Sample(g_Sampler, input.uv + float2(uvStep.x, 0.0f)).r;
+    float mUp    = g_SelectionMask.Sample(g_Sampler, input.uv - float2(0.0f, uvStep.y)).r;
+    float mDown  = g_SelectionMask.Sample(g_Sampler, input.uv + float2(0.0f, uvStep.y)).r;
+    
+    // Check if there is an edge
+    if (abs(mask - mLeft) > 0.1f || abs(mask - mRight) > 0.1f || abs(mask - mUp) > 0.1f || abs(mask - mDown) > 0.1f)
+    {
+        float time = u_ViewportFlags.z;
+        float dash = (input.screenPos.x + input.screenPos.y - time * 30.0f) % 10.0f;
+        if (dash < 0.0f) dash += 10.0f;
+        float3 col = (dash < 5.0f) ? float3(0.0f, 0.0f, 0.0f) : float3(1.0f, 1.0f, 1.0f);
+        return float4(col, 1.0f);
+    }
+    
+    discard;
+    return float4(0.0f, 0.0f, 0.0f, 0.0f);
 }

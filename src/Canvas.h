@@ -1,9 +1,11 @@
 #pragma once
+#include <imgui.h>
 
 #include <d3d11.h>
 #include <directxmath.h>
 #include <vector>
 #include <string>
+#include <atomic>
 #include <functional>
 #include "core/PaintEngine.h"
 #include "core/DdsHelper.h"
@@ -17,6 +19,12 @@ struct Layer {
     ID3D11Texture2D* texture = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
     bool needsUpload = false;
+
+    std::vector<float> mask;
+    ID3D11Texture2D* maskTexture = nullptr;
+    ID3D11ShaderResourceView* maskSRV = nullptr;
+    bool hasMask = false;
+    bool maskNeedsUpload = false;
 };
 
 enum class StrokePhase {
@@ -64,13 +72,45 @@ public:
     int GetActiveLayerIndex() const { return m_ActiveLayerIdx; }
     std::vector<Layer>& GetLayers() { return m_Layers; }
 
+    // Layer Mask operations
+    void CreateLayerMask(ID3D11Device* device, int index);
+    void CreateLayerMaskFromSelection(ID3D11Device* device, int index);
+    void DeleteLayerMask(int index);
+    void ApplyLayerMask(int index);
+    void UpdateLayerMaskTexture(ID3D11Device* device, int index);
+
     // Paint Operation
     void PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush);
+
+    // Selection System
+    bool HasSelection() const { return m_HasSelection; }
+    void ClearSelection();
+    void SetSelectionMask(const std::vector<float>& mask);
+    const std::vector<float>& GetSelectionMask() const { return m_SelectionMask; }
+    void UpdateSelectionMaskTexture(ID3D11Device* device);
+    void ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract);
+    void ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, bool subtract);
+    void ApplyLassoSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
+    void ApplyMagicWandSelection(ID3D11Device* device, int startX, int startY, float tolerance, bool add, bool subtract, bool contiguous);
+    void ApplySmartSelectSelection(ID3D11Device* device, int x1, int y1, int x2, int y2, bool add, bool subtract);
+    bool IsSmartSelectInProgress() const { return m_SmartSelectInProgress.load(); }
+    void CancelSmartSelect() { m_SmartSelectCancelled.store(true); }
+    void ApplyBucketFill(int startX, int startY, float tolerance, const float color[4], bool contiguous);
+    void ApplyGradient(int x1, int y1, int x2, int y2, const float startColor[4], const float endColor[4]);
+
+    // Move Pixels operations
+    bool IsMovingPixels() const { return m_IsMovingPixels; }
+    void StartMovePixels(ID3D11Device* device);
+    void UpdateMovePixels(ID3D11Device* device, int dx, int dy);
+    void CommitMovePixels(ID3D11Device* device);
+    void CancelMovePixels(ID3D11Device* device);
+    void DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen);
 
     // File Import / Export
     bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath);
     bool SaveCanvas(const std::string& filepath, DdsFormat ddsFormat);
     bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath = "");
+    bool SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed);
     std::vector<float> GetCompositePixels() const;
     void CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height);
 
@@ -202,6 +242,7 @@ private:
     ID3D11VertexShader* m_LayerVertexShader = nullptr;
     ID3D11PixelShader* m_PixelShader = nullptr;
     ID3D11PixelShader* m_LayerBlendPixelShader = nullptr;
+    ID3D11PixelShader* m_SelectionOutlinePixelShader = nullptr;
     ID3D11InputLayout* m_InputLayout = nullptr;
     ID3D11SamplerState* m_SamplerState = nullptr;
 
@@ -242,4 +283,26 @@ private:
     bool m_ViewportFlipH = false;
     bool m_ViewportFlipV = false;
     ProjectType m_ProjectType = ProjectType::Advanced;
+
+    // Selection State
+    bool m_HasSelection = false;
+    std::vector<float> m_SelectionMask;
+    ID3D11Texture2D* m_SelectionMaskTexture = nullptr;
+    ID3D11ShaderResourceView* m_SelectionMaskSRV = nullptr;
+    float m_SelectionOutlineTime = 0.0f;
+    std::atomic<bool> m_SmartSelectInProgress{false};
+    std::atomic<bool> m_SmartSelectCancelled{false};
+
+    // Move Pixels State
+    bool m_IsMovingPixels = false;
+    std::vector<float> m_FloatingPixels;
+    std::vector<float> m_OriginalSelectionMask;
+    int m_FloatingOffsetX = 0;
+    int m_FloatingOffsetY = 0;
+    int m_StartActiveLayerIdx = -1;
+
+    ID3D11Texture2D* m_FloatingTexture = nullptr;
+    ID3D11ShaderResourceView* m_FloatingSRV = nullptr;
+    ID3D11Texture2D* m_FloatingMaskTexture = nullptr;
+    ID3D11ShaderResourceView* m_FloatingMaskSRV = nullptr;
 };

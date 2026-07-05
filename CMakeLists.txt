@@ -3,6 +3,7 @@ project(RayVPaint CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 add_compile_definitions(NOMINMAX)
 
@@ -121,6 +122,10 @@ set(SHADER_FILES
 )
 set_source_files_properties(${SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 
+# OpenCV integration
+set(OPENCV_INSTALL_DIR "C:/Users/Rayvy/Documents/GitHub/opencv/install")
+set(OPENCV_LIBS_DIR "${OPENCV_INSTALL_DIR}/x64/vc17/staticlib")
+
 # Create Core executable (WIN32 target ensures it runs without console window by default)
 add_executable(RayVPaint_Core WIN32 ${SOURCES} ${SHADER_FILES})
 set_target_properties(RayVPaint_Core PROPERTIES
@@ -136,6 +141,9 @@ target_link_libraries(RayVPaint_Core PRIVATE
     d3dcompiler
     nlohmann_json::nlohmann_json
     pybind11::embed
+    "${OPENCV_LIBS_DIR}/opencv_core4140.lib"
+    "${OPENCV_LIBS_DIR}/opencv_imgproc4140.lib"
+    "${OPENCV_LIBS_DIR}/zlib.lib"
 )
 
 # Set include directories for Core
@@ -144,6 +152,16 @@ target_include_directories(RayVPaint_Core PRIVATE
     src/core
     src/scripting
     ${stb_SOURCE_DIR}
+    "${OPENCV_INSTALL_DIR}/include"
+)
+
+# Copy OpenCV LICENSE file to the output directory
+add_custom_command(
+    TARGET RayVPaint_Core POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    "${OPENCV_INSTALL_DIR}/LICENSE"
+    "$<TARGET_FILE_DIR:RayVPaint_Core>/OPENCV_LICENSE"
+    COMMENT "Copying OpenCV LICENSE to output directory"
 )
 
 # Create Launchers

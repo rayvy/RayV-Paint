@@ -4,7 +4,8 @@
 
 void PaintEngine::DrawStamp(std::vector<float>& pixels, int width, int height, 
                           float cx, float cy, const BrushSettings& brush,
-                          bool mirrorH, bool mirrorV) {
+                          bool mirrorH, bool mirrorV,
+                          const std::vector<float>& selectionMask) {
     std::vector<std::pair<float, float>> points;
     points.push_back({ cx, cy });
     if (mirrorH) {
@@ -45,7 +46,12 @@ void PaintEngine::DrawStamp(std::vector<float>& pixels, int width, int height,
                         }
                     }
                     
-                    float stampAlpha = brush.color[3] * op * intensity;
+                    float selectionVal = 1.0f;
+                    if (!selectionMask.empty()) {
+                        selectionVal = selectionMask[(size_t)y * width + x];
+                    }
+                    
+                    float stampAlpha = brush.color[3] * op * intensity * selectionVal;
                     if (stampAlpha <= 0.0f) continue;
                     
                     size_t idx = ((size_t)y * width + x) * 4;
@@ -77,13 +83,14 @@ void PaintEngine::DrawStamp(std::vector<float>& pixels, int width, int height,
 
 void PaintEngine::DrawLine(std::vector<float>& pixels, int width, int height, 
                          float x0, float y0, float x1, float y1, const BrushSettings& brush,
-                         bool mirrorH, bool mirrorV) {
+                         bool mirrorH, bool mirrorV,
+                         const std::vector<float>& selectionMask) {
     float dx = x1 - x0;
     float dy = y1 - y0;
     float distance = std::sqrt(dx * dx + dy * dy);
     
     if (distance == 0.0f) {
-        DrawStamp(pixels, width, height, x0, y0, brush, mirrorH, mirrorV);
+        DrawStamp(pixels, width, height, x0, y0, brush, mirrorH, mirrorV, selectionMask);
         return;
     }
     
@@ -94,7 +101,7 @@ void PaintEngine::DrawLine(std::vector<float>& pixels, int width, int height,
         float t = static_cast<float>(i) / numSteps;
         float cx = x0 + dx * t;
         float cy = y0 + dy * t;
-        DrawStamp(pixels, width, height, cx, cy, brush, mirrorH, mirrorV);
+        DrawStamp(pixels, width, height, cx, cy, brush, mirrorH, mirrorV, selectionMask);
     }
 }
 
@@ -102,7 +109,8 @@ void PaintEngine::DrawStrokeSegment(std::vector<float>& pixels, int width, int h
                                     float x0, float y0, float x1, float y1,
                                     const BrushSettings& brush, float& distanceAccumulator,
                                     float& lastDabX, float& lastDabY,
-                                    bool mirrorH, bool mirrorV) {
+                                    bool mirrorH, bool mirrorV,
+                                    const std::vector<float>& selectionMask) {
     float dx = x1 - x0;
     float dy = y1 - y0;
     float segmentLength = std::sqrt(dx * dx + dy * dy);
@@ -124,7 +132,7 @@ void PaintEngine::DrawStrokeSegment(std::vector<float>& pixels, int width, int h
             traveled += needed;
             float dabX = x0 + dirX * traveled;
             float dabY = y0 + dirY * traveled;
-            DrawStamp(pixels, width, height, dabX, dabY, brush, mirrorH, mirrorV);
+            DrawStamp(pixels, width, height, dabX, dabY, brush, mirrorH, mirrorV, selectionMask);
             lastDabX = dabX;
             lastDabY = dabY;
             distanceAccumulator = 0.0f;
