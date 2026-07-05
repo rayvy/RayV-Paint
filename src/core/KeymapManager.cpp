@@ -102,6 +102,8 @@ void KeymapManager::Initialize() {
     m_Bindings["RotateTool"] = KeyCombination{ GLFW_KEY_R, -1, false, false, false };
     m_Bindings["QuickExport"] = KeyCombination{ GLFW_KEY_E, -1, true, false, false };
     m_Bindings["AdvancedExport"] = KeyCombination{ GLFW_KEY_E, -1, true, true, false };
+    m_Bindings["Copy"] = KeyCombination{ GLFW_KEY_C, -1, true, false, false };
+    m_Bindings["Paste"] = KeyCombination{ GLFW_KEY_V, -1, true, false, false };
 
     // Resolve their scancodes
     ResolveScancodes();

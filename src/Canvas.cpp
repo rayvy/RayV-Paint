@@ -123,6 +123,8 @@ void Canvas::ResetView() {
     m_Pan.x = -m_Width * 0.5f * m_Zoom;
     m_Pan.y = -m_Height * 0.5f * m_Zoom;
     m_RotationAngle = 0.0f;
+    m_ViewportFlipH = false;
+    m_ViewportFlipV = false;
 }
 
 bool Canvas::Initialize(ID3D11Device* device) {
@@ -810,9 +812,10 @@ void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float vie
     HRESULT hr = context->Map(m_ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
     if (SUCCEEDED(hr)) {
         CanvasBuffer* cb = (CanvasBuffer*)mappedResource.pData;
-        cb->viewportSizeAndZoom = DirectX::XMFLOAT4(viewportWidth, viewportHeight, m_Zoom, 0.0f);
+        cb->viewportSizeAndZoom = DirectX::XMFLOAT4(viewportWidth, viewportHeight, m_Zoom, m_RotationAngle);
         cb->offsetAndCanvasSize = DirectX::XMFLOAT4(m_Pan.x, m_Pan.y, (float)m_Width, (float)m_Height);
         cb->channelMasks = DirectX::XMFLOAT4(m_ChannelR ? 1.0f : 0.0f, m_ChannelG ? 1.0f : 0.0f, m_ChannelB ? 1.0f : 0.0f, m_ChannelA ? 1.0f : 0.0f);
+        cb->viewportFlags = DirectX::XMFLOAT4(m_ViewportFlipH ? 1.0f : 0.0f, m_ViewportFlipV ? 1.0f : 0.0f, 0.0f, 0.0f);
         context->Unmap(m_ConstantBuffer, 0);
     }
 
@@ -886,13 +889,14 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
         Logger::Get().Info("Normal map / 2-channel texture detected. Auto-configured channels: R=ON, G=ON, B=OFF, A=OFF");
     }
 
-    // Auto resize canvas size to match the imported image if it's the first layer
-    // or if the dimensions differ significantly and user wants to scale
-    if (m_Layers.empty() || (m_Layers.size() == 1 && m_Width == 1024 && m_Height == 1024 && m_Layers[0].name == "Background" && (m_Layers[0].pixels.empty() || m_Layers[0].pixels == std::vector<float>((size_t)1024*1024*4, 0.0f)))) {
+    bool isFirst = m_Layers.empty() || (m_Layers.size() == 1 && m_Width == 1024 && m_Height == 1024 && m_Layers[0].name == "Background" && (m_Layers[0].pixels.empty() || m_Layers[0].pixels == std::vector<float>((size_t)1024*1024*4, 0.0f)));
+    if (isFirst) {
         m_Width = imgWidth;
         m_Height = imgHeight;
         CreateCompositeResources(device);
         m_Layers.clear();
+        m_ProjectType = ProjectType::Simple;
+        m_CurrentProjectFilePath = filepath;
     }
 
     // Allocate layer
@@ -1064,6 +1068,122 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
     return ImageManager::SaveImageToFile(filepath, composite, m_Width, m_Height, iccProfilePath);
 }
 
+std::vector<float> Canvas::GetCompositePixels() const {
+    if (m_Layers.empty()) {
+        return std::vector<float>((size_t)m_Width * m_Height * 4, 0.0f);
+    }
+
+    int firstVisibleIdx = -1;
+    for (int l = 0; l < static_cast<int>(m_Layers.size()); ++l) {
+        if (m_Layers[l].visible) {
+            firstVisibleIdx = l;
+            break;
+        }
+    }
+
+    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
+    if (firstVisibleIdx != -1) {
+        const auto& baseLayer = m_Layers[firstVisibleIdx];
+        if (!baseLayer.pixels.empty()) {
+            size_t copySize = std::min(composite.size(), baseLayer.pixels.size());
+            std::memcpy(composite.data(), baseLayer.pixels.data(), copySize * sizeof(float));
+            if (baseLayer.opacity < 1.0f) {
+                for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
+                    composite[i * 4 + 3] *= baseLayer.opacity;
+                }
+            }
+        }
+    }
+
+    for (int l = firstVisibleIdx + 1; l < static_cast<int>(m_Layers.size()); ++l) {
+        const auto& layer = m_Layers[l];
+        if (!layer.visible) continue;
+
+        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
+            size_t base = i * 4;
+            float srcR = 0.0f;
+            float srcG = 0.0f;
+            float srcB = 0.0f;
+            float srcA = 0.0f;
+            if (!layer.pixels.empty()) {
+                srcR = layer.pixels[base + 0];
+                srcG = layer.pixels[base + 1];
+                srcB = layer.pixels[base + 2];
+                srcA = layer.pixels[base + 3] * layer.opacity;
+            }
+
+            if (srcA <= 0.0f) continue;
+
+            float destR = composite[base + 0];
+            float destG = composite[base + 1];
+            float destB = composite[base + 2];
+            float destA = composite[base + 3];
+
+            float outA = srcA + destA * (1.0f - srcA);
+            if (outA > 0.0f) {
+                composite[base + 0] = (srcR * srcA + destR * destA * (1.0f - srcA)) / outA;
+                composite[base + 1] = (srcG * srcA + destG * destA * (1.0f - srcA)) / outA;
+                composite[base + 2] = (srcB * srcA + destB * destA * (1.0f - srcA)) / outA;
+                composite[base + 3] = outA;
+            }
+        }
+    }
+
+    return composite;
+}
+
+void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height) {
+    if (pixels.empty() || width <= 0 || height <= 0) return;
+
+    if (m_Layers.empty()) {
+        m_Width = width;
+        m_Height = height;
+        CreateCompositeResources(device);
+    }
+
+    Layer newLayer;
+    newLayer.name = name;
+    newLayer.visible = true;
+    newLayer.opacity = 1.0f;
+    newLayer.pixels = pixels;
+    newLayer.needsUpload = true;
+
+    if (width != m_Width || height != m_Height) {
+        std::vector<float> resizedPixels((size_t)m_Width * m_Height * 4, 0.0f);
+        int offsetX = (m_Width - width) / 2;
+        int offsetY = (m_Height - height) / 2;
+        for (int y = 0; y < height; ++y) {
+            int targetY = y + offsetY;
+            if (targetY < 0 || targetY >= m_Height) continue;
+            for (int x = 0; x < width; ++x) {
+                int targetX = x + offsetX;
+                if (targetX < 0 || targetX >= m_Width) continue;
+
+                int srcIdx = (y * width + x) * 4;
+                int destIdx = (targetY * m_Width + targetX) * 4;
+                std::memcpy(&resizedPixels[destIdx], &pixels[srcIdx], 4 * sizeof(float));
+            }
+        }
+        newLayer.pixels = std::move(resizedPixels);
+    }
+
+    if (device) {
+        RecreateLayerTexture(device, newLayer);
+    }
+
+    int insertIdx = m_ActiveLayerIdx + 1;
+    if (insertIdx < 0 || insertIdx > static_cast<int>(m_Layers.size())) {
+        insertIdx = static_cast<int>(m_Layers.size());
+    }
+
+    m_Layers.insert(m_Layers.begin() + insertIdx, newLayer);
+    m_ActiveLayerIdx = insertIdx;
+
+    ClearUndoHistory();
+    m_IsDocumentModified = true;
+    Logger::Get().Info("Created new layer from clipboard/drop: " + name);
+}
+
 bool Canvas::Undo() {
     bool res = m_UndoRedoManager.Undo(this);
     if (res) {
@@ -1112,6 +1232,7 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         metadata["width"] = m_Width;
         metadata["height"] = m_Height;
         metadata["active_layer"] = m_ActiveLayerIdx;
+        metadata["project_type"] = (m_ProjectType == ProjectType::Simple) ? "simple" : "advanced";
         
         metadata["export_path"] = m_ExportPath;
         metadata["export_format"] = m_ExportFormat;
@@ -1237,6 +1358,14 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
         m_Width = metadata["width"].get<int>();
         m_Height = metadata["height"].get<int>();
         m_ActiveLayerIdx = metadata["active_layer"].get<int>();
+        m_CurrentProjectFilePath = filepath;
+
+        if (metadata.contains("project_type")) {
+            std::string pt = metadata["project_type"].get<std::string>();
+            m_ProjectType = (pt == "simple") ? ProjectType::Simple : ProjectType::Advanced;
+        } else {
+            m_ProjectType = ProjectType::Advanced;
+        }
 
         if (metadata.contains("export_path")) m_ExportPath = metadata["export_path"].get<std::string>();
         if (metadata.contains("export_format")) m_ExportFormat = metadata["export_format"].get<std::string>();
@@ -1664,4 +1793,54 @@ void Canvas::FlipCanvasVertical(ID3D11Device* device) {
     }
     m_IsDocumentModified = true;
     Logger::Get().Info("Flipped canvas vertically");
+}
+
+bool Canvas::SaveProjectAuto() {
+    if (m_CurrentProjectFilePath.empty()) {
+        Logger::Get().Error("Cannot auto-save: current project file path is empty.");
+        return false;
+    }
+
+    if (m_ProjectType == ProjectType::Simple) {
+        std::string path = m_CurrentProjectFilePath;
+        size_t dot = path.find_last_of('.');
+        std::string ext = "";
+        if (dot != std::string::npos) {
+            ext = path.substr(dot + 1);
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        }
+
+        bool success = false;
+        if (ext == "dds") {
+            DdsFormat fmt = DdsFormat::RGBA8_UNORM;
+            if (m_ExportFormat == "RGBA32_FLOAT") fmt = DdsFormat::RGBA32_FLOAT;
+            else if (m_ExportFormat == "RGBA16_UNORM") fmt = DdsFormat::RGBA16_UNORM;
+            else if (m_ExportFormat == "RGBA16_FLOAT") fmt = DdsFormat::RGBA16_FLOAT;
+            else if (m_ExportFormat == "R8_UNORM") fmt = DdsFormat::R8_UNORM;
+            else if (m_ExportFormat == "R16_FLOAT") fmt = DdsFormat::R16_FLOAT;
+            else if (m_ExportFormat == "R32_FLOAT") fmt = DdsFormat::R32_FLOAT;
+            
+            success = SaveCanvas(path, fmt);
+        } else {
+            std::string icc = m_ExportPngColorSpace;
+            success = SaveCanvasStandard(path, icc == "sRGB" ? "" : icc);
+        }
+
+        if (success) {
+            m_IsDocumentModified = false;
+            Logger::Get().Info("Simple project saved back to source image: " + path);
+        } else {
+            Logger::Get().Error("Failed to save simple project back to: " + path);
+        }
+        return success;
+    } else {
+        bool success = SaveCanvasRayp(m_CurrentProjectFilePath);
+        if (success) {
+            m_IsDocumentModified = false;
+            Logger::Get().Info("Advanced project saved to RAYP package: " + m_CurrentProjectFilePath);
+        } else {
+            Logger::Get().Error("Failed to save advanced project to RAYP package: " + m_CurrentProjectFilePath);
+        }
+        return success;
+    }
 }

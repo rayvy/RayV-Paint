@@ -32,6 +32,7 @@
 #include "ScriptingEngine.h"
 #include "Canvas.h"
 #include "core/KeymapManager.h"
+#include "core/ClipboardHelper.h"
 #include "ui/EditorPanels.h"
 
 // Tablet Pointer API support
@@ -86,8 +87,8 @@ static void CustomKeyCallback(GLFWwindow* window, int key, int scancode, int act
     }
 }
 
-static bool g_IsViewportHovered = false;
-static bool g_IsLayersHovered = false;
+bool g_IsViewportHovered = false;
+bool g_IsLayersHovered = false;
 
 
 
@@ -572,7 +573,7 @@ int main(int argc, char* argv[]) {
                 g_ActiveTool = ActiveTool::Pan;
             }
             if (KeymapManager::Get().ConsumeActionTrigger("RotateTool")) {
-                g_ActiveTool = ActiveTool::Rotate;
+                g_ActiveTool = ActiveTool::Pan;
             }
             if (KeymapManager::Get().ConsumeActionTrigger("QuickExport") || uiState.openQuickExportTrigger) {
                 uiState.openQuickExportTrigger = false;
@@ -617,6 +618,17 @@ int main(int argc, char* argv[]) {
             }
             if (KeymapManager::Get().ConsumeActionTrigger("AdvancedExport")) {
                 uiState.openExportAdvancedModal = true;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("Copy")) {
+                std::vector<float> composite = g_Canvas.GetCompositePixels();
+                ClipboardHelper::CopyImageToClipboard(composite, g_Canvas.GetWidth(), g_Canvas.GetHeight());
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("Paste")) {
+                std::vector<float> pastedPixels;
+                int pastedW = 0, pastedH = 0;
+                if (ClipboardHelper::PasteImageFromClipboard(pastedPixels, pastedW, pastedH)) {
+                    g_Canvas.CreateLayerFromPixels(g_pd3dDevice, "Pasted Layer", pastedPixels, pastedW, pastedH);
+                }
             }
         }
 
@@ -690,6 +702,13 @@ int main(int argc, char* argv[]) {
             float canvasX = relX * cosA + relY * sinA + centerX;
             float canvasY = -relX * sinA + relY * cosA + centerY;
 
+            if (g_Canvas.GetViewportFlipH()) {
+                canvasX = (float)g_Canvas.GetWidth() - canvasX;
+            }
+            if (g_Canvas.GetViewportFlipV()) {
+                canvasY = (float)g_Canvas.GetHeight() - canvasY;
+            }
+
             // Check if cursor is within active canvas boundary
             bool isInsideCanvas = (canvasX >= 0.0f && canvasX < (float)g_Canvas.GetWidth() &&
                                    canvasY >= 0.0f && canvasY < (float)g_Canvas.GetHeight());
@@ -699,19 +718,42 @@ int main(int argc, char* argv[]) {
             bool isRotating = false;
             float dragDx = 0.0f;
             float dragDy = 0.0f;
-            if (isHovered && (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) || (g_ActiveTool == ActiveTool::Pan && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))) {
-                ImGuiMouseButton panButton = ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ? ImGuiMouseButton_Middle : ImGuiMouseButton_Left;
-                ImVec2 drag = ImGui::GetMouseDragDelta(panButton);
-                dragDx = drag.x - g_LastDragDelta.x;
-                dragDy = drag.y - g_LastDragDelta.y;
-                g_LastDragDelta = drag;
-                isPanning = true;
-            } else if (isHovered && g_ActiveTool == ActiveTool::Rotate && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-                ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
-                dragDx = drag.x - g_LastDragDelta.x;
-                g_LastDragDelta = drag;
-                g_Canvas.SetRotationAngle(g_Canvas.GetRotationAngle() + dragDx * 0.005f);
-                isRotating = true;
+            if (isHovered) {
+                bool wantRotate = false;
+                bool wantPan = false;
+
+                if (g_ActiveTool == ActiveTool::Pan) {
+                    if (ImGui::IsMouseDragging(ImGuiMouseButton_Right)) {
+                        wantRotate = true;
+                    } else if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                        if (ImGui::GetIO().KeyShift) {
+                            wantRotate = true;
+                        } else {
+                            wantPan = true;
+                        }
+                    }
+                }
+                if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                    wantPan = true;
+                }
+
+                if (wantPan) {
+                    ImGuiMouseButton panButton = ImGui::IsMouseDragging(ImGuiMouseButton_Middle) ? ImGuiMouseButton_Middle : ImGuiMouseButton_Left;
+                    ImVec2 drag = ImGui::GetMouseDragDelta(panButton);
+                    dragDx = drag.x - g_LastDragDelta.x;
+                    dragDy = drag.y - g_LastDragDelta.y;
+                    g_LastDragDelta = drag;
+                    isPanning = true;
+                } else if (wantRotate) {
+                    ImGuiMouseButton rotateButton = ImGui::IsMouseDragging(ImGuiMouseButton_Right) ? ImGuiMouseButton_Right : ImGuiMouseButton_Left;
+                    ImVec2 drag = ImGui::GetMouseDragDelta(rotateButton);
+                    dragDx = drag.x - g_LastDragDelta.x;
+                    g_LastDragDelta = drag;
+                    g_Canvas.SetRotationAngle(g_Canvas.GetRotationAngle() + dragDx * 0.005f);
+                    isRotating = true;
+                } else {
+                    g_LastDragDelta = ImVec2(0.0f, 0.0f);
+                }
             } else {
                 g_LastDragDelta = ImVec2(0.0f, 0.0f);
             }
@@ -786,12 +828,27 @@ int main(int argc, char* argv[]) {
             // Draw Symmetrical Guidelines
             if (g_Canvas.GetMirrorHorizontal() || g_Canvas.GetMirrorVertical()) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
-                float screenCanvasCenterX = imageMin.x + screenOriginX + (g_Canvas.GetWidth() * 0.5f) * g_Canvas.GetZoom();
-                float screenCanvasCenterY = imageMin.y + screenOriginY + (g_Canvas.GetHeight() * 0.5f) * g_Canvas.GetZoom();
-                float canvasTop = imageMin.y + screenOriginY;
-                float canvasBottom = canvasTop + g_Canvas.GetHeight() * g_Canvas.GetZoom();
-                float canvasLeft = imageMin.x + screenOriginX;
-                float canvasRight = canvasLeft + g_Canvas.GetWidth() * g_Canvas.GetZoom();
+                float screenOriginX = std::floor(g_Canvas.GetPan().x + static_cast<float>(viewportWidth) * 0.5f);
+                float screenOriginY = std::floor(g_Canvas.GetPan().y + static_cast<float>(viewportHeight) * 0.5f);
+                float angle = g_Canvas.GetRotationAngle();
+                float cosA = std::cos(angle);
+                float sinA = std::sin(angle);
+                float zoom = g_Canvas.GetZoom();
+                float cw = (float)g_Canvas.GetWidth();
+                float ch = (float)g_Canvas.GetHeight();
+
+                auto canvasToScreen = [&](float cx, float cy) -> ImVec2 {
+                    if (g_Canvas.GetViewportFlipH()) cx = cw - cx;
+                    if (g_Canvas.GetViewportFlipV()) cy = ch - cy;
+                    float rx = cx - cw * 0.5f;
+                    float ry = cy - ch * 0.5f;
+                    float rotX = rx * cosA - ry * sinA;
+                    float rotY = rx * sinA + ry * cosA;
+                    return ImVec2(
+                        imageMin.x + screenOriginX + rotX * zoom,
+                        imageMin.y + screenOriginY + rotY * zoom
+                    );
+                };
 
                 auto drawDashedLine = [](ImDrawList* drawList, ImVec2 p1, ImVec2 p2, ImU32 col, float thickness, float dashLength) {
                     ImVec2 d = ImVec2(p2.x - p1.x, p2.y - p1.y);
@@ -819,10 +876,14 @@ int main(int argc, char* argv[]) {
                 dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
 
                 if (g_Canvas.GetMirrorHorizontal()) {
-                    drawDashedLine(dl, ImVec2(screenCanvasCenterX, canvasTop), ImVec2(screenCanvasCenterX, canvasBottom), IM_COL32(235, 64, 52, 180), 1.5f, 6.0f);
+                    ImVec2 h1 = canvasToScreen(cw * 0.5f, -ch * 5.0f);
+                    ImVec2 h2 = canvasToScreen(cw * 0.5f, ch * 6.0f);
+                    drawDashedLine(dl, h1, h2, IM_COL32(235, 64, 52, 180), 1.5f, 6.0f);
                 }
                 if (g_Canvas.GetMirrorVertical()) {
-                    drawDashedLine(dl, ImVec2(canvasLeft, screenCanvasCenterY), ImVec2(canvasRight, screenCanvasCenterY), IM_COL32(235, 64, 52, 180), 1.5f, 6.0f);
+                    ImVec2 v1 = canvasToScreen(-cw * 5.0f, ch * 0.5f);
+                    ImVec2 v2 = canvasToScreen(cw * 6.0f, ch * 0.5f);
+                    drawDashedLine(dl, v1, v2, IM_COL32(235, 64, 52, 180), 1.5f, 6.0f);
                 }
 
                 dl->PopClipRect();

@@ -13,9 +13,10 @@ struct PS_INPUT
 
 cbuffer CanvasBuffer : register(b0)
 {
-    float4 u_ViewportSizeAndZoom; // xy: Viewport size in pixels, z: Zoom, w: Padding
+    float4 u_ViewportSizeAndZoom; // xy: Viewport size in pixels, z: Zoom, w: rotation
     float4 u_OffsetAndCanvasSize; // xy: Offset/Pan in pixels, zw: Canvas size in pixels
     float4 u_ChannelMasksAndFlags; // x: R active, y: G active, z: B active, w: A active (1.0f or 0.0f)
+    float4 u_ViewportFlags; // x: flipH, y: flipV, zw: unused
 };
 
 cbuffer LayerBuffer : register(b1)
@@ -38,6 +39,14 @@ PS_INPUT VSMain(VS_INPUT input)
     
     // Map unit quad position (0 to 1) to canvas pixel size
     float2 canvasPixelPos = input.pos * canvasSize;
+    
+    // Apply viewport flips
+    if (u_ViewportFlags.x > 0.5f) {
+        canvasPixelPos.x = canvasSize.x - canvasPixelPos.x;
+    }
+    if (u_ViewportFlags.y > 0.5f) {
+        canvasPixelPos.y = canvasSize.y - canvasPixelPos.y;
+    }
     
     // Rotate canvasPixelPos around canvas center (canvasSize * 0.5f)
     float2 center = canvasSize * 0.5f;

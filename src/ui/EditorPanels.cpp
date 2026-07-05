@@ -11,6 +11,8 @@
 #include <chrono>
 
 extern void ApplyTheme(const std::string& themeName);
+extern bool g_IsLayersHovered;
+extern bool g_IsViewportHovered;
 
 namespace UI {
 
@@ -243,7 +245,7 @@ namespace UI {
         ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | Zoom: %.0f%% | Threads: %d | Tool: %s", 
             state.startupTimeMs, state.frameTimeMs, state.fps, canvas.GetWidth(), canvas.GetHeight(), canvas.GetZoom() * 100.0f, 
             ThreadPool::Get().GetThreadCount(),
-            (activeTool == ActiveTool::Brush ? "Brush" : (activeTool == ActiveTool::Eraser ? "Eraser" : (activeTool == ActiveTool::Rotate ? "Rotate" : "Pan"))));
+            (activeTool == ActiveTool::Brush ? "Brush" : (activeTool == ActiveTool::Eraser ? "Eraser" : "Hand")));
         
         ImGui::End();
         ImGui::PopStyleVar();
@@ -804,9 +806,7 @@ namespace UI {
                 ImGui::Spacing();
                 RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::Spacing();
-                RenderToolButton("PanTool", "Pan", ActiveTool::Pan, false, panBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("RotateTool", "Rotate", ActiveTool::Rotate, false, rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+                RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
@@ -816,9 +816,7 @@ namespace UI {
                 ImGui::SameLine();
                 RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::SameLine();
-                RenderToolButton("PanTool", "Pan", ActiveTool::Pan, false, panBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("RotateTool", "Rotate", ActiveTool::Rotate, false, rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+                RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::SameLine();
                 RenderToolButton("Reset", "Reset View", activeTool, false, std::string(""), btnSize, s_RebindAction, activeTool, brush, canvas);
             }
@@ -894,6 +892,27 @@ namespace UI {
             ImGui::Text("Zoom: %.0f%%", canvas.GetZoom() * 100.0f);
             ImGui::Text("Pan: (%.1f, %.1f)", canvas.GetPan().x, canvas.GetPan().y);
             
+            ImGui::Spacing();
+            ImGui::Text("Viewport Transformations:");
+            bool flipH = canvas.GetViewportFlipH();
+            if (ImGui::Checkbox("Flip Horizontal", &flipH)) {
+                canvas.SetViewportFlipH(flipH);
+            }
+            ImGui::SameLine();
+            bool flipV = canvas.GetViewportFlipV();
+            if (ImGui::Checkbox("Flip Vertical", &flipV)) {
+                canvas.SetViewportFlipV(flipV);
+            }
+
+            float rotAngle = canvas.GetRotationAngle() * (180.0f / 3.14159265f);
+            if (ImGui::SliderFloat("Rotation", &rotAngle, -180.0f, 180.0f, "%.1f deg")) {
+                canvas.SetRotationAngle(rotAngle * (3.14159265f / 180.0f));
+            }
+
+            if (ImGui::Button("Reset Viewport")) {
+                canvas.ResetView();
+            }
+            
             ImGui::Separator();
             ImGui::Text("Active Channels:");
             
@@ -929,6 +948,21 @@ namespace UI {
             ImGui::SameLine();
             if (DrawUnifiedChannelToggle("A", a, ImVec4(0.6f, 0.6f, 0.6f, 1.0f))) canvas.SetChannelA(!a);
             
+            ImGui::NewLine();
+            ImGui::Separator();
+            ImGui::Text("Project Properties:");
+            int pType = (canvas.GetProjectType() == Canvas::ProjectType::Simple) ? 0 : 1;
+            const char* pTypeNames[] = { "Simple Project", "Advanced Project (.rayp)" };
+            if (ImGui::Combo("Project Type", &pType, pTypeNames, IM_ARRAYSIZE(pTypeNames))) {
+                canvas.SetProjectType((pType == 0) ? Canvas::ProjectType::Simple : Canvas::ProjectType::Advanced);
+            }
+
+            char propProjPath[512] = "";
+            std::strncpy(propProjPath, canvas.GetCurrentProjectFilePath().c_str(), sizeof(propProjPath));
+            if (ImGui::InputText("Project Path", propProjPath, IM_ARRAYSIZE(propProjPath))) {
+                canvas.SetCurrentProjectFilePath(propProjPath);
+            }
+
             ImGui::NewLine();
             ImGui::Separator();
             ImGui::Text("Export Settings:");
@@ -988,9 +1022,11 @@ namespace UI {
             ImGui::End();
         }
 
-        // 7. Draw Layers Panel
         if (state.showLayers) {
             ImGui::Begin("Layers", &state.showLayers, ImGuiWindowFlags_NoCollapse);
+            if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows)) {
+                g_IsLayersHovered = true;
+            }
             
             if (ImGui::Button("Add Layer", ImVec2(-1, 25))) {
                 std::string lName = "Layer " + std::to_string(canvas.GetLayers().size() + 1);
@@ -1073,6 +1109,19 @@ namespace UI {
             ImGui::Spacing();
             ImGui::Text("Brush Color:");
             ImGui::ColorEdit4("Color##brush", brush.color, ImGuiColorEditFlags_NoInputs);
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            ImGui::Text("Symmetry / Mirror Paint:");
+            bool mirrorH = canvas.GetMirrorHorizontal();
+            if (ImGui::Checkbox("Horizontal Mirror (Left/Right)", &mirrorH)) {
+                canvas.SetMirrorHorizontal(mirrorH);
+            }
+            bool mirrorV = canvas.GetMirrorVertical();
+            if (ImGui::Checkbox("Vertical Mirror (Top/Bottom)", &mirrorV)) {
+                canvas.SetMirrorVertical(mirrorV);
+            }
 
             ImGui::End();
         }

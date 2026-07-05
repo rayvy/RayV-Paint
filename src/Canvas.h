@@ -71,6 +71,8 @@ public:
     bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath);
     bool SaveCanvas(const std::string& filepath, DdsFormat ddsFormat);
     bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath = "");
+    std::vector<float> GetCompositePixels() const;
+    void CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height);
 
     // Pixel Transformations
     void FlipActiveLayerHorizontal(ID3D11Device* device);
@@ -118,12 +120,26 @@ public:
     std::string GetExportPngColorSpace() const { return m_ExportPngColorSpace; }
     void SetExportPngColorSpace(const std::string& cs) { m_ExportPngColorSpace = cs; }
 
+    enum class ProjectType {
+        Simple,
+        Advanced
+    };
+
     float GetRotationAngle() const { return m_RotationAngle; }
     void SetRotationAngle(float angle) { m_RotationAngle = angle; }
     bool GetMirrorHorizontal() const { return m_MirrorHorizontal; }
     void SetMirrorHorizontal(bool v) { m_MirrorHorizontal = v; }
     bool GetMirrorVertical() const { return m_MirrorVertical; }
     void SetMirrorVertical(bool v) { m_MirrorVertical = v; }
+
+    bool GetViewportFlipH() const { return m_ViewportFlipH; }
+    void SetViewportFlipH(bool v) { m_ViewportFlipH = v; }
+    bool GetViewportFlipV() const { return m_ViewportFlipV; }
+    void SetViewportFlipV(bool v) { m_ViewportFlipV = v; }
+
+    ProjectType GetProjectType() const { return m_ProjectType; }
+    void SetProjectType(ProjectType type) { m_ProjectType = type; }
+    bool SaveProjectAuto();
 
     // Native RAYP Format
     bool SaveCanvasRayp(const std::string& filepath);
@@ -144,6 +160,7 @@ private:
         DirectX::XMFLOAT4 viewportSizeAndZoom;
         DirectX::XMFLOAT4 offsetAndCanvasSize;
         DirectX::XMFLOAT4 channelMasks;
+        DirectX::XMFLOAT4 viewportFlags; // x: flipH, y: flipV, zw: unused
     };
 
     struct LayerBuffer {
@@ -219,4 +236,7 @@ private:
     float m_RotationAngle = 0.0f;
     bool m_MirrorHorizontal = false;
     bool m_MirrorVertical = false;
+    bool m_ViewportFlipH = false;
+    bool m_ViewportFlipV = false;
+    ProjectType m_ProjectType = ProjectType::Advanced;
 };

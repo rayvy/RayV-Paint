@@ -7,7 +7,7 @@
 #include "../Canvas.h"
 #include "../core/PaintEngine.h"
 
-enum class ActiveTool { Brush, Eraser, Pan, Rotate };
+enum class ActiveTool { Brush, Eraser, Pan };
 
 #include <GLFW/glfw3.h>
 

@@ -107,6 +107,8 @@ set(SOURCES
     src/core/UndoRedoManager.h
     src/core/KeymapManager.cpp
     src/core/KeymapManager.h
+    src/core/ClipboardHelper.cpp
+    src/core/ClipboardHelper.h
     src/scripting/ScriptingEngine.cpp
     src/scripting/ScriptingEngine.h
     src/ui/EditorPanels.cpp
