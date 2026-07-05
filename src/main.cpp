@@ -129,6 +129,7 @@ static float g_MoveDragStartX = 0.0f;
 static float g_MoveDragStartY = 0.0f;
 static int g_MoveAccumulatedOffsetX = 0;
 static int g_MoveAccumulatedOffsetY = 0;
+static bool g_IsGradientDragging = false;
 static void CustomDropCallback(GLFWwindow* window, int count, const char** paths) {
     if (count <= 0) return;
     std::string path = paths[0];
@@ -1070,7 +1071,7 @@ int main(int argc, char* argv[]) {
                 // Gradient (drag to define vector)
                 else if (g_ActiveTool == ActiveTool::Gradient) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        g_IsPainting = true; 
+                        g_IsGradientDragging = true; 
                         g_SelectionDragStartX = canvasX;
                         g_SelectionDragStartY = canvasY;
                     }
@@ -1151,13 +1152,13 @@ int main(int argc, char* argv[]) {
             }
 
             // Gradient drag release
-            if (g_ActiveTool == ActiveTool::Gradient && g_IsPainting && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
-                g_IsPainting = false;
+            if (g_ActiveTool == ActiveTool::Gradient && g_IsGradientDragging && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+                g_IsGradientDragging = false;
                 g_Canvas.ApplyGradient((int)g_SelectionDragStartX, (int)g_SelectionDragStartY, (int)canvasX, (int)canvasY, g_Brush.color, g_SecondaryColor);
             }
 
             // Draw interactive shape outline during drag/selection
-            if (g_IsSelectionDragging || (g_ActiveTool == ActiveTool::Gradient && g_IsPainting)) {
+            if (g_IsSelectionDragging || (g_ActiveTool == ActiveTool::Gradient && g_IsGradientDragging)) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
 

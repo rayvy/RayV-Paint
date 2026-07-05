@@ -389,6 +389,9 @@ void Canvas::CreateCompositeResources(ID3D11Device* device) {
         device->CreateRenderTargetView(m_CompositeTexture, nullptr, &m_CompositeRTV);
         device->CreateShaderResourceView(m_CompositeTexture, nullptr, &m_CompositeSRV);
     }
+
+    m_SelectionMask.assign((size_t)m_Width * m_Height, 0.0f);
+    m_HasSelection = false;
 }
 
 void Canvas::ReleaseCompositeResources() {
@@ -867,8 +870,23 @@ void Canvas::ResizeCanvas(ID3D11Device* device, int width, int height) {
     Logger::Get().Info("Resizing canvas from " + std::to_string(oldW) + "x" + std::to_string(oldH) + 
                        " to " + std::to_string(m_Width) + "x" + std::to_string(m_Height));
 
+    std::vector<float> oldSelection = std::move(m_SelectionMask);
+
     // Recreate composition texture
     CreateCompositeResources(device);
+
+    // Copy old selection contents top-left aligned
+    int copySelW = std::min(oldW, m_Width);
+    int copySelH = std::min(oldH, m_Height);
+    for (int y = 0; y < copySelH; ++y) {
+        for (int x = 0; x < copySelW; ++x) {
+            float val = oldSelection[(size_t)y * oldW + x];
+            m_SelectionMask[(size_t)y * m_Width + x] = val;
+            if (val > 0.01f) {
+                m_HasSelection = true;
+            }
+        }
+    }
 
     // Resize each layer's pixel buffers
     for (auto& layer : m_Layers) {
