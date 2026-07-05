@@ -106,6 +106,16 @@ void KeymapManager::Initialize() {
     m_Bindings["Paste"] = KeyCombination{ GLFW_KEY_V, -1, true, false, false };
     m_Bindings["TransformTool"] = KeyCombination{ GLFW_KEY_V, -1, false, false, false };
 
+    // New tools bindings mapping
+    m_Bindings["BucketFillTool"] = KeyCombination{ GLFW_KEY_F, -1, false, false, false };
+    m_Bindings["GradientTool"] = KeyCombination{ GLFW_KEY_G, -1, false, false, false };
+    m_Bindings["PipetteTool"] = KeyCombination{ GLFW_KEY_I, -1, false, false, false };
+    m_Bindings["RectSelectTool"] = KeyCombination{ GLFW_KEY_M, -1, false, false, false };
+    m_Bindings["EllipseSelectTool"] = KeyCombination{ GLFW_KEY_N, -1, false, false, false };
+    m_Bindings["LassoSelectTool"] = KeyCombination{ GLFW_KEY_L, -1, false, false, false };
+    m_Bindings["MagicWandTool"] = KeyCombination{ GLFW_KEY_W, -1, false, false, false };
+    m_Bindings["SmartSelectTool"] = KeyCombination{ GLFW_KEY_U, -1, false, false, false };
+
     // Resolve their scancodes
     ResolveScancodes();
 }

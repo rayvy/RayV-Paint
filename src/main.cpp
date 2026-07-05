@@ -583,6 +583,30 @@ int main(int argc, char* argv[]) {
                 g_ActiveTool = ActiveTool::Eraser;
                 g_Brush.erase = true;
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("BucketFillTool")) {
+                g_ActiveTool = ActiveTool::BucketFill;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("GradientTool")) {
+                g_ActiveTool = ActiveTool::Gradient;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("PipetteTool")) {
+                g_ActiveTool = ActiveTool::Pipette;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("RectSelectTool")) {
+                g_ActiveTool = ActiveTool::RectSelect;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("EllipseSelectTool")) {
+                g_ActiveTool = ActiveTool::EllipseSelect;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("LassoSelectTool")) {
+                g_ActiveTool = ActiveTool::LassoSelect;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("MagicWandTool")) {
+                g_ActiveTool = ActiveTool::MagicWand;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("SmartSelectTool")) {
+                g_ActiveTool = ActiveTool::SmartSelect;
+            }
             if (KeymapManager::Get().ConsumeActionTrigger("PanTool")) {
                 g_ActiveTool = ActiveTool::Pan;
             }

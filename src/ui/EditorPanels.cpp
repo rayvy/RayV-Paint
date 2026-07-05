@@ -141,6 +141,99 @@ namespace UI {
             ImVec2 pts[4] = { p1, p2, p3, p4 };
             drawList->AddConvexPolyFilled(pts, 4, color);
         }
+        else if (strcmp(actionName, "BucketFillTool") == 0) {
+            // Наклонное ведерко
+            ImVec2 p1 = ImVec2(cx - w * 0.15f, cy - h * 0.1f);
+            ImVec2 p2 = ImVec2(cx + w * 0.15f, cy - h * 0.25f);
+            ImVec2 p3 = ImVec2(cx + w * 0.25f, cy + h * 0.1f);
+            ImVec2 p4 = ImVec2(cx - w * 0.05f, cy + h * 0.25f);
+            drawList->AddLine(p1, p2, color, 1.5f);
+            drawList->AddLine(p2, p3, color, 1.5f);
+            drawList->AddLine(p3, p4, color, 1.5f);
+            drawList->AddLine(p4, p1, color, 1.5f);
+            // Изливаемая капля
+            drawList->AddTriangleFilled(ImVec2(cx - w * 0.1f, cy + h * 0.25f), ImVec2(cx - w * 0.2f, cy + h * 0.4f), ImVec2(cx, cy + h * 0.4f), color);
+        }
+        else if (strcmp(actionName, "GradientTool") == 0) {
+            // Линия перехода градиента с узлами на концах
+            ImVec2 pStart = ImVec2(min.x + pad, max.y - pad);
+            ImVec2 pEnd = ImVec2(max.x - pad, min.y + pad);
+            drawList->AddLine(pStart, pEnd, color, 2.0f);
+            drawList->AddCircle(pStart, 3.5f, color, 12, 1.5f);
+            drawList->AddCircleFilled(pEnd, 4.0f, color);
+        }
+        else if (strcmp(actionName, "PipetteTool") == 0) {
+            // Пипетка под наклоном
+            ImVec2 tip = ImVec2(min.x + pad + 1.0f, max.y - pad - 1.0f);
+            ImVec2 end = ImVec2(max.x - pad - 1.0f, min.y + pad + 1.0f);
+            drawList->AddLine(tip, end, color, 3.0f);
+            drawList->AddCircleFilled(end, 4.0f, color);
+            drawList->AddLine(tip, ImVec2(tip.x - 2.0f, tip.y + 2.0f), color, 1.5f);
+        }
+        else if (strcmp(actionName, "RectSelectTool") == 0) {
+            // Прямоугольная рамка выделения (штрихи по углам)
+            float rLeft = min.x + pad;
+            float rRight = max.x - pad;
+            float rTop = min.y + pad;
+            float rBottom = max.y - pad;
+            drawList->AddLine(ImVec2(rLeft, rTop), ImVec2(rLeft + 4.0f, rTop), color, 1.0f);
+            drawList->AddLine(ImVec2(rLeft, rTop), ImVec2(rLeft, rTop + 4.0f), color, 1.0f);
+            drawList->AddLine(ImVec2(rRight, rTop), ImVec2(rRight - 4.0f, rTop), color, 1.0f);
+            drawList->AddLine(ImVec2(rRight, rTop), ImVec2(rRight, rTop + 4.0f), color, 1.0f);
+            drawList->AddLine(ImVec2(rLeft, rBottom), ImVec2(rLeft + 4.0f, rBottom), color, 1.0f);
+            drawList->AddLine(ImVec2(rLeft, rBottom), ImVec2(rLeft, rBottom - 4.0f), color, 1.0f);
+            drawList->AddLine(ImVec2(rRight, rBottom), ImVec2(rRight - 4.0f, rBottom), color, 1.0f);
+            drawList->AddLine(ImVec2(rRight, rBottom), ImVec2(rRight, rBottom - 4.0f), color, 1.0f);
+        }
+        else if (strcmp(actionName, "EllipseSelectTool") == 0) {
+            // Штриховой овал/круг
+            float radius = (w - pad * 2.0f) * 0.5f;
+            const int segments = 16;
+            for (int i = 0; i < segments; i += 2) {
+                float a1 = (i) * 2.0f * 3.14159f / segments;
+                float a2 = (i + 1) * 2.0f * 3.14159f / segments;
+                drawList->PathArcTo(ImVec2(cx, cy), radius, a1, a2, 4);
+                drawList->PathStroke(color, false, 1.0f);
+            }
+        }
+        else if (strcmp(actionName, "LassoSelectTool") == 0) {
+            // Схематичное лассо произвольной формы штрихами
+            ImVec2 pts[] = {
+                ImVec2(cx - 5.0f, cy - 5.0f),
+                ImVec2(cx + 5.0f, cy - 7.0f),
+                ImVec2(cx + 7.0f, cy),
+                ImVec2(cx + 3.0f, cy + 6.0f),
+                ImVec2(cx - 6.0f, cy + 4.0f),
+                ImVec2(cx - 7.0f, cy - 1.0f)
+            };
+            for (int i = 0; i < 6; ++i) {
+                if (i % 2 == 0) {
+                    drawList->AddLine(pts[i], pts[(i + 1) % 6], color, 1.0f);
+                }
+            }
+        }
+        else if (strcmp(actionName, "MagicWandTool") == 0) {
+            // Волшебная палочка (палочка и звезды-точки на конце)
+            ImVec2 wStart(min.x + pad, max.y - pad);
+            ImVec2 wEnd(cx + 2.0f, cy - 2.0f);
+            drawList->AddLine(wStart, wEnd, color, 2.0f);
+            drawList->AddLine(ImVec2(cx - 1.0f, cy - 5.0f), ImVec2(cx + 5.0f, cy - 5.0f), color, 1.0f);
+            drawList->AddLine(ImVec2(cx + 2.0f, cy - 8.0f), ImVec2(cx + 2.0f, cy - 2.0f), color, 1.0f);
+        }
+        else if (strcmp(actionName, "SmartSelectTool") == 0) {
+            // Умное выделение (уголки ограничительной рамки и круглый маркер по центру)
+            float rL = min.x + pad;
+            float rR = max.x - pad;
+            float rT = min.y + pad;
+            float rB = max.y - pad;
+            drawList->AddLine(ImVec2(rL, rT), ImVec2(rL + 4.0f, rT), color, 1.0f);
+            drawList->AddLine(ImVec2(rL, rT), ImVec2(rL, rT + 4.0f), color, 1.0f);
+            drawList->AddLine(ImVec2(rR, rB), ImVec2(rR - 4.0f, rB), color, 1.0f);
+            drawList->AddLine(ImVec2(rR, rB), ImVec2(rR, rB - 4.0f), color, 1.0f);
+            drawList->AddCircleFilled(ImVec2(cx, cy), 2.5f, color);
+            drawList->AddLine(ImVec2(cx, cy - 4.0f), ImVec2(cx, cy + 4.0f), color, 1.0f);
+            drawList->AddLine(ImVec2(cx - 4.0f, cy), ImVec2(cx + 4.0f, cy), color, 1.0f);
+        }
         else if (strcmp(actionName, "PanTool") == 0) {
             float r = w * 0.25f;
             drawList->AddLine(ImVec2(cx - r, cy), ImVec2(cx + r, cy), color, 2.0f);
