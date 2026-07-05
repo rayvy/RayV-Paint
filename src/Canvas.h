@@ -72,6 +72,14 @@ public:
     bool SaveCanvas(const std::string& filepath, DdsFormat ddsFormat);
     bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath = "");
 
+    // Pixel Transformations
+    void FlipActiveLayerHorizontal(ID3D11Device* device);
+    void FlipActiveLayerVertical(ID3D11Device* device);
+    void RotateCanvas90(ID3D11Device* device, bool clockwise);
+    void FlipCanvasHorizontal(ID3D11Device* device);
+    void FlipCanvasVertical(ID3D11Device* device);
+    void CommitTransformation(const std::string& actionName);
+
 
 
     bool GetChannelR() const { return m_ChannelR; }
@@ -95,10 +103,34 @@ public:
     std::string GetCurrentProjectFilePath() const { return m_CurrentProjectFilePath; }
     void SetCurrentProjectFilePath(const std::string& path) { m_CurrentProjectFilePath = path; }
 
+    std::string GetExportPath() const { return m_ExportPath; }
+    void SetExportPath(const std::string& path) { m_ExportPath = path; }
+    std::string GetExportFormat() const { return m_ExportFormat; }
+    void SetExportFormat(const std::string& format) { m_ExportFormat = format; }
+    bool GetExportAdvancedMode() const { return m_ExportAdvancedMode; }
+    void SetExportAdvancedMode(bool v) { m_ExportAdvancedMode = v; }
+    std::string GetExportCompressionSpeed() const { return m_ExportCompressionSpeed; }
+    void SetExportCompressionSpeed(const std::string& speed) { m_ExportCompressionSpeed = speed; }
+    bool GetExportGenerateMipMaps() const { return m_ExportGenerateMipMaps; }
+    void SetExportGenerateMipMaps(bool v) { m_ExportGenerateMipMaps = v; }
+    std::string GetExportMipFilter() const { return m_ExportMipFilter; }
+    void SetExportMipFilter(const std::string& filter) { m_ExportMipFilter = filter; }
+    std::string GetExportPngColorSpace() const { return m_ExportPngColorSpace; }
+    void SetExportPngColorSpace(const std::string& cs) { m_ExportPngColorSpace = cs; }
+
+    float GetRotationAngle() const { return m_RotationAngle; }
+    void SetRotationAngle(float angle) { m_RotationAngle = angle; }
+    bool GetMirrorHorizontal() const { return m_MirrorHorizontal; }
+    void SetMirrorHorizontal(bool v) { m_MirrorHorizontal = v; }
+    bool GetMirrorVertical() const { return m_MirrorVertical; }
+    void SetMirrorVertical(bool v) { m_MirrorVertical = v; }
+
     // Native RAYP Format
     bool SaveCanvasRayp(const std::string& filepath);
     void SaveCanvasRaypAsync(const std::string& filepath, std::function<void(bool)> callback = nullptr);
     bool LoadCanvasRayp(const std::string& filepath, ID3D11Device* device);
+
+    std::vector<float> GetComposedPixels();
 
 private:
     void BackupTile(int tileX, int tileY);
@@ -175,4 +207,16 @@ private:
     std::unordered_map<int, TileDelta> m_ActiveStrokeDeltas;
     bool m_IsDocumentModified = false;
     std::string m_CurrentProjectFilePath;
+
+    std::string m_ExportPath = "";
+    std::string m_ExportFormat = "BC7_UNORM_SRGB";
+    bool m_ExportAdvancedMode = false;
+    std::string m_ExportCompressionSpeed = "Medium";
+    bool m_ExportGenerateMipMaps = true;
+    std::string m_ExportMipFilter = "Bicubic";
+    std::string m_ExportPngColorSpace = "sRGB";
+
+    float m_RotationAngle = 0.0f;
+    bool m_MirrorHorizontal = false;
+    bool m_MirrorVertical = false;
 };

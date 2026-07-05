@@ -97,6 +97,8 @@ set(SOURCES
     src/core/ConfigManager.h
     src/core/DdsHelper.cpp
     src/core/DdsHelper.h
+    src/core/TexconvHelper.cpp
+    src/core/TexconvHelper.h
     src/core/ImageManager.cpp
     src/core/ImageManager.h
     src/core/PaintEngine.cpp

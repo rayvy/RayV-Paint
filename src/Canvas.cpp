@@ -122,6 +122,7 @@ void Canvas::ResetView() {
     m_Zoom = 1.0f;
     m_Pan.x = -m_Width * 0.5f * m_Zoom;
     m_Pan.y = -m_Height * 0.5f * m_Zoom;
+    m_RotationAngle = 0.0f;
 }
 
 bool Canvas::Initialize(ID3D11Device* device) {
@@ -519,20 +520,11 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     int numTilesX = (m_Width + 255) / 256;
     int numTilesY = (m_Height + 255) / 256;
 
-    if (phase == StrokePhase::Begin) {
-        m_IsStrokeActive = true;
-        m_StrokeDistanceAccumulator = 0.0f;
-        m_LastDabX = currRawX;
-        m_LastDabY = currRawY;
-        m_PrevStabilizedX = currRawX;
-        m_PrevStabilizedY = currRawY;
-        m_ActiveStrokeDeltas.clear();
-
-        // Backup tiles covered by the first stamp
-        float minX = currRawX - activeBrush.radius;
-        float maxX = currRawX + activeBrush.radius;
-        float minY = currRawY - activeBrush.radius;
-        float maxY = currRawY + activeBrush.radius;
+    auto backupSymmetricTiles = [&](float cx, float cy, float radius) {
+        float minX = cx - radius;
+        float maxX = cx + radius;
+        float minY = cy - radius;
+        float maxY = cy + radius;
         
         int minTileX = std::max(0, static_cast<int>(minX) / 256);
         int maxTileX = std::max(0, static_cast<int>(maxX) / 256);
@@ -544,10 +536,32 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                 BackupTile(tx, ty);
             }
         }
+    };
+
+    if (phase == StrokePhase::Begin) {
+        m_IsStrokeActive = true;
+        m_StrokeDistanceAccumulator = 0.0f;
+        m_LastDabX = currRawX;
+        m_LastDabY = currRawY;
+        m_PrevStabilizedX = currRawX;
+        m_PrevStabilizedY = currRawY;
+        m_ActiveStrokeDeltas.clear();
+
+        // Backup tiles covered by the first stamp (and its symmetries)
+        backupSymmetricTiles(currRawX, currRawY, activeBrush.radius);
+        if (m_MirrorHorizontal) {
+            backupSymmetricTiles(static_cast<float>(m_Width) - currRawX, currRawY, activeBrush.radius);
+        }
+        if (m_MirrorVertical) {
+            backupSymmetricTiles(currRawX, static_cast<float>(m_Height) - currRawY, activeBrush.radius);
+        }
+        if (m_MirrorHorizontal && m_MirrorVertical) {
+            backupSymmetricTiles(static_cast<float>(m_Width) - currRawX, static_cast<float>(m_Height) - currRawY, activeBrush.radius);
+        }
 
         // Place the very first stamp immediately
         PaintEngine::DrawStamp(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height, 
-                               currRawX, currRawY, activeBrush);
+                               currRawX, currRawY, activeBrush, m_MirrorHorizontal, m_MirrorVertical);
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
     }
     else if (phase == StrokePhase::Update && m_IsStrokeActive) {
@@ -556,21 +570,37 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         float stabilizedX = m_PrevStabilizedX + weight * (currRawX - m_PrevStabilizedX);
         float stabilizedY = m_PrevStabilizedY + weight * (currRawY - m_PrevStabilizedY);
 
-        // Backup tiles covered by the stroke segment
-        float minX = std::min(m_PrevStabilizedX, stabilizedX) - activeBrush.radius;
-        float maxX = std::max(m_PrevStabilizedX, stabilizedX) + activeBrush.radius;
-        float minY = std::min(m_PrevStabilizedY, stabilizedY) - activeBrush.radius;
-        float maxY = std::max(m_PrevStabilizedY, stabilizedY) + activeBrush.radius;
+        // Backup tiles covered by the stroke segment (and its symmetries)
+        auto backupSegment = [&](float x0, float y0, float x1, float y1) {
+            float minX = std::min(x0, x1) - activeBrush.radius;
+            float maxX = std::max(x0, x1) + activeBrush.radius;
+            float minY = std::min(y0, y1) - activeBrush.radius;
+            float maxY = std::max(y0, y1) + activeBrush.radius;
 
-        int minTileX = std::max(0, static_cast<int>(minX) / 256);
-        int maxTileX = std::max(0, static_cast<int>(maxX) / 256);
-        int minTileY = std::max(0, static_cast<int>(minY) / 256);
-        int maxTileY = std::max(0, static_cast<int>(maxY) / 256);
+            int minTileX = std::max(0, static_cast<int>(minX) / 256);
+            int maxTileX = std::max(0, static_cast<int>(maxX) / 256);
+            int minTileY = std::max(0, static_cast<int>(minY) / 256);
+            int maxTileY = std::max(0, static_cast<int>(maxY) / 256);
 
-        for (int ty = minTileY; ty <= std::min(maxTileY, numTilesY - 1); ++ty) {
-            for (int tx = minTileX; tx <= std::min(maxTileX, numTilesX - 1); ++tx) {
-                BackupTile(tx, ty);
+            for (int ty = minTileY; ty <= std::min(maxTileY, numTilesY - 1); ++ty) {
+                for (int tx = minTileX; tx <= std::min(maxTileX, numTilesX - 1); ++tx) {
+                    BackupTile(tx, ty);
+                }
             }
+        };
+
+        backupSegment(m_PrevStabilizedX, m_PrevStabilizedY, stabilizedX, stabilizedY);
+        if (m_MirrorHorizontal) {
+            backupSegment(static_cast<float>(m_Width) - m_PrevStabilizedX, m_PrevStabilizedY,
+                          static_cast<float>(m_Width) - stabilizedX, stabilizedY);
+        }
+        if (m_MirrorVertical) {
+            backupSegment(m_PrevStabilizedX, static_cast<float>(m_Height) - m_PrevStabilizedY,
+                          stabilizedX, static_cast<float>(m_Height) - stabilizedY);
+        }
+        if (m_MirrorHorizontal && m_MirrorVertical) {
+            backupSegment(static_cast<float>(m_Width) - m_PrevStabilizedX, static_cast<float>(m_Height) - m_PrevStabilizedY,
+                          static_cast<float>(m_Width) - stabilizedX, static_cast<float>(m_Height) - stabilizedY);
         }
 
         // Draw segment from previous stabilized position to current stabilized position
@@ -578,7 +608,8 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                                        m_PrevStabilizedX, m_PrevStabilizedY,
                                        stabilizedX, stabilizedY,
                                        activeBrush, m_StrokeDistanceAccumulator,
-                                       m_LastDabX, m_LastDabY);
+                                       m_LastDabX, m_LastDabY,
+                                       m_MirrorHorizontal, m_MirrorVertical);
 
         m_PrevStabilizedX = stabilizedX;
         m_PrevStabilizedY = stabilizedY;
@@ -899,10 +930,32 @@ bool Canvas::SaveCanvas(const std::string& filepath, DdsFormat ddsFormat) {
         return false;
     }
 
-    // Composite all layers into a single CPU buffer for export
-    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
+    // Find the first visible layer index (bottom-most)
+    int firstVisibleIdx = -1;
+    for (int l = 0; l < static_cast<int>(m_Layers.size()); ++l) {
+        if (m_Layers[l].visible) {
+            firstVisibleIdx = l;
+            break;
+        }
+    }
 
-    for (const auto& layer : m_Layers) {
+    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
+    if (firstVisibleIdx != -1) {
+        const auto& baseLayer = m_Layers[firstVisibleIdx];
+        if (!baseLayer.pixels.empty()) {
+            size_t copySize = std::min(composite.size(), baseLayer.pixels.size());
+            std::memcpy(composite.data(), baseLayer.pixels.data(), copySize * sizeof(float));
+            if (baseLayer.opacity < 1.0f) {
+                for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
+                    composite[i * 4 + 3] *= baseLayer.opacity;
+                }
+            }
+        }
+    }
+
+    // Blend subsequent visible layers on CPU
+    for (int l = firstVisibleIdx + 1; l < static_cast<int>(m_Layers.size()); ++l) {
+        const auto& layer = m_Layers[l];
         if (!layer.visible) continue;
         
         for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
@@ -950,10 +1003,32 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
         return false;
     }
 
-    // Composite layers CPU side
-    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
+    // Find the first visible layer index (bottom-most)
+    int firstVisibleIdx = -1;
+    for (int l = 0; l < static_cast<int>(m_Layers.size()); ++l) {
+        if (m_Layers[l].visible) {
+            firstVisibleIdx = l;
+            break;
+        }
+    }
 
-    for (const auto& layer : m_Layers) {
+    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
+    if (firstVisibleIdx != -1) {
+        const auto& baseLayer = m_Layers[firstVisibleIdx];
+        if (!baseLayer.pixels.empty()) {
+            size_t copySize = std::min(composite.size(), baseLayer.pixels.size());
+            std::memcpy(composite.data(), baseLayer.pixels.data(), copySize * sizeof(float));
+            if (baseLayer.opacity < 1.0f) {
+                for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
+                    composite[i * 4 + 3] *= baseLayer.opacity;
+                }
+            }
+        }
+    }
+
+    // Blend subsequent visible layers on CPU
+    for (int l = firstVisibleIdx + 1; l < static_cast<int>(m_Layers.size()); ++l) {
+        const auto& layer = m_Layers[l];
         if (!layer.visible) continue;
 
         for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
@@ -1037,6 +1112,14 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         metadata["width"] = m_Width;
         metadata["height"] = m_Height;
         metadata["active_layer"] = m_ActiveLayerIdx;
+        
+        metadata["export_path"] = m_ExportPath;
+        metadata["export_format"] = m_ExportFormat;
+        metadata["export_advanced_mode"] = m_ExportAdvancedMode;
+        metadata["export_compression_speed"] = m_ExportCompressionSpeed;
+        metadata["export_generate_mip_maps"] = m_ExportGenerateMipMaps;
+        metadata["export_mip_filter"] = m_ExportMipFilter;
+        metadata["export_png_color_space"] = m_ExportPngColorSpace;
 
         json layersArray = json::array();
         for (const auto& layer : m_Layers) {
@@ -1155,6 +1238,14 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
         m_Height = metadata["height"].get<int>();
         m_ActiveLayerIdx = metadata["active_layer"].get<int>();
 
+        if (metadata.contains("export_path")) m_ExportPath = metadata["export_path"].get<std::string>();
+        if (metadata.contains("export_format")) m_ExportFormat = metadata["export_format"].get<std::string>();
+        if (metadata.contains("export_advanced_mode")) m_ExportAdvancedMode = metadata["export_advanced_mode"].get<bool>();
+        if (metadata.contains("export_compression_speed")) m_ExportCompressionSpeed = metadata["export_compression_speed"].get<std::string>();
+        if (metadata.contains("export_generate_mip_maps")) m_ExportGenerateMipMaps = metadata["export_generate_mip_maps"].get<bool>();
+        if (metadata.contains("export_mip_filter")) m_ExportMipFilter = metadata["export_mip_filter"].get<std::string>();
+        if (metadata.contains("export_png_color_space")) m_ExportPngColorSpace = metadata["export_png_color_space"].get<std::string>();
+
         // Recreate composition resources
         CreateCompositeResources(device);
 
@@ -1215,12 +1306,27 @@ static bool SaveCanvasRaypInternal(const std::string& filepath, int width, int h
                                   const std::vector<std::string>& layerNames,
                                   const std::vector<bool>& layerVisibles,
                                   const std::vector<float>& layerOpacities,
-                                  const std::vector<std::vector<float>>& layerPixels) {
+                                  const std::vector<std::vector<float>>& layerPixels,
+                                  const std::string& exportPath,
+                                  const std::string& exportFormat,
+                                  bool exportAdvancedMode,
+                                  const std::string& exportCompressionSpeed,
+                                  bool exportGenerateMipMaps,
+                                  const std::string& exportMipFilter,
+                                  const std::string& exportPngColorSpace) {
     try {
         json metadata;
         metadata["width"] = width;
         metadata["height"] = height;
         metadata["active_layer"] = activeLayerIdx;
+
+        metadata["export_path"] = exportPath;
+        metadata["export_format"] = exportFormat;
+        metadata["export_advanced_mode"] = exportAdvancedMode;
+        metadata["export_compression_speed"] = exportCompressionSpeed;
+        metadata["export_generate_mip_maps"] = exportGenerateMipMaps;
+        metadata["export_mip_filter"] = exportMipFilter;
+        metadata["export_png_color_space"] = exportPngColorSpace;
 
         json layersArray = json::array();
         for (size_t i = 0; i < layerNames.size(); ++i) {
@@ -1303,11 +1409,259 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
             pixels.push_back(layer.pixels);
         }
     }
+
+    std::string expPath = m_ExportPath;
+    std::string expFormat = m_ExportFormat;
+    bool expAdv = m_ExportAdvancedMode;
+    std::string expSpeed = m_ExportCompressionSpeed;
+    bool expMips = m_ExportGenerateMipMaps;
+    std::string expMipF = m_ExportMipFilter;
+    std::string expPngCS = m_ExportPngColorSpace;
     
     std::thread([=, pixels = std::move(pixels)]() {
-        bool success = SaveCanvasRaypInternal(filepath, width, height, activeLayer, names, visibles, opacities, pixels);
+        bool success = SaveCanvasRaypInternal(filepath, width, height, activeLayer, names, visibles, opacities, pixels,
+                                             expPath, expFormat, expAdv, expSpeed, expMips, expMipF, expPngCS);
         if (callback) {
             callback(success);
         }
     }).detach();
+}
+
+std::vector<float> Canvas::GetComposedPixels() {
+    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
+    int firstVisibleIdx = -1;
+    for (int l = 0; l < static_cast<int>(m_Layers.size()); ++l) {
+        if (m_Layers[l].visible) {
+            firstVisibleIdx = l;
+            break;
+        }
+    }
+    if (firstVisibleIdx != -1) {
+        const auto& baseLayer = m_Layers[firstVisibleIdx];
+        if (!baseLayer.pixels.empty()) {
+            size_t copySize = std::min(composite.size(), baseLayer.pixels.size());
+            std::memcpy(composite.data(), baseLayer.pixels.data(), copySize * sizeof(float));
+            if (baseLayer.opacity < 1.0f) {
+                for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
+                    composite[i * 4 + 3] *= baseLayer.opacity;
+                }
+            }
+        }
+    }
+    for (int l = firstVisibleIdx + 1; l < static_cast<int>(m_Layers.size()); ++l) {
+        const auto& layer = m_Layers[l];
+        if (!layer.visible) continue;
+        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
+            size_t base = i * 4;
+            float srcR = 0.0f, srcG = 0.0f, srcB = 0.0f, srcA = 0.0f;
+            if (!layer.pixels.empty()) {
+                srcR = layer.pixels[base + 0];
+                srcG = layer.pixels[base + 1];
+                srcB = layer.pixels[base + 2];
+                srcA = layer.pixels[base + 3] * layer.opacity;
+            }
+            if (srcA <= 0.0f) continue;
+            float destR = composite[base + 0];
+            float destG = composite[base + 1];
+            float destB = composite[base + 2];
+            float destA = composite[base + 3];
+            float outA = srcA + destA * (1.0f - srcA);
+            if (outA > 0.0f) {
+                composite[base + 0] = (srcR * srcA + destR * destA * (1.0f - srcA)) / outA;
+                composite[base + 1] = (srcG * srcA + destG * destA * (1.0f - srcA)) / outA;
+                composite[base + 2] = (srcB * srcA + destB * destA * (1.0f - srcA)) / outA;
+                composite[base + 3] = outA;
+            }
+        }
+    }
+    return composite;
+}
+
+void Canvas::CommitTransformation(const std::string& actionName) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
+    auto& layer = m_Layers[m_ActiveLayerIdx];
+    std::vector<TileDelta> deltas;
+    deltas.reserve(m_ActiveStrokeDeltas.size());
+
+    for (auto& pair : m_ActiveStrokeDeltas) {
+        auto& delta = pair.second;
+        delta.newPixels.resize(256 * 256 * 4, 0.0f);
+
+        int startX = delta.tileX * 256;
+        int startY = delta.tileY * 256;
+        for (int y = 0; y < 256; ++y) {
+            int canvasY = startY + y;
+            if (canvasY >= m_Height) break;
+            for (int x = 0; x < 256; ++x) {
+                int canvasX = startX + x;
+                if (canvasX >= m_Width) break;
+                
+                int tileOffset = (y * 256 + x) * 4;
+                int canvasOffset = (canvasY * m_Width + canvasX) * 4;
+                
+                delta.newPixels[tileOffset + 0] = layer.pixels[canvasOffset + 0];
+                delta.newPixels[tileOffset + 1] = layer.pixels[canvasOffset + 1];
+                delta.newPixels[tileOffset + 2] = layer.pixels[canvasOffset + 2];
+                delta.newPixels[tileOffset + 3] = layer.pixels[canvasOffset + 3];
+            }
+        }
+        deltas.push_back(std::move(delta));
+    }
+
+    auto cmd = std::make_shared<PaintStrokeCommand>(
+        layer.name + " " + actionName, m_ActiveLayerIdx, std::move(deltas)
+    );
+    m_UndoRedoManager.PushCommand(cmd);
+    m_ActiveStrokeDeltas.clear();
+    m_IsDocumentModified = true;
+    layer.needsUpload = true;
+}
+
+void Canvas::FlipActiveLayerHorizontal(ID3D11Device* device) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
+    auto& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.pixels.empty()) {
+        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+    }
+
+    // Backup all tiles
+    m_ActiveStrokeDeltas.clear();
+    int numTilesX = (m_Width + 255) / 256;
+    int numTilesY = (m_Height + 255) / 256;
+    for (int ty = 0; ty < numTilesY; ++ty) {
+        for (int tx = 0; tx < numTilesX; ++tx) {
+            BackupTile(tx, ty);
+        }
+    }
+
+    // Perform horizontal flip
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width / 2; ++x) {
+            int leftIdx = (y * m_Width + x) * 4;
+            int rightIdx = (y * m_Width + (m_Width - 1 - x)) * 4;
+            for (int c = 0; c < 4; ++c) {
+                std::swap(layer.pixels[leftIdx + c], layer.pixels[rightIdx + c]);
+            }
+        }
+    }
+
+    CommitTransformation("Horizontal Flip");
+}
+
+void Canvas::FlipActiveLayerVertical(ID3D11Device* device) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
+    auto& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.pixels.empty()) {
+        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+    }
+
+    // Backup all tiles
+    m_ActiveStrokeDeltas.clear();
+    int numTilesX = (m_Width + 255) / 256;
+    int numTilesY = (m_Height + 255) / 256;
+    for (int ty = 0; ty < numTilesY; ++ty) {
+        for (int tx = 0; tx < numTilesX; ++tx) {
+            BackupTile(tx, ty);
+        }
+    }
+
+    // Perform vertical flip
+    for (int y = 0; y < m_Height / 2; ++y) {
+        int targetY = m_Height - 1 - y;
+        for (int x = 0; x < m_Width; ++x) {
+            int topIdx = (y * m_Width + x) * 4;
+            int bottomIdx = (targetY * m_Width + x) * 4;
+            for (int c = 0; c < 4; ++c) {
+                std::swap(layer.pixels[topIdx + c], layer.pixels[bottomIdx + c]);
+            }
+        }
+    }
+
+    CommitTransformation("Vertical Flip");
+}
+
+void Canvas::RotateCanvas90(ID3D11Device* device, bool clockwise) {
+    int oldW = m_Width;
+    int oldH = m_Height;
+    int newW = oldH;
+    int newH = oldW;
+
+    // Clear undo history because resizing/rotating the entire canvas changes layout dimensions
+    ClearUndoHistory();
+
+    for (auto& layer : m_Layers) {
+        if (layer.pixels.empty()) {
+            layer.pixels.assign((size_t)oldW * oldH * 4, 0.0f);
+        }
+        std::vector<float> rotated((size_t)newW * newH * 4, 0.0f);
+        for (int y = 0; y < oldH; ++y) {
+            for (int x = 0; x < oldW; ++x) {
+                int dx = clockwise ? (oldH - 1 - y) : y;
+                int dy = clockwise ? x : (oldW - 1 - x);
+                int srcIdx = (y * oldW + x) * 4;
+                int destIdx = (dy * newW + dx) * 4;
+                for (int c = 0; c < 4; ++c) {
+                    rotated[destIdx + c] = layer.pixels[srcIdx + c];
+                }
+            }
+        }
+        layer.pixels = std::move(rotated);
+    }
+
+    m_Width = newW;
+    m_Height = newH;
+
+    // Recreate resources
+    if (device) {
+        CreateCompositeResources(device);
+        for (auto& layer : m_Layers) {
+            RecreateLayerTexture(device, layer);
+        }
+    }
+
+    m_IsDocumentModified = true;
+    Logger::Get().Info("Rotated canvas 90 degrees " + std::string(clockwise ? "CW" : "CCW"));
+}
+
+void Canvas::FlipCanvasHorizontal(ID3D11Device* device) {
+    ClearUndoHistory();
+    for (auto& layer : m_Layers) {
+        if (layer.pixels.empty()) continue;
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width / 2; ++x) {
+                int leftIdx = (y * m_Width + x) * 4;
+                int rightIdx = (y * m_Width + (m_Width - 1 - x)) * 4;
+                for (int c = 0; c < 4; ++c) {
+                    std::swap(layer.pixels[leftIdx + c], layer.pixels[rightIdx + c]);
+                }
+            }
+        }
+        if (device) {
+            RecreateLayerTexture(device, layer);
+        }
+    }
+    m_IsDocumentModified = true;
+    Logger::Get().Info("Flipped canvas horizontally");
+}
+
+void Canvas::FlipCanvasVertical(ID3D11Device* device) {
+    ClearUndoHistory();
+    for (auto& layer : m_Layers) {
+        if (layer.pixels.empty()) continue;
+        for (int y = 0; y < m_Height / 2; ++y) {
+            int targetY = m_Height - 1 - y;
+            for (int x = 0; x < m_Width; ++x) {
+                int topIdx = (y * m_Width + x) * 4;
+                int bottomIdx = (targetY * m_Width + x) * 4;
+                for (int c = 0; c < 4; ++c) {
+                    std::swap(layer.pixels[topIdx + c], layer.pixels[bottomIdx + c]);
+                }
+            }
+        }
+        if (device) {
+            RecreateLayerTexture(device, layer);
+        }
+    }
+    m_IsDocumentModified = true;
+    Logger::Get().Info("Flipped canvas vertically");
 }

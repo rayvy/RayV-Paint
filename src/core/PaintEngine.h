@@ -25,13 +25,16 @@ struct BrushSettings {
 class PaintEngine {
 public:
     static void DrawStamp(std::vector<float>& pixels, int width, int height, 
-                          float cx, float cy, const BrushSettings& brush);
+                          float cx, float cy, const BrushSettings& brush,
+                          bool mirrorH = false, bool mirrorV = false);
 
     static void DrawLine(std::vector<float>& pixels, int width, int height, 
-                         float x0, float y0, float x1, float y1, const BrushSettings& brush);
+                         float x0, float y0, float x1, float y1, const BrushSettings& brush,
+                         bool mirrorH = false, bool mirrorV = false);
 
     static void DrawStrokeSegment(std::vector<float>& pixels, int width, int height,
                                   float x0, float y0, float x1, float y1,
                                   const BrushSettings& brush, float& distanceAccumulator,
-                                  float& lastDabX, float& lastDabY);
+                                  float& lastDabX, float& lastDabY,
+                                  bool mirrorH = false, bool mirrorV = false);
 };

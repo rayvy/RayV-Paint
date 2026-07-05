@@ -32,14 +32,26 @@ PS_INPUT VSMain(VS_INPUT input)
     
     float2 viewportSize = u_ViewportSizeAndZoom.xy;
     float zoom = u_ViewportSizeAndZoom.z;
+    float rotation = u_ViewportSizeAndZoom.w;
     float2 panOffset = u_OffsetAndCanvasSize.xy;
     float2 canvasSize = u_OffsetAndCanvasSize.zw;
     
     // Map unit quad position (0 to 1) to canvas pixel size
     float2 canvasPixelPos = input.pos * canvasSize;
+    
+    // Rotate canvasPixelPos around canvas center (canvasSize * 0.5f)
+    float2 center = canvasSize * 0.5f;
+    float2 rel = canvasPixelPos - center;
+    float cosA = cos(rotation);
+    float sinA = sin(rotation);
+    float2 rotatedPixelPos;
+    rotatedPixelPos.x = rel.x * cosA - rel.y * sinA;
+    rotatedPixelPos.y = rel.x * sinA + rel.y * cosA;
+    rotatedPixelPos += center;
+    
     // Apply zoom, translation, and center relative to viewport with integer pixel alignment
     float2 screenOrigin = floor(panOffset + viewportSize * 0.5f);
-    float2 screenPixelPos = floor(canvasPixelPos * zoom) + screenOrigin;
+    float2 screenPixelPos = floor(rotatedPixelPos * zoom) + screenOrigin;
     
     // Transform from Screen-space pixels to NDC [-1, 1]
     float2 ndcPos = (screenPixelPos / viewportSize) * 2.0f - 1.0f;

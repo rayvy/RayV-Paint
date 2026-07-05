@@ -85,6 +85,11 @@ static void CustomKeyCallback(GLFWwindow* window, int key, int scancode, int act
     }
 }
 
+static bool g_IsViewportHovered = false;
+static bool g_IsLayersHovered = false;
+
+
+
 // DirectX 11 Global Objects
 static ID3D11Device*           g_pd3dDevice = nullptr;
 static ID3D11DeviceContext*    g_pd3dDeviceContext = nullptr;
@@ -106,12 +111,49 @@ static ImVec2 g_LastDragDelta = ImVec2(0.0f, 0.0f);
 static double g_StartupTimeMs = 0.0;
 
 // Painting state
-enum class ActiveTool { Brush, Eraser, Pan };
+enum class ActiveTool { Brush, Eraser, Pan, Rotate };
 static ActiveTool g_ActiveTool = ActiveTool::Brush;
 static BrushSettings g_Brush;
 static bool g_IsPainting = false;
-static float g_PrevCanvasMouseX = 0.0f;
-static float g_PrevCanvasMouseY = 0.0f;
+static void CustomDropCallback(GLFWwindow* window, int count, const char** paths) {
+    if (count <= 0) return;
+    std::string path = paths[0];
+    
+    if (g_IsViewportHovered || g_IsLayersHovered) {
+        if (g_Canvas.LoadImageToLayer(g_pd3dDevice, path)) {
+            Logger::Get().Info("Dropped file imported as layer: " + path);
+        } else {
+            Logger::Get().Error("Failed to import dropped file as layer: " + path);
+        }
+    } else {
+        size_t dot = path.find_last_of('.');
+        std::string ext = "";
+        if (dot != std::string::npos) {
+            ext = path.substr(dot + 1);
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+        }
+        
+        if (ext == "rayp") {
+            if (g_Canvas.LoadCanvasRayp(path, g_pd3dDevice)) {
+                Logger::Get().Info("Successfully loaded project from drop: " + path);
+            } else {
+                Logger::Get().Error("Failed to load project from drop: " + path);
+            }
+        } else {
+            g_Canvas.ClearUndoHistory();
+            g_Canvas.GetLayers().clear();
+            g_Canvas.SetActiveLayerIndex(-1);
+            g_Canvas.SetCurrentProjectFilePath("");
+            
+            if (g_Canvas.LoadImageToLayer(g_pd3dDevice, path)) {
+                Logger::Get().Info("Dropped file opened as new project: " + path);
+            } else {
+                Logger::Get().Error("Failed to open dropped file as new project: " + path);
+                g_Canvas.CreateNewLayer(g_pd3dDevice, "Background");
+            }
+        }
+    }
+}
 
 // Forward declarations
 bool CreateDeviceD3D(HWND hWnd, bool useNullDriver = false);
@@ -300,10 +342,13 @@ static void DrawToolIcon(const char* actionName, ImVec2 min, ImVec2 max, ImU32 c
         drawList->AddTriangleFilled(ImVec2(cx - 3.0f, cy - r), ImVec2(cx + 3.0f, cy - r), ImVec2(cx, cy - r - 4.0f), color);
         drawList->AddTriangleFilled(ImVec2(cx - 3.0f, cy + r), ImVec2(cx + 3.0f, cy + r), ImVec2(cx, cy + r + 4.0f), color);
     }
-    else {
+    else if (strcmp(actionName, "RotateTool") == 0) {
         float r = w * 0.22f;
         drawList->AddCircle(ImVec2(cx, cy), r, color, 16, 2.0f);
         drawList->AddTriangleFilled(ImVec2(cx + r - 3.0f, cy - 3.0f), ImVec2(cx + r + 3.0f, cy - 3.0f), ImVec2(cx + r, cy + 2.0f), color);
+    }
+    else {
+        drawList->AddRect(min, max, color, 1.0f);
     }
 }
 
@@ -536,6 +581,7 @@ int main(int argc, char* argv[]) {
 
     ImGui_ImplGlfw_InitForOther(window, true);
     g_PrevKeyCallback = glfwSetKeyCallback(window, CustomKeyCallback);
+    glfwSetDropCallback(window, CustomDropCallback);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
     log_step("ImGui Context & Backend Init");
 
@@ -589,6 +635,8 @@ int main(int argc, char* argv[]) {
     bool openImportModal = false;
     bool openExportDdsModal = false;
     bool openExportStdModal = false;
+    bool openExportAdvancedModal = false;
+    bool openQuickExportTrigger = false;
     bool openSettingsModal = false;
     bool openSaveRaypModal = false;
     bool openLoadRaypModal = false;
@@ -621,6 +669,8 @@ int main(int argc, char* argv[]) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+        g_IsViewportHovered = false;
+        g_IsLayersHovered = false;
 
         ImGuiViewport* mainViewport = ImGui::GetMainViewport();
 
@@ -637,14 +687,11 @@ int main(int argc, char* argv[]) {
                 if (ImGui::MenuItem("Import Image...", "Ctrl+I")) {
                     openImportModal = true;
                 }
-                if (ImGui::BeginMenu("Export...")) {
-                    if (ImGui::MenuItem("Natively to DDS...")) {
-                        openExportDdsModal = true;
-                    }
-                    if (ImGui::MenuItem("Standard formats (PNG/JPG)...")) {
-                        openExportStdModal = true;
-                    }
-                    ImGui::EndMenu();
+                if (ImGui::MenuItem("Quick Export", KeymapManager::Get().GetActionShortcutString("QuickExport").c_str())) {
+                    openQuickExportTrigger = true;
+                }
+                if (ImGui::MenuItem("Advanced Export...", KeymapManager::Get().GetActionShortcutString("AdvancedExport").c_str())) {
+                    openExportAdvancedModal = true;
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Load Config...")) {
@@ -687,6 +734,26 @@ int main(int argc, char* argv[]) {
             if (ImGui::BeginMenu("Canvas")) {
                 if (ImGui::MenuItem("Canvas Size...")) {
                     openCanvasSizeModal = true;
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Rotate Canvas 90 CW")) {
+                    g_Canvas.RotateCanvas90(g_pd3dDevice, true);
+                }
+                if (ImGui::MenuItem("Rotate Canvas 90 CCW")) {
+                    g_Canvas.RotateCanvas90(g_pd3dDevice, false);
+                }
+                if (ImGui::MenuItem("Flip Canvas Horizontally")) {
+                    g_Canvas.FlipCanvasHorizontal(g_pd3dDevice);
+                }
+                if (ImGui::MenuItem("Flip Canvas Vertically")) {
+                    g_Canvas.FlipCanvasVertical(g_pd3dDevice);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Flip Active Layer Horizontally", nullptr, false, g_Canvas.GetActiveLayerIndex() != -1)) {
+                    g_Canvas.FlipActiveLayerHorizontal(g_pd3dDevice);
+                }
+                if (ImGui::MenuItem("Flip Active Layer Vertically", nullptr, false, g_Canvas.GetActiveLayerIndex() != -1)) {
+                    g_Canvas.FlipActiveLayerVertical(g_pd3dDevice);
                 }
                 ImGui::EndMenu();
             }
@@ -736,7 +803,7 @@ int main(int argc, char* argv[]) {
         
         ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | Zoom: %.0f%% | Threads: %d | Tool: %s", 
             g_StartupTimeMs, s_FrameTimeMs, s_FPS, g_Canvas.GetWidth(), g_Canvas.GetHeight(), g_Canvas.GetZoom() * 100.0f, numThreads,
-            (g_ActiveTool == ActiveTool::Brush ? "Brush" : (g_ActiveTool == ActiveTool::Eraser ? "Eraser" : "Pan")));
+            (g_ActiveTool == ActiveTool::Brush ? "Brush" : (g_ActiveTool == ActiveTool::Eraser ? "Eraser" : (g_ActiveTool == ActiveTool::Rotate ? "Rotate" : "Pan"))));
         
         ImGui::End();
         ImGui::PopStyleVar();
@@ -785,6 +852,10 @@ int main(int argc, char* argv[]) {
         if (openExportStdModal) {
             ImGui::OpenPopup("Export Standard Image");
             openExportStdModal = false;
+        }
+        if (openExportAdvancedModal) {
+            ImGui::OpenPopup("Advanced Export Settings");
+            openExportAdvancedModal = false;
         }
         if (openSettingsModal) {
             ImGui::OpenPopup("Settings");
@@ -936,6 +1007,124 @@ int main(int argc, char* argv[]) {
             }
             ImGui::SameLine();
             if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Advanced Export Settings Modal
+        if (ImGui::BeginPopupModal("Advanced Export Settings", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static char exportPath[512] = "";
+            static bool inited = false;
+            if (!inited) {
+                std::strncpy(exportPath, g_Canvas.GetExportPath().c_str(), sizeof(exportPath));
+                if (strlen(exportPath) == 0) {
+                    std::strncpy(exportPath, "export.png", sizeof(exportPath));
+                }
+                inited = true;
+            }
+            
+            ImGui::Text("Export File Path:");
+            ImGui::InputText("##advpath", exportPath, IM_ARRAYSIZE(exportPath));
+            
+            // Format detection based on path extension
+            std::string pathStr = exportPath;
+            size_t dot = pathStr.find_last_of('.');
+            std::string ext = "";
+            if (dot != std::string::npos) {
+                ext = pathStr.substr(dot + 1);
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            }
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            
+            if (ext == "dds") {
+                ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "DDS Export Settings (Subprocess Compressed)");
+                
+                // Formats list matching paint.net/photoshop presets
+                const char* formats[] = { "BC7_UNORM_SRGB", "BC7_UNORM", "BC3_UNORM", "BC1_UNORM", "RGBA8_UNORM", "RGBA16_FLOAT" };
+                static int currentFormatIdx = 0;
+                // Sync from canvas
+                std::string currentFmt = g_Canvas.GetExportFormat();
+                for (int i = 0; i < IM_ARRAYSIZE(formats); ++i) {
+                    if (currentFmt == formats[i]) currentFormatIdx = i;
+                }
+                if (ImGui::Combo("DDS Format / Preset", &currentFormatIdx, formats, IM_ARRAYSIZE(formats))) {
+                    g_Canvas.SetExportFormat(formats[currentFormatIdx]);
+                }
+                
+                // Mipmaps checkbox
+                bool mips = g_Canvas.GetExportGenerateMipMaps();
+                if (ImGui::Checkbox("Generate Mipmaps", &mips)) {
+                    g_Canvas.SetExportGenerateMipMaps(mips);
+                }
+                
+                if (mips) {
+                    const char* filters[] = { "Point", "Box", "Linear", "Cubic" };
+                    static int currentFilterIdx = 3; // Bicubic/Cubic default
+                    std::string currentFilter = g_Canvas.GetExportMipFilter();
+                    for (int i = 0; i < IM_ARRAYSIZE(filters); ++i) {
+                        if (currentFilter == filters[i]) currentFilterIdx = i;
+                    }
+                    if (ImGui::Combo("Mip Filter", &currentFilterIdx, filters, IM_ARRAYSIZE(filters))) {
+                        g_Canvas.SetExportMipFilter(filters[currentFilterIdx]);
+                    }
+                }
+                
+                // Compression speed
+                const char* speeds[] = { "Fast", "Medium", "Slow", "Best" };
+                static int currentSpeedIdx = 1; // Medium default
+                std::string currentSpeed = g_Canvas.GetExportCompressionSpeed();
+                for (int i = 0; i < IM_ARRAYSIZE(speeds); ++i) {
+                    if (currentSpeed == speeds[i]) currentSpeedIdx = i;
+                }
+                if (ImGui::Combo("Compression Quality", &currentSpeedIdx, speeds, IM_ARRAYSIZE(speeds))) {
+                    g_Canvas.SetExportCompressionSpeed(speeds[currentSpeedIdx]);
+                }
+            } else if (ext == "png") {
+                ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "PNG Export Settings");
+                
+                static char iccPath[512] = "";
+                std::string currentIcc = g_Canvas.GetExportPngColorSpace();
+                if (currentIcc != "sRGB" && currentIcc != "Linear") {
+                    std::strncpy(iccPath, currentIcc.c_str(), sizeof(iccPath));
+                }
+                
+                ImGui::InputText("ICC Color Profile Path", iccPath, IM_ARRAYSIZE(iccPath));
+                ImGui::TextDisabled("Leave empty for standard sRGB colorspace");
+                
+                g_Canvas.SetExportPngColorSpace(strlen(iccPath) > 0 ? iccPath : "sRGB");
+            } else {
+                ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "Standard Format Export");
+                ImGui::Text("Format: %s", ext.empty() ? "None" : ext.c_str());
+            }
+            
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+            
+            if (ImGui::Button("Export Now", ImVec2(120, 0))) {
+                g_Canvas.SetExportPath(exportPath);
+                
+                bool success = false;
+                if (ext == "dds") {
+                    DdsFormat fmt = DdsFormat::RGBA8_UNORM;
+                    success = g_Canvas.SaveCanvas(exportPath, fmt);
+                } else {
+                    std::string icc = g_Canvas.GetExportPngColorSpace();
+                    success = g_Canvas.SaveCanvasStandard(exportPath, icc == "sRGB" ? "" : icc);
+                }
+                
+                if (success) {
+                    inited = false;
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                inited = false;
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();
@@ -1229,6 +1418,53 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("PanTool")) {
                 g_ActiveTool = ActiveTool::Pan;
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("RotateTool")) {
+                g_ActiveTool = ActiveTool::Rotate;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("QuickExport") || openQuickExportTrigger) {
+                openQuickExportTrigger = false;
+                std::string path = g_Canvas.GetExportPath();
+                if (path.empty()) {
+                    std::string proj = g_Canvas.GetCurrentProjectFilePath();
+                    if (!proj.empty()) {
+                        size_t dot = proj.find_last_of('.');
+                        if (dot != std::string::npos) {
+                            path = proj.substr(0, dot) + ".png";
+                        } else {
+                            path = proj + ".png";
+                        }
+                    } else {
+                        path = "export.png";
+                    }
+                    g_Canvas.SetExportPath(path);
+                }
+                
+                size_t dot = path.find_last_of('.');
+                std::string ext = "";
+                if (dot != std::string::npos) {
+                    ext = path.substr(dot + 1);
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                }
+                
+                if (ext == "dds") {
+                    DdsFormat fmt = DdsFormat::RGBA8_UNORM;
+                    if (g_Canvas.SaveCanvas(path, fmt)) {
+                        Logger::Get().Info("Quick exported DDS successfully to: " + path);
+                    } else {
+                        Logger::Get().Error("Quick export DDS failed for path: " + path);
+                    }
+                } else {
+                    std::string icc = g_Canvas.GetExportPngColorSpace();
+                    if (g_Canvas.SaveCanvasStandard(path, icc == "sRGB" ? "" : icc)) {
+                        Logger::Get().Info("Quick exported image successfully to: " + path);
+                    } else {
+                        Logger::Get().Error("Quick export image failed for path: " + path);
+                    }
+                }
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("AdvancedExport")) {
+                openExportAdvancedModal = true;
+            }
         }
 
         // Background Auto-Save trigger
@@ -1264,6 +1500,7 @@ int main(int argc, char* argv[]) {
             std::string brushBind = KeymapManager::Get().GetActionShortcutString("BrushTool");
             std::string eraserBind = KeymapManager::Get().GetActionShortcutString("EraserTool");
             std::string panBind = KeymapManager::Get().GetActionShortcutString("PanTool");
+            std::string rotateBind = KeymapManager::Get().GetActionShortcutString("RotateTool");
             
             static std::string s_RebindAction = "";
             float btnSize = 44.0f;
@@ -1278,6 +1515,9 @@ int main(int argc, char* argv[]) {
                 // Pan
                 RenderToolButton("PanTool", "Pan", ActiveTool::Pan, false, panBind, btnSize, s_RebindAction);
                 ImGui::Spacing();
+                // Rotate
+                RenderToolButton("RotateTool", "Rotate", ActiveTool::Rotate, false, rotateBind, btnSize, s_RebindAction);
+                ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
                 
@@ -1291,6 +1531,8 @@ int main(int argc, char* argv[]) {
                 RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction);
                 ImGui::SameLine();
                 RenderToolButton("PanTool", "Pan", ActiveTool::Pan, false, panBind, btnSize, s_RebindAction);
+                ImGui::SameLine();
+                RenderToolButton("RotateTool", "Rotate", ActiveTool::Rotate, false, rotateBind, btnSize, s_RebindAction);
                 ImGui::SameLine();
                 
                 std::string emptyBind = "";
@@ -1365,6 +1607,7 @@ int main(int argc, char* argv[]) {
         // 9.5 Draw Canvas Viewport
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::Begin("Canvas Viewport", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        g_IsViewportHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
         ImGui::PopStyleVar();
 
         ImVec2 viewportPanelSize = ImGui::GetContentRegionAvail();
@@ -1393,8 +1636,21 @@ int main(int argc, char* argv[]) {
             float screenOriginX = std::floor(g_Canvas.GetPan().x + static_cast<float>(viewportWidth) * 0.5f);
             float screenOriginY = std::floor(g_Canvas.GetPan().y + static_cast<float>(viewportHeight) * 0.5f);
 
-            float canvasX = (localMouseX - screenOriginX) / g_Canvas.GetZoom();
-            float canvasY = (localMouseY - screenOriginY) / g_Canvas.GetZoom();
+            float rotatedX = (localMouseX - screenOriginX) / g_Canvas.GetZoom();
+            float rotatedY = (localMouseY - screenOriginY) / g_Canvas.GetZoom();
+
+            float angle = g_Canvas.GetRotationAngle();
+            float cosA = std::cos(angle);
+            float sinA = std::sin(angle);
+            
+            float centerX = g_Canvas.GetWidth() * 0.5f;
+            float centerY = g_Canvas.GetHeight() * 0.5f;
+            
+            float relX = rotatedX - centerX;
+            float relY = rotatedY - centerY;
+            
+            float canvasX = relX * cosA + relY * sinA + centerX;
+            float canvasY = -relX * sinA + relY * cosA + centerY;
 
             // Check if cursor is within active canvas boundary
             bool isInsideCanvas = (canvasX >= 0.0f && canvasX < (float)g_Canvas.GetWidth() &&
@@ -1402,6 +1658,7 @@ int main(int argc, char* argv[]) {
 
             // Panning: Middle mouse button drag OR left mouse button drag when Pan tool is selected
             bool isPanning = false;
+            bool isRotating = false;
             float dragDx = 0.0f;
             float dragDy = 0.0f;
             if (isHovered && (ImGui::IsMouseDragging(ImGuiMouseButton_Middle) || (g_ActiveTool == ActiveTool::Pan && ImGui::IsMouseDragging(ImGuiMouseButton_Left)))) {
@@ -1411,6 +1668,12 @@ int main(int argc, char* argv[]) {
                 dragDy = drag.y - g_LastDragDelta.y;
                 g_LastDragDelta = drag;
                 isPanning = true;
+            } else if (isHovered && g_ActiveTool == ActiveTool::Rotate && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                ImVec2 drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+                dragDx = drag.x - g_LastDragDelta.x;
+                g_LastDragDelta = drag;
+                g_Canvas.SetRotationAngle(g_Canvas.GetRotationAngle() + dragDx * 0.005f);
+                isRotating = true;
             } else {
                 g_LastDragDelta = ImVec2(0.0f, 0.0f);
             }
@@ -1480,6 +1743,51 @@ int main(int argc, char* argv[]) {
                 float screenRadius = g_Brush.radius * g_Canvas.GetZoom();
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(0, 0, 0, 255), 32, 1.5f);
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(255, 255, 255, 255), 32, 1.0f);
+            }
+
+            // Draw Symmetrical Guidelines
+            if (g_Canvas.GetMirrorHorizontal() || g_Canvas.GetMirrorVertical()) {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                float screenCanvasCenterX = imageMin.x + screenOriginX + (g_Canvas.GetWidth() * 0.5f) * g_Canvas.GetZoom();
+                float screenCanvasCenterY = imageMin.y + screenOriginY + (g_Canvas.GetHeight() * 0.5f) * g_Canvas.GetZoom();
+                float canvasTop = imageMin.y + screenOriginY;
+                float canvasBottom = canvasTop + g_Canvas.GetHeight() * g_Canvas.GetZoom();
+                float canvasLeft = imageMin.x + screenOriginX;
+                float canvasRight = canvasLeft + g_Canvas.GetWidth() * g_Canvas.GetZoom();
+
+                auto drawDashedLine = [](ImDrawList* drawList, ImVec2 p1, ImVec2 p2, ImU32 col, float thickness, float dashLength) {
+                    ImVec2 d = ImVec2(p2.x - p1.x, p2.y - p1.y);
+                    float len = std::sqrt(d.x * d.x + d.y * d.y);
+                    if (len == 0.0f) return;
+                    ImVec2 dir = ImVec2(d.x / len, d.y / len);
+                    float traveled = 0.0f;
+                    bool draw = true;
+                    while (traveled < len) {
+                        float step = dashLength;
+                        if (traveled + step > len) step = len - traveled;
+                        if (draw) {
+                            drawList->AddLine(
+                                ImVec2(p1.x + dir.x * traveled, p1.y + dir.y * traveled),
+                                ImVec2(p1.x + dir.x * (traveled + step), p1.y + dir.y * (traveled + step)),
+                                col, thickness
+                            );
+                        }
+                        traveled += step;
+                        draw = !draw;
+                    }
+                };
+
+                // Push clip rect to ensure guides don't draw outside viewport boundaries
+                dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
+
+                if (g_Canvas.GetMirrorHorizontal()) {
+                    drawDashedLine(dl, ImVec2(screenCanvasCenterX, canvasTop), ImVec2(screenCanvasCenterX, canvasBottom), IM_COL32(235, 64, 52, 180), 1.5f, 6.0f);
+                }
+                if (g_Canvas.GetMirrorVertical()) {
+                    drawDashedLine(dl, ImVec2(canvasLeft, screenCanvasCenterY), ImVec2(canvasRight, screenCanvasCenterY), IM_COL32(235, 64, 52, 180), 1.5f, 6.0f);
+                }
+
+                dl->PopClipRect();
             }
 
             // Draw interaction logic
@@ -1611,6 +1919,61 @@ int main(int argc, char* argv[]) {
             if (DrawUnifiedChannelToggle("A", a, ImVec4(0.6f, 0.6f, 0.6f, 1.0f))) g_Canvas.SetChannelA(!a);
             
             ImGui::NewLine();
+            ImGui::Separator();
+            ImGui::Text("Export Settings:");
+            
+            // Export path
+            char propExportPath[512] = "";
+            std::strncpy(propExportPath, g_Canvas.GetExportPath().c_str(), sizeof(propExportPath));
+            if (ImGui::InputText("Export Path", propExportPath, IM_ARRAYSIZE(propExportPath))) {
+                g_Canvas.SetExportPath(propExportPath);
+            }
+            
+            std::string pathStr = propExportPath;
+            size_t dot = pathStr.find_last_of('.');
+            std::string ext = "";
+            if (dot != std::string::npos) {
+                ext = pathStr.substr(dot + 1);
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            }
+            
+            if (ext == "dds") {
+                const char* formats[] = { "BC7_UNORM_SRGB", "BC7_UNORM", "BC3_UNORM", "BC1_UNORM", "RGBA8_UNORM", "RGBA16_FLOAT" };
+                int currentFormatIdx = 0;
+                std::string currentFmt = g_Canvas.GetExportFormat();
+                for (int i = 0; i < IM_ARRAYSIZE(formats); ++i) {
+                    if (currentFmt == formats[i]) currentFormatIdx = i;
+                }
+                if (ImGui::Combo("DDS Preset", &currentFormatIdx, formats, IM_ARRAYSIZE(formats))) {
+                    g_Canvas.SetExportFormat(formats[currentFormatIdx]);
+                }
+                
+                bool mips = g_Canvas.GetExportGenerateMipMaps();
+                if (ImGui::Checkbox("Mipmaps", &mips)) {
+                    g_Canvas.SetExportGenerateMipMaps(mips);
+                }
+                
+                if (mips) {
+                    const char* filters[] = { "Point", "Box", "Linear", "Cubic" };
+                    int currentFilterIdx = 3;
+                    std::string currentFilter = g_Canvas.GetExportMipFilter();
+                    for (int i = 0; i < IM_ARRAYSIZE(filters); ++i) {
+                        if (currentFilter == filters[i]) currentFilterIdx = i;
+                    }
+                    if (ImGui::Combo("Filter", &currentFilterIdx, filters, IM_ARRAYSIZE(filters))) {
+                        g_Canvas.SetExportMipFilter(filters[currentFilterIdx]);
+                    }
+                }
+            } else if (ext == "png") {
+                char propIccPath[512] = "";
+                std::string currentIcc = g_Canvas.GetExportPngColorSpace();
+                if (currentIcc != "sRGB" && currentIcc != "Linear") {
+                    std::strncpy(propIccPath, currentIcc.c_str(), sizeof(propIccPath));
+                }
+                if (ImGui::InputText("ICC Profile", propIccPath, IM_ARRAYSIZE(propIccPath))) {
+                    g_Canvas.SetExportPngColorSpace(strlen(propIccPath) > 0 ? propIccPath : "sRGB");
+                }
+            }
 
             ImGui::End();
         }
@@ -1618,6 +1981,7 @@ int main(int argc, char* argv[]) {
         // 9.6b Draw Layers Panel (Standalone docked window)
         if (showLayers) {
             ImGui::Begin("Layers", &showLayers, ImGuiWindowFlags_NoCollapse);
+            g_IsLayersHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
             
             if (ImGui::Button("Add Layer", ImVec2(-1, 25))) {
                 std::string lName = "Layer " + std::to_string(g_Canvas.GetLayers().size() + 1);

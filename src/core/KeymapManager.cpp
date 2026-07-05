@@ -99,6 +99,9 @@ void KeymapManager::Initialize() {
     m_Bindings["BrushTool"] = KeyCombination{ GLFW_KEY_B, -1, false, false, false };
     m_Bindings["EraserTool"] = KeyCombination{ GLFW_KEY_E, -1, false, false, false };
     m_Bindings["PanTool"] = KeyCombination{ GLFW_KEY_H, -1, false, false, false };
+    m_Bindings["RotateTool"] = KeyCombination{ GLFW_KEY_R, -1, false, false, false };
+    m_Bindings["QuickExport"] = KeyCombination{ GLFW_KEY_E, -1, true, false, false };
+    m_Bindings["AdvancedExport"] = KeyCombination{ GLFW_KEY_E, -1, true, true, false };
 
     // Resolve their scancodes
     ResolveScancodes();
