@@ -11,21 +11,64 @@
 #include "core/DdsHelper.h"
 #include "core/UndoRedoManager.h"
 
+// ---- Blend Modes ----
+enum class BlendMode : uint8_t {
+    Normal = 0,
+    Multiply,
+    Screen,
+    Overlay,
+    Add,
+    Subtract,
+    Darken,
+    Lighten,
+    HardLight,
+    SoftLight
+};
+
+// ---- Non-destructive Layer Filters ----
+enum class FilterType : uint8_t {
+    Blur = 0,
+    HSV,
+    Curves,
+    AlphaInvert,
+    Noise
+};
+
+struct LayerFilter {
+    FilterType type = FilterType::Blur;
+    bool enabled    = true;
+    float p[4]      = {};  // generic params: blur=p[0] radius; hsv=p[0..2] H/S/V; noise=p[0] strength,p[1] colorNoise
+    std::vector<float> lut; // 256 floats [0..1] for Curves (same LUT applied to R,G,B)
+};
+
 struct Layer {
     std::string name;
     bool visible = true;
     float opacity = 1.0f;
+    BlendMode blendMode = BlendMode::Normal;
     std::vector<float> pixels; // CPU pixel data: RGBA (32-bit float per channel, size width * height * 4)
     ID3D11Texture2D* texture = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
     bool needsUpload = false;
+
+    // Non-destructive filters (applied at composite time)
+    std::vector<LayerFilter> filters;
+    // Cache: pixels with filters applied. Rebuilt when filtersDirty=true.
+    std::vector<float> filteredPixels;
+    bool filtersDirty = true;
 
     std::vector<float> mask;
     ID3D11Texture2D* maskTexture = nullptr;
     ID3D11ShaderResourceView* maskSRV = nullptr;
     bool hasMask = false;
     bool maskNeedsUpload = false;
+
+    // Group support
+    bool isGroup = false;         // true = this is a group header (no pixels)
+    int  parentGroupId = -1;      // -1 = top-level; index into m_Layers of the group header
+    bool groupExpanded = true;
 };
+
 
 enum class StrokePhase {
     Begin,
@@ -82,6 +125,21 @@ public:
     // Paint Operation
     void PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush);
     bool IsStrokeActive() const { return m_IsStrokeActive; }
+    void SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s);
+
+    // Destructive image adjustments (operate on active layer, respect selection mask)
+    void SelectAll();
+    void InvertSelection();
+    void InvertAlpha();
+    void ApplyBlur(float radius);
+    void ApplyHSV(float dH, float dS, float dV);
+    void ApplyCurves(const std::vector<float>& lut256); // 256-element LUT [0..1] applied to R,G,B
+    void ApplyNoise(float strength, bool colorNoise);
+
+    // Layer group management
+    void CreateLayerGroup(ID3D11Device* device, const std::string& name);
+    void AddLayerToGroup(int layerIdx, int groupLayerIdx);
+    void RemoveLayerFromGroup(int layerIdx);
 
     // Selection System
     bool HasSelection() const { return m_HasSelection; }
@@ -213,8 +271,9 @@ private:
     struct LayerBuffer {
         DirectX::XMFLOAT4 layerParams;     // x: opacity, y: hasMask, zw: translation (uOff, vOff)
         DirectX::XMFLOAT4 transformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
-        DirectX::XMFLOAT4 centerParams;    // x: centerX, y: centerY, zw: unused
+        DirectX::XMFLOAT4 centerParams;    // x: centerX, y: centerY, z: blendMode (as float uint), w: unused
     };
+
 
     void ComposeLayers(ID3D11DeviceContext* context);
     void CreateCompositeResources(ID3D11Device* device);
@@ -262,6 +321,17 @@ private:
     ID3D11BlendState* m_LayerBlendState = nullptr;
     ID3D11RasterizerState* m_RasterizerState = nullptr;
 
+    // Group Compositing: temp RT for rendering a group's children before blending into main
+    ID3D11Texture2D* m_GroupCompositeTexture = nullptr;
+    ID3D11RenderTargetView* m_GroupCompositeRTV = nullptr;
+    ID3D11ShaderResourceView* m_GroupCompositeSRV = nullptr;
+    void CreateGroupCompositeResources(ID3D11Device* device);
+    void ReleaseGroupCompositeResources();
+
+    // Applies filters to layer.pixels → layer.filteredPixels (rebuilds if filtersDirty)
+    void RebuildFilteredPixels(Layer& layer);
+
+
     bool ExtractAndSetICCProfile(const std::string& pngPath);
 
     // Stroke state tracking
@@ -271,6 +341,13 @@ private:
     float m_StrokeDistanceAccumulator = 0.0f;
     float m_PrevStabilizedX = 0.0f;
     float m_PrevStabilizedY = 0.0f;
+
+    // Smudge state
+    float m_SmudgePickup[4] = { 0.f, 0.f, 0.f, 0.f };
+    bool  m_SmudgePickupValid = false;
+    float m_SmudgeLastX = 0.f;
+    float m_SmudgeLastY = 0.f;
+    float m_SmudgeDistAcc = 0.f;
 
     // Undo/Redo Engine
     UndoRedoManager m_UndoRedoManager;

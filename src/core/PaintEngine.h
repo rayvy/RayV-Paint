@@ -22,6 +22,12 @@ struct BrushSettings {
     bool pressureOpacity = false;
 };
 
+struct SmudgeSettings {
+    float radius   = 20.0f;
+    float strength = 0.6f;   // lerp factor: 0=no effect, 1=full smear
+    float spacing  = 0.12f;
+};
+
 class PaintEngine {
 public:
     static void DrawStamp(std::vector<float>& pixels, int width, int height, 

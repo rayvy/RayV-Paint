@@ -14,6 +14,7 @@
 extern void ApplyTheme(const std::string& themeName);
 extern bool g_IsLayersHovered;
 extern bool g_IsViewportHovered;
+extern std::vector<float> Canvas_BuildSplineLUT(const std::vector<std::pair<float,float>>& pts);
 
 #ifdef _WIN32
 #include <windows.h>
@@ -611,6 +612,35 @@ namespace UI {
                 }
                 ImGui::EndMenu();
             }
+            // ---- Image Menu ----
+            if (ImGui::BeginMenu("Image")) {
+                bool hasLayer = canvas.GetActiveLayerIndex() != -1;
+                if (ImGui::MenuItem("Invert Alpha", nullptr, false, hasLayer))
+                    canvas.InvertAlpha();
+                ImGui::Separator();
+                if (ImGui::MenuItem("Blur...", nullptr, false, hasLayer))
+                    state.showBlurModal = true;
+                if (ImGui::MenuItem("HSV Adjust...", "Ctrl+U", false, hasLayer))
+                    state.showHSVModal = true;
+                if (ImGui::MenuItem("Curves...", nullptr, false, hasLayer)) {
+                    if (state.curvesPoints.empty()) {
+                        state.curvesPoints = {{0.f,0.f},{1.f,1.f}};
+                        state.curvesLUT.assign(256, 0.f);
+                        for (int i=0;i<256;++i) state.curvesLUT[i]=(float)i/255.f;
+                    }
+                    state.showCurvesModal = true;
+                }
+                if (ImGui::MenuItem("Add Noise...", nullptr, false, hasLayer))
+                    state.showNoiseModal = true;
+                ImGui::EndMenu();
+            }
+            // ---- Select Menu ----
+            if (ImGui::BeginMenu("Select")) {
+                if (ImGui::MenuItem("Select All", "Ctrl+A")) canvas.SelectAll();
+                if (ImGui::MenuItem("Deselect",   "Ctrl+D")) canvas.ClearSelection();
+                if (ImGui::MenuItem("Invert Selection", "Ctrl+Shift+I")) canvas.InvertSelection();
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("View")) {
                 ImGui::MenuItem("Toolbar", nullptr, &state.showToolbar);
                 ImGui::MenuItem("Properties", nullptr, &state.showProperties);
@@ -633,6 +663,141 @@ namespace UI {
             ImGui::EndMainMenuBar();
         }
 
+        // ---- Image Adjustment Modals ----
+
+        // Blur Modal
+        if (state.showBlurModal) ImGui::OpenPopup("Blur##modal");
+        if (ImGui::BeginPopupModal("Blur##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Gaussian Blur (3-pass box)");
+            ImGui::SliderFloat("Radius", &state.blurRadius, 0.5f, 80.0f, "%.1f px");
+            ImGui::Spacing();
+            if (ImGui::Button("Apply", ImVec2(100,0))) {
+                canvas.ApplyBlur(state.blurRadius);
+                state.showBlurModal = false; ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(100,0))) { state.showBlurModal = false; ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
+
+        // HSV Modal
+        if (state.showHSVModal) ImGui::OpenPopup("HSV Adjust##modal");
+        if (ImGui::BeginPopupModal("HSV Adjust##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Hue / Saturation / Value");
+            ImGui::SliderFloat("Hue",        &state.hsvH, -0.5f, 0.5f, "%.3f");
+            ImGui::SliderFloat("Saturation", &state.hsvS, -1.0f, 1.0f, "%.3f");
+            ImGui::SliderFloat("Value",      &state.hsvV, -1.0f, 1.0f, "%.3f");
+            ImGui::Spacing();
+            if (ImGui::Button("Apply", ImVec2(100,0))) {
+                canvas.ApplyHSV(state.hsvH, state.hsvS, state.hsvV);
+                state.hsvH=state.hsvS=state.hsvV=0.f;
+                state.showHSVModal=false; ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel",ImVec2(100,0))){ state.hsvH=state.hsvS=state.hsvV=0.f; state.showHSVModal=false; ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
+
+        // Noise Modal
+        if (state.showNoiseModal) ImGui::OpenPopup("Add Noise##modal");
+        if (ImGui::BeginPopupModal("Add Noise##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::SliderFloat("Strength", &state.noiseStrength, 0.0f, 1.0f, "%.3f");
+            ImGui::Checkbox("Color Noise", &state.noiseColor);
+            ImGui::Spacing();
+            if (ImGui::Button("Apply",ImVec2(100,0))){ canvas.ApplyNoise(state.noiseStrength, state.noiseColor); state.showNoiseModal=false; ImGui::CloseCurrentPopup(); }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel",ImVec2(100,0))){ state.showNoiseModal=false; ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
+
+        // Curves Modal — interactive spline editor like Paint.NET
+        if (state.showCurvesModal) ImGui::OpenPopup("Curves##modal");
+        if (ImGui::BeginPopupModal("Curves##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            static const char* chanNames[] = {"RGB","R","G","B"};
+            ImGui::Combo("Channel", &state.curvesChannel, chanNames, 4);
+            ImGui::SameLine(); ImGui::TextDisabled("(right-click = remove point)");
+
+            const float graphSz = 256.f;
+            const float pad = 8.f;
+            ImVec2 graphPos = ImGui::GetCursorScreenPos();
+            graphPos.x += pad; graphPos.y += pad;
+            ImGui::Dummy(ImVec2(graphSz + pad*2, graphSz + pad*2));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Background
+            dl->AddRectFilled(graphPos, ImVec2(graphPos.x+graphSz,graphPos.y+graphSz), IM_COL32(30,30,30,255));
+            // Grid lines
+            for (int gi=1;gi<4;++gi) {
+                float gx=graphPos.x+graphSz*gi/4.f, gy=graphPos.y+graphSz*gi/4.f;
+                dl->AddLine(ImVec2(gx,graphPos.y),ImVec2(gx,graphPos.y+graphSz),IM_COL32(60,60,60,255));
+                dl->AddLine(ImVec2(graphPos.x,gy),ImVec2(graphPos.x+graphSz,gy),IM_COL32(60,60,60,255));
+            }
+            // Diagonal identity
+            dl->AddLine(graphPos,ImVec2(graphPos.x+graphSz,graphPos.y+graphSz),IM_COL32(80,80,80,255));
+            // Border
+            dl->AddRect(graphPos,ImVec2(graphPos.x+graphSz,graphPos.y+graphSz),IM_COL32(120,120,120,255));
+
+            // Rebuild LUT and draw curve
+            if (!state.curvesPoints.empty())
+                state.curvesLUT = Canvas_BuildSplineLUT(state.curvesPoints);
+            for (int xi=0;xi<255;++xi) {
+                float x0=graphPos.x+xi, y0=graphPos.y+graphSz*(1.f-state.curvesLUT[xi]);
+                float x1=graphPos.x+xi+1, y1=graphPos.y+graphSz*(1.f-state.curvesLUT[xi+1]);
+                dl->AddLine(ImVec2(x0,y0),ImVec2(x1,y1),IM_COL32(220,220,220,255),1.5f);
+            }
+
+            // Handle control points
+            static int draggingPt = -1;
+            ImVec2 mpos = ImGui::GetIO().MousePos;
+            bool inGraph = mpos.x>=graphPos.x && mpos.x<=graphPos.x+graphSz && mpos.y>=graphPos.y && mpos.y<=graphPos.y+graphSz;
+
+            for (int pi=0;pi<(int)state.curvesPoints.size();++pi) {
+                float cx=graphPos.x+state.curvesPoints[pi].first*graphSz;
+                float cy=graphPos.y+(1.f-state.curvesPoints[pi].second)*graphSz;
+                bool hovered = fabsf(mpos.x-cx)<7.f && fabsf(mpos.y-cy)<7.f;
+                dl->AddCircleFilled(ImVec2(cx,cy),5.f,hovered?IM_COL32(255,200,100,255):IM_COL32(200,200,200,255));
+                dl->AddCircle(ImVec2(cx,cy),5.f,IM_COL32(60,60,60,255));
+
+                if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) draggingPt=pi;
+                if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && pi!=0 && pi!=(int)state.curvesPoints.size()-1)
+                    state.curvesPoints.erase(state.curvesPoints.begin()+pi);
+            }
+            if (draggingPt>=0) {
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    float nx=std::clamp((mpos.x-graphPos.x)/graphSz,0.f,1.f);
+                    float ny=std::clamp(1.f-(mpos.y-graphPos.y)/graphSz,0.f,1.f);
+                    // endpoints locked in X
+                    if (draggingPt==0) nx=0.f;
+                    if (draggingPt==(int)state.curvesPoints.size()-1) nx=1.f;
+                    state.curvesPoints[draggingPt]={nx,ny};
+                    // keep sorted by x
+                    std::sort(state.curvesPoints.begin(),state.curvesPoints.end(),[](auto&a,auto&b){return a.first<b.first;});
+                } else draggingPt=-1;
+            }
+            // Left-click in graph (not on a point) = add point
+            if (inGraph && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && draggingPt<0) {
+                float nx=std::clamp((mpos.x-graphPos.x)/graphSz,0.f,1.f);
+                float ny=std::clamp(1.f-(mpos.y-graphPos.y)/graphSz,0.f,1.f);
+                state.curvesPoints.push_back({nx,ny});
+                std::sort(state.curvesPoints.begin(),state.curvesPoints.end(),[](auto&a,auto&b){return a.first<b.first;});
+            }
+
+            // Readout
+            float posX=(mpos.x-graphPos.x)/graphSz*255.f, posY=(1.f-(mpos.y-graphPos.y)/graphSz)*255.f;
+            if (inGraph) ImGui::Text("(%.0f, %.0f)", posX, posY);
+            else ImGui::TextDisabled("Move mouse over graph");
+            ImGui::Spacing();
+            if (ImGui::Button("Reset",ImVec2(80,0))){ state.curvesPoints={{0.f,0.f},{1.f,1.f}}; }
+            ImGui::SameLine();
+            if (ImGui::Button("Apply",ImVec2(80,0))){
+                canvas.ApplyCurves(state.curvesLUT);
+                state.showCurvesModal=false; ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel",ImVec2(80,0))){ state.showCurvesModal=false; ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
+
         // 2. Persistent Footer (Status Bar)
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
         ImGui::BeginViewportSideBar("##StatusBar", mainViewport, ImGuiDir_Down, 28.0f, 
@@ -652,6 +817,7 @@ namespace UI {
             case ActiveTool::Pipette: toolLabel = "Pipette"; break;
             case ActiveTool::BucketFill: toolLabel = "Bucket Fill"; break;
             case ActiveTool::Gradient: toolLabel = "Gradient"; break;
+            case ActiveTool::Smudge: toolLabel = "Smudge"; break;
         }
         ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | Zoom: %.0f%% | Threads: %d | Tool: %s",
             state.startupTimeMs, state.frameTimeMs, state.fps, canvas.GetWidth(), canvas.GetHeight(), canvas.GetZoom() * 100.0f,
@@ -1257,6 +1423,7 @@ namespace UI {
             std::string fillBind = KeymapManager::Get().GetActionShortcutString("BucketFillTool");
             std::string gradientBind = KeymapManager::Get().GetActionShortcutString("GradientTool");
             std::string pipetteBind = KeymapManager::Get().GetActionShortcutString("PipetteTool");
+            std::string smudgeBind  = KeymapManager::Get().GetActionShortcutString("SmudgeTool");
             std::string selectBind = KeymapManager::Get().GetActionShortcutString("SelectToolGroup");
             std::string wandBind = KeymapManager::Get().GetActionShortcutString("WandToolGroup");
             std::string transformBind = KeymapManager::Get().GetActionShortcutString("TransformTool");
@@ -1272,7 +1439,7 @@ namespace UI {
             };
 
             static std::string s_RebindAction = "";
-            constexpr int kToolbarButtonCount = 10;
+            constexpr int kToolbarButtonCount = 11;
             const bool hasSeparator = true;
             float btnSize = ComputeAdaptiveToolButtonSize(avail, isVertical, kToolbarButtonCount, hasSeparator);
             float gap = isVertical ? ImGui::GetStyle().ItemSpacing.y : ImGui::GetStyle().ItemSpacing.x;
@@ -1286,6 +1453,8 @@ namespace UI {
             RenderToolButton("BucketFillTool", "Fill", ActiveTool::BucketFill, false, fillBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             ToolbarAdvance(isVertical, gap);
             RenderToolButton("GradientTool", "Gradient", ActiveTool::Gradient, false, gradientBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+            ToolbarAdvance(isVertical, gap);
+            RenderToolButton("SmudgeTool", "Smudge", ActiveTool::Smudge, false, smudgeBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             ToolbarAdvance(isVertical, gap);
             RenderToolButton("PipetteTool", "Pipette", ActiveTool::Pipette, false, pipetteBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             ToolbarAdvance(isVertical, gap);
@@ -1574,6 +1743,75 @@ namespace UI {
                 ImGui::SliderFloat("Opacity", &layers[i].opacity, 0.0f, 1.0f, "%.2f");
                 ImGui::PopItemWidth();
 
+                // Blend Mode
+                ImGui::SameLine();
+                static const char* blendNames[] = {
+                    "Normal","Multiply","Screen","Overlay",
+                    "Add","Subtract","Darken","Lighten","HardLight","SoftLight"
+                };
+                int blendIdx = (int)layers[i].blendMode;
+                ImGui::PushItemWidth(90);
+                if (ImGui::Combo("##blend", &blendIdx, blendNames, IM_ARRAYSIZE(blendNames))) {
+                    layers[i].blendMode = (BlendMode)blendIdx;
+                }
+                ImGui::PopItemWidth();
+
+                // Fx button — filter management popup
+                ImGui::SameLine();
+                bool hasFx = !layers[i].filters.empty();
+                if (hasFx) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f,0.6f,0.9f,0.7f));
+                if (ImGui::SmallButton("Fx")) ImGui::OpenPopup("##filterPopup");
+                if (hasFx) ImGui::PopStyleColor();
+
+                if (ImGui::BeginPopup("##filterPopup")) {
+                    ImGui::Text("Filters — Layer: %s", layers[i].name.c_str());
+                    ImGui::Separator();
+                    static const char* filterTypeNames[] = {"Blur","HSV","Curves","Alpha Invert","Noise"};
+                    for (int fi = 0; fi < (int)layers[i].filters.size(); ++fi) {
+                        ImGui::PushID(fi);
+                        LayerFilter& flt = layers[i].filters[fi];
+                        bool wasEnabled = flt.enabled;
+                        if (ImGui::Checkbox("##fen", &flt.enabled) && flt.enabled != wasEnabled)
+                            layers[i].filtersDirty = true;
+                        ImGui::SameLine();
+                        ImGui::Text("%s", filterTypeNames[(int)flt.type]);
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("X")) { layers[i].filters.erase(layers[i].filters.begin()+fi); layers[i].filtersDirty=true; ImGui::PopID(); break; }
+                        // Inline params
+                        if (flt.enabled) {
+                            switch(flt.type) {
+                            case FilterType::Blur:
+                                if (ImGui::SliderFloat("Radius##fp",&flt.p[0],0.5f,80.f,"%.1f")) layers[i].filtersDirty=true; break;
+                            case FilterType::HSV:
+                                if (ImGui::SliderFloat("H##fp",&flt.p[0],-0.5f,0.5f)||ImGui::SliderFloat("S##fp",&flt.p[1],-1.f,1.f)||ImGui::SliderFloat("V##fp",&flt.p[2],-1.f,1.f)) layers[i].filtersDirty=true; break;
+                            case FilterType::AlphaInvert: break;
+                            case FilterType::Noise:
+                                if (ImGui::SliderFloat("Str##fp",&flt.p[0],0.f,1.f)) layers[i].filtersDirty=true;
+                                { bool col=(flt.p[1]>0.5f); if(ImGui::Checkbox("Color##fp",&col)){flt.p[1]=col?1.f:0.f;layers[i].filtersDirty=true;} } break;
+                            case FilterType::Curves:
+                                ImGui::TextDisabled("Edit via Image > Curves"); break;
+                            }
+                        }
+                        ImGui::Separator();
+                        ImGui::PopID();
+                    }
+                    ImGui::Spacing();
+                    if (ImGui::BeginMenu("Add Filter")) {
+                        static const FilterType ftypes[] = {FilterType::Blur,FilterType::HSV,FilterType::Curves,FilterType::AlphaInvert,FilterType::Noise};
+                        for (int ti=0;ti<5;++ti) {
+                            if (ImGui::MenuItem(filterTypeNames[ti])) {
+                                LayerFilter nf; nf.type=ftypes[ti]; nf.enabled=true;
+                                if (ftypes[ti]==FilterType::Blur) nf.p[0]=5.f;
+                                if (ftypes[ti]==FilterType::Curves){ nf.lut.resize(256); for(int li=0;li<256;++li) nf.lut[li]=(float)li/255.f; }
+                                layers[i].filters.push_back(nf);
+                                layers[i].filtersDirty=true;
+                            }
+                        }
+                        ImGui::EndMenu();
+                    }
+                    ImGui::EndPopup();
+                }
+
                 if (isSelected) {
                     ImGui::Spacing();
                     if (layers[i].hasMask) {
@@ -1692,6 +1930,13 @@ namespace UI {
             else if (activeTool == ActiveTool::Pipette) {
                 BeginToolSection("Pipette");
                 ImGui::TextWrapped("Hold LMB on canvas to sample color.");
+            }
+            else if (activeTool == ActiveTool::Smudge) {
+                BeginToolSection("Smudge");
+                ImGui::SliderFloat("Radius##sm",   &state.smudge.radius,   1.0f, 150.0f, "%.0f px");
+                ImGui::SliderFloat("Strength##sm", &state.smudge.strength,  0.0f, 1.0f,   "%.2f");
+                ImGui::SliderFloat("Spacing##sm",  &state.smudge.spacing,   0.01f, 1.0f,  "%.2f");
+                ImGui::TextDisabled("Drag to smear pixels.");
             }
             else if (activeTool == ActiveTool::MovePixels) {
                 BeginToolSection("Transform");

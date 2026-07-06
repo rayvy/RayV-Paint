@@ -161,6 +161,7 @@ float4 PSMain(PS_INPUT input) : SV_TARGET
 }
 
 Texture2D g_LayerMask : register(t1);
+Texture2D g_Composite  : register(t2); // current composite for blend modes
 
 // Simple pixel shader to output layer contents multiplied by layer opacity
 float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
@@ -202,7 +203,7 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
 
     if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
     {
-        discard; // or return transparent
+        discard;
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
@@ -222,9 +223,54 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
         float maskVal = g_LayerMask.Sample(g_Sampler, uv).r;
         col.a *= maskVal;
     }
-    
+
+    // Blend mode (u_CenterParams.z encodes blend mode as float)
+    uint blendMode = (uint)(u_CenterParams.z + 0.5f);
+    if (blendMode > 0u)
+    {
+        float4 dst = g_Composite.Sample(g_Sampler, input.uv); // existing composite
+        float3 s = col.rgb;
+        float3 d = dst.rgb;
+        float3 result = s; // default = Normal
+
+        if (blendMode == 1u) // Multiply
+            result = s * d;
+        else if (blendMode == 2u) // Screen
+            result = 1.0f - (1.0f - s) * (1.0f - d);
+        else if (blendMode == 3u) // Overlay
+        {
+            result.r = (d.r < 0.5f) ? 2.0f*s.r*d.r : 1.0f - 2.0f*(1.0f-s.r)*(1.0f-d.r);
+            result.g = (d.g < 0.5f) ? 2.0f*s.g*d.g : 1.0f - 2.0f*(1.0f-s.g)*(1.0f-d.g);
+            result.b = (d.b < 0.5f) ? 2.0f*s.b*d.b : 1.0f - 2.0f*(1.0f-s.b)*(1.0f-d.b);
+        }
+        else if (blendMode == 4u) // Add
+            result = min(s + d, 1.0f);
+        else if (blendMode == 5u) // Subtract
+            result = max(d - s, 0.0f);
+        else if (blendMode == 6u) // Darken
+            result = min(s, d);
+        else if (blendMode == 7u) // Lighten
+            result = max(s, d);
+        else if (blendMode == 8u) // HardLight
+        {
+            result.r = (s.r < 0.5f) ? 2.0f*s.r*d.r : 1.0f - 2.0f*(1.0f-s.r)*(1.0f-d.r);
+            result.g = (s.g < 0.5f) ? 2.0f*s.g*d.g : 1.0f - 2.0f*(1.0f-s.g)*(1.0f-d.g);
+            result.b = (s.b < 0.5f) ? 2.0f*s.b*d.b : 1.0f - 2.0f*(1.0f-s.b)*(1.0f-d.b);
+        }
+        else if (blendMode == 9u) // SoftLight
+        {
+            result.r = (s.r < 0.5f) ? d.r - (1.0f-2.0f*s.r)*d.r*(1.0f-d.r) : d.r + (2.0f*s.r-1.0f)*(sqrt(d.r)-d.r);
+            result.g = (s.g < 0.5f) ? d.g - (1.0f-2.0f*s.g)*d.g*(1.0f-d.g) : d.g + (2.0f*s.g-1.0f)*(sqrt(d.g)-d.g);
+            result.b = (s.b < 0.5f) ? d.b - (1.0f-2.0f*s.b)*d.b*(1.0f-d.b) : d.b + (2.0f*s.b-1.0f)*(sqrt(d.b)-d.b);
+        }
+
+        // Compose: replace col.rgb with blended result, keep alpha for D3D blending
+        col.rgb = result;
+    }
+
     return col;
 }
+
 
 Texture2D g_SelectionMask : register(t1);
 

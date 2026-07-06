@@ -109,6 +109,12 @@ void KeymapManager::Initialize() {
     m_Bindings["BucketFillTool"] = KeyCombination{ GLFW_KEY_F, -1, false, false, false };
     m_Bindings["GradientTool"] = KeyCombination{ GLFW_KEY_G, -1, false, false, false };
     m_Bindings["PipetteTool"] = KeyCombination{ GLFW_KEY_I, -1, false, false, false };
+    m_Bindings["SmudgeTool"] = KeyCombination{ GLFW_KEY_Y, -1, false, false, false };
+
+    // Image / Selection operations
+    m_Bindings["SelectAll"]        = KeyCombination{ GLFW_KEY_A, -1, true, false, false };
+    m_Bindings["InvertSelection"]  = KeyCombination{ GLFW_KEY_I, -1, true, true,  false };
+    m_Bindings["AdjustHSV"]        = KeyCombination{ GLFW_KEY_U, -1, true, false, false };
 
     // Tool groups: one key cycles between variants (repeat press)
     m_Bindings["SelectToolGroup"] = KeyCombination{ GLFW_KEY_S, -1, false, false, false };

@@ -627,6 +627,18 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("TransformTool")) {
                 g_ActiveTool = ActiveTool::MovePixels;
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("SmudgeTool")) {
+                g_ActiveTool = ActiveTool::Smudge;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("SelectAll")) {
+                g_Canvas.SelectAll();
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("InvertSelection")) {
+                g_Canvas.InvertSelection();
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("AdjustHSV")) {
+                uiState.showHSVModal = true;
+            }
             if (KeymapManager::Get().ConsumeActionTrigger("QuickExport") || uiState.openQuickExportTrigger) {
                 uiState.openQuickExportTrigger = false;
                 std::string path = g_Canvas.GetExportPath();
@@ -765,7 +777,7 @@ int main(int argc, char* argv[]) {
             bool isInsideCanvas = (canvasX >= 0.0f && canvasX < (float)g_Canvas.GetWidth() &&
                                    canvasY >= 0.0f && canvasY < (float)g_Canvas.GetHeight());
 
-            bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser);
+            bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser || g_ActiveTool == ActiveTool::Smudge);
             bool isPipetteTool = (g_ActiveTool == ActiveTool::Pipette);
             bool isEyedropperMode = (isBrushLikeTool && ImGui::GetIO().KeyAlt) || isPipetteTool;
 
@@ -895,8 +907,9 @@ int main(int argc, char* argv[]) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
                 // Draw custom outline circle at mouse position
-                ImDrawList* drawList = ImGui::GetForegroundDrawList(); // Use foreground draw list so it renders on top of everything
-                float screenRadius = g_Brush.radius * g_Canvas.GetZoom();
+                ImDrawList* drawList = ImGui::GetForegroundDrawList();
+                float cursorRadius = (g_ActiveTool == ActiveTool::Smudge) ? uiState.smudge.radius : g_Brush.radius;
+                float screenRadius = cursorRadius * g_Canvas.GetZoom();
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(0, 0, 0, 255), 32, 1.5f);
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(255, 255, 255, 255), 32, 1.0f);
             }
@@ -1050,6 +1063,11 @@ int main(int argc, char* argv[]) {
                 g_IsPainting = false;
             }
 
+            // Smudge End
+            if (g_ActiveTool == ActiveTool::Smudge && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+                g_Canvas.SmudgeOnActiveLayer(0, 0, StrokePhase::End, uiState.smudge);
+            }
+
             // Commit / Cancel Move Pixels (keyboard or Tool Settings panel buttons)
             if (g_Canvas.IsMovingPixels()) {
                 bool doCommit = uiState.commitTransform ||
@@ -1124,7 +1142,14 @@ int main(int argc, char* argv[]) {
                         g_SelectionDragStartY = canvasY;
                     }
                 }
-                // Move Pixels Click
+                // Smudge Tool
+                else if (g_ActiveTool == ActiveTool::Smudge) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        g_Canvas.SmudgeOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, uiState.smudge);
+                    } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                        g_Canvas.SmudgeOnActiveLayer(canvasX, canvasY, StrokePhase::Update, uiState.smudge);
+                    }
+                }
                 else if (g_ActiveTool == ActiveTool::MovePixels) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                         if (!g_Canvas.IsMovingPixels()) {
