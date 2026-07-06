@@ -5,6 +5,7 @@
 #include <memory>
 #include <functional>
 #include <algorithm>
+#include <span>
 
 // ---- Pixel format for the canvas document ----
 enum class CanvasPixelFormat {
@@ -57,11 +58,15 @@ public:
     // ---- Float pixel interface (works for RGBA8 and RGBA32F) ----
     // Missing tile == fully transparent (0,0,0,0).
     void GetPixelF(int x, int y, float rgba[4]) const;
+    void GetPixelF(int x, int y, std::span<float, 4> rgba) const;
     void SetPixelF(int x, int y, const float rgba[4]);
+    void SetPixelF(int x, int y, std::span<const float, 4> rgba);
 
     // ---- Fast UINT8 interface (only valid when format == RGBA8) ----
     void GetPixelU8(int x, int y, uint8_t rgba[4]) const;
+    void GetPixelU8(int x, int y, std::span<uint8_t, 4> rgba) const;
     void SetPixelU8(int x, int y, const uint8_t rgba[4]);
+    void SetPixelU8(int x, int y, std::span<const uint8_t, 4> rgba);
 
     // ---- Direct tile data access (for GPU upload / PaintEngine hot path) ----
     // Returns nullptr if the tile doesn't exist (treat as zeroes).

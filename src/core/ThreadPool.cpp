@@ -17,16 +17,17 @@ void ThreadPool::Init(size_t threads) {
     m_Stop = false;
     Logger::Get().Info("Initializing ThreadPool with " + std::to_string(threads) + " worker threads.");
 
-    for(size_t i = 0; i < threads; ++i) {
-        m_Workers.emplace_back([this]() {
-            for(;;) {
+    for (size_t i = 0; i < threads; ++i) {
+        m_Workers.emplace_back([this](std::stop_token st) {
+            for (;;) {
                 std::function<void()> task;
                 {
                     std::unique_lock<std::mutex> lock(this->m_QueueMutex);
-                    this->m_Condition.wait(lock,
-                        [this]{ return this->m_Stop || !this->m_Tasks.empty(); });
+                    this->m_Condition.wait(lock, st, [this] {
+                        return this->m_Stop || !this->m_Tasks.empty();
+                    });
                     
-                    if (this->m_Stop && this->m_Tasks.empty()) {
+                    if ((this->m_Stop || st.stop_requested()) && this->m_Tasks.empty()) {
                         return;
                     }
                     
@@ -48,14 +49,14 @@ void ThreadPool::Shutdown() {
     }
     
     m_Condition.notify_all();
-    
-    for(std::thread &worker: m_Workers) {
-        if (worker.joinable()) {
-            worker.join();
-        }
+
+    for (auto& worker : m_Workers) {
+        worker.request_stop();
     }
-    
+    m_Condition.notify_all();
+
     m_Workers.clear();
     m_Initialized = false;
+    m_Stop = false;
     Logger::Get().Info("ThreadPool shut down successfully.");
 }

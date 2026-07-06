@@ -114,6 +114,10 @@ bool TileCache::HasTile(int tileX, int tileY) const {
 // ---- Pixel read/write ----
 
 void TileCache::GetPixelF(int x, int y, float rgba[4]) const {
+    GetPixelF(x, y, std::span<float, 4>(rgba, 4));
+}
+
+void TileCache::GetPixelF(int x, int y, std::span<float, 4> rgba) const {
     if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) {
         rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0.0f;
         return;
@@ -140,6 +144,10 @@ void TileCache::GetPixelF(int x, int y, float rgba[4]) const {
 }
 
 void TileCache::SetPixelF(int x, int y, const float rgba[4]) {
+    SetPixelF(x, y, std::span<const float, 4>(rgba, 4));
+}
+
+void TileCache::SetPixelF(int x, int y, std::span<const float, 4> rgba) {
     if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) return;
     Tile& t  = GetOrCreateTile(x / TILE_SIZE, y / TILE_SIZE);
     int lx   = x % TILE_SIZE;
@@ -160,6 +168,10 @@ void TileCache::SetPixelF(int x, int y, const float rgba[4]) {
 }
 
 void TileCache::GetPixelU8(int x, int y, uint8_t rgba[4]) const {
+    GetPixelU8(x, y, std::span<uint8_t, 4>(rgba, 4));
+}
+
+void TileCache::GetPixelU8(int x, int y, std::span<uint8_t, 4> rgba) const {
     if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) {
         rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0; return;
     }
@@ -171,6 +183,10 @@ void TileCache::GetPixelU8(int x, int y, uint8_t rgba[4]) const {
 }
 
 void TileCache::SetPixelU8(int x, int y, const uint8_t rgba[4]) {
+    SetPixelU8(x, y, std::span<const uint8_t, 4>(rgba, 4));
+}
+
+void TileCache::SetPixelU8(int x, int y, std::span<const uint8_t, 4> rgba) {
     if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) return;
     Tile& t    = GetOrCreateTile(x / TILE_SIZE, y / TILE_SIZE);
     size_t off = ((size_t)(y % TILE_SIZE) * TILE_SIZE + (x % TILE_SIZE)) * 4;

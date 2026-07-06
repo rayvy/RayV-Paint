@@ -7,6 +7,7 @@
 #include <future>
 #include <functional>
 #include <memory>
+#include <stop_token>
 
 class ThreadPool {
 public:
@@ -47,11 +48,11 @@ private:
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
 
-    std::vector<std::thread> m_Workers;
+    std::vector<std::jthread> m_Workers;
     std::queue<std::function<void()>> m_Tasks;
     
     std::mutex m_QueueMutex;
-    std::condition_variable m_Condition;
+    std::condition_variable_any m_Condition;
     bool m_Stop = false;
     bool m_Initialized = false;
 };

@@ -29,7 +29,6 @@
 #include "Logger.h"
 #include "ThreadPool.h"
 #include "ConfigManager.h"
-#include "ScriptingEngine.h"
 #include "Canvas.h"
 #include "core/KeymapManager.h"
 #include "core/ClipboardHelper.h"
@@ -190,33 +189,6 @@ void CleanupCanvasRenderTarget();
 void RenderCanvasToTexture(int width, int height);
 void RedirectIOToConsole();
 
-// Core API bindings exported to Scripting Engine
-void TriggerCanvasResize(int w, int h) {
-    g_Canvas.ResizeCanvas(g_pd3dDevice, w, h);
-    Logger::Get().Info("Canvas resized to: " + std::to_string(w) + "x" + std::to_string(h));
-}
-float GetCanvasZoom() { return g_Canvas.GetZoom(); }
-void SetCanvasZoom(float zoom) { g_Canvas.SetZoom(zoom); }
-void SetCanvasPan(float x, float y) { g_Canvas.SetPan(DirectX::XMFLOAT2(x, y)); }
-void ResetCanvasView() { g_Canvas.ResetView(); }
-bool LoadCanvasImage(const std::string& filepath) {
-    return g_Canvas.LoadImageToLayer(g_pd3dDevice, filepath);
-}
-bool SaveCanvasDDS(const std::string& filepath, int formatChoice) {
-    DdsFormat fmt = DdsFormat::RGBA8_UNORM;
-    if (formatChoice == 1) fmt = DdsFormat::RGBA32_FLOAT;
-    else if (formatChoice == 2) fmt = DdsFormat::RGBA16_UNORM;
-    else if (formatChoice == 3) fmt = DdsFormat::RGBA16_FLOAT;
-    else if (formatChoice == 4) fmt = DdsFormat::R8_UNORM;
-    else if (formatChoice == 5) fmt = DdsFormat::R16_FLOAT;
-    else if (formatChoice == 6) fmt = DdsFormat::R32_FLOAT;
-    return g_Canvas.SaveCanvas(filepath, fmt);
-}
-bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath) {
-    return g_Canvas.SaveCanvasStandard(filepath, iccProfilePath);
-}
-
-
 // Entry point helper to dynamically spawn or attach console
 void SetupConsole(bool forceConsole) {
     if (forceConsole) {
@@ -346,7 +318,6 @@ int main(int argc, char* argv[]) {
     bool testMode = false;
     bool headlessMode = false;
     bool forceConsole = false;
-    std::string scriptPath = "";
     std::string configPath = "";
     std::string startupImagePath = "";
 
@@ -363,8 +334,6 @@ int main(int argc, char* argv[]) {
             SetupConsole(true);
             std::cout << "RayVPaint - Tech Art Editor - Version 0.2.0" << std::endl;
             return 0;
-        } else if (arg == "--script" && i + 1 < argc) {
-            scriptPath = argv[++i];
         } else if (arg == "--config" && i + 1 < argc) {
             configPath = argv[++i];
         } else if (arg[0] != '-') {
@@ -414,16 +383,6 @@ int main(int argc, char* argv[]) {
     if (numThreads == 0) numThreads = 2;
     ThreadPool::Get().Init(numThreads);
     log_step("Concurrency (ThreadPool)");
-
-    // 4. Initialize Scripting Engine
-    if (!scriptPath.empty() || headlessMode || testMode) {
-        ScriptingEngine::Get().Initialize();
-    } else {
-        std::thread([]() {
-            ScriptingEngine::Get().Initialize();
-        }).detach();
-    }
-    log_step("Scripting Engine Init Link/Start");
 
     // Canvas dimensions and GPU resources are created lazily when the user opens or creates a document.
 
@@ -521,11 +480,6 @@ int main(int argc, char* argv[]) {
     auto startupEnd = std::chrono::high_resolution_clock::now();
     g_StartupTimeMs = std::chrono::duration<double, std::milli>(startupEnd - startupStart).count();
     Logger::Get().Info("Startup completed in: " + std::to_string(g_StartupTimeMs) + " ms");
-
-    // Execute script from CLI if provided
-    if (!scriptPath.empty()) {
-        ScriptingEngine::Get().RunScript(scriptPath);
-    }
 
     // Trackers
     int currentWindowWidth = 1280;
@@ -1386,7 +1340,6 @@ int main(int argc, char* argv[]) {
     glfwDestroyWindow(window);
     glfwTerminate();
 
-    ScriptingEngine::Get().Shutdown();
     ThreadPool::Get().Shutdown();
     Logger::Get().Info("RayVPaint shut down cleanly.");
     Logger::Get().Shutdown();

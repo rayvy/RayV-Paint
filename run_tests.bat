@@ -20,21 +20,10 @@ if not exist "!EXE_PATH!" (
 
 echo Launching executable in test mode (hidden window)...
 "!EXE_PATH!" --test
-
-set "TEST_RESULT=%ERRORLEVEL%"
-if %TEST_RESULT% neq 0 (
-    echo First test failed with code %TEST_RESULT%
-    exit /b %TEST_RESULT%
+if %ERRORLEVEL% neq 0 (
+    echo Test failed with code %ERRORLEVEL%
+    exit /b %ERRORLEVEL%
 )
 
-echo Launching executable in headless mode with Python script...
-"!EXE_PATH!" --headless --script test_script.py
-
-set "TEST_RESULT=%ERRORLEVEL%"
-if %TEST_RESULT% neq 0 (
-    echo Python script test failed with code %TEST_RESULT%
-    exit /b %TEST_RESULT%
-)
-
-echo All tests completed successfully!
+echo Test completed successfully!
 exit /b 0

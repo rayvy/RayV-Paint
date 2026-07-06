@@ -4,25 +4,25 @@
 #include <algorithm>
 #include <cstring>
 
-static inline void ReadPixelRaw(const uint8_t* p, CanvasPixelFormat fmt, float out[4]) {
+static inline void ReadPixelRaw(std::span<const uint8_t> p, CanvasPixelFormat fmt, std::span<float, 4> out) {
     if (fmt == CanvasPixelFormat::RGBA8) {
         out[0] = p[0] / 255.0f;
         out[1] = p[1] / 255.0f;
         out[2] = p[2] / 255.0f;
         out[3] = p[3] / 255.0f;
     } else {
-        std::memcpy(out, p, 4 * sizeof(float));
+        std::memcpy(out.data(), p.data(), 4 * sizeof(float));
     }
 }
 
-static inline void WritePixelRaw(uint8_t* p, CanvasPixelFormat fmt, const float in[4]) {
+static inline void WritePixelRaw(std::span<uint8_t> p, CanvasPixelFormat fmt, std::span<const float, 4> in) {
     if (fmt == CanvasPixelFormat::RGBA8) {
         p[0] = (uint8_t)(std::clamp(in[0], 0.0f, 1.0f) * 255.0f + 0.5f);
         p[1] = (uint8_t)(std::clamp(in[1], 0.0f, 1.0f) * 255.0f + 0.5f);
         p[2] = (uint8_t)(std::clamp(in[2], 0.0f, 1.0f) * 255.0f + 0.5f);
         p[3] = (uint8_t)(std::clamp(in[3], 0.0f, 1.0f) * 255.0f + 0.5f);
     } else {
-        std::memcpy(p, in, 4 * sizeof(float));
+        std::memcpy(p.data(), in.data(), 4 * sizeof(float));
     }
 }
 
@@ -99,7 +99,7 @@ static void StampAt(TileCache& cache, float px, float py,
                     uint8_t* p = row + (size_t)lx * bytesPerPixel;
 
                     float dest[4];
-                    ReadPixelRaw(p, fmt, dest);
+                    ReadPixelRaw(std::span<const uint8_t>(p, (size_t)bytesPerPixel), fmt, std::span<float, 4>(dest, 4));
                     float out[4] = { dest[0], dest[1], dest[2], dest[3] };
 
                     if (brush.erase) {
@@ -118,7 +118,7 @@ static void StampAt(TileCache& cache, float px, float py,
                         }
                     }
 
-                    WritePixelRaw(p, fmt, out);
+                    WritePixelRaw(std::span<uint8_t>(p, (size_t)bytesPerPixel), fmt, std::span<const float, 4>(out, 4));
                 }
             }
         }

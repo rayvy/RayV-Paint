@@ -2,7 +2,6 @@
 #include "../core/ConfigManager.h"
 #include "../core/Logger.h"
 #include "../core/KeymapManager.h"
-#include "../scripting/ScriptingEngine.h"
 #include "../core/ThreadPool.h"
 #include <imgui_internal.h>
 #include <filesystem>
@@ -651,12 +650,6 @@ namespace UI {
                 ImGui::Separator();
                 if (ImGui::MenuItem("Reset View")) {
                     canvas.ResetView();
-                }
-                ImGui::EndMenu();
-            }
-            if (ImGui::BeginMenu("Scripting")) {
-                if (ImGui::MenuItem("Run test command")) {
-                    ScriptingEngine::Get().RunString("import rayv; rayv.log_warn('Executing scripting check.')");
                 }
                 ImGui::EndMenu();
             }

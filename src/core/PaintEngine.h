@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <cstdint>
+#include <span>
 
 struct BrushSettings {
     float color[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
