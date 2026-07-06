@@ -81,6 +81,7 @@ public:
 
     // Paint Operation
     void PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush);
+    bool IsStrokeActive() const { return m_IsStrokeActive; }
 
     // Selection System
     bool HasSelection() const { return m_HasSelection; }

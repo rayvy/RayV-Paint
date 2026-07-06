@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <chrono>
+#include <unordered_map>
 
 extern void ApplyTheme(const std::string& themeName);
 extern bool g_IsLayersHovered;
@@ -118,6 +119,56 @@ static bool ShowSaveFileWin32(char* outPath, size_t maxLen, const char* filter =
 #endif
 
 namespace UI {
+
+    bool IsSelectTool(ActiveTool tool) {
+        return tool == ActiveTool::RectSelect || tool == ActiveTool::EllipseSelect || tool == ActiveTool::LassoSelect;
+    }
+
+    bool IsWandTool(ActiveTool tool) {
+        return tool == ActiveTool::MagicWand || tool == ActiveTool::SmartSelect;
+    }
+
+    ActiveTool CycleSelectTool(ActiveTool current) {
+        if (current == ActiveTool::RectSelect) return ActiveTool::EllipseSelect;
+        if (current == ActiveTool::EllipseSelect) return ActiveTool::LassoSelect;
+        return ActiveTool::RectSelect;
+    }
+
+    ActiveTool CycleWandTool(ActiveTool current) {
+        if (current == ActiveTool::MagicWand) return ActiveTool::SmartSelect;
+        return ActiveTool::MagicWand;
+    }
+
+    void SampleCanvasColor(Canvas& canvas, float canvasX, float canvasY, float outColor[4]) {
+        static std::vector<float> s_CachedComposite;
+        static int s_CachedFrame = -1;
+        static int s_CachedW = 0;
+        static int s_CachedH = 0;
+
+        int frame = ImGui::GetFrameCount();
+        int w = canvas.GetWidth();
+        int h = canvas.GetHeight();
+        if (frame != s_CachedFrame || w != s_CachedW || h != s_CachedH) {
+            s_CachedComposite = canvas.GetCompositePixels();
+            s_CachedFrame = frame;
+            s_CachedW = w;
+            s_CachedH = h;
+        }
+
+        int cx = std::clamp((int)canvasX, 0, w - 1);
+        int cy = std::clamp((int)canvasY, 0, h - 1);
+        size_t idx = ((size_t)cy * w + cx) * 4;
+        outColor[0] = s_CachedComposite[idx + 0];
+        outColor[1] = s_CachedComposite[idx + 1];
+        outColor[2] = s_CachedComposite[idx + 2];
+        outColor[3] = s_CachedComposite[idx + 3];
+    }
+
+    struct ToolVariant {
+        const char* actionName;
+        const char* displayName;
+        ActiveTool tool;
+    };
 
     static void DrawToolIcon(const char* actionName, ImVec2 min, ImVec2 max, ImU32 color) {
         ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -253,6 +304,175 @@ namespace UI {
         }
     }
 
+    static void DrawKeybindBadge(ImVec2 btnMax, const std::string& keybindString, float btnSize) {
+        if (keybindString.empty()) return;
+
+        std::string badgeText;
+        size_t plusPos = keybindString.find_last_of('+');
+        if (plusPos != std::string::npos) {
+            badgeText = keybindString.substr(plusPos + 1);
+        } else {
+            badgeText = keybindString;
+        }
+        if (badgeText.empty()) return;
+
+        std::string singleChar = badgeText.substr(0, 1);
+        float badgeSize = std::clamp(btnSize * 0.32f, 10.0f, 18.0f);
+        ImVec2 badgeMin = ImVec2(btnMax.x - badgeSize, btnMax.y - badgeSize);
+        ImVec2 badgeMax = btnMax;
+
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+        drawList->AddRectFilled(badgeMin, badgeMax, ImGui::GetColorU32(ImGuiCol_FrameBgActive), 2.0f);
+        drawList->AddRect(badgeMin, badgeMax, ImGui::GetColorU32(ImGuiCol_Border), 2.0f);
+
+        ImVec2 textSize = ImGui::CalcTextSize(singleChar.c_str());
+        float fontScale = std::clamp(btnSize / 44.0f, 0.55f, 1.0f);
+        ImVec2 textPos = ImVec2(
+            badgeMin.x + (badgeSize - textSize.x * fontScale) * 0.5f,
+            badgeMin.y + (badgeSize - textSize.y * fontScale) * 0.5f - 1.0f);
+        drawList->AddText(ImGui::GetFont(), ImGui::GetFontSize() * fontScale, textPos,
+            ImGui::GetColorU32(ImGuiCol_Text), singleChar.c_str());
+    }
+
+    static float ComputeAdaptiveToolButtonSize(ImVec2 avail, bool isVertical, int buttonCount, bool hasSeparator) {
+        constexpr float kMin = 16.0f;
+        constexpr float kMax = 64.0f;
+        if (buttonCount <= 0) return 44.0f;
+
+        ImGuiStyle& style = ImGui::GetStyle();
+        float gap = isVertical ? style.ItemSpacing.y : style.ItemSpacing.x;
+        float separatorExtra = 0.0f;
+        if (hasSeparator) {
+            separatorExtra = gap * 2.0f + 1.0f;
+        }
+
+        float usableMain = isVertical ? avail.y : avail.x;
+        usableMain -= separatorExtra + gap * (float)(buttonCount - 1);
+        float sizeFromMain = usableMain / (float)buttonCount;
+        float sizeFromCross = isVertical ? avail.x : avail.y;
+
+        return std::clamp(std::min(sizeFromMain, sizeFromCross), kMin, kMax);
+    }
+
+    static void ToolbarAdvance(bool isVertical, float gap) {
+        if (isVertical) {
+            ImGui::Dummy(ImVec2(0.0f, gap));
+        } else {
+            ImGui::SameLine(0.0f, gap);
+        }
+    }
+
+    static void ToolbarBeginLayout(ImVec2 avail, bool isVertical, int buttonCount, float btnSize, float gap, bool hasSeparator) {
+        float separatorExtra = hasSeparator ? (gap * 2.0f + 1.0f) : 0.0f;
+        float totalMain = btnSize * (float)buttonCount + gap * (float)(buttonCount - 1) + separatorExtra;
+        float totalCross = btnSize;
+
+        float padMain = std::max(0.0f, (isVertical ? avail.y : avail.x) - totalMain);
+        float padCross = std::max(0.0f, (isVertical ? avail.x : avail.y) - totalCross);
+
+        if (isVertical) {
+            if (padMain > 0.0f) ImGui::Dummy(ImVec2(0.0f, padMain * 0.5f));
+            if (padCross > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + padCross * 0.5f);
+        } else {
+            if (padCross > 0.0f) ImGui::Dummy(ImVec2(0.0f, padCross * 0.5f));
+            if (padMain > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + padMain * 0.5f);
+        }
+    }
+
+    static void RenderGroupedToolButton(
+        const char* groupId,
+        const char* rebindActionName,
+        const ToolVariant* variants,
+        int variantCount,
+        const char* groupTooltip,
+        const std::string& keybindString,
+        float size,
+        std::string& rebindAction,
+        ActiveTool& activeTool)
+    {
+        static std::unordered_map<std::string, int> s_LastVariantIndex;
+        static std::unordered_map<ImGuiID, double> s_PressStart;
+        static std::unordered_map<ImGuiID, bool> s_LongPressOpened;
+
+        int activeIdx = -1;
+        for (int i = 0; i < variantCount; ++i) {
+            if (activeTool == variants[i].tool) {
+                activeIdx = i;
+                break;
+            }
+        }
+
+        int displayIdx = (activeIdx >= 0) ? activeIdx : s_LastVariantIndex[groupId];
+        if (displayIdx < 0 || displayIdx >= variantCount) displayIdx = 0;
+
+        const ToolVariant& display = variants[displayIdx];
+        bool isActive = (activeIdx >= 0);
+
+        ImGui::PushID(groupId);
+        if (isActive) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_Button]);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
+        }
+
+        ImGui::BeginGroup();
+        ImGui::Button("##groupBtn", ImVec2(size, size));
+        ImGuiID itemId = ImGui::GetItemID();
+        double now = ImGui::GetTime();
+
+        if (ImGui::IsItemActive()) {
+            if (s_PressStart.find(itemId) == s_PressStart.end()) {
+                s_PressStart[itemId] = now;
+                s_LongPressOpened[itemId] = false;
+            }
+            if (!s_LongPressOpened[itemId] && (now - s_PressStart[itemId]) > 0.15) {
+                ImGui::OpenPopup("##variantPopup");
+                s_LongPressOpened[itemId] = true;
+            }
+        }
+
+        if (ImGui::IsItemDeactivated() && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            if (!s_LongPressOpened[itemId]) {
+                activeTool = display.tool;
+                s_LastVariantIndex[groupId] = displayIdx;
+            }
+            s_PressStart.erase(itemId);
+            s_LongPressOpened.erase(itemId);
+        }
+
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            rebindAction = rebindActionName;
+            ImGui::OpenPopup("RebindToolPopup");
+        }
+
+        if (ImGui::BeginPopup("##variantPopup")) {
+            for (int i = 0; i < variantCount; ++i) {
+                if (ImGui::Selectable(variants[i].displayName, displayIdx == i)) {
+                    activeTool = variants[i].tool;
+                    s_LastVariantIndex[groupId] = i;
+                }
+            }
+            ImGui::EndPopup();
+        }
+
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s (%s)\nClick: activate  |  Hold: pick variant\nRight-click: rebind",
+                groupTooltip, keybindString.c_str());
+        }
+
+        ImVec2 btnMin = ImGui::GetItemRectMin();
+        ImVec2 btnMax = ImGui::GetItemRectMax();
+        DrawToolIcon(display.actionName, btnMin, btnMax,
+            ImGui::GetColorU32(isActive ? ImGuiCol_Text : ImGuiCol_TextDisabled));
+        DrawKeybindBadge(btnMax, keybindString, size);
+
+        ImGui::EndGroup();
+        ImGui::PopStyleColor(2);
+        ImGui::PopID();
+    }
+
     static void RenderToolButton(const char* actionName, const char* displayName, ActiveTool targetTool, bool isEraseTool, std::string keybindString, float size, std::string& rebindAction, ActiveTool& activeTool, BrushSettings& brush, Canvas& canvas) {
         bool isActive = (activeTool == targetTool && (targetTool != ActiveTool::Brush || isEraseTool == brush.erase));
         if (strcmp(actionName, "Reset") == 0) isActive = false;
@@ -295,31 +515,11 @@ namespace UI {
         ImVec2 btnMin = ImGui::GetItemRectMin();
         ImVec2 btnMax = ImGui::GetItemRectMax();
         DrawToolIcon(actionName, btnMin, btnMax, ImGui::GetColorU32(isActive ? ImGuiCol_Text : ImGuiCol_TextDisabled));
-        
-        if (strcmp(actionName, "Reset") != 0 && !keybindString.empty()) {
-            std::string badgeText = "";
-            size_t plusPos = keybindString.find_last_of('+');
-            if (plusPos != std::string::npos) {
-                badgeText = keybindString.substr(plusPos + 1);
-            } else {
-                badgeText = keybindString;
-            }
-            if (!badgeText.empty()) {
-                std::string singleChar = badgeText.substr(0, 1);
-                float badgeSize = 14.0f;
-                ImVec2 badgeMin = ImVec2(btnMax.x - badgeSize, btnMax.y - badgeSize);
-                ImVec2 badgeMax = btnMax;
-                
-                ImDrawList* drawList = ImGui::GetWindowDrawList();
-                drawList->AddRectFilled(badgeMin, badgeMax, ImGui::GetColorU32(ImGuiCol_FrameBgActive), 2.0f);
-                drawList->AddRect(badgeMin, badgeMax, ImGui::GetColorU32(ImGuiCol_Border), 2.0f);
-                
-                ImVec2 textSize = ImGui::CalcTextSize(singleChar.c_str());
-                ImVec2 textPos = ImVec2(badgeMin.x + (badgeSize - textSize.x) * 0.5f, badgeMin.y + (badgeSize - textSize.y) * 0.5f - 1.0f);
-                drawList->AddText(textPos, ImGui::GetColorU32(ImGuiCol_Text), singleChar.c_str());
-            }
+
+        if (strcmp(actionName, "Reset") != 0) {
+            DrawKeybindBadge(btnMax, keybindString, size);
         }
-        
+
         ImGui::EndGroup();
         ImGui::PopStyleColor(2);
         ImGui::PopID();
@@ -438,10 +638,24 @@ namespace UI {
         ImGui::BeginViewportSideBar("##StatusBar", mainViewport, ImGuiDir_Down, 28.0f, 
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
         
-        ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | Zoom: %.0f%% | Threads: %d | Tool: %s", 
-            state.startupTimeMs, state.frameTimeMs, state.fps, canvas.GetWidth(), canvas.GetHeight(), canvas.GetZoom() * 100.0f, 
-            ThreadPool::Get().GetThreadCount(),
-            (activeTool == ActiveTool::Brush ? "Brush" : (activeTool == ActiveTool::Eraser ? "Eraser" : "Hand")));
+        const char* toolLabel = "Hand";
+        switch (activeTool) {
+            case ActiveTool::Brush: toolLabel = "Brush"; break;
+            case ActiveTool::Eraser: toolLabel = "Eraser"; break;
+            case ActiveTool::Pan: toolLabel = "Hand"; break;
+            case ActiveTool::RectSelect: toolLabel = "Rect Select"; break;
+            case ActiveTool::EllipseSelect: toolLabel = "Ellipse Select"; break;
+            case ActiveTool::LassoSelect: toolLabel = "Lasso Select"; break;
+            case ActiveTool::MagicWand: toolLabel = "Magic Wand"; break;
+            case ActiveTool::SmartSelect: toolLabel = "Smart Select"; break;
+            case ActiveTool::MovePixels: toolLabel = "Transform"; break;
+            case ActiveTool::Pipette: toolLabel = "Pipette"; break;
+            case ActiveTool::BucketFill: toolLabel = "Bucket Fill"; break;
+            case ActiveTool::Gradient: toolLabel = "Gradient"; break;
+        }
+        ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | Zoom: %.0f%% | Threads: %d | Tool: %s",
+            state.startupTimeMs, state.frameTimeMs, state.fps, canvas.GetWidth(), canvas.GetHeight(), canvas.GetZoom() * 100.0f,
+            ThreadPool::Get().GetThreadCount(), toolLabel);
         
         ImGui::End();
         ImGui::PopStyleVar();
@@ -1032,73 +1246,66 @@ namespace UI {
         // 5. Draw Toolbar Panel
         if (state.showToolbar) {
             ImGui::Begin("Toolbar", &state.showToolbar, ImGuiWindowFlags_NoCollapse);
-            
+
             ImVec2 avail = ImGui::GetContentRegionAvail();
             bool isVertical = (avail.y > avail.x);
-            
+
             std::string brushBind = KeymapManager::Get().GetActionShortcutString("BrushTool");
             std::string eraserBind = KeymapManager::Get().GetActionShortcutString("EraserTool");
             std::string panBind = KeymapManager::Get().GetActionShortcutString("PanTool");
             std::string rotateBind = KeymapManager::Get().GetActionShortcutString("RotateTool");
-            
-            static std::string s_RebindAction = "";
-            float btnSize = 44.0f;
+            std::string fillBind = KeymapManager::Get().GetActionShortcutString("BucketFillTool");
+            std::string gradientBind = KeymapManager::Get().GetActionShortcutString("GradientTool");
+            std::string pipetteBind = KeymapManager::Get().GetActionShortcutString("PipetteTool");
+            std::string selectBind = KeymapManager::Get().GetActionShortcutString("SelectToolGroup");
+            std::string wandBind = KeymapManager::Get().GetActionShortcutString("WandToolGroup");
+            std::string transformBind = KeymapManager::Get().GetActionShortcutString("TransformTool");
 
+            static const ToolVariant s_SelectVariants[] = {
+                { "RectSelectTool", "Rectangular Selection", ActiveTool::RectSelect },
+                { "EllipseSelectTool", "Ellipse Selection", ActiveTool::EllipseSelect },
+                { "LassoSelectTool", "Lasso Selection", ActiveTool::LassoSelect },
+            };
+            static const ToolVariant s_WandVariants[] = {
+                { "MagicWandTool", "Magic Wand", ActiveTool::MagicWand },
+                { "SmartSelectTool", "Smart Select", ActiveTool::SmartSelect },
+            };
+
+            static std::string s_RebindAction = "";
+            constexpr int kToolbarButtonCount = 10;
+            const bool hasSeparator = true;
+            float btnSize = ComputeAdaptiveToolButtonSize(avail, isVertical, kToolbarButtonCount, hasSeparator);
+            float gap = isVertical ? ImGui::GetStyle().ItemSpacing.y : ImGui::GetStyle().ItemSpacing.x;
+
+            ToolbarBeginLayout(avail, isVertical, kToolbarButtonCount, btnSize, gap, hasSeparator);
+
+            RenderToolButton("BrushTool", "Brush", ActiveTool::Brush, false, brushBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+            ToolbarAdvance(isVertical, gap);
+            RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+            ToolbarAdvance(isVertical, gap);
+            RenderToolButton("BucketFillTool", "Fill", ActiveTool::BucketFill, false, fillBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+            ToolbarAdvance(isVertical, gap);
+            RenderToolButton("GradientTool", "Gradient", ActiveTool::Gradient, false, gradientBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+            ToolbarAdvance(isVertical, gap);
+            RenderToolButton("PipetteTool", "Pipette", ActiveTool::Pipette, false, pipetteBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+            ToolbarAdvance(isVertical, gap);
+            RenderGroupedToolButton("SelectGroup", "SelectToolGroup", s_SelectVariants, IM_ARRAYSIZE(s_SelectVariants),
+                "Selection Tools", selectBind, btnSize, s_RebindAction, activeTool);
+            ToolbarAdvance(isVertical, gap);
+            RenderGroupedToolButton("WandGroup", "WandToolGroup", s_WandVariants, IM_ARRAYSIZE(s_WandVariants),
+                "Wand / Smart Select", wandBind, btnSize, s_RebindAction, activeTool);
+            ToolbarAdvance(isVertical, gap);
+            RenderToolButton("TransformTool", "Transform", ActiveTool::MovePixels, false, transformBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+            ToolbarAdvance(isVertical, gap);
+            RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             if (isVertical) {
-                RenderToolButton("BrushTool", "Brush", ActiveTool::Brush, false, brushBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("BucketFillTool", "Fill", ActiveTool::BucketFill, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("GradientTool", "Gradient", ActiveTool::Gradient, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("PipetteTool", "Pipette", ActiveTool::Pipette, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("RectSelectTool", "Rect Sel", ActiveTool::RectSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("EllipseSelectTool", "Ellip Sel", ActiveTool::EllipseSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("LassoSelectTool", "Lasso Sel", ActiveTool::LassoSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("MagicWandTool", "Wand Sel", ActiveTool::MagicWand, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("SmartSelectTool", "Smart Sel", ActiveTool::SmartSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("TransformTool", "Transform", ActiveTool::MovePixels, false, "V", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::Spacing();
-                RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();
-                RenderToolButton("Reset", "Reset View", activeTool, false, std::string(""), btnSize, s_RebindAction, activeTool, brush, canvas);
             } else {
-                RenderToolButton("BrushTool", "Brush", ActiveTool::Brush, false, brushBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("BucketFillTool", "Fill", ActiveTool::BucketFill, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("GradientTool", "Gradient", ActiveTool::Gradient, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("PipetteTool", "Pipette", ActiveTool::Pipette, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("RectSelectTool", "Rect Sel", ActiveTool::RectSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("EllipseSelectTool", "Ellip Sel", ActiveTool::EllipseSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("LassoSelectTool", "Lasso Sel", ActiveTool::LassoSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("MagicWandTool", "Wand Sel", ActiveTool::MagicWand, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("SmartSelectTool", "Smart Sel", ActiveTool::SmartSelect, false, "", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("TransformTool", "Transform", ActiveTool::MovePixels, false, "V", btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-                ImGui::SameLine();
-                RenderToolButton("Reset", "Reset View", activeTool, false, std::string(""), btnSize, s_RebindAction, activeTool, brush, canvas);
+                ImGui::SameLine(0.0f, gap * 2.0f);
             }
+            RenderToolButton("Reset", "Reset View", activeTool, false, std::string(""), btnSize, s_RebindAction, activeTool, brush, canvas);
 
             if (ImGui::BeginPopup("RebindToolPopup")) {
                 ImGui::Text("Rebind Action: %s", s_RebindAction.c_str());
@@ -1398,148 +1605,122 @@ namespace UI {
             ImGui::End();
         }
 
-        // 8. Draw Standalone Tool Settings Panel (adapts to active tool)
+        // 8. Draw Standalone Tool Settings Panel (adapts to active tool + layout)
         if (state.showToolSettings) {
             ImGui::Begin("Tool Settings", &state.showToolSettings, ImGuiWindowFlags_NoCollapse);
+
+            ImVec2 tsAvail = ImGui::GetContentRegionAvail();
+            bool tsHorizontal = (tsAvail.x > tsAvail.y * 1.15f);
+
+            auto BeginToolSection = [](const char* title) {
+                ImGui::TextDisabled("%s", title);
+                ImGui::Separator();
+            };
 
             bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser);
 
             if (isBrushLike) {
-                // ---- Brush / Eraser ----
-                ImGui::TextDisabled(activeTool == ActiveTool::Eraser ? "Eraser" : "Brush");
-                ImGui::Separator();
-                ImGui::Spacing();
+                BeginToolSection(activeTool == ActiveTool::Eraser ? "Eraser" : "Brush");
 
-                ImGui::SliderFloat("Radius##ts", &brush.radius, 1.0f, 250.0f, "%.0f px");
-                ImGui::Checkbox("Pressure -> Radius", &brush.pressureRadius);
+                if (tsHorizontal) {
+                    ImGui::Columns(2, "##brushCols", false);
+                    ImGui::SliderFloat("Radius##ts", &brush.radius, 1.0f, 250.0f, "%.0f px");
+                    ImGui::Checkbox("P -> Radius", &brush.pressureRadius);
+                    ImGui::SliderFloat("Hardness##ts", &brush.hardness, 0.0f, 1.0f, "%.2f");
+                    ImGui::Checkbox("P -> Hardness", &brush.pressureHardness);
 
-                ImGui::Spacing();
-                ImGui::SliderFloat("Hardness##ts", &brush.hardness, 0.0f, 1.0f, "%.2f");
-                ImGui::Checkbox("Pressure -> Hardness", &brush.pressureHardness);
-
-                ImGui::Spacing();
-                ImGui::SliderFloat("Opacity##ts", &brush.opacity, 0.0f, 1.0f, "%.2f");
-                ImGui::Checkbox("Pressure -> Opacity", &brush.pressureOpacity);
-
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::SliderFloat("Spacing##ts", &brush.spacing, 0.01f, 5.0f, "%.2f");
-                ImGui::SliderInt("Stabilization##ts", &brush.stabilization, 1, 50, "%d");
+                    ImGui::NextColumn();
+                    ImGui::SliderFloat("Opacity##ts", &brush.opacity, 0.0f, 1.0f, "%.2f");
+                    ImGui::Checkbox("P -> Opacity", &brush.pressureOpacity);
+                    ImGui::SliderFloat("Spacing##ts", &brush.spacing, 0.01f, 5.0f, "%.2f");
+                    ImGui::SliderInt("Stabilization##ts", &brush.stabilization, 1, 50, "%d");
+                    ImGui::Columns(1);
+                } else {
+                    ImGui::SliderFloat("Radius##ts", &brush.radius, 1.0f, 250.0f, "%.0f px");
+                    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+                    ImGui::Checkbox("P->R", &brush.pressureRadius);
+                    ImGui::SliderFloat("Hardness##ts", &brush.hardness, 0.0f, 1.0f, "%.2f");
+                    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+                    ImGui::Checkbox("P->H", &brush.pressureHardness);
+                    ImGui::SliderFloat("Opacity##ts", &brush.opacity, 0.0f, 1.0f, "%.2f");
+                    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+                    ImGui::Checkbox("P->O", &brush.pressureOpacity);
+                    ImGui::SliderFloat("Spacing##ts", &brush.spacing, 0.01f, 5.0f, "%.2f");
+                    ImGui::SliderInt("Stabilization##ts", &brush.stabilization, 1, 50, "%d");
+                }
 
                 if (activeTool == ActiveTool::Brush) {
                     ImGui::Spacing();
-                    ImGui::Separator();
-                    ImGui::Spacing();
-                    ImGui::Text("Symmetry / Mirror Paint:");
                     bool mirrorH = canvas.GetMirrorHorizontal();
-                    if (ImGui::Checkbox("Horizontal Mirror (Left/Right)", &mirrorH))
-                        canvas.SetMirrorHorizontal(mirrorH);
                     bool mirrorV = canvas.GetMirrorVertical();
-                    if (ImGui::Checkbox("Vertical Mirror (Top/Bottom)", &mirrorV))
-                        canvas.SetMirrorVertical(mirrorV);
+                    if (tsHorizontal) {
+                        if (ImGui::Checkbox("Mirror H", &mirrorH)) canvas.SetMirrorHorizontal(mirrorH);
+                        ImGui::SameLine();
+                        if (ImGui::Checkbox("Mirror V", &mirrorV)) canvas.SetMirrorVertical(mirrorV);
+                    } else {
+                        if (ImGui::Checkbox("Horizontal Mirror", &mirrorH)) canvas.SetMirrorHorizontal(mirrorH);
+                        if (ImGui::Checkbox("Vertical Mirror", &mirrorV)) canvas.SetMirrorVertical(mirrorV);
+                    }
+                    ImGui::TextDisabled("Hold Alt+LMB: sample color (eyedropper)");
                 }
             }
-            else if (activeTool == ActiveTool::MagicWand) {
-                // ---- Magic Wand ----
-                ImGui::TextDisabled("Magic Wand");
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                ImGui::SliderFloat("Tolerance##mw", &state.magicWandTolerance, 0.0f, 1.0f, "%.2f");
-                ImGui::Checkbox("Contiguous", &state.magicWandContiguous);
-                ImGui::Spacing();
-                ImGui::TextWrapped("Shift: add  |  Alt: subtract");
+            else if (activeTool == ActiveTool::MagicWand || activeTool == ActiveTool::SmartSelect) {
+                BeginToolSection(activeTool == ActiveTool::MagicWand ? "Magic Wand" : "Smart Select");
+                if (activeTool == ActiveTool::MagicWand) {
+                    ImGui::SliderFloat("Tolerance##mw", &state.magicWandTolerance, 0.0f, 1.0f, "%.2f");
+                    ImGui::Checkbox("Contiguous", &state.magicWandContiguous);
+                } else {
+                    ImGui::TextWrapped("Draw contour; GrabCut runs in background.");
+                }
+                ImGui::TextDisabled("Shift: add  |  Alt: subtract  |  W: cycle wand tools");
             }
             else if (activeTool == ActiveTool::BucketFill) {
-                // ---- Bucket Fill ----
-                ImGui::TextDisabled("Bucket Fill");
-                ImGui::Separator();
-                ImGui::Spacing();
-
+                BeginToolSection("Bucket Fill");
                 ImGui::SliderFloat("Tolerance##bf", &state.bucketFillTolerance, 0.0f, 1.0f, "%.2f");
             }
-            else if (activeTool == ActiveTool::RectSelect ||
-                     activeTool == ActiveTool::EllipseSelect ||
-                     activeTool == ActiveTool::LassoSelect) {
-                // ---- Geometric selections ----
+            else if (IsSelectTool(activeTool)) {
                 const char* selName =
-                    activeTool == ActiveTool::RectSelect    ? "Rectangular Selection" :
+                    activeTool == ActiveTool::RectSelect ? "Rectangular Selection" :
                     activeTool == ActiveTool::EllipseSelect ? "Ellipse Selection" : "Lasso Selection";
-                ImGui::TextDisabled(selName);
-                ImGui::Separator();
-                ImGui::Spacing();
-                ImGui::TextWrapped("Shift: add to selection");
-                ImGui::TextWrapped("Alt: subtract from selection");
-            }
-            else if (activeTool == ActiveTool::SmartSelect) {
-                // ---- Smart Select ----
-                ImGui::TextDisabled("Smart Select (GrabCut)");
-                ImGui::Separator();
-                ImGui::Spacing();
-                ImGui::TextWrapped("Draw a freehand contour around the subject.");
-                ImGui::TextWrapped("GrabCut runs on a background thread within the contour bounding box.");
-                ImGui::Spacing();
-                ImGui::TextWrapped("Shift: add  |  Alt: subtract");
+                BeginToolSection(selName);
+                ImGui::TextDisabled("Shift: add  |  Alt: subtract  |  S: cycle select tools");
             }
             else if (activeTool == ActiveTool::Gradient) {
-                ImGui::TextDisabled("Gradient");
-                ImGui::Separator();
-                ImGui::Spacing();
-                ImGui::TextWrapped("Drag from start to end to define the gradient direction.");
-                ImGui::TextWrapped("Primary color -> Secondary color.");
+                BeginToolSection("Gradient");
+                ImGui::TextWrapped("Drag to set direction. Primary -> Secondary color.");
             }
             else if (activeTool == ActiveTool::Pipette) {
-                ImGui::TextDisabled("Color Picker (Pipette)");
-                ImGui::Separator();
-                ImGui::Spacing();
-                ImGui::TextWrapped("Click on the canvas to sample a pixel color.");
+                BeginToolSection("Pipette");
+                ImGui::TextWrapped("Hold LMB on canvas to sample color.");
             }
             else if (activeTool == ActiveTool::MovePixels) {
-                ImGui::TextDisabled("Transform / Move Pixels");
-                ImGui::Separator();
-                ImGui::Spacing();
-                ImGui::TextWrapped("Drag on canvas to move. Adjust scale and rotation below.");
-                ImGui::Spacing();
-
-                // Scale X
-                float sx = canvas.GetFloatingScaleX();
-                if (ImGui::SliderFloat("Scale X##tx", &sx, 0.05f, 5.0f, "%.2f")) {
-                    canvas.SetFloatingScaleX(sx);
-                }
-                // Scale Y
-                float sy = canvas.GetFloatingScaleY();
-                if (ImGui::SliderFloat("Scale Y##tx", &sy, 0.05f, 5.0f, "%.2f")) {
-                    canvas.SetFloatingScaleY(sy);
-                }
-                // Lock aspect ratio
-                static bool lockAspect = false;
-                if (ImGui::Checkbox("Lock Aspect Ratio", &lockAspect)) {}
-                if (lockAspect) {
-                    // Sync whichever changed last — handled by sliders above calling both
-                }
-
-                ImGui::Spacing();
-
-                // Rotation in degrees
-                float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
-                if (ImGui::SliderFloat("Rotation##tx", &rotDeg, -180.0f, 180.0f, "%.1f deg")) {
-                    canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
+                BeginToolSection("Transform");
+                if (tsHorizontal) {
+                    ImGui::Columns(2, "##txCols", false);
+                    float sx = canvas.GetFloatingScaleX();
+                    if (ImGui::SliderFloat("Scale X##tx", &sx, 0.05f, 5.0f, "%.2f")) canvas.SetFloatingScaleX(sx);
+                    float sy = canvas.GetFloatingScaleY();
+                    if (ImGui::SliderFloat("Scale Y##tx", &sy, 0.05f, 5.0f, "%.2f")) canvas.SetFloatingScaleY(sy);
+                    ImGui::NextColumn();
+                    float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
+                    if (ImGui::SliderFloat("Rotation##tx", &rotDeg, -180.0f, 180.0f, "%.1f deg")) {
+                        canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
+                    }
+                    ImGui::Columns(1);
+                } else {
+                    float sx = canvas.GetFloatingScaleX();
+                    if (ImGui::SliderFloat("Scale X##tx", &sx, 0.05f, 5.0f, "%.2f")) canvas.SetFloatingScaleX(sx);
+                    float sy = canvas.GetFloatingScaleY();
+                    if (ImGui::SliderFloat("Scale Y##tx", &sy, 0.05f, 5.0f, "%.2f")) canvas.SetFloatingScaleY(sy);
+                    float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
+                    if (ImGui::SliderFloat("Rotation##tx", &rotDeg, -180.0f, 180.0f, "%.1f deg")) {
+                        canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
+                    }
                 }
 
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-
-                // Quick scale buttons
-                if (ImGui::Button("Flip H##tx")) {
-                    canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());
-                }
+                if (ImGui::Button("Flip H##tx")) canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());
                 ImGui::SameLine();
-                if (ImGui::Button("Flip V##tx")) {
-                    canvas.SetFloatingScaleY(-canvas.GetFloatingScaleY());
-                }
+                if (ImGui::Button("Flip V##tx")) canvas.SetFloatingScaleY(-canvas.GetFloatingScaleY());
                 ImGui::SameLine();
                 if (ImGui::Button("Reset##tx")) {
                     canvas.SetFloatingScaleX(1.0f);
@@ -1547,28 +1728,19 @@ namespace UI {
                     canvas.SetFloatingRotation(0.0f);
                 }
 
-                ImGui::Spacing();
-
-                // Commit / Cancel
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.18f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.72f, 0.25f, 1.0f));
-                if (ImGui::Button("Commit (Enter)##tx", ImVec2(-1, 0))) {
-                    state.commitTransform = true;
-                }
+                if (ImGui::Button("Commit##tx", ImVec2(tsHorizontal ? 120.0f : -1.0f, 0))) state.commitTransform = true;
                 ImGui::PopStyleColor(2);
-
+                ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.18f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.72f, 0.25f, 0.25f, 1.0f));
-                if (ImGui::Button("Cancel (Esc)##tx", ImVec2(-1, 0))) {
-                    state.cancelTransform = true;
-                }
+                if (ImGui::Button("Cancel##tx", ImVec2(tsHorizontal ? 120.0f : -1.0f, 0))) state.cancelTransform = true;
                 ImGui::PopStyleColor(2);
             }
             else {
-                ImGui::TextDisabled("Pan / Hand");
-                ImGui::Separator();
-                ImGui::Spacing();
-                ImGui::TextWrapped("Middle-click or hold Space to pan the canvas.");
+                BeginToolSection("Pan / Hand");
+                ImGui::TextWrapped("Middle-click drag or Hand tool to pan.");
             }
 
             ImGui::End();

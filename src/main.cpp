@@ -114,9 +114,19 @@ static double g_StartupTimeMs = 0.0;
 
 // Painting state
 static ActiveTool g_ActiveTool = ActiveTool::Brush;
+static ActiveTool g_LastSelectTool = ActiveTool::RectSelect;
+static ActiveTool g_LastWandTool = ActiveTool::MagicWand;
 static BrushSettings g_Brush;
 static float g_SecondaryColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 static bool g_IsPainting = false;
+static ActiveTool g_PrevActiveTool = ActiveTool::Brush;
+
+static void EndBrushStrokeIfNeeded() {
+    if (g_IsPainting) {
+        g_Canvas.PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
+        g_IsPainting = false;
+    }
+}
 
 // Selection dragging state
 static bool g_IsSelectionDragging = false;
@@ -592,20 +602,21 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("PipetteTool")) {
                 g_ActiveTool = ActiveTool::Pipette;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("RectSelectTool")) {
-                g_ActiveTool = ActiveTool::RectSelect;
+            if (KeymapManager::Get().ConsumeActionTrigger("SelectToolGroup")) {
+                if (UI::IsSelectTool(g_ActiveTool)) {
+                    g_ActiveTool = UI::CycleSelectTool(g_ActiveTool);
+                } else {
+                    g_ActiveTool = g_LastSelectTool;
+                }
+                g_LastSelectTool = g_ActiveTool;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("EllipseSelectTool")) {
-                g_ActiveTool = ActiveTool::EllipseSelect;
-            }
-            if (KeymapManager::Get().ConsumeActionTrigger("LassoSelectTool")) {
-                g_ActiveTool = ActiveTool::LassoSelect;
-            }
-            if (KeymapManager::Get().ConsumeActionTrigger("MagicWandTool")) {
-                g_ActiveTool = ActiveTool::MagicWand;
-            }
-            if (KeymapManager::Get().ConsumeActionTrigger("SmartSelectTool")) {
-                g_ActiveTool = ActiveTool::SmartSelect;
+            if (KeymapManager::Get().ConsumeActionTrigger("WandToolGroup")) {
+                if (UI::IsWandTool(g_ActiveTool)) {
+                    g_ActiveTool = UI::CycleWandTool(g_ActiveTool);
+                } else {
+                    g_ActiveTool = g_LastWandTool;
+                }
+                g_LastWandTool = g_ActiveTool;
             }
             if (KeymapManager::Get().ConsumeActionTrigger("PanTool")) {
                 g_ActiveTool = ActiveTool::Pan;
@@ -754,6 +765,15 @@ int main(int argc, char* argv[]) {
             bool isInsideCanvas = (canvasX >= 0.0f && canvasX < (float)g_Canvas.GetWidth() &&
                                    canvasY >= 0.0f && canvasY < (float)g_Canvas.GetHeight());
 
+            bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser);
+            bool isPipetteTool = (g_ActiveTool == ActiveTool::Pipette);
+            bool isEyedropperMode = (isBrushLikeTool && ImGui::GetIO().KeyAlt) || isPipetteTool;
+
+            if (g_ActiveTool != g_PrevActiveTool) {
+                EndBrushStrokeIfNeeded();
+                g_PrevActiveTool = g_ActiveTool;
+            }
+
             // Panning: Middle mouse button drag OR left mouse button drag when Pan tool is selected
             bool isPanning = false;
             bool isRotating = false;
@@ -871,7 +891,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Handle custom brush visualizer and cursor hiding when inside canvas bounds
-            if (isHovered && isInsideCanvas && !g_IsCtrlAltRmbDragging && (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser)) {
+            if (isHovered && isInsideCanvas && !g_IsCtrlAltRmbDragging && isBrushLikeTool && !isEyedropperMode) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
                 // Draw custom outline circle at mouse position
@@ -955,7 +975,14 @@ int main(int argc, char* argv[]) {
 
             bool isShiftHeld = ImGui::GetIO().KeyShift;
 
-            if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging && (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser)) {
+            if (isHovered && isInsideCanvas && isEyedropperMode && !isPanning && !g_IsCtrlAltRmbDragging) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+                if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    UI::SampleCanvasColor(g_Canvas, canvasX, canvasY, g_Brush.color);
+                }
+            }
+
+            if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging && isBrushLikeTool && !isEyedropperMode) {
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     g_IsPainting = true;
                     if (isShiftHeld && g_HasLastStrokeEnd) {
@@ -1081,19 +1108,6 @@ int main(int argc, char* argv[]) {
                         bool add = ImGui::GetIO().KeyShift;
                         bool subtract = ImGui::GetIO().KeyAlt;
                         g_Canvas.ApplyMagicWandSelection(g_pd3dDevice, (int)canvasX, (int)canvasY, uiState.magicWandTolerance, add, subtract, uiState.magicWandContiguous);
-                    }
-                }
-                // Pipette
-                else if (g_ActiveTool == ActiveTool::Pipette) {
-                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        std::vector<float> srcPixels = g_Canvas.GetCompositePixels();
-                        int cx = std::clamp((int)canvasX, 0, g_Canvas.GetWidth() - 1);
-                        int cy = std::clamp((int)canvasY, 0, g_Canvas.GetHeight() - 1);
-                        size_t idx = ((size_t)cy * g_Canvas.GetWidth() + cx) * 4;
-                        g_Brush.color[0] = srcPixels[idx + 0];
-                        g_Brush.color[1] = srcPixels[idx + 1];
-                        g_Brush.color[2] = srcPixels[idx + 2];
-                        g_Brush.color[3] = srcPixels[idx + 3];
                     }
                 }
                 // Bucket Fill

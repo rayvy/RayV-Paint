@@ -13,6 +13,12 @@ enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSele
 
 namespace UI {
 
+    bool IsSelectTool(ActiveTool tool);
+    bool IsWandTool(ActiveTool tool);
+    ActiveTool CycleSelectTool(ActiveTool current);
+    ActiveTool CycleWandTool(ActiveTool current);
+    void SampleCanvasColor(Canvas& canvas, float canvasX, float canvasY, float outColor[4]);
+
     struct UIState {
         // Window visibility flags
         bool showConsole = true;
