@@ -1,0 +1,69 @@
+---
+pid: 972
+cwd: "C:\Users\Rayvy\Documents\GitHub\RayV-Paint"
+command: "cmd /c C:\\Users\\Rayvy\\Documents\\GitHub\\RayV-Paint\\build.bat"
+started_at: 2026-07-06T15:12:59.708Z
+running_for_ms: 10915009 
+---
+===================================================
+Building RayVPaint...
+===================================================
+Setting up Visual Studio compilation environment (x64)...
+**********************************************************************
+** Visual Studio 2022 Developer Command Prompt v17.14.24
+** Copyright (c) 2025 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Generating CMake build files...
+-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.22631.
+-- Including Win32 support
+CMake Warning (dev) at C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FetchContent.cmake:1953 (message):
+  Calling FetchContent_Populate(imgui) is deprecated, call
+  FetchContent_MakeAvailable(imgui) instead.  Policy CMP0169 can be set to
+  OLD to allow FetchContent_Populate(imgui) to be called directly for now,
+  but the ability to call it with declared details will be removed completely
+  in a future version.
+Call Stack (most recent call first):
+  CMakeLists.txt:36 (FetchContent_Populate)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+CMake Warning (dev) at C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FetchContent.cmake:1373 (message):
+  The DOWNLOAD_EXTRACT_TIMESTAMP option was not given and policy CMP0135 is
+  not set.  The policy's OLD behavior will be used.  When using a URL
+  download, the timestamps of extracted files should preferably be that of
+  the time of extraction, otherwise code that depends on the extracted
+  contents might not be rebuilt if the URL changes.  The OLD behavior
+  preserves the timestamps from the archive instead, but this is usually not
+  what you want.  Update your project to the NEW behavior or specify the
+  DOWNLOAD_EXTRACT_TIMESTAMP option with a value of true to avoid this
+  robustness issue.
+Call Stack (most recent call first):
+  CMakeLists.txt:40 (FetchContent_Declare)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Using the multi-header code from C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-src/include/
+-- pybind11 v2.12.0 
+CMake Deprecation Warning at build/_deps/pybind11-src/CMakeLists.txt:13 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Checking for Python embeddable package: python-3.13.2-embed-amd64.zip
+-- Configuring done (9.5s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build
+Compiling project...
+Версия MSBuild 17.14.40+3e7442088 для .NET Framework
+
+  glfw.vcxproj -> C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-build\src\Release\glfw3.lib
+  imgui.vcxproj -> C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\Release\imgui.lib
+  Canvas.cpp
+  RayVPaint_Core.vcxproj -> C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\Release\bin\RayVPaint_Core.exe
+  Copying OpenCV LICENSE to output directoryCopying shader Canvas.hlsl to output directoryOrganizing Python embeddable runtime environment into python_runtime subdirectory
+  RayVPaint.vcxproj -> C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\Release\RayVPaint.exe
+  RayVPaint_Console.vcxproj -> C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\Release\RayVPaint_Console.exe
+Build succeeded Launchers can be found at build\Release\RayVPaint.exe and build\Release\RayVPaint_Console.exe

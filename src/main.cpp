@@ -425,9 +425,7 @@ int main(int argc, char* argv[]) {
     }
     log_step("Scripting Engine Init Link/Start");
 
-    // Resize canvas default dimensions according to config
-    g_Canvas.ResizeCanvas(nullptr, ConfigManager::Get().GetDefaultWidth(), ConfigManager::Get().GetDefaultHeight());
-    log_step("Initial Canvas Resize");
+    // Canvas dimensions and GPU resources are created lazily when the user opens or creates a document.
 
     // 5. Initialize GLFW (if not in true headless mode)
     if (!glfwInit()) {

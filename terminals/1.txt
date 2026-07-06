@@ -1,0 +1,998 @@
+---
+pid: 18708
+cwd: "C:\Users\Rayvy\Documents\GitHub\RayV-Paint"
+command: "cmd /c \"C:\\Users\\Rayvy\\Documents\\GitHub\\RayV-Paint\\build.bat\""
+started_at: 2026-07-06T15:06:43.912Z
+running_for_ms: 11290013 
+---
+===================================================
+Building RayVPaint...
+===================================================
+Setting up Visual Studio compilation environment (x64)...
+**********************************************************************
+** Visual Studio 2022 Developer Command Prompt v17.14.24
+** Copyright (c) 2025 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Generating CMake build files...
+-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.22631.
+-- Including Win32 support
+CMake Warning (dev) at C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FetchContent.cmake:1953 (message):
+  Calling FetchContent_Populate(imgui) is deprecated, call
+  FetchContent_MakeAvailable(imgui) instead.  Policy CMP0169 can be set to
+  OLD to allow FetchContent_Populate(imgui) to be called directly for now,
+  but the ability to call it with declared details will be removed completely
+  in a future version.
+Call Stack (most recent call first):
+  CMakeLists.txt:36 (FetchContent_Populate)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+CMake Warning (dev) at C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FetchContent.cmake:1373 (message):
+  The DOWNLOAD_EXTRACT_TIMESTAMP option was not given and policy CMP0135 is
+  not set.  The policy's OLD behavior will be used.  When using a URL
+  download, the timestamps of extracted files should preferably be that of
+  the time of extraction, otherwise code that depends on the extracted
+  contents might not be rebuilt if the URL changes.  The OLD behavior
+  preserves the timestamps from the archive instead, but this is usually not
+  what you want.  Update your project to the NEW behavior or specify the
+  DOWNLOAD_EXTRACT_TIMESTAMP option with a value of true to avoid this
+  robustness issue.
+Call Stack (most recent call first):
+  CMakeLists.txt:40 (FetchContent_Declare)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Using the multi-header code from C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-src/include/
+-- pybind11 v2.12.0 
+CMake Deprecation Warning at build/_deps/pybind11-src/CMakeLists.txt:13 (cmake_minimum_required):
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Checking for Python embeddable package: python-3.13.2-embed-amd64.zip
+-- Configuring done (9.6s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build
+Compiling project...
+Версия MSBuild 17.14.40+3e7442088 для .NET Framework
+
+  glfw.vcxproj -> C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-build\src\Release\glfw3.lib
+  imgui.vcxproj -> C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\Release\imgui.lib
+  Canvas.cpp
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(513,19): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(535,57): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(536,57): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(537,57): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(538,57): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(721,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(723,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1442,24): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1443,68): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1443,36): error C2672: "std::min": не найдена соответствующая перегруженная функция [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(109,26):
+      может быть "_Ty std::min(std::initializer_list<_Elem>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1443,36):
+          '_Ty std::min(std::initializer_list<_Elem>)': не удалось вывести аргумент шаблон для 'std::initializer_list<_Elem>' из 'unsigned __int64'
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(106,26):
+      или       "_Ty std::min(std::initializer_list<_Elem>,_Pr)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1443,36):
+          "_Ty std::min(std::initializer_list<_Elem>,_Pr)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(98,6):
+      или       "const _Ty &std::min(const _Ty &,const _Ty &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1443,36):
+          "const _Ty &std::min(const _Ty &,const _Ty &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(88,33):
+      или       "const _Ty &std::min(const _Ty &,const _Ty &,_Pr) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1443,36):
+          "const _Ty &std::min(const _Ty &,const _Ty &,_Pr) noexcept(<expr>)": ожидаются аргументы 3 — 1 предоставлены
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1444,53): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1444,18): error C2660: memcpy: функция не принимает 2 аргументов [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_string.h(43,15):
+       см. объявление "memcpy"
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1444,18):
+      при попытке сопоставить список аргументов "(_Ty *, size_t)"
+          with
+          [
+              _Ty=float
+          ]
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1464,24): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1465,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1466,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1467,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1468,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1515,24): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1516,68): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1516,36): error C2672: "std::min": не найдена соответствующая перегруженная функция [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(109,26):
+      может быть "_Ty std::min(std::initializer_list<_Elem>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1516,36):
+          '_Ty std::min(std::initializer_list<_Elem>)': не удалось вывести аргумент шаблон для 'std::initializer_list<_Elem>' из 'unsigned __int64'
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(106,26):
+      или       "_Ty std::min(std::initializer_list<_Elem>,_Pr)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1516,36):
+          "_Ty std::min(std::initializer_list<_Elem>,_Pr)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(98,6):
+      или       "const _Ty &std::min(const _Ty &,const _Ty &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1516,36):
+          "const _Ty &std::min(const _Ty &,const _Ty &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(88,33):
+      или       "const _Ty &std::min(const _Ty &,const _Ty &,_Pr) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1516,36):
+          "const _Ty &std::min(const _Ty &,const _Ty &,_Pr) noexcept(<expr>)": ожидаются аргументы 3 — 1 предоставлены
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1517,53): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1517,18): error C2660: memcpy: функция не принимает 2 аргументов [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_string.h(43,15):
+       см. объявление "memcpy"
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1517,18):
+      при попытке сопоставить список аргументов "(_Ty *, size_t)"
+          with
+          [
+              _Ty=float
+          ]
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1537,24): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1538,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1539,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1540,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1541,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1630,24): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1631,68): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1631,36): error C2672: "std::min": не найдена соответствующая перегруженная функция [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(109,26):
+      может быть "_Ty std::min(std::initializer_list<_Elem>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1631,36):
+          '_Ty std::min(std::initializer_list<_Elem>)': не удалось вывести аргумент шаблон для 'std::initializer_list<_Elem>' из 'unsigned __int64'
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(106,26):
+      или       "_Ty std::min(std::initializer_list<_Elem>,_Pr)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1631,36):
+          "_Ty std::min(std::initializer_list<_Elem>,_Pr)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(98,6):
+      или       "const _Ty &std::min(const _Ty &,const _Ty &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1631,36):
+          "const _Ty &std::min(const _Ty &,const _Ty &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(88,33):
+      или       "const _Ty &std::min(const _Ty &,const _Ty &,_Pr) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1631,36):
+          "const _Ty &std::min(const _Ty &,const _Ty &,_Pr) noexcept(<expr>)": ожидаются аргументы 3 — 1 предоставлены
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1632,53): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1632,18): error C2660: memcpy: функция не принимает 2 аргументов [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_string.h(43,15):
+       см. объявление "memcpy"
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1632,18):
+      при попытке сопоставить список аргументов "(_Ty *, size_t)"
+          with
+          [
+              _Ty=float
+          ]
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1651,24): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1652,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1653,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1654,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1655,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1691,14): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1710,18): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1825,23): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1826,23): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1828,47): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1832,75): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1963,19): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1964,31): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2090,19): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2093,36): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2125,24): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2126,68): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2126,36): error C2672: "std::min": не найдена соответствующая перегруженная функция [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(109,26):
+      может быть "_Ty std::min(std::initializer_list<_Elem>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2126,36):
+          '_Ty std::min(std::initializer_list<_Elem>)': не удалось вывести аргумент шаблон для 'std::initializer_list<_Elem>' из 'unsigned __int64'
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(106,26):
+      или       "_Ty std::min(std::initializer_list<_Elem>,_Pr)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2126,36):
+          "_Ty std::min(std::initializer_list<_Elem>,_Pr)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(98,6):
+      или       "const _Ty &std::min(const _Ty &,const _Ty &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2126,36):
+          "const _Ty &std::min(const _Ty &,const _Ty &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(88,33):
+      или       "const _Ty &std::min(const _Ty &,const _Ty &,_Pr) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2126,36):
+          "const _Ty &std::min(const _Ty &,const _Ty &,_Pr) noexcept(<expr>)": ожидаются аргументы 3 — 1 предоставлены
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2127,53): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2127,18): error C2660: memcpy: функция не принимает 2 аргументов [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vcruntime_string.h(43,15):
+       см. объявление "memcpy"
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2127,18):
+      при попытке сопоставить список аргументов "(_Ty *, size_t)"
+          with
+          [
+              _Ty=float
+          ]
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2141,24): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2142,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2143,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2144,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2145,30): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2186,57): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2187,57): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2188,57): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2189,57): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2207,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2208,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,33): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,60): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22): error C2661: std::swap: нет перегруженной функции, принимающей 1 аргументов [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\optional(968,19):
+      может быть "void std::swap(std::optional<_Ty> &,std::optional<_Ty> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::optional<_Ty> &,std::optional<_Ty> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\valarray(611,6):
+      или       "void std::swap(std::valarray<_Ty> &,std::valarray<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::valarray<_Ty> &,std::valarray<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\map(678,6):
+      или       "void std::swap(std::multimap<_Kty,_Ty,_Pr,_Alloc> &,std::multimap<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::multimap<_Kty,_Ty,_Pr,_Alloc> &,std::multimap<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\map(441,6):
+      или       "void std::swap(std::map<_Kty,_Ty,_Pr,_Alloc> &,std::map<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::map<_Kty,_Ty,_Pr,_Alloc> &,std::map<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\forward_list(1584,6):
+      или       "void std::swap(std::forward_list<_Ty,_Alloc> &,std::forward_list<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::forward_list<_Ty,_Alloc> &,std::forward_list<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(969,6):
+      или       "void std::swap(std::basic_stringstream<_Elem,_Traits,_Alloc> &,std::basic_stringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::basic_stringstream<_Elem,_Traits,_Alloc> &,std::basic_stringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(844,6):
+      или       "void std::swap(std::basic_ostringstream<_Elem,_Traits,_Alloc> &,std::basic_ostringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::basic_ostringstream<_Elem,_Traits,_Alloc> &,std::basic_ostringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(725,6):
+      или       "void std::swap(std::basic_istringstream<_Elem,_Traits,_Alloc> &,std::basic_istringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::basic_istringstream<_Elem,_Traits,_Alloc> &,std::basic_istringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(606,6):
+      или       "void std::swap(std::basic_stringbuf<_Elem,_Traits,_Alloc> &,std::basic_stringbuf<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::basic_stringbuf<_Elem,_Traits,_Alloc> &,std::basic_stringbuf<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\array(772,19):
+      или       "void std::swap(std::array<_Ty,_Size> &,std::array<_Ty,_Size> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::array<_Ty,_Size> &,std::array<_Ty,_Size> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(485,6):
+      или       "void std::swap(std::basic_fstream<_Elem,_Traits> &,std::basic_fstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::basic_fstream<_Elem,_Traits> &,std::basic_fstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(325,6):
+      или       "void std::swap(std::basic_ofstream<_Elem,_Traits> &,std::basic_ofstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::basic_ofstream<_Elem,_Traits> &,std::basic_ofstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(172,6):
+      или       "void std::swap(std::basic_ifstream<_Elem,_Traits> &,std::basic_ifstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::basic_ifstream<_Elem,_Traits> &,std::basic_ifstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_filebuf.hpp(778,6):
+      или       "void std::swap(std::basic_filebuf<_Elem,_Traits> &,std::basic_filebuf<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::basic_filebuf<_Elem,_Traits> &,std::basic_filebuf<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\mutex(263,6):
+      или       "void std::swap(std::unique_lock<_Mutex> &,std::unique_lock<_Mutex> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::unique_lock<_Mutex> &,std::unique_lock<_Mutex> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(3661,19):
+      или       "void std::swap(std::unique_ptr<_Ty,_Dx> &,std::unique_ptr<_Ty,_Dx> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::unique_ptr<_Ty,_Dx> &,std::unique_ptr<_Ty,_Dx> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(3255,6):
+      или       "void std::swap(std::weak_ptr<_Ty> &,std::weak_ptr<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::weak_ptr<_Ty> &,std::weak_ptr<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(1990,6):
+      или       "void std::swap(std::shared_ptr<_Ty> &,std::shared_ptr<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::shared_ptr<_Ty> &,std::shared_ptr<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\functional(1279,6):
+      или       "void std::swap(std::function<_Fty> &,std::function<_Fty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::function<_Fty> &,std::function<_Fty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\unordered_map(894,6):
+      или       "void std::swap(std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\unordered_map(522,6):
+      или       "void std::swap(std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\list(1885,6):
+      или       "void std::swap(std::list<_Ty,_Alloc> &,std::list<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::list<_Ty,_Alloc> &,std::list<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xstring(3141,19):
+      или       "void std::swap(std::basic_string<_Elem,_Traits,_Alloc> &,std::basic_string<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::basic_string<_Elem,_Traits,_Alloc> &,std::basic_string<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(2399,19):
+      или       "void std::swap(std::vector<_Ty,_Alloc> &,std::vector<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::vector<_Ty,_Alloc> &,std::vector<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2  1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\tuple(885,19):
+      или       "void std::swap(std::tuple<_Types...> &,std::tuple<_Types...> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::tuple<_Types...> &,std::tuple<_Types...> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(489,19):
+      или       "void std::swap(std::pair<_Ty1,_Ty2> &,std::pair<_Ty1,_Ty2> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(std::pair<_Ty1,_Ty2> &,std::pair<_Ty1,_Ty2> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\type_traits(2077,19):
+      или       "void std::swap(_Ty (&)[_Size],_Ty (&)[_Size]) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(_Ty (&)[_Size],_Ty (&)[_Size]) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\type_traits(2074,19):
+      или       "void std::swap(_Ty &,_Ty &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+          "void std::swap(_Ty &,_Ty &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2227,22):
+      при попытке сопоставить список аргументов "()"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2238,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2239,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,33): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,59): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22): error C2661: std::swap: нет перегруженной функции, принимающей 1 аргументов [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\optional(968,19):
+      может быть "void std::swap(std::optional<_Ty> &,std::optional<_Ty> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::optional<_Ty> &,std::optional<_Ty> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\valarray(611,6):
+      или       "void std::swap(std::valarray<_Ty> &,std::valarray<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::valarray<_Ty> &,std::valarray<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\map(678,6):
+      или       "void std::swap(std::multimap<_Kty,_Ty,_Pr,_Alloc> &,std::multimap<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::multimap<_Kty,_Ty,_Pr,_Alloc> &,std::multimap<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\map(441,6):
+      или       "void std::swap(std::map<_Kty,_Ty,_Pr,_Alloc> &,std::map<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::map<_Kty,_Ty,_Pr,_Alloc> &,std::map<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\forward_list(1584,6):
+      или       "void std::swap(std::forward_list<_Ty,_Alloc> &,std::forward_list<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::forward_list<_Ty,_Alloc> &,std::forward_list<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(969,6):
+      или       "void std::swap(std::basic_stringstream<_Elem,_Traits,_Alloc> &,std::basic_stringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::basic_stringstream<_Elem,_Traits,_Alloc> &,std::basic_stringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(844,6):
+      или       "void std::swap(std::basic_ostringstream<_Elem,_Traits,_Alloc> &,std::basic_ostringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::basic_ostringstream<_Elem,_Traits,_Alloc> &,std::basic_ostringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(725,6):
+      или       "void std::swap(std::basic_istringstream<_Elem,_Traits,_Alloc> &,std::basic_istringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::basic_istringstream<_Elem,_Traits,_Alloc> &,std::basic_istringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(606,6):
+      или       "void std::swap(std::basic_stringbuf<_Elem,_Traits,_Alloc> &,std::basic_stringbuf<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::basic_stringbuf<_Elem,_Traits,_Alloc> &,std::basic_stringbuf<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\array(772,19):
+      или       "void std::swap(std::array<_Ty,_Size> &,std::array<_Ty,_Size> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::array<_Ty,_Size> &,std::array<_Ty,_Size> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(485,6):
+      или       "void std::swap(std::basic_fstream<_Elem,_Traits> &,std::basic_fstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::basic_fstream<_Elem,_Traits> &,std::basic_fstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(325,6):
+      или       "void std::swap(std::basic_ofstream<_Elem,_Traits> &,std::basic_ofstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::basic_ofstream<_Elem,_Traits> &,std::basic_ofstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(172,6):
+      или       "void std::swap(std::basic_ifstream<_Elem,_Traits> &,std::basic_ifstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::basic_ifstream<_Elem,_Traits> &,std::basic_ifstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_filebuf.hpp(778,6):
+      или       "void std::swap(std::basic_filebuf<_Elem,_Traits> &,std::basic_filebuf<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::basic_filebuf<_Elem,_Traits> &,std::basic_filebuf<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\mutex(263,6):
+      или       "void std::swap(std::unique_lock<_Mutex> &,std::unique_lock<_Mutex> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::unique_lock<_Mutex> &,std::unique_lock<_Mutex> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(3661,19):
+      или       "void std::swap(std::unique_ptr<_Ty,_Dx> &,std::unique_ptr<_Ty,_Dx> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::unique_ptr<_Ty,_Dx> &,std::unique_ptr<_Ty,_Dx> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(3255,6):
+      или       "void std::swap(std::weak_ptr<_Ty> &,std::weak_ptr<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::weak_ptr<_Ty> &,std::weak_ptr<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(1990,6):
+      или       "void std::swap(std::shared_ptr<_Ty> &,std::shared_ptr<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::shared_ptr<_Ty> &,std::shared_ptr<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\functional(1279,6):
+      или       "void std::swap(std::function<_Fty> &,std::function<_Fty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::function<_Fty> &,std::function<_Fty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\unordered_map(894,6):
+      или       "void std::swap(std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\unordered_map(522,6):
+      или       "void std::swap(std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\list(1885,6):
+      или       "void std::swap(std::list<_Ty,_Alloc> &,std::list<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::list<_Ty,_Alloc> &,std::list<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xstring(3141,19):
+      или       "void std::swap(std::basic_string<_Elem,_Traits,_Alloc> &,std::basic_string<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::basic_string<_Elem,_Traits,_Alloc> &,std::basic_string<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(2399,19):
+      или       "void std::swap(std::vector<_Ty,_Alloc> &,std::vector<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::vector<_Ty,_Alloc> &,std::vector<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\tuple(885,19):
+      или       "void std::swap(std::tuple<_Types...> &,std::tuple<_Types...> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::tuple<_Types...> &,std::tuple<_Types...> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(489,19):
+      или       "void std::swap(std::pair<_Ty1,_Ty2> &,std::pair<_Ty1,_Ty2> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(std::pair<_Ty1,_Ty2> &,std::pair<_Ty1,_Ty2> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\type_traits(2077,19):
+      или       "void std::swap(_Ty (&)[_Size],_Ty (&)[_Size]) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(_Ty (&)[_Size],_Ty (&)[_Size]) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\type_traits(2074,19):
+      или       "void std::swap(_Ty &,_Ty &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+          "void std::swap(_Ty &,_Ty &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2259,22):
+      при попытке сопоставить список аргументов "()"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2277,19): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2278,19): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2288,50): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2292,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2313,19): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,37): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,64): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26): error C2661: std::swap: нет перегруженной функции, принимающей 1 аргументов [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\optional(968,19):
+      может быть "void std::swap(std::optional<_Ty> &,std::optional<_Ty> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::optional<_Ty> &,std::optional<_Ty> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\valarray(611,6):
+      или       "void std::swap(std::valarray<_Ty> &,std::valarray<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::valarray<_Ty> &,std::valarray<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\map(678,6):
+      или       "void std::swap(std::multimap<_Kty,_Ty,_Pr,_Alloc> &,std::multimap<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::multimap<_Kty,_Ty,_Pr,_Alloc> &,std::multimap<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\map(441,6):
+      или       "void std::swap(std::map<_Kty,_Ty,_Pr,_Alloc> &,std::map<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::map<_Kty,_Ty,_Pr,_Alloc> &,std::map<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\forward_list(1584,6):
+      или       "void std::swap(std::forward_list<_Ty,_Alloc> &,std::forward_list<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::forward_list<_Ty,_Alloc> &,std::forward_list<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(969,6):
+      или       "void std::swap(std::basic_stringstream<_Elem,_Traits,_Alloc> &,std::basic_stringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::basic_stringstream<_Elem,_Traits,_Alloc> &,std::basic_stringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(844,6):
+      или       "void std::swap(std::basic_ostringstream<_Elem,_Traits,_Alloc> &,std::basic_ostringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::basic_ostringstream<_Elem,_Traits,_Alloc> &,std::basic_ostringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(725,6):
+      или       "void std::swap(std::basic_istringstream<_Elem,_Traits,_Alloc> &,std::basic_istringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::basic_istringstream<_Elem,_Traits,_Alloc> &,std::basic_istringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(606,6):
+      или       "void std::swap(std::basic_stringbuf<_Elem,_Traits,_Alloc> &,std::basic_stringbuf<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::basic_stringbuf<_Elem,_Traits,_Alloc> &,std::basic_stringbuf<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\array(772,19):
+      или       "void std::swap(std::array<_Ty,_Size> &,std::array<_Ty,_Size> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::array<_Ty,_Size> &,std::array<_Ty,_Size> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(485,6):
+      или       "void std::swap(std::basic_fstream<_Elem,_Traits> &,std::basic_fstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::basic_fstream<_Elem,_Traits> &,std::basic_fstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(325,6):
+      или       "void std::swap(std::basic_ofstream<_Elem,_Traits> &,std::basic_ofstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::basic_ofstream<_Elem,_Traits> &,std::basic_ofstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(172,6):
+      или       "void std::swap(std::basic_ifstream<_Elem,_Traits> &,std::basic_ifstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::basic_ifstream<_Elem,_Traits> &,std::basic_ifstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_filebuf.hpp(778,6):
+      или       "void std::swap(std::basic_filebuf<_Elem,_Traits> &,std::basic_filebuf<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::basic_filebuf<_Elem,_Traits> &,std::basic_filebuf<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\mutex(263,6):
+      или       "void std::swap(std::unique_lock<_Mutex> &,std::unique_lock<_Mutex> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::unique_lock<_Mutex> &,std::unique_lock<_Mutex> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(3661,19):
+      или       "void std::swap(std::unique_ptr<_Ty,_Dx> &,std::unique_ptr<_Ty,_Dx> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::unique_ptr<_Ty,_Dx> &,std::unique_ptr<_Ty,_Dx> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(3255,6):
+      или       "void std::swap(std::weak_ptr<_Ty> &,std::weak_ptr<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::weak_ptr<_Ty> &,std::weak_ptr<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(1990,6):
+      или       "void std::swap(std::shared_ptr<_Ty> &,std::shared_ptr<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::shared_ptr<_Ty> &,std::shared_ptr<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\functional(1279,6):
+      или       "void std::swap(std::function<_Fty> &,std::function<_Fty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::function<_Fty> &,std::function<_Fty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\unordered_map(894,6):
+      или       "void std::swap(std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\unordered_map(522,6):
+      или       "void std::swap(std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\list(1885,6):
+      или       "void std::swap(std::list<_Ty,_Alloc> &,std::list<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::list<_Ty,_Alloc> &,std::list<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xstring(3141,19):
+      или       "void std::swap(std::basic_string<_Elem,_Traits,_Alloc> &,std::basic_string<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::basic_string<_Elem,_Traits,_Alloc> &,std::basic_string<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(2399,19):
+      или       "void std::swap(std::vector<_Ty,_Alloc> &,std::vector<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::vector<_Ty,_Alloc> &,std::vector<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\tuple(885,19):
+      или       "void std::swap(std::tuple<_Types...> &,std::tuple<_Types...> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::tuple<_Types...> &,std::tuple<_Types...> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(489,19):
+      или       "void std::swap(std::pair<_Ty1,_Ty2> &,std::pair<_Ty1,_Ty2> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(std::pair<_Ty1,_Ty2> &,std::pair<_Ty1,_Ty2> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\type_traits(2077,19):
+      или       "void std::swap(_Ty (&)[_Size],_Ty (&)[_Size]) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(_Ty (&)[_Size],_Ty (&)[_Size]) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\type_traits(2074,19):
+      или       "void std::swap(_Ty &,_Ty &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+          "void std::swap(_Ty &,_Ty &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2319,26):
+      при попытке сопоставить список аргументов "()"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2334,19): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,37): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,63): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26): error C2661: std::swap: нет перегруженной функции, принимающей 1 аргументов [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\optional(968,19):
+      может быть "void std::swap(std::optional<_Ty> &,std::optional<_Ty> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::optional<_Ty> &,std::optional<_Ty> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\valarray(611,6):
+      или       "void std::swap(std::valarray<_Ty> &,std::valarray<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::valarray<_Ty> &,std::valarray<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\map(678,6):
+      или       "void std::swap(std::multimap<_Kty,_Ty,_Pr,_Alloc> &,std::multimap<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::multimap<_Kty,_Ty,_Pr,_Alloc> &,std::multimap<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\map(441,6):
+      или       "void std::swap(std::map<_Kty,_Ty,_Pr,_Alloc> &,std::map<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::map<_Kty,_Ty,_Pr,_Alloc> &,std::map<_Kty,_Ty,_Pr,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\forward_list(1584,6):
+      или       "void std::swap(std::forward_list<_Ty,_Alloc> &,std::forward_list<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::forward_list<_Ty,_Alloc> &,std::forward_list<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(969,6):
+      или       "void std::swap(std::basic_stringstream<_Elem,_Traits,_Alloc> &,std::basic_stringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::basic_stringstream<_Elem,_Traits,_Alloc> &,std::basic_stringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(844,6):
+      или       "void std::swap(std::basic_ostringstream<_Elem,_Traits,_Alloc> &,std::basic_ostringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::basic_ostringstream<_Elem,_Traits,_Alloc> &,std::basic_ostringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(725,6):
+      или       "void std::swap(std::basic_istringstream<_Elem,_Traits,_Alloc> &,std::basic_istringstream<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::basic_istringstream<_Elem,_Traits,_Alloc> &,std::basic_istringstream<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\sstream(606,6):
+      или       "void std::swap(std::basic_stringbuf<_Elem,_Traits,_Alloc> &,std::basic_stringbuf<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::basic_stringbuf<_Elem,_Traits,_Alloc> &,std::basic_stringbuf<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\array(772,19):
+      или       "void std::swap(std::array<_Ty,_Size> &,std::array<_Ty,_Size> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::array<_Ty,_Size> &,std::array<_Ty,_Size> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(485,6):
+      или       "void std::swap(std::basic_fstream<_Elem,_Traits> &,std::basic_fstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::basic_fstream<_Elem,_Traits> &,std::basic_fstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(325,6):
+      или       "void std::swap(std::basic_ofstream<_Elem,_Traits> &,std::basic_ofstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::basic_ofstream<_Elem,_Traits> &,std::basic_ofstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\fstream(172,6):
+      или       "void std::swap(std::basic_ifstream<_Elem,_Traits> &,std::basic_ifstream<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::basic_ifstream<_Elem,_Traits> &,std::basic_ifstream<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\__msvc_filebuf.hpp(778,6):
+      или       "void std::swap(std::basic_filebuf<_Elem,_Traits> &,std::basic_filebuf<_Elem,_Traits> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::basic_filebuf<_Elem,_Traits> &,std::basic_filebuf<_Elem,_Traits> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\mutex(263,6):
+      или       "void std::swap(std::unique_lock<_Mutex> &,std::unique_lock<_Mutex> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::unique_lock<_Mutex> &,std::unique_lock<_Mutex> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(3661,19):
+      или       "void std::swap(std::unique_ptr<_Ty,_Dx> &,std::unique_ptr<_Ty,_Dx> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::unique_ptr<_Ty,_Dx> &,std::unique_ptr<_Ty,_Dx> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(3255,6):
+      или       "void std::swap(std::weak_ptr<_Ty> &,std::weak_ptr<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::weak_ptr<_Ty> &,std::weak_ptr<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(1990,6):
+      или       "void std::swap(std::shared_ptr<_Ty> &,std::shared_ptr<_Ty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::shared_ptr<_Ty> &,std::shared_ptr<_Ty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\functional(1279,6):
+      или       "void std::swap(std::function<_Fty> &,std::function<_Fty> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::function<_Fty> &,std::function<_Fty> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\unordered_map(894,6):
+      или       "void std::swap(std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_multimap<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\unordered_map(522,6):
+      или       "void std::swap(std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &,std::unordered_map<_Kty,_Ty,_Hasher,_Keyeq,_Alloc> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\list(1885,6):
+      или       "void std::swap(std::list<_Ty,_Alloc> &,std::list<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::list<_Ty,_Alloc> &,std::list<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xstring(3141,19):
+      или       "void std::swap(std::basic_string<_Elem,_Traits,_Alloc> &,std::basic_string<_Elem,_Traits,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::basic_string<_Elem,_Traits,_Alloc> &,std::basic_string<_Elem,_Traits,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(2399,19):
+      или       "void std::swap(std::vector<_Ty,_Alloc> &,std::vector<_Ty,_Alloc> &) noexcept"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::vector<_Ty,_Alloc> &,std::vector<_Ty,_Alloc> &) noexcept": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\tuple(885,19):
+      или       "void std::swap(std::tuple<_Types...> &,std::tuple<_Types...> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::tuple<_Types...> &,std::tuple<_Types...> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\utility(489,19):
+      или       "void std::swap(std::pair<_Ty1,_Ty2> &,std::pair<_Ty1,_Ty2> &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(std::pair<_Ty1,_Ty2> &,std::pair<_Ty1,_Ty2> &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\type_traits(2077,19):
+      или       "void std::swap(_Ty (&)[_Size],_Ty (&)[_Size]) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(_Ty (&)[_Size],_Ty (&)[_Size]) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\type_traits(2074,19):
+      или       "void std::swap(_Ty &,_Ty &) noexcept(<expr>)"
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+          "void std::swap(_Ty &,_Ty &) noexcept(<expr>)": ожидаются аргументы 2 — 1 предоставлены
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(2341,26):
+      при попытке сопоставить список аргументов "()"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3506,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3506,37): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3511,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3511,39): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3520,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3520,37): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3522,38): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3528,36): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3528,56): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3537,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3537,37): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3542,24): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3542,45): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3542,68): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3546,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3546,35): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3547,15): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3547,35): error C2039: "pixels": не является членом "Layer". [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+      C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(45,8):
+       см. объявление "Layer"
+  
+C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(3547,35): error C1003: число ошибок превышает 100; остановка компиляции [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+Build failed

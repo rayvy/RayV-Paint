@@ -1,0 +1,7 @@
+{
+  "artifactType":  "ARTIFACT_TYPE_IMPLEMENTATION_PLAN",
+  "summary":  "Обновлённый план реконструкции ядра RayV-Paint с финализированными решениями: внутренний формат UINT8 RGBA (4 байта/пиксель), тайлы 256×256, лимит Undo 256 МБ, потокобезопасность bcdec подтверждена, Float DDS конвертируется в uint8 при импорте. Включает 7 фаз реализации от lazy start до SIMD brushing.",
+  "updatedAt":  "2026-07-06T14:26:32.680408Z",
+  "version":  "1",
+  "requestFeedback":  true
+}

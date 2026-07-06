@@ -1,0 +1,114 @@
+---
+pid: 22912
+cwd: "C:\Users\Rayvy\Documents\GitHub\RayV-Paint"
+command: "cmd /c \"C:\\Users\\Rayvy\\Documents\\GitHub\\RayV-Paint\\build.bat\""
+started_at: 2026-07-06T15:12:17.341Z
+running_for_ms: 10955012 
+---
+===================================================
+Building RayVPaint...
+===================================================
+Setting up Visual Studio compilation environment (x64)...
+**********************************************************************
+** Visual Studio 2022 Developer Command Prompt v17.14.24
+** Copyright (c) 2025 Microsoft Corporation
+**********************************************************************
+[vcvarsall.bat] Environment initialized for: 'x64'
+Generating CMake build files...
+-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.22631.
+-- Including Win32 support
+CMake Warning (dev) at C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FetchContent.cmake:1953 (message):
+  Calling FetchContent_Populate(imgui) is deprecated, call
+  FetchContent_MakeAvailable(imgui) instead.  Policy CMP0169 can be set to
+  OLD to allow FetchContent_Populate(imgui) to be called directly for now,
+  but the ability to call it with declared details will be removed completely
+  in a future version.
+Call Stack (most recent call first):
+  CMakeLists.txt:36 (FetchContent_Populate)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+CMake Warning (dev) at C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/share/cmake-3.31/Modules/FetchContent.cmake:1373 (message):
+  The DOWNLOAD_EXTRACT_TIMESTAMP option was not given and policy CMP0135 is
+  not set.  The policy's OLD behavior will be used.  When using a URL
+  download, the timestamps of extracted files should preferably be that of
+  the time of extraction, otherwise code that depends on the extracted
+  contents might not be rebuilt if the URL changes.  The OLD behavior
+  preserves the timestamps from the archive instead, but this is usually not
+  what you want.  Update your project to the NEW behavior or specify the
+  DOWNLOAD_EXTRACT_TIMESTAMP option with a value of true to avoid this
+  robustness issue.
+Call Stack (most recent call first):
+  CMakeLists.txt:40 (FetchContent_Declare)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Using the multi-header code from C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build/_deps/json-src/include/
+CMake Deprecation Warning at build/_deps/pybind11-src/CMakeLists.txt:13 (cmake_minimum_required):
+-- pybind11 v2.12.0 
+  Compatibility with CMake < 3.10 will be removed from a future version of
+  CMake.
+
+  Update the VERSION argument <min> value.  Or, use the <min>...<max> syntax
+  to tell CMake that the project requires at least <min> but has been updated
+  to work with policies introduced by <max> or earlier.
+
+
+-- Checking for Python embeddable package: python-3.13.2-embed-amd64.zip
+-- Configuring done (9.3s)
+-- Generating done (0.1s)
+-- Build files have been written to: C:/Users/Rayvy/Documents/GitHub/RayV-Paint/build
+Compiling project...
+Версия MSBuild 17.14.40+3e7442088 для .NET Framework
+
+  glfw.vcxproj -> C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\_deps\glfw-build\src\Release\glfw3.lib
+  imgui.vcxproj -> C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\Release\imgui.lib
+  main.cpp
+  Canvas.cpp
+C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(730,14): error C2672: "std::construct_at": не найдена соответствующая перегруженная функция [C:\Users\Rayvy\Documents\GitHub\RayV-Paint\build\RayVPaint_Core.vcxproj]
+  (компиляция исходного файла "../src/Canvas.cpp")
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(461,16):
+      может быть "_Ty *std::construct_at(_Ty *const ,_Types ...) noexcept(<expr>)"
+          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(730,14):
+          связанные ограничения не соблюдаются
+              C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xutility(459,50):
+              "Layer::Layer(const Layer &)": предпринята попытка ссылки на удаленную функцию
+                  C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(77,1):
+                  "Layer::Layer(const Layer &)": функция неявно удалена, так как элемент данных вызывает удаленную или недоступную функцию "std::unique_ptr<TileCache,std::default_delete<TileCache>>::unique_ptr(const std::unique_ptr<TileCache,std::default_delete<TileCache>> &)".
+                  C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\memory(3475,5):
+                  "std::unique_ptr<TileCache,std::default_delete<TileCache>>::unique_ptr(const std::unique_ptr<TileCache,std::default_delete<TileCache>> &)": функция явно удалена.
+              C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(77,1):
+              в этом месте создано компилятором: "Layer::Layer"
+      C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\xmemory(730,14):
+      контекст создания экземпляра шаблона (сначала самый старый)
+          C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.h(304,24):
+          выполняется компиляция ссылки на экземпляр класс шаблон функции "std::vector<Layer,std::allocator<Layer>>"
+          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1059,27):
+          во время компиляции функции-члена класс шаблон "std::_Vector_iterator<std::_Vector_val<std::_Simple_types<_Ty>>> std::vector<_Ty,std::allocator<_Ty>>::insert(std::_Vector_const_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,const _Ty &)"
+          with
+          [
+              _Ty=Layer
+          ]
+              C:\Users\Rayvy\Documents\GitHub\RayV-Paint\src\Canvas.cpp(1596,20):
+              см. первую ссылку на "std::vector<Layer,std::allocator<Layer>>::insert" в "Canvas::CreateLayerFromPixels"
+          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1060,16):
+          выполняется компиляция ссылки на экземпляр шаблон функции "std::_Vector_iterator<std::_Vector_val<std::_Simple_types<_Ty>>> std::vector<_Ty,std::allocator<_Ty>>::emplace<const _Ty&>(std::_Vector_const_iterator<std::_Vector_val<std::_Simple_types<_Ty>>>,const _Ty &)"
+          with
+          [
+              _Ty=Layer
+          ]
+          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(1039,17):
+          выполняется компиляция ссылки на экземпляр шаблон функции "_Ty &std::vector<_Ty,std::allocator<_Ty>>::_Emplace_back_with_unused_capacity<const _Ty&>(const _Ty &)"
+          with
+          [
+              _Ty=Layer
+          ]
+          C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\include\vector(863,27):
+          выполняется компиляция ссылки на экземпляр шаблон функции "void std::_Default_allocator_traits<_Alloc>::construct<_Ty,const _Ty&>(_Alloc &,_Objty *const ,const _Ty &)"
+          with
+          [
+              _Alloc=std::allocator<Layer>,
+              _Ty=Layer,
+              _Objty=Layer
+          ]
+  
+  Создание кода...
+Build failed

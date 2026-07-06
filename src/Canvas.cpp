@@ -1,4 +1,5 @@
 #include "Canvas.h"
+#include "core/TileCache.h"
 #include "core/Logger.h"
 #include "core/ImageManager.h"
 #include <opencv2/imgproc.hpp>
@@ -31,6 +32,93 @@ extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, 
 extern "C" char* stbi_zlib_decode_malloc(const char* buffer, int len, int* outlen);
 
 using json = nlohmann::json;
+
+// ============================================================
+// Pixel-buffer compatibility helpers
+// These bridge TileCache layers with code expecting flat float RGBA.
+// Use ExportLayerF + SetLayerPixelsF for non-interactive paths
+// (filters, compositing, save/load). NOT for paint hot paths.
+// ============================================================
+static std::vector<float> ExportLayerF(const Layer& layer, int w, int h) {
+    std::vector<float> out((size_t)w * h * 4, 0.f);
+    if (layer.tileCache) layer.tileCache->ExportRGBA32F(out.data(), w, h);
+    return out;
+}
+static void SetLayerPixelsF(Layer& layer, const std::vector<float>& pixels, int w, int h,
+                             CanvasPixelFormat fmt = CanvasPixelFormat::RGBA8) {
+    if (!layer.tileCache) {
+        layer.tileCache = std::make_unique<TileCache>();
+        layer.tileCache->Init(w, h, fmt);
+    }
+    layer.tileCache->ImportRGBA32F(pixels.data(), w, h);
+    layer.tileCache->MarkAllDirty();
+    layer.needsUpload = true;
+}
+static bool LayerHasPixels(const Layer& layer) {
+    return layer.tileCache && !layer.tileCache->IsEmpty();
+}
+static void EnsureLayerTileCache(Layer& layer, int w, int h, CanvasPixelFormat fmt) {
+    if (!layer.tileCache) {
+        layer.tileCache = std::make_unique<TileCache>();
+        layer.tileCache->Init(w, h, fmt);
+    }
+}
+// Selection mask helpers: convert float[0,1] <-> uint8
+static uint8_t SelF2U8(float v) {
+    return (uint8_t)(std::clamp(v, 0.f, 1.f) * 255.f + .5f);
+}
+static float SelU82F(uint8_t v) {
+    return v / 255.f;
+}
+static float GetSelWeight(const std::vector<uint8_t>& mask, int w, int x, int y, bool hasSel) {
+    if (!hasSel || mask.empty()) return 1.f;
+    return SelU82F(mask[(size_t)y * w + x]);
+}
+static std::vector<float> ComposeVisibleLayers(const std::vector<Layer>& layers, int w, int h) {
+    std::vector<float> composite((size_t)w * h * 4, 0.f);
+    int firstVisibleIdx = -1;
+    for (int l = 0; l < (int)layers.size(); ++l) {
+        if (layers[l].visible) { firstVisibleIdx = l; break; }
+    }
+    if (firstVisibleIdx == -1) return composite;
+
+    const auto& baseLayer = layers[firstVisibleIdx];
+    if (LayerHasPixels(baseLayer)) {
+        auto basePx = ExportLayerF(baseLayer, w, h);
+        std::memcpy(composite.data(), basePx.data(), basePx.size() * sizeof(float));
+        if (baseLayer.opacity < 1.f) {
+            for (size_t i = 0; i < (size_t)w * h; ++i) {
+                composite[i * 4 + 3] *= baseLayer.opacity;
+            }
+        }
+    }
+
+    for (int l = firstVisibleIdx + 1; l < (int)layers.size(); ++l) {
+        const auto& layer = layers[l];
+        if (!layer.visible || !LayerHasPixels(layer)) continue;
+        auto layerPx = ExportLayerF(layer, w, h);
+        for (size_t i = 0; i < (size_t)w * h; ++i) {
+            size_t base = i * 4;
+            float srcR = layerPx[base + 0];
+            float srcG = layerPx[base + 1];
+            float srcB = layerPx[base + 2];
+            float srcA = layerPx[base + 3] * layer.opacity;
+            if (srcA <= 0.f) continue;
+            float destR = composite[base + 0];
+            float destG = composite[base + 1];
+            float destB = composite[base + 2];
+            float destA = composite[base + 3];
+            float outA = srcA + destA * (1.f - srcA);
+            if (outA > 0.f) {
+                composite[base + 0] = (srcR * srcA + destR * destA * (1.f - srcA)) / outA;
+                composite[base + 1] = (srcG * srcA + destG * destA * (1.f - srcA)) / outA;
+                composite[base + 2] = (srcB * srcA + destB * destA * (1.f - srcA)) / outA;
+                composite[base + 3] = outA;
+            }
+        }
+    }
+    return composite;
+}
 
 // Get the directory containing the running executable
 static std::wstring GetExecutableDir() {
@@ -122,8 +210,8 @@ static HRESULT CompileShaderFromFile(const WCHAR* szFileName, LPCSTR szEntryPoin
 }
 
 Canvas::Canvas()
-    : m_Width(1024)
-    , m_Height(1024)
+    : m_Width(0)
+    , m_Height(0)
     , m_Zoom(1.0f)
     , m_Pan(0.0f, 0.0f) {
     ResetView();
@@ -328,14 +416,7 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 9. Create Composite targets
-    CreateCompositeResources(device);
-
-    m_SelectionMask.assign(m_Width * m_Height, 0.0f);
-    m_HasSelection = false;
-
-    // 10. Start with one default layer
-    CreateNewLayer(device, "Background");
+    // Composite targets and default layer are created lazily on first use.
 
     return true;
 }
@@ -378,7 +459,7 @@ void Canvas::CreateCompositeResources(ID3D11Device* device) {
     desc.Height = m_Height;
     desc.MipLevels = 1;
     desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.Format = GetLayerDxgiFormat();
     desc.SampleDesc.Count = 1;
     desc.SampleDesc.Quality = 0;
     desc.Usage = D3D11_USAGE_DEFAULT;
@@ -390,7 +471,7 @@ void Canvas::CreateCompositeResources(ID3D11Device* device) {
         device->CreateShaderResourceView(m_CompositeTexture, nullptr, &m_CompositeSRV);
     }
 
-    m_SelectionMask.assign((size_t)m_Width * m_Height, 0.0f);
+    m_SelectionMask.assign((size_t)m_Width * m_Height, 0);
     m_HasSelection = false;
 }
 
@@ -408,7 +489,7 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
     if (index < 0 || index >= m_Layers.size()) return;
     Layer& layer = m_Layers[index];
     
-    layer.mask.assign(m_Width * m_Height, 1.0f);
+    layer.mask.assign((size_t)m_Width * m_Height, 255);
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
     
@@ -423,11 +504,11 @@ void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     if (index < 0 || index >= m_Layers.size()) return;
     Layer& layer = m_Layers[index];
     
-    layer.mask.assign(m_Width * m_Height, 0.0f);
+    layer.mask.assign((size_t)m_Width * m_Height, 0);
     if (m_HasSelection) {
         std::copy(m_SelectionMask.begin(), m_SelectionMask.end(), layer.mask.begin());
     } else {
-        layer.mask.assign(m_Width * m_Height, 1.0f);
+        layer.mask.assign((size_t)m_Width * m_Height, 255);
     }
     
     layer.hasMask = true;
@@ -470,16 +551,19 @@ void Canvas::ApplyLayerMask(int index) {
     
     if (layer.mask.size() != (size_t)m_Width * m_Height) {
         Logger::Get().Error("ApplyLayerMask: Mask size mismatch! Reallocating mask.");
-        layer.mask.resize((size_t)m_Width * m_Height, 1.0f);
+        layer.mask.resize((size_t)m_Width * m_Height, 255);
     }
 
-    for (size_t y = 0; y < m_Height; ++y) {
-        for (size_t x = 0; x < m_Width; ++x) {
-            size_t pixelIdx = (y * m_Width + x) * 4;
-            size_t maskIdx = y * m_Width + x;
-            layer.pixels[pixelIdx + 3] *= layer.mask[maskIdx];
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            float rgba[4];
+            layer.tileCache->GetPixelF(x, y, rgba);
+            rgba[3] *= SelU82F(layer.mask[(size_t)y * m_Width + x]);
+            layer.tileCache->SetPixelF(x, y, rgba);
         }
     }
+    layer.tileCache->MarkAllDirty();
     
     layer.needsUpload = true;
     DeleteLayerMask(index);
@@ -488,26 +572,12 @@ void Canvas::ApplyLayerMask(int index) {
         std::vector<TileDelta> deltas;
         for (auto& pair : m_ActiveStrokeDeltas) {
             auto& delta = pair.second;
-            delta.newPixels.resize(256 * 256 * 4, 0.0f);
-            int startX = delta.tileX * 256;
-            int startY = delta.tileY * 256;
-            for (int y = 0; y < 256; ++y) {
-                int cy = startY + y;
-                if (cy >= m_Height) break;
-                for (int x = 0; x < 256; ++x) {
-                    int cx = startX + x;
-                    if (cx >= m_Width) break;
-                    size_t srcIdx = ((size_t)cy * m_Width + cx) * 4;
-                    size_t dstIdx = ((size_t)y * 256 + x) * 4;
-                    delta.newPixels[dstIdx + 0] = layer.pixels[srcIdx + 0];
-                    delta.newPixels[dstIdx + 1] = layer.pixels[srcIdx + 1];
-                    delta.newPixels[dstIdx + 2] = layer.pixels[srcIdx + 2];
-                    delta.newPixels[dstIdx + 3] = layer.pixels[srcIdx + 3];
-                }
-            }
-            deltas.push_back(delta);
+            delta.newPixels = layer.tileCache
+                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                : std::vector<uint8_t>{};
+            deltas.push_back(std::move(delta));
         }
-        m_UndoRedoManager.PushCommand(std::make_unique<PaintStrokeCommand>("Apply Mask", index, deltas));
+        m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Apply Mask", index, std::move(deltas)));
         m_ActiveStrokeDeltas.clear();
     }
     m_ActiveLayerIdx = oldActive;
@@ -528,7 +598,7 @@ void Canvas::UpdateLayerMaskTexture(ID3D11Device* device, int index) {
     desc.Height = m_Height;
     desc.MipLevels = 1;
     desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_R32_FLOAT;
+    desc.Format = DXGI_FORMAT_R8_UNORM;
     desc.SampleDesc.Count = 1;
     desc.SampleDesc.Quality = 0;
     desc.Usage = D3D11_USAGE_DEFAULT;
@@ -536,7 +606,7 @@ void Canvas::UpdateLayerMaskTexture(ID3D11Device* device, int index) {
     
     D3D11_SUBRESOURCE_DATA initData = {};
     initData.pSysMem = layer.mask.data();
-    initData.SysMemPitch = m_Width * sizeof(float);
+    initData.SysMemPitch = m_Width * sizeof(uint8_t);
     
     HRESULT hr = device->CreateTexture2D(&desc, &initData, &layer.maskTexture);
     if (SUCCEEDED(hr)) {
@@ -545,53 +615,62 @@ void Canvas::UpdateLayerMaskTexture(ID3D11Device* device, int index) {
     layer.maskNeedsUpload = false;
 }
 
+DXGI_FORMAT Canvas::GetLayerDxgiFormat() const {
+    return (m_CanvasFormat == CanvasPixelFormat::RGBA32F)
+        ? DXGI_FORMAT_R32G32B32A32_FLOAT
+        : DXGI_FORMAT_R8G8B8A8_UNORM;
+}
+
 void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
     if (!device) return;
     if (layer.texture) { layer.texture->Release(); layer.texture = nullptr; }
-    if (layer.srv) { layer.srv->Release(); layer.srv = nullptr; }
+    if (layer.srv)     { layer.srv->Release();     layer.srv     = nullptr; }
 
     D3D11_TEXTURE2D_DESC desc = {};
-    desc.Width = m_Width;
-    desc.Height = m_Height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.Width            = m_Width;
+    desc.Height           = m_Height;
+    desc.MipLevels        = 1;
+    desc.ArraySize        = 1;
+    desc.Format           = GetLayerDxgiFormat();
     desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    desc.Usage            = D3D11_USAGE_DEFAULT;
+    desc.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
 
-    HRESULT hr;
-    if (layer.pixels.empty()) {
-        hr = device->CreateTexture2D(&desc, nullptr, &layer.texture);
-    } else {
-        D3D11_SUBRESOURCE_DATA initData = {};
-        initData.pSysMem = layer.pixels.data();
-        initData.SysMemPitch = m_Width * sizeof(float) * 4;
-        hr = device->CreateTexture2D(&desc, &initData, &layer.texture);
+    HRESULT hr = device->CreateTexture2D(&desc, nullptr, &layer.texture);
+    if (FAILED(hr)) {
+        Logger::Get().Error("RecreateLayerTexture: CreateTexture2D failed");
+        return;
     }
-    
-    if (SUCCEEDED(hr)) {
-        device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
+    device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
+
+    // Upload existing TileCache data if available
+    if (layer.tileCache) {
+        layer.tileCache->MarkAllDirty();
+        layer.needsUpload = true;
     }
-    layer.needsUpload = false;
+    layer.needsUpload = false; // will be handled by ComposeLayers dirty loop
 }
 
 void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
     Layer newLayer;
-    newLayer.name = name;
+    newLayer.name    = name;
     newLayer.visible = true;
     newLayer.opacity = 1.0f;
-    // Leave pixels empty (lazy loading)
-    newLayer.needsUpload = false;
 
-    if (device) {
+    // Initialise TileCache for this layer (no tiles allocated yet — truly lazy)
+    newLayer.tileCache = std::make_unique<TileCache>();
+    newLayer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+
+    if (device && m_Width > 0 && m_Height > 0) {
+        if (!m_CompositeTexture) {
+            CreateCompositeResources(device);
+        }
         RecreateLayerTexture(device, newLayer);
     }
 
-    m_Layers.push_back(newLayer);
-    m_ActiveLayerIdx = static_cast<int>(m_Layers.size()) - 1;
-    Logger::Get().Info("Created new lazy layer: " + name);
+    m_Layers.push_back(std::move(newLayer));
+    m_ActiveLayerIdx = (int)m_Layers.size() - 1;
+    Logger::Get().Info("Created new layer: " + name);
 }
 
 void Canvas::DeleteLayer(int index) {
@@ -656,39 +735,20 @@ void Canvas::ToggleLayerIsolation(int layerIdx) {
 }
 
 void Canvas::BackupTile(int tileX, int tileY) {
-    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
-    int numTilesX = (m_Width + 255) / 256;
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    int numTilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
     int key = tileY * numTilesX + tileX;
-    
-    if (m_ActiveStrokeDeltas.find(key) != m_ActiveStrokeDeltas.end()) {
-        return; // Already backed up this tile
-    }
+
+    if (m_ActiveStrokeDeltas.count(key)) return; // already backed up
 
     auto& layer = m_Layers[m_ActiveLayerIdx];
     TileDelta delta;
-    delta.layerIdx = m_ActiveLayerIdx;
-    delta.tileX = tileX;
-    delta.tileY = tileY;
-    delta.oldPixels.resize(256 * 256 * 4, 0.0f);
+    delta.layerIdx  = m_ActiveLayerIdx;
+    delta.tileX     = tileX;
+    delta.tileY     = tileY;
+    // Snapshot current tile state (empty vector if tile doesn't exist)
+    delta.oldPixels = layer.tileCache ? layer.tileCache->SnapshotTile(tileX, tileY) : std::vector<uint8_t>{};
 
-    int startX = tileX * 256;
-    int startY = tileY * 256;
-    for (int y = 0; y < 256; ++y) {
-        int canvasY = startY + y;
-        if (canvasY >= m_Height) break;
-        for (int x = 0; x < 256; ++x) {
-            int canvasX = startX + x;
-            if (canvasX >= m_Width) break;
-            
-            int tileOffset = (y * 256 + x) * 4;
-            int canvasOffset = (canvasY * m_Width + canvasX) * 4;
-            
-            delta.oldPixels[tileOffset + 0] = layer.pixels[canvasOffset + 0];
-            delta.oldPixels[tileOffset + 1] = layer.pixels[canvasOffset + 1];
-            delta.oldPixels[tileOffset + 2] = layer.pixels[canvasOffset + 2];
-            delta.oldPixels[tileOffset + 3] = layer.pixels[canvasOffset + 3];
-        }
-    }
     m_ActiveStrokeDeltas[key] = std::move(delta);
 }
 
@@ -698,10 +758,6 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
 
     auto& layer = m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) {
-        Logger::Get().Info("Lazy allocating active layer pixel buffer: " + layer.name);
-        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
-    }
 
     BrushSettings activeBrush = brush;
     activeBrush.writeR = m_ChannelR;
@@ -761,10 +817,17 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
             backupSymmetricTiles(static_cast<float>(m_Width) - currRawX, static_cast<float>(m_Height) - currRawY, activeBrush.radius);
         }
 
+        // Lazy-allocate TileCache on first paint
+        if (!m_Layers[m_ActiveLayerIdx].tileCache) {
+            m_Layers[m_ActiveLayerIdx].tileCache = std::make_unique<TileCache>();
+            m_Layers[m_ActiveLayerIdx].tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+        }
+
         // Place the very first stamp immediately
-        PaintEngine::DrawStamp(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height, 
-                               currRawX, currRawY, activeBrush, m_MirrorHorizontal, m_MirrorVertical,
-                               m_HasSelection ? m_SelectionMask : std::vector<float>{});
+        PaintEngine::DrawStamp(*m_Layers[m_ActiveLayerIdx].tileCache,
+                               currRawX, currRawY, activeBrush,
+                               m_MirrorHorizontal, m_MirrorVertical,
+                               m_HasSelection ? m_SelectionMask : std::vector<uint8_t>{});
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
     }
     else if (phase == StrokePhase::Update && m_IsStrokeActive) {
@@ -806,14 +869,14 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                           static_cast<float>(m_Width) - stabilizedX, static_cast<float>(m_Height) - stabilizedY);
         }
 
-        // Draw segment from previous stabilized position to current stabilized position
-        PaintEngine::DrawStrokeSegment(m_Layers[m_ActiveLayerIdx].pixels, m_Width, m_Height,
+        // Draw stroke segment
+        PaintEngine::DrawStrokeSegment(*m_Layers[m_ActiveLayerIdx].tileCache,
                                        m_PrevStabilizedX, m_PrevStabilizedY,
                                        stabilizedX, stabilizedY,
                                        activeBrush, m_StrokeDistanceAccumulator,
                                        m_LastDabX, m_LastDabY,
                                        m_MirrorHorizontal, m_MirrorVertical,
-                                       m_HasSelection ? m_SelectionMask : std::vector<float>{});
+                                       m_HasSelection ? m_SelectionMask : std::vector<uint8_t>{});
 
         m_PrevStabilizedX = stabilizedX;
         m_PrevStabilizedY = stabilizedY;
@@ -828,26 +891,10 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
 
             for (auto& pair : m_ActiveStrokeDeltas) {
                 auto& delta = pair.second;
-                delta.newPixels.resize(256 * 256 * 4, 0.0f);
-
-                int startX = delta.tileX * 256;
-                int startY = delta.tileY * 256;
-                for (int y = 0; y < 256; ++y) {
-                    int canvasY = startY + y;
-                    if (canvasY >= m_Height) break;
-                    for (int x = 0; x < 256; ++x) {
-                        int canvasX = startX + x;
-                        if (canvasX >= m_Width) break;
-                        
-                        int tileOffset = (y * 256 + x) * 4;
-                        int canvasOffset = (canvasY * m_Width + canvasX) * 4;
-                        
-                        delta.newPixels[tileOffset + 0] = layer.pixels[canvasOffset + 0];
-                        delta.newPixels[tileOffset + 1] = layer.pixels[canvasOffset + 1];
-                        delta.newPixels[tileOffset + 2] = layer.pixels[canvasOffset + 2];
-                        delta.newPixels[tileOffset + 3] = layer.pixels[canvasOffset + 3];
-                    }
-                }
+                // Snapshot the tile AFTER the stroke (newPixels)
+                delta.newPixels = layer.tileCache
+                    ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                    : std::vector<uint8_t>{};
                 deltas.push_back(std::move(delta));
             }
 
@@ -872,71 +919,61 @@ void Canvas::ResizeCanvas(ID3D11Device* device, int width, int height) {
 
     if (m_Width == oldW && m_Height == oldH) return;
 
-    Logger::Get().Info("Resizing canvas from " + std::to_string(oldW) + "x" + std::to_string(oldH) + 
+    Logger::Get().Info("Resizing canvas from " + std::to_string(oldW) + "x" + std::to_string(oldH) +
                        " to " + std::to_string(m_Width) + "x" + std::to_string(m_Height));
 
-    std::vector<float> oldSelection = std::move(m_SelectionMask);
-
-    // Recreate composition texture
-    CreateCompositeResources(device);
-
-    // Copy old selection contents top-left aligned
-    int copySelW = std::min(oldW, m_Width);
-    int copySelH = std::min(oldH, m_Height);
-    for (int y = 0; y < copySelH; ++y) {
-        for (int x = 0; x < copySelW; ++x) {
-            float val = oldSelection[(size_t)y * oldW + x];
-            m_SelectionMask[(size_t)y * m_Width + x] = val;
-            if (val > 0.01f) {
-                m_HasSelection = true;
+    // Resize selection mask (uint8_t, single-channel)
+    {
+        std::vector<uint8_t> oldSel = std::move(m_SelectionMask);
+        m_SelectionMask.assign((size_t)m_Width * m_Height, 0);
+        int copyW = std::min(oldW, m_Width);
+        int copyH = std::min(oldH, m_Height);
+        for (int y = 0; y < copyH; ++y) {
+            for (int x = 0; x < copyW; ++x) {
+                uint8_t v = oldSel.empty() ? 0 : oldSel[(size_t)y * oldW + x];
+                m_SelectionMask[(size_t)y * m_Width + x] = v;
+                if (v > 0) m_HasSelection = true;
             }
         }
     }
 
-    // Resize each layer's pixel buffers
+    // Recreate composition texture when a device is available
+    if (device) {
+        CreateCompositeResources(device);
+    }
+
+    // Resize each layer's TileCache and GPU texture
     for (size_t i = 0; i < m_Layers.size(); ++i) {
         auto& layer = m_Layers[i];
-        if (layer.pixels.empty()) {
-            if (device) {
-                RecreateLayerTexture(device, layer);
-            }
-            continue;
-        }
-        std::vector<float> oldPixels = std::move(layer.pixels);
-        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+        if (layer.isGroup) continue;
 
-        // Copy old contents top-left aligned
-        int copyW = std::min(oldW, m_Width);
-        int copyH = std::min(oldH, m_Height);
-
-        for (int y = 0; y < copyH; ++y) {
-            for (int x = 0; x < copyW; ++x) {
-                size_t oldIdx = ((size_t)y * oldW + x) * 4;
-                size_t newIdx = ((size_t)y * m_Width + x) * 4;
-                for (int c = 0; c < 4; ++c) {
-                    layer.pixels[newIdx + c] = oldPixels[oldIdx + c];
-                }
-            }
+        if (layer.tileCache) {
+            layer.tileCache->Resize(m_Width, m_Height);
+            layer.tileCache->MarkAllDirty();
         }
 
-        RecreateLayerTexture(device, layer);
+        if (device) {
+            RecreateLayerTexture(device, layer);
+        }
 
-        if (layer.hasMask) {
-            std::vector<float> oldMask = std::move(layer.mask);
-            layer.mask.assign((size_t)m_Width * m_Height, 1.0f);
-            if (!oldMask.empty()) {
-                for (int y = 0; y < copyH; ++y) {
-                    for (int x = 0; x < copyW; ++x) {
-                        layer.mask[(size_t)y * m_Width + x] = oldMask[(size_t)y * oldW + x];
-                    }
+        // Resize mask
+        if (layer.hasMask && !layer.mask.empty()) {
+            std::vector<uint8_t> oldMask = std::move(layer.mask);
+            layer.mask.assign((size_t)m_Width * m_Height, 255);
+            int copyW = std::min(oldW, m_Width);
+            int copyH = std::min(oldH, m_Height);
+            for (int y = 0; y < copyH; ++y) {
+                for (int x = 0; x < copyW; ++x) {
+                    layer.mask[(size_t)y * m_Width + x] = oldMask[(size_t)y * oldW + x];
                 }
             }
             if (device) {
-                UpdateLayerMaskTexture(device, static_cast<int>(i));
+                UpdateLayerMaskTexture(device, (int)i);
             }
         }
     }
 }
+
 
 void Canvas::Update(float viewportWidth, float viewportHeight, bool isMouseOverCanvas, 
                     float mouseX, float mouseY, bool isDragging, float dragDx, float dragDy, float wheelDelta) {
@@ -962,25 +999,49 @@ void Canvas::Update(float viewportWidth, float viewportHeight, bool isMouseOverC
 }
 
 void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
-    // 1. Upload layers with dirty CPU data
     ID3D11Device* device = nullptr;
     context->GetDevice(&device);
+
     if (device) {
+        int tilesX = (m_Width  + TILE_SIZE - 1) / TILE_SIZE;
+        int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+
         for (auto& layer : m_Layers) {
-            if (layer.isGroup) continue; // group headers have no pixels
-            // Rebuild filtered pixel cache if needed
-            RebuildFilteredPixels(layer);
-            // Use filteredPixels if filters exist, else original pixels
-            const std::vector<float>& srcPixels = layer.filters.empty() ? layer.pixels : layer.filteredPixels;
-            if (layer.needsUpload && layer.texture && !srcPixels.empty()) {
-                context->UpdateSubresource(layer.texture, 0, nullptr, srcPixels.data(), m_Width * sizeof(float) * 4, 0);
-                layer.needsUpload = false;
+            if (layer.isGroup) continue;
+            if (!layer.texture) continue;
+
+            // Pick source cache (filtered or raw)
+            TileCache* src = nullptr;
+            if (!layer.filters.empty()) {
+                RebuildFilteredPixels(layer); // may rebuild filteredCache
+                src = layer.filteredCache.get();
             }
+            if (!src) src = layer.tileCache.get();
+            if (!src) continue;
+
+            // Upload only dirty tiles
+            src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
+                D3D11_BOX box;
+                box.left   = tx * TILE_SIZE;
+                box.top    = ty * TILE_SIZE;
+                box.front  = 0;
+                box.right  = std::min(box.left + TILE_SIZE, (UINT)m_Width);
+                box.bottom = std::min(box.top  + TILE_SIZE, (UINT)m_Height);
+                box.back   = 1;
+                UINT pitch = TILE_SIZE * (UINT)src->GetBytesPerPixel();
+                context->UpdateSubresource(layer.texture, 0, &box, data, pitch, 0);
+            });
+            src->ClearAllDirty();
+            layer.needsUpload = false;
         }
-        if (m_SelectionMaskNeedsUpload && m_SelectionMaskTexture) {
-            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, m_SelectionMask.data(), m_Width * sizeof(float), 0);
+
+        // Selection mask upload
+        if (m_SelectionMaskNeedsUpload && m_SelectionMaskTexture && !m_SelectionMask.empty()) {
+            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr,
+                m_SelectionMask.data(), m_Width * sizeof(uint8_t), 0);
             m_SelectionMaskNeedsUpload = false;
         }
+
         device->Release();
     }
 
@@ -1074,7 +1135,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 bool hasPixels = false;
                 for (int y = 0; y < m_Height; ++y) {
                     for (int x = 0; x < m_Width; ++x) {
-                        if (m_OriginalSelectionMask[y * m_Width + x] > 0.0f) {
+                        if (m_OriginalSelectionMask[y * m_Width + x] > 0) {
                             if (x < minX) minX = x;
                             if (x > maxX) maxX = x;
                             if (y < minY) minY = y;
@@ -1285,98 +1346,113 @@ bool Canvas::ExtractAndSetICCProfile(const std::string& pngPath) {
 }
 
 bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath) {
-    std::string ext = "";
+    std::string ext;
     size_t dotPos = filepath.find_last_of('.');
     if (dotPos != std::string::npos) {
         ext = filepath.substr(dotPos + 1);
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     }
 
-    int imgWidth = 0;
-    int imgHeight = 0;
-    std::vector<float> loadedPixels;
+    int imgWidth = 0, imgHeight = 0;
+    std::vector<float>   loadedFloat;   // used for DDS float formats
+    std::vector<uint8_t> loadedU8;      // used for PNG/JPEG/BMP/standard DDS
     DdsFormat loadedDdsFormat = DdsFormat::RGBA8_UNORM;
+    bool isFloatSource = false;
 
     if (ext == "dds") {
         DdsImage dds;
-        if (!DdsHelper::LoadDDS(filepath, dds)) {
-            return false;
-        }
-        imgWidth = dds.width;
-        imgHeight = dds.height;
-        loadedPixels = std::move(dds.pixels);
+        if (!DdsHelper::LoadDDS(filepath, dds)) return false;
+        imgWidth       = dds.width;
+        imgHeight      = dds.height;
         loadedDdsFormat = dds.format;
+
+        // Determine if this is a float-precision source
+        isFloatSource = (dds.format == DdsFormat::RGBA32_FLOAT ||
+                         dds.format == DdsFormat::RGBA16_FLOAT ||
+                         dds.format == DdsFormat::R32_FLOAT    ||
+                         dds.format == DdsFormat::R16_FLOAT);
+
+        // DdsHelper always returns float pixels internally
+        loadedFloat = std::move(dds.pixels);
+
         if (dds.format == DdsFormat::R8_UNORM || dds.format == DdsFormat::R16_FLOAT || dds.format == DdsFormat::R32_FLOAT) {
-            m_ChannelR = true;
-            m_ChannelG = false;
-            m_ChannelB = false;
-            m_ChannelA = false;
-            Logger::Get().Info("Single-channel DDS detected. Auto-configured channels: R=ON, G=OFF, B=OFF, A=OFF");
+            m_ChannelR = true; m_ChannelG = false; m_ChannelB = false; m_ChannelA = false;
+            Logger::Get().Info("Single-channel DDS detected. Auto-configured R-only channels.");
         }
-    } 
-    else {
-        if (!ImageManager::LoadImageFromFile(filepath, loadedPixels, imgWidth, imgHeight)) {
-            return false;
-        }
+    } else {
+        // Standard images: stb_image gives us uint8 RGBA
+        std::vector<float> tmp;
+        if (!ImageManager::LoadImageFromFile(filepath, tmp, imgWidth, imgHeight)) return false;
+        // Convert float [0,1] -> uint8
+        loadedU8.resize(tmp.size());
+        for (size_t i = 0; i < tmp.size(); ++i)
+            loadedU8[i] = (uint8_t)(std::clamp(tmp[i], 0.0f, 1.0f) * 255.0f + 0.5f);
+        isFloatSource = false;
     }
 
     std::string lowerPath = filepath;
     std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower);
-    if (lowerPath.find("normal") != std::string::npos || lowerPath.find("nrm") != std::string::npos || lowerPath.find("bc5") != std::string::npos) {
-        m_ChannelR = true;
-        m_ChannelG = true;
-        m_ChannelB = false;
-        m_ChannelA = false;
-        Logger::Get().Info("Normal map / 2-channel texture detected. Auto-configured channels: R=ON, G=ON, B=OFF, A=OFF");
+    if (lowerPath.find("normal") != std::string::npos ||
+        lowerPath.find("nrm")    != std::string::npos ||
+        lowerPath.find("bc5")    != std::string::npos) {
+        m_ChannelR = true; m_ChannelG = true; m_ChannelB = false; m_ChannelA = false;
+        Logger::Get().Info("Normal map detected. Auto-configured RG channels.");
     }
 
-    bool isFirst = m_Layers.empty() || (m_Layers.size() == 1 && m_Width == 1024 && m_Height == 1024 && m_Layers[0].name == "Background" && (m_Layers[0].pixels.empty() || m_Layers[0].pixels == std::vector<float>((size_t)1024*1024*4, 0.0f)));
+    // --- Detect if this is the first real image load ---
+    bool isFirst = m_Layers.empty() ||
+        (m_Layers.size() == 1 &&
+         m_Layers[0].name == "Background" &&
+         (!m_Layers[0].tileCache || m_Layers[0].tileCache->IsEmpty()));
+
     if (isFirst) {
-        m_Width = imgWidth;
+        m_Width  = imgWidth;
         m_Height = imgHeight;
+
+        // Auto-detect document format: use RGBA32F for float sources
+        m_CanvasFormat = isFloatSource ? CanvasPixelFormat::RGBA32F : CanvasPixelFormat::RGBA8;
+        Logger::Get().Info(std::string("Canvas format: ") +
+            (m_CanvasFormat == CanvasPixelFormat::RGBA32F ? "RGBA32F" : "RGBA8"));
+
         CreateCompositeResources(device);
         m_Layers.clear();
-        m_ProjectType = ProjectType::Simple;
+        m_ProjectType        = ProjectType::Simple;
         m_CurrentProjectFilePath = filepath;
-        m_ExportPath = filepath;
+        m_ExportPath         = filepath;
 
         if (ext == "dds") {
             if (loadedDdsFormat == DdsFormat::RGBA32_FLOAT) m_ExportFormat = "RGBA32_FLOAT";
             else if (loadedDdsFormat == DdsFormat::RGBA16_UNORM) m_ExportFormat = "RGBA16_UNORM";
             else if (loadedDdsFormat == DdsFormat::RGBA16_FLOAT) m_ExportFormat = "RGBA16_FLOAT";
-            else if (loadedDdsFormat == DdsFormat::R8_UNORM) m_ExportFormat = "R8_UNORM";
-            else if (loadedDdsFormat == DdsFormat::R16_FLOAT) m_ExportFormat = "R16_FLOAT";
-            else if (loadedDdsFormat == DdsFormat::R32_FLOAT) m_ExportFormat = "R32_FLOAT";
+            else if (loadedDdsFormat == DdsFormat::R8_UNORM)     m_ExportFormat = "R8_UNORM";
+            else if (loadedDdsFormat == DdsFormat::R16_FLOAT)    m_ExportFormat = "R16_FLOAT";
+            else if (loadedDdsFormat == DdsFormat::R32_FLOAT)    m_ExportFormat = "R32_FLOAT";
             else m_ExportFormat = "RGBA8_UNORM";
-            Logger::Get().Info("Auto-configured DDS export format from loaded file: " + m_ExportFormat);
+            Logger::Get().Info("Auto-configured DDS export format: " + m_ExportFormat);
         } else if (ext == "png") {
             ExtractAndSetICCProfile(filepath);
         }
     }
 
-    // Allocate layer
+    // --- Build Layer with TileCache ---
     Layer imported;
-    imported.name = filepath.substr(filepath.find_last_of("\\/") + 1);
+    imported.name    = filepath.substr(filepath.find_last_of("\\/") + 1);
     imported.visible = true;
     imported.opacity = 1.0f;
-    imported.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
+    imported.tileCache = std::make_unique<TileCache>();
+    imported.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
 
-    // Copy loaded pixels centering them or fitting top-left
-    int copyW = std::min(imgWidth, m_Width);
-    int copyH = std::min(imgHeight, m_Height);
-    for (int y = 0; y < copyH; ++y) {
-        for (int x = 0; x < copyW; ++x) {
-            size_t oldIdx = ((size_t)y * imgWidth + x) * 4;
-            size_t newIdx = ((size_t)y * m_Width + x) * 4;
-            for (int c = 0; c < 4; ++c) {
-                imported.pixels[newIdx + c] = loadedPixels[oldIdx + c];
-            }
-        }
+    if (!loadedFloat.empty()) {
+        // Float source (DDS): import via ImportRGBA32F (handles format conversion internally)
+        imported.tileCache->ImportRGBA32F(loadedFloat.data(), imgWidth, imgHeight);
+    } else if (!loadedU8.empty()) {
+        imported.tileCache->ImportRGBA8(loadedU8.data(), imgWidth, imgHeight);
     }
+    imported.tileCache->MarkAllDirty();
 
     RecreateLayerTexture(device, imported);
-    m_Layers.push_back(imported);
-    m_ActiveLayerIdx = static_cast<int>(m_Layers.size()) - 1;
+    m_Layers.push_back(std::move(imported));
+    m_ActiveLayerIdx = (int)m_Layers.size() - 1;
 
     ResetView();
     Logger::Get().Info("Successfully imported layer from: " + filepath);
@@ -1389,63 +1465,7 @@ bool Canvas::SaveCanvas(const std::string& filepath, DdsFormat ddsFormat) {
         return false;
     }
 
-    // Find the first visible layer index (bottom-most)
-    int firstVisibleIdx = -1;
-    for (int l = 0; l < static_cast<int>(m_Layers.size()); ++l) {
-        if (m_Layers[l].visible) {
-            firstVisibleIdx = l;
-            break;
-        }
-    }
-
-    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
-    if (firstVisibleIdx != -1) {
-        const auto& baseLayer = m_Layers[firstVisibleIdx];
-        if (!baseLayer.pixels.empty()) {
-            size_t copySize = std::min(composite.size(), baseLayer.pixels.size());
-            std::memcpy(composite.data(), baseLayer.pixels.data(), copySize * sizeof(float));
-            if (baseLayer.opacity < 1.0f) {
-                for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
-                    composite[i * 4 + 3] *= baseLayer.opacity;
-                }
-            }
-        }
-    }
-
-    // Blend subsequent visible layers on CPU
-    for (int l = firstVisibleIdx + 1; l < static_cast<int>(m_Layers.size()); ++l) {
-        const auto& layer = m_Layers[l];
-        if (!layer.visible) continue;
-        
-        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
-            size_t base = i * 4;
-            float srcR = 0.0f;
-            float srcG = 0.0f;
-            float srcB = 0.0f;
-            float srcA = 0.0f;
-            if (!layer.pixels.empty()) {
-                srcR = layer.pixels[base + 0];
-                srcG = layer.pixels[base + 1];
-                srcB = layer.pixels[base + 2];
-                srcA = layer.pixels[base + 3] * layer.opacity;
-            }
-
-            if (srcA <= 0.0f) continue;
-
-            float destR = composite[base + 0];
-            float destG = composite[base + 1];
-            float destB = composite[base + 2];
-            float destA = composite[base + 3];
-
-            float outA = srcA + destA * (1.0f - srcA);
-            if (outA > 0.0f) {
-                composite[base + 0] = (srcR * srcA + destR * destA * (1.0f - srcA)) / outA;
-                composite[base + 1] = (srcG * srcA + destG * destA * (1.0f - srcA)) / outA;
-                composite[base + 2] = (srcB * srcA + destB * destA * (1.0f - srcA)) / outA;
-                composite[base + 3] = outA;
-            }
-        }
-    }
+    std::vector<float> composite = ComposeVisibleLayers(m_Layers, m_Width, m_Height);
 
     DdsImage dds;
     dds.width = m_Width;
@@ -1462,64 +1482,7 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
         return false;
     }
 
-    // Find the first visible layer index (bottom-most)
-    int firstVisibleIdx = -1;
-    for (int l = 0; l < static_cast<int>(m_Layers.size()); ++l) {
-        if (m_Layers[l].visible) {
-            firstVisibleIdx = l;
-            break;
-        }
-    }
-
-    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
-    if (firstVisibleIdx != -1) {
-        const auto& baseLayer = m_Layers[firstVisibleIdx];
-        if (!baseLayer.pixels.empty()) {
-            size_t copySize = std::min(composite.size(), baseLayer.pixels.size());
-            std::memcpy(composite.data(), baseLayer.pixels.data(), copySize * sizeof(float));
-            if (baseLayer.opacity < 1.0f) {
-                for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
-                    composite[i * 4 + 3] *= baseLayer.opacity;
-                }
-            }
-        }
-    }
-
-    // Blend subsequent visible layers on CPU
-    for (int l = firstVisibleIdx + 1; l < static_cast<int>(m_Layers.size()); ++l) {
-        const auto& layer = m_Layers[l];
-        if (!layer.visible) continue;
-
-        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
-            size_t base = i * 4;
-            float srcR = 0.0f;
-            float srcG = 0.0f;
-            float srcB = 0.0f;
-            float srcA = 0.0f;
-            if (!layer.pixels.empty()) {
-                srcR = layer.pixels[base + 0];
-                srcG = layer.pixels[base + 1];
-                srcB = layer.pixels[base + 2];
-                srcA = layer.pixels[base + 3] * layer.opacity;
-            }
-
-            if (srcA <= 0.0f) continue;
-
-            float destR = composite[base + 0];
-            float destG = composite[base + 1];
-            float destB = composite[base + 2];
-            float destA = composite[base + 3];
-
-            float outA = srcA + destA * (1.0f - srcA);
-            if (outA > 0.0f) {
-                composite[base + 0] = (srcR * srcA + destR * destA * (1.0f - srcA)) / outA;
-                composite[base + 1] = (srcG * srcA + destG * destA * (1.0f - srcA)) / outA;
-                composite[base + 2] = (srcB * srcA + destB * destA * (1.0f - srcA)) / outA;
-                composite[base + 3] = outA;
-            }
-        }
-    }
-
+    std::vector<float> composite = ComposeVisibleLayers(m_Layers, m_Width, m_Height);
     return ImageManager::SaveImageToFile(filepath, composite, m_Width, m_Height, iccProfilePath);
 }
 
@@ -1577,64 +1540,7 @@ std::vector<float> Canvas::GetCompositePixels() const {
     if (m_Layers.empty()) {
         return std::vector<float>((size_t)m_Width * m_Height * 4, 0.0f);
     }
-
-    int firstVisibleIdx = -1;
-    for (int l = 0; l < static_cast<int>(m_Layers.size()); ++l) {
-        if (m_Layers[l].visible) {
-            firstVisibleIdx = l;
-            break;
-        }
-    }
-
-    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
-    if (firstVisibleIdx != -1) {
-        const auto& baseLayer = m_Layers[firstVisibleIdx];
-        if (!baseLayer.pixels.empty()) {
-            size_t copySize = std::min(composite.size(), baseLayer.pixels.size());
-            std::memcpy(composite.data(), baseLayer.pixels.data(), copySize * sizeof(float));
-            if (baseLayer.opacity < 1.0f) {
-                for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
-                    composite[i * 4 + 3] *= baseLayer.opacity;
-                }
-            }
-        }
-    }
-
-    for (int l = firstVisibleIdx + 1; l < static_cast<int>(m_Layers.size()); ++l) {
-        const auto& layer = m_Layers[l];
-        if (!layer.visible) continue;
-
-        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
-            size_t base = i * 4;
-            float srcR = 0.0f;
-            float srcG = 0.0f;
-            float srcB = 0.0f;
-            float srcA = 0.0f;
-            if (!layer.pixels.empty()) {
-                srcR = layer.pixels[base + 0];
-                srcG = layer.pixels[base + 1];
-                srcB = layer.pixels[base + 2];
-                srcA = layer.pixels[base + 3] * layer.opacity;
-            }
-
-            if (srcA <= 0.0f) continue;
-
-            float destR = composite[base + 0];
-            float destG = composite[base + 1];
-            float destB = composite[base + 2];
-            float destA = composite[base + 3];
-
-            float outA = srcA + destA * (1.0f - srcA);
-            if (outA > 0.0f) {
-                composite[base + 0] = (srcR * srcA + destR * destA * (1.0f - srcA)) / outA;
-                composite[base + 1] = (srcG * srcA + destG * destA * (1.0f - srcA)) / outA;
-                composite[base + 2] = (srcB * srcA + destB * destA * (1.0f - srcA)) / outA;
-                composite[base + 3] = outA;
-            }
-        }
-    }
-
-    return composite;
+    return ComposeVisibleLayers(m_Layers, m_Width, m_Height);
 }
 
 void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height) {
@@ -1643,17 +1549,21 @@ void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name
     if (m_Layers.empty()) {
         m_Width = width;
         m_Height = height;
-        CreateCompositeResources(device);
+        if (device) {
+            CreateCompositeResources(device);
+        }
     }
 
     Layer newLayer;
     newLayer.name = name;
     newLayer.visible = true;
     newLayer.opacity = 1.0f;
-    newLayer.pixels = pixels;
-    newLayer.needsUpload = true;
+    newLayer.tileCache = std::make_unique<TileCache>();
+    newLayer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
 
-    if (width != m_Width || height != m_Height) {
+    if (width == m_Width && height == m_Height) {
+        newLayer.tileCache->ImportRGBA32F(pixels.data(), width, height);
+    } else {
         std::vector<float> resizedPixels((size_t)m_Width * m_Height * 4, 0.0f);
         int offsetX = (m_Width - width) / 2;
         int offsetY = (m_Height - height) / 2;
@@ -1669,8 +1579,10 @@ void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name
                 std::memcpy(&resizedPixels[destIdx], &pixels[srcIdx], 4 * sizeof(float));
             }
         }
-        newLayer.pixels = std::move(resizedPixels);
+        newLayer.tileCache->ImportRGBA32F(resizedPixels.data(), m_Width, m_Height);
     }
+    newLayer.tileCache->MarkAllDirty();
+    newLayer.needsUpload = true;
 
     if (device) {
         RecreateLayerTexture(device, newLayer);
@@ -1681,7 +1593,7 @@ void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name
         insertIdx = static_cast<int>(m_Layers.size());
     }
 
-    m_Layers.insert(m_Layers.begin() + insertIdx, newLayer);
+    m_Layers.insert(m_Layers.begin() + insertIdx, std::move(newLayer));
     m_ActiveLayerIdx = insertIdx;
 
     ClearUndoHistory();
@@ -1784,14 +1696,12 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
 
         // 3. Compress and write pixel data for each layer
         for (auto& layer : m_Layers) {
-            if (layer.pixels.empty()) {
-                layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
-            }
-            uint64_t uncompressedSize = layer.pixels.size() * sizeof(float);
+            std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
+            uint64_t uncompressedSize = layerPixels.size() * sizeof(float);
             
             int compSize = 0;
             unsigned char* compData = stbi_zlib_compress(
-                reinterpret_cast<unsigned char*>(const_cast<float*>(layer.pixels.data())),
+                reinterpret_cast<unsigned char*>(layerPixels.data()),
                 static_cast<int>(uncompressedSize),
                 &compSize,
                 8 // good compression level
@@ -1922,10 +1832,14 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
                 return false;
             }
 
-            layer.pixels.resize(uncompressedSize / sizeof(float));
-            std::memcpy(layer.pixels.data(), decompData, uncompressedSize);
+            std::vector<float> layerPixels(uncompressedSize / sizeof(float));
+            std::memcpy(layerPixels.data(), decompData, uncompressedSize);
             free(decompData);
 
+            layer.tileCache = std::make_unique<TileCache>();
+            layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+            layer.tileCache->ImportRGBA32F(layerPixels.data(), m_Width, m_Height);
+            layer.tileCache->MarkAllDirty();
             layer.needsUpload = true;
             RecreateLayerTexture(device, layer);
 
@@ -2049,11 +1963,7 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
         names.push_back(layer.name);
         visibles.push_back(layer.visible);
         opacities.push_back(layer.opacity);
-        if (layer.pixels.empty()) {
-            pixels.push_back(std::vector<float>((size_t)width * height * 4, 0.0f));
-        } else {
-            pixels.push_back(layer.pixels);
-        }
+        pixels.push_back(ExportLayerF(layer, width, height));
     }
 
     std::string expPath = m_ExportPath;
@@ -2074,53 +1984,7 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
 }
 
 std::vector<float> Canvas::GetComposedPixels() {
-    std::vector<float> composite((size_t)m_Width * m_Height * 4, 0.0f);
-    int firstVisibleIdx = -1;
-    for (int l = 0; l < static_cast<int>(m_Layers.size()); ++l) {
-        if (m_Layers[l].visible) {
-            firstVisibleIdx = l;
-            break;
-        }
-    }
-    if (firstVisibleIdx != -1) {
-        const auto& baseLayer = m_Layers[firstVisibleIdx];
-        if (!baseLayer.pixels.empty()) {
-            size_t copySize = std::min(composite.size(), baseLayer.pixels.size());
-            std::memcpy(composite.data(), baseLayer.pixels.data(), copySize * sizeof(float));
-            if (baseLayer.opacity < 1.0f) {
-                for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
-                    composite[i * 4 + 3] *= baseLayer.opacity;
-                }
-            }
-        }
-    }
-    for (int l = firstVisibleIdx + 1; l < static_cast<int>(m_Layers.size()); ++l) {
-        const auto& layer = m_Layers[l];
-        if (!layer.visible) continue;
-        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i) {
-            size_t base = i * 4;
-            float srcR = 0.0f, srcG = 0.0f, srcB = 0.0f, srcA = 0.0f;
-            if (!layer.pixels.empty()) {
-                srcR = layer.pixels[base + 0];
-                srcG = layer.pixels[base + 1];
-                srcB = layer.pixels[base + 2];
-                srcA = layer.pixels[base + 3] * layer.opacity;
-            }
-            if (srcA <= 0.0f) continue;
-            float destR = composite[base + 0];
-            float destG = composite[base + 1];
-            float destB = composite[base + 2];
-            float destA = composite[base + 3];
-            float outA = srcA + destA * (1.0f - srcA);
-            if (outA > 0.0f) {
-                composite[base + 0] = (srcR * srcA + destR * destA * (1.0f - srcA)) / outA;
-                composite[base + 1] = (srcG * srcA + destG * destA * (1.0f - srcA)) / outA;
-                composite[base + 2] = (srcB * srcA + destB * destA * (1.0f - srcA)) / outA;
-                composite[base + 3] = outA;
-            }
-        }
-    }
-    return composite;
+    return ComposeVisibleLayers(m_Layers, m_Width, m_Height);
 }
 
 void Canvas::CommitTransformation(const std::string& actionName) {
@@ -2131,26 +1995,9 @@ void Canvas::CommitTransformation(const std::string& actionName) {
 
     for (auto& pair : m_ActiveStrokeDeltas) {
         auto& delta = pair.second;
-        delta.newPixels.resize(256 * 256 * 4, 0.0f);
-
-        int startX = delta.tileX * 256;
-        int startY = delta.tileY * 256;
-        for (int y = 0; y < 256; ++y) {
-            int canvasY = startY + y;
-            if (canvasY >= m_Height) break;
-            for (int x = 0; x < 256; ++x) {
-                int canvasX = startX + x;
-                if (canvasX >= m_Width) break;
-                
-                int tileOffset = (y * 256 + x) * 4;
-                int canvasOffset = (canvasY * m_Width + canvasX) * 4;
-                
-                delta.newPixels[tileOffset + 0] = layer.pixels[canvasOffset + 0];
-                delta.newPixels[tileOffset + 1] = layer.pixels[canvasOffset + 1];
-                delta.newPixels[tileOffset + 2] = layer.pixels[canvasOffset + 2];
-                delta.newPixels[tileOffset + 3] = layer.pixels[canvasOffset + 3];
-            }
-        }
+        delta.newPixels = layer.tileCache
+            ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+            : std::vector<uint8_t>{};
         deltas.push_back(std::move(delta));
     }
 
@@ -2166,9 +2013,8 @@ void Canvas::CommitTransformation(const std::string& actionName) {
 void Canvas::FlipActiveLayerHorizontal(ID3D11Device* device) {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
     auto& layer = m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) {
-        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
-    }
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
 
     // Backup all tiles
     m_ActiveStrokeDeltas.clear();
@@ -2186,20 +2032,21 @@ void Canvas::FlipActiveLayerHorizontal(ID3D11Device* device) {
             int leftIdx = (y * m_Width + x) * 4;
             int rightIdx = (y * m_Width + (m_Width - 1 - x)) * 4;
             for (int c = 0; c < 4; ++c) {
-                std::swap(layer.pixels[leftIdx + c], layer.pixels[rightIdx + c]);
+                std::swap(pixels[leftIdx + c], pixels[rightIdx + c]);
             }
         }
     }
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
 
     CommitTransformation("Horizontal Flip");
+    (void)device;
 }
 
 void Canvas::FlipActiveLayerVertical(ID3D11Device* device) {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
     auto& layer = m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) {
-        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
-    }
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
 
     // Backup all tiles
     m_ActiveStrokeDeltas.clear();
@@ -2218,12 +2065,14 @@ void Canvas::FlipActiveLayerVertical(ID3D11Device* device) {
             int topIdx = (y * m_Width + x) * 4;
             int bottomIdx = (targetY * m_Width + x) * 4;
             for (int c = 0; c < 4; ++c) {
-                std::swap(layer.pixels[topIdx + c], layer.pixels[bottomIdx + c]);
+                std::swap(pixels[topIdx + c], pixels[bottomIdx + c]);
             }
         }
     }
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
 
     CommitTransformation("Vertical Flip");
+    (void)device;
 }
 
 void Canvas::RotateCanvas90(ID3D11Device* device, bool clockwise) {
@@ -2236,9 +2085,7 @@ void Canvas::RotateCanvas90(ID3D11Device* device, bool clockwise) {
     ClearUndoHistory();
 
     for (auto& layer : m_Layers) {
-        if (layer.pixels.empty()) {
-            layer.pixels.assign((size_t)oldW * oldH * 4, 0.0f);
-        }
+        auto pixels = ExportLayerF(layer, oldW, oldH);
         std::vector<float> rotated((size_t)newW * newH * 4, 0.0f);
         for (int y = 0; y < oldH; ++y) {
             for (int x = 0; x < oldW; ++x) {
@@ -2247,11 +2094,17 @@ void Canvas::RotateCanvas90(ID3D11Device* device, bool clockwise) {
                 int srcIdx = (y * oldW + x) * 4;
                 int destIdx = (dy * newW + dx) * 4;
                 for (int c = 0; c < 4; ++c) {
-                    rotated[destIdx + c] = layer.pixels[srcIdx + c];
+                    rotated[destIdx + c] = pixels[srcIdx + c];
                 }
             }
         }
-        layer.pixels = std::move(rotated);
+        if (!layer.tileCache) {
+            layer.tileCache = std::make_unique<TileCache>();
+        }
+        layer.tileCache->Init(newW, newH, m_CanvasFormat);
+        layer.tileCache->ImportRGBA32F(rotated.data(), newW, newH);
+        layer.tileCache->MarkAllDirty();
+        layer.needsUpload = true;
     }
 
     m_Width = newW;
@@ -2272,16 +2125,18 @@ void Canvas::RotateCanvas90(ID3D11Device* device, bool clockwise) {
 void Canvas::FlipCanvasHorizontal(ID3D11Device* device) {
     ClearUndoHistory();
     for (auto& layer : m_Layers) {
-        if (layer.pixels.empty()) continue;
+        if (!LayerHasPixels(layer)) continue;
+        auto pixels = ExportLayerF(layer, m_Width, m_Height);
         for (int y = 0; y < m_Height; ++y) {
             for (int x = 0; x < m_Width / 2; ++x) {
                 int leftIdx = (y * m_Width + x) * 4;
                 int rightIdx = (y * m_Width + (m_Width - 1 - x)) * 4;
                 for (int c = 0; c < 4; ++c) {
-                    std::swap(layer.pixels[leftIdx + c], layer.pixels[rightIdx + c]);
+                    std::swap(pixels[leftIdx + c], pixels[rightIdx + c]);
                 }
             }
         }
+        SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
         if (device) {
             RecreateLayerTexture(device, layer);
         }
@@ -2293,17 +2148,19 @@ void Canvas::FlipCanvasHorizontal(ID3D11Device* device) {
 void Canvas::FlipCanvasVertical(ID3D11Device* device) {
     ClearUndoHistory();
     for (auto& layer : m_Layers) {
-        if (layer.pixels.empty()) continue;
+        if (!LayerHasPixels(layer)) continue;
+        auto pixels = ExportLayerF(layer, m_Width, m_Height);
         for (int y = 0; y < m_Height / 2; ++y) {
             int targetY = m_Height - 1 - y;
             for (int x = 0; x < m_Width; ++x) {
                 int topIdx = (y * m_Width + x) * 4;
                 int bottomIdx = (targetY * m_Width + x) * 4;
                 for (int c = 0; c < 4; ++c) {
-                    std::swap(layer.pixels[topIdx + c], layer.pixels[bottomIdx + c]);
+                    std::swap(pixels[topIdx + c], pixels[bottomIdx + c]);
                 }
             }
         }
+        SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
         if (device) {
             RecreateLayerTexture(device, layer);
         }
@@ -2356,22 +2213,22 @@ bool Canvas::SaveProjectAuto() {
 
 void Canvas::ClearSelection() {
     if (!m_HasSelection) return;
-    std::vector<float> oldMask = m_SelectionMask;
+    std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
-    m_SelectionMask.assign(m_Width * m_Height, 0.0f);
+    m_SelectionMask.assign(m_Width * m_Height, 0);
     m_HasSelection = false;
     m_SelectionMaskNeedsUpload = true;
 
     m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Deselect", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
 }
 
-void Canvas::SetSelectionMask(const std::vector<float>& mask) {
+void Canvas::SetSelectionMask(const std::vector<uint8_t>& mask) {
     if (mask.size() == (size_t)m_Width * m_Height) {
         m_SelectionMask = mask;
         m_HasSelection = false;
-        for (float val : m_SelectionMask) {
-            if (val > 0.01f) {
+        for (uint8_t val : m_SelectionMask) {
+            if (val > 0) {
                 m_HasSelection = true;
                 break;
             }
@@ -2386,7 +2243,7 @@ void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
     if (m_SelectionMaskTexture) {
         D3D11_TEXTURE2D_DESC desc = {};
         m_SelectionMaskTexture->GetDesc(&desc);
-        if (desc.Width != m_Width || desc.Height != m_Height) {
+        if (desc.Width != m_Width || desc.Height != m_Height || desc.Format != DXGI_FORMAT_R8_UNORM) {
             m_SelectionMaskTexture->Release(); m_SelectionMaskTexture = nullptr;
             m_SelectionMaskSRV->Release(); m_SelectionMaskSRV = nullptr;
         }
@@ -2398,7 +2255,7 @@ void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
         desc.Height = m_Height;
         desc.MipLevels = 1;
         desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_R32_FLOAT;
+        desc.Format = DXGI_FORMAT_R8_UNORM;
         desc.SampleDesc.Count = 1;
         desc.SampleDesc.Quality = 0;
         desc.Usage = D3D11_USAGE_DEFAULT;
@@ -2414,20 +2271,25 @@ void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
         ID3D11DeviceContext* context = nullptr;
         device->GetImmediateContext(&context);
         if (context) {
-            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, m_SelectionMask.data(), m_Width * sizeof(float), 0);
+            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, m_SelectionMask.data(), m_Width * sizeof(uint8_t), 0);
             context->Release();
         }
     }
 }
 
 void Canvas::ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
-    std::vector<float> oldMask = m_SelectionMask;
+    std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
     cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
     cv::rectangle(temp, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255), -1);
 
-    cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+    cv::Mat current(m_Height, m_Width, CV_8UC1);
+    if (!m_SelectionMask.empty()) {
+        std::memcpy(current.data, m_SelectionMask.data(), m_SelectionMask.size());
+    } else {
+        current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    }
     cv::Mat combined;
     if (add) {
         cv::bitwise_or(current, temp, combined);
@@ -2438,14 +2300,12 @@ void Canvas::ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool s
     }
 
     m_SelectionMask.resize((size_t)m_Width * m_Height);
+    std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
     m_HasSelection = false;
-    for (int y = 0; y < m_Height; ++y) {
-        for (int x = 0; x < m_Width; ++x) {
-            float val = combined.at<uint8_t>(y, x) / 255.0f;
-            m_SelectionMask[(size_t)y * m_Width + x] = val;
-            if (val > 0.01f) {
-                m_HasSelection = true;
-            }
+    for (uint8_t val : m_SelectionMask) {
+        if (val > 0) {
+            m_HasSelection = true;
+            break;
         }
     }
     m_SelectionMaskNeedsUpload = true;
@@ -2454,7 +2314,7 @@ void Canvas::ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool s
 }
 
 void Canvas::ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
-    std::vector<float> oldMask = m_SelectionMask;
+    std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
     cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
@@ -2464,7 +2324,12 @@ void Canvas::ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, boo
         cv::ellipse(temp, center, axes, 0.0, 0.0, 360.0, cv::Scalar(255), -1);
     }
 
-    cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+    cv::Mat current(m_Height, m_Width, CV_8UC1);
+    if (!m_SelectionMask.empty()) {
+        std::memcpy(current.data, m_SelectionMask.data(), m_SelectionMask.size());
+    } else {
+        current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    }
     cv::Mat combined;
     if (add) {
         cv::bitwise_or(current, temp, combined);
@@ -2475,14 +2340,12 @@ void Canvas::ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, boo
     }
 
     m_SelectionMask.resize((size_t)m_Width * m_Height);
+    std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
     m_HasSelection = false;
-    for (int y = 0; y < m_Height; ++y) {
-        for (int x = 0; x < m_Width; ++x) {
-            float val = combined.at<uint8_t>(y, x) / 255.0f;
-            m_SelectionMask[(size_t)y * m_Width + x] = val;
-            if (val > 0.01f) {
-                m_HasSelection = true;
-            }
+    for (uint8_t val : m_SelectionMask) {
+        if (val > 0) {
+            m_HasSelection = true;
+            break;
         }
     }
     m_SelectionMaskNeedsUpload = true;
@@ -2491,7 +2354,7 @@ void Canvas::ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, boo
 }
 
 void Canvas::ApplyLassoSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract) {
-    std::vector<float> oldMask = m_SelectionMask;
+    std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
     cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
@@ -2504,7 +2367,12 @@ void Canvas::ApplyLassoSelection(const std::vector<std::pair<int, int>>& points,
         cv::fillPoly(temp, polys, cv::Scalar(255));
     }
 
-    cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+    cv::Mat current(m_Height, m_Width, CV_8UC1);
+    if (!m_SelectionMask.empty()) {
+        std::memcpy(current.data, m_SelectionMask.data(), m_SelectionMask.size());
+    } else {
+        current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    }
     cv::Mat combined;
     if (add) {
         cv::bitwise_or(current, temp, combined);
@@ -2515,14 +2383,12 @@ void Canvas::ApplyLassoSelection(const std::vector<std::pair<int, int>>& points,
     }
 
     m_SelectionMask.resize((size_t)m_Width * m_Height);
+    std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
     m_HasSelection = false;
-    for (int y = 0; y < m_Height; ++y) {
-        for (int x = 0; x < m_Width; ++x) {
-            float val = combined.at<uint8_t>(y, x) / 255.0f;
-            m_SelectionMask[(size_t)y * m_Width + x] = val;
-            if (val > 0.01f) {
-                m_HasSelection = true;
-            }
+    for (uint8_t val : m_SelectionMask) {
+        if (val > 0) {
+            m_HasSelection = true;
+            break;
         }
     }
     m_SelectionMaskNeedsUpload = true;
@@ -2533,12 +2399,12 @@ void Canvas::ApplyLassoSelection(const std::vector<std::pair<int, int>>& points,
 void Canvas::ApplyMagicWandSelection(ID3D11Device* device, int startX, int startY, float tolerance, bool add, bool subtract, bool contiguous) {
     if (startX < 0 || startX >= m_Width || startY < 0 || startY >= m_Height) return;
 
-    std::vector<float> oldMask = m_SelectionMask;
+    std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
     std::vector<float> srcPixels;
     if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
-        srcPixels = m_Layers[m_ActiveLayerIdx].pixels;
+        srcPixels = ExportLayerF(m_Layers[m_ActiveLayerIdx], m_Width, m_Height);
     } else {
         srcPixels = GetCompositePixels();
     }
@@ -2567,7 +2433,12 @@ void Canvas::ApplyMagicWandSelection(ID3D11Device* device, int startX, int start
         }
     }
 
-    cv::Mat current = ImageManager::PixelsToMat8UC1(m_SelectionMask, m_Width, m_Height);
+    cv::Mat current(m_Height, m_Width, CV_8UC1);
+    if (!m_SelectionMask.empty()) {
+        std::memcpy(current.data, m_SelectionMask.data(), m_SelectionMask.size());
+    } else {
+        current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    }
     cv::Mat combined;
     if (add) {
         cv::bitwise_or(current, temp, combined);
@@ -2578,14 +2449,12 @@ void Canvas::ApplyMagicWandSelection(ID3D11Device* device, int startX, int start
     }
 
     m_SelectionMask.resize((size_t)m_Width * m_Height);
+    std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
     m_HasSelection = false;
-    for (int y = 0; y < m_Height; ++y) {
-        for (int x = 0; x < m_Width; ++x) {
-            float val = combined.at<uint8_t>(y, x) / 255.0f;
-            m_SelectionMask[(size_t)y * m_Width + x] = val;
-            if (val > 0.01f) {
-                m_HasSelection = true;
-            }
+    for (uint8_t val : m_SelectionMask) {
+        if (val > 0) {
+            m_HasSelection = true;
+            break;
         }
     }
     m_SelectionMaskNeedsUpload = true;
@@ -2601,13 +2470,13 @@ void Canvas::ApplySmartSelectSelection(ID3D11Device* device, const std::vector<s
     m_SmartSelectInProgress.store(true);
     m_SmartSelectCancelled.store(false);
 
-    std::vector<float> oldMask = m_SelectionMask;
+    std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
     std::thread t([this, device, points, add, subtract, oldMask, oldHasSelection]() {
         std::vector<float> srcPixels;
         if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
-            srcPixels = m_Layers[m_ActiveLayerIdx].pixels;
+            srcPixels = ExportLayerF(m_Layers[m_ActiveLayerIdx], m_Width, m_Height);
         } else {
             srcPixels = GetCompositePixels();
         }
@@ -2690,7 +2559,12 @@ void Canvas::ApplySmartSelectSelection(ID3D11Device* device, const std::vector<s
             }
         }
 
-        cv::Mat current = ImageManager::PixelsToMat8UC1(oldMask, m_Width, m_Height);
+        cv::Mat current(m_Height, m_Width, CV_8UC1);
+        if (!oldMask.empty()) {
+            std::memcpy(current.data, oldMask.data(), oldMask.size());
+        } else {
+            current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+        }
         cv::Mat combined;
         if (add) {
             cv::bitwise_or(current, temp, combined);
@@ -2701,14 +2575,12 @@ void Canvas::ApplySmartSelectSelection(ID3D11Device* device, const std::vector<s
         }
 
         m_SelectionMask.resize((size_t)m_Width * m_Height);
+        std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
         m_HasSelection = false;
-        for (int y = 0; y < m_Height; ++y) {
-            for (int x = 0; x < m_Width; ++x) {
-                float val = combined.at<uint8_t>(y, x) / 255.0f;
-                m_SelectionMask[(size_t)y * m_Width + x] = val;
-                if (val > 0.01f) {
-                    m_HasSelection = true;
-                }
+        for (uint8_t val : m_SelectionMask) {
+            if (val > 0) {
+                m_HasSelection = true;
+                break;
             }
         }
         m_SelectionMaskNeedsUpload = true;
@@ -2725,11 +2597,9 @@ void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const floa
     if (startX < 0 || startX >= m_Width || startY < 0 || startY >= m_Height) return;
 
     auto& layer = m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) {
-        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
-    }
+    std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
 
-    cv::Mat mat = ImageManager::PixelsToMat8UC3(layer.pixels, m_Width, m_Height);
+    cv::Mat mat = ImageManager::PixelsToMat8UC3(layerPixels, m_Width, m_Height);
     cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
 
     if (contiguous) {
@@ -2775,55 +2645,41 @@ void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const floa
 
     for (int y = 0; y < m_Height; ++y) {
         for (int x = 0; x < m_Width; ++x) {
-            float selectionVal = m_HasSelection ? m_SelectionMask[(size_t)y * m_Width + x] : 1.0f;
+            float selectionVal = m_HasSelection ? SelU82F(m_SelectionMask[(size_t)y * m_Width + x]) : 1.0f;
             float maskVal = temp.at<uint8_t>(y, x) / 255.0f;
             float fillAlpha = maskVal * selectionVal * color[3];
 
             if (fillAlpha > 0.0f) {
                 size_t idx = ((size_t)y * m_Width + x) * 4;
-                float destR = layer.pixels[idx + 0];
-                float destG = layer.pixels[idx + 1];
-                float destB = layer.pixels[idx + 2];
-                float destA = layer.pixels[idx + 3];
+                float destR = layerPixels[idx + 0];
+                float destG = layerPixels[idx + 1];
+                float destB = layerPixels[idx + 2];
+                float destA = layerPixels[idx + 3];
 
                 float outA = fillAlpha + destA * (1.0f - fillAlpha);
                 if (outA > 0.0f) {
-                    layer.pixels[idx + 0] = (color[0] * fillAlpha + destR * destA * (1.0f - fillAlpha)) / outA;
-                    layer.pixels[idx + 1] = (color[1] * fillAlpha + destG * destA * (1.0f - fillAlpha)) / outA;
-                    layer.pixels[idx + 2] = (color[2] * fillAlpha + destB * destA * (1.0f - fillAlpha)) / outA;
-                    layer.pixels[idx + 3] = outA;
+                    layerPixels[idx + 0] = (color[0] * fillAlpha + destR * destA * (1.0f - fillAlpha)) / outA;
+                    layerPixels[idx + 1] = (color[1] * fillAlpha + destG * destA * (1.0f - fillAlpha)) / outA;
+                    layerPixels[idx + 2] = (color[2] * fillAlpha + destB * destA * (1.0f - fillAlpha)) / outA;
+                    layerPixels[idx + 3] = outA;
                 }
             }
         }
     }
 
-    layer.needsUpload = true;
+    SetLayerPixelsF(layer, layerPixels, m_Width, m_Height, m_CanvasFormat);
     m_IsDocumentModified = true;
 
     if (!m_ActiveStrokeDeltas.empty()) {
         std::vector<TileDelta> deltas;
         for (auto& pair : m_ActiveStrokeDeltas) {
             auto& delta = pair.second;
-            delta.newPixels.resize(256 * 256 * 4, 0.0f);
-            int startX = delta.tileX * 256;
-            int startY = delta.tileY * 256;
-            for (int y = 0; y < 256; ++y) {
-                int cy = startY + y;
-                if (cy >= m_Height) break;
-                for (int x = 0; x < 256; ++x) {
-                    int cx = startX + x;
-                    if (cx >= m_Width) break;
-                    size_t srcIdx = ((size_t)cy * m_Width + cx) * 4;
-                    size_t dstIdx = ((size_t)y * 256 + x) * 4;
-                    delta.newPixels[dstIdx + 0] = layer.pixels[srcIdx + 0];
-                    delta.newPixels[dstIdx + 1] = layer.pixels[srcIdx + 1];
-                    delta.newPixels[dstIdx + 2] = layer.pixels[srcIdx + 2];
-                    delta.newPixels[dstIdx + 3] = layer.pixels[srcIdx + 3];
-                }
-            }
-            deltas.push_back(delta);
+            delta.newPixels = layer.tileCache
+                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                : std::vector<uint8_t>{};
+            deltas.push_back(std::move(delta));
         }
-        m_UndoRedoManager.PushCommand(std::make_unique<PaintStrokeCommand>("Bucket Fill", m_ActiveLayerIdx, deltas));
+        m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Bucket Fill", m_ActiveLayerIdx, std::move(deltas)));
         m_ActiveStrokeDeltas.clear();
     }
 }
@@ -2832,9 +2688,7 @@ void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColo
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
 
     auto& layer = m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) {
-        layer.pixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
-    }
+    std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
 
     float dx = (float)(x2 - x1);
     float dy = (float)(y2 - y1);
@@ -2862,54 +2716,40 @@ void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColo
             lerpColor[2] = startColor[2] * (1.0f - t) + endColor[2] * t;
             lerpColor[3] = startColor[3] * (1.0f - t) + endColor[3] * t;
 
-            float selectionVal = m_HasSelection ? m_SelectionMask[(size_t)y * m_Width + x] : 1.0f;
+            float selectionVal = m_HasSelection ? SelU82F(m_SelectionMask[(size_t)y * m_Width + x]) : 1.0f;
             float alphaVal = lerpColor[3] * selectionVal;
 
             if (alphaVal > 0.0f) {
                 size_t idx = ((size_t)y * m_Width + x) * 4;
-                float destR = layer.pixels[idx + 0];
-                float destG = layer.pixels[idx + 1];
-                float destB = layer.pixels[idx + 2];
-                float destA = layer.pixels[idx + 3];
+                float destR = layerPixels[idx + 0];
+                float destG = layerPixels[idx + 1];
+                float destB = layerPixels[idx + 2];
+                float destA = layerPixels[idx + 3];
 
                 float outA = alphaVal + destA * (1.0f - alphaVal);
                 if (outA > 0.0f) {
-                    layer.pixels[idx + 0] = (lerpColor[0] * alphaVal + destR * destA * (1.0f - alphaVal)) / outA;
-                    layer.pixels[idx + 1] = (lerpColor[1] * alphaVal + destG * destA * (1.0f - alphaVal)) / outA;
-                    layer.pixels[idx + 2] = (lerpColor[2] * alphaVal + destB * destA * (1.0f - alphaVal)) / outA;
-                    layer.pixels[idx + 3] = outA;
+                    layerPixels[idx + 0] = (lerpColor[0] * alphaVal + destR * destA * (1.0f - alphaVal)) / outA;
+                    layerPixels[idx + 1] = (lerpColor[1] * alphaVal + destG * destA * (1.0f - alphaVal)) / outA;
+                    layerPixels[idx + 2] = (lerpColor[2] * alphaVal + destB * destA * (1.0f - alphaVal)) / outA;
+                    layerPixels[idx + 3] = outA;
                 }
             }
         }
     }
 
-    layer.needsUpload = true;
+    SetLayerPixelsF(layer, layerPixels, m_Width, m_Height, m_CanvasFormat);
     m_IsDocumentModified = true;
 
     if (!m_ActiveStrokeDeltas.empty()) {
         std::vector<TileDelta> deltas;
         for (auto& pair : m_ActiveStrokeDeltas) {
             auto& delta = pair.second;
-            delta.newPixels.resize(256 * 256 * 4, 0.0f);
-            int startX = delta.tileX * 256;
-            int startY = delta.tileY * 256;
-            for (int y = 0; y < 256; ++y) {
-                int cy = startY + y;
-                if (cy >= m_Height) break;
-                for (int x = 0; x < 256; ++x) {
-                    int cx = startX + x;
-                    if (cx >= m_Width) break;
-                    size_t srcIdx = ((size_t)cy * m_Width + cx) * 4;
-                    size_t dstIdx = ((size_t)y * 256 + x) * 4;
-                    delta.newPixels[dstIdx + 0] = layer.pixels[srcIdx + 0];
-                    delta.newPixels[dstIdx + 1] = layer.pixels[srcIdx + 1];
-                    delta.newPixels[dstIdx + 2] = layer.pixels[srcIdx + 2];
-                    delta.newPixels[dstIdx + 3] = layer.pixels[srcIdx + 3];
-                }
-            }
-            deltas.push_back(delta);
+            delta.newPixels = layer.tileCache
+                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                : std::vector<uint8_t>{};
+            deltas.push_back(std::move(delta));
         }
-        m_UndoRedoManager.PushCommand(std::make_unique<PaintStrokeCommand>("Gradient", m_ActiveLayerIdx, deltas));
+        m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Gradient", m_ActiveLayerIdx, std::move(deltas)));
         m_ActiveStrokeDeltas.clear();
     }
 }
@@ -2936,7 +2776,7 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
     m_FloatingRotation = 0.0f;
     m_StartActiveLayerIdx = m_ActiveLayerIdx;
     
-    m_OriginalSelectionMask.assign(m_Width * m_Height, 1.0f);
+    m_OriginalSelectionMask.assign(m_Width * m_Height, 255);
     if (m_HasSelection) {
         std::copy(m_SelectionMask.begin(), m_SelectionMask.end(), m_OriginalSelectionMask.begin());
     }
@@ -2944,26 +2784,28 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
     Layer& layer = m_Layers[m_ActiveLayerIdx];
     m_FloatingPixels.assign(m_Width * m_Height * 4, 0.0f);
     
+    std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
+    
     for (int y = 0; y < m_Height; ++y) {
         for (int x = 0; x < m_Width; ++x) {
             size_t maskIdx = y * m_Width + x;
-            float weight = m_OriginalSelectionMask[maskIdx];
+            float weight = SelU82F(m_OriginalSelectionMask[maskIdx]);
             if (weight > 0.0f) {
                 size_t pixelIdx = maskIdx * 4;
-                m_FloatingPixels[pixelIdx + 0] = layer.pixels[pixelIdx + 0];
-                m_FloatingPixels[pixelIdx + 1] = layer.pixels[pixelIdx + 1];
-                m_FloatingPixels[pixelIdx + 2] = layer.pixels[pixelIdx + 2];
-                m_FloatingPixels[pixelIdx + 3] = layer.pixels[pixelIdx + 3] * weight;
+                m_FloatingPixels[pixelIdx + 0] = layerPixels[pixelIdx + 0];
+                m_FloatingPixels[pixelIdx + 1] = layerPixels[pixelIdx + 1];
+                m_FloatingPixels[pixelIdx + 2] = layerPixels[pixelIdx + 2];
+                m_FloatingPixels[pixelIdx + 3] = layerPixels[pixelIdx + 3] * weight;
                 
-                layer.pixels[pixelIdx + 0] *= (1.0f - weight);
-                layer.pixels[pixelIdx + 1] *= (1.0f - weight);
-                layer.pixels[pixelIdx + 2] *= (1.0f - weight);
-                layer.pixels[pixelIdx + 3] *= (1.0f - weight);
+                layerPixels[pixelIdx + 0] *= (1.0f - weight);
+                layerPixels[pixelIdx + 1] *= (1.0f - weight);
+                layerPixels[pixelIdx + 2] *= (1.0f - weight);
+                layerPixels[pixelIdx + 3] *= (1.0f - weight);
             }
         }
     }
     
-    layer.needsUpload = true;
+    SetLayerPixelsF(layer, layerPixels, m_Width, m_Height, m_CanvasFormat);
     
     for (int iter = 0; iter < 4; ++iter) {
         std::vector<float> nextFloating = m_FloatingPixels;
@@ -3027,13 +2869,13 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
             if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
             if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
             
-            std::vector<float> floatingMask(m_Width * m_Height, 0.0f);
+            std::vector<uint8_t> floatingMask(m_Width * m_Height, 0);
             for (int y = 0; y < m_Height; ++y) {
                 for (int x = 0; x < m_Width; ++x) {
                     size_t idx = y * m_Width + x;
-                    if (m_OriginalSelectionMask[idx] > 0.0f) {
+                    if (m_OriginalSelectionMask[idx] > 0) {
                         floatingMask[idx] = layer.mask[idx];
-                        layer.mask[idx] = 1.0f;
+                        layer.mask[idx] = 255;
                     }
                 }
             }
@@ -3044,7 +2886,7 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
             mDesc.Height = m_Height;
             mDesc.MipLevels = 1;
             mDesc.ArraySize = 1;
-            mDesc.Format = DXGI_FORMAT_R32_FLOAT;
+            mDesc.Format = DXGI_FORMAT_R8_UNORM;
             mDesc.SampleDesc.Count = 1;
             mDesc.SampleDesc.Quality = 0;
             mDesc.Usage = D3D11_USAGE_DEFAULT;
@@ -3052,7 +2894,7 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
             
             D3D11_SUBRESOURCE_DATA mInitData = {};
             mInitData.pSysMem = floatingMask.data();
-            mInitData.SysMemPitch = m_Width * sizeof(float);
+            mInitData.SysMemPitch = m_Width * sizeof(uint8_t);
             
             hr = device->CreateTexture2D(&mDesc, &mInitData, &m_FloatingMaskTexture);
             if (SUCCEEDED(hr)) {
@@ -3092,7 +2934,7 @@ static float sampleBilinearChannel(const std::vector<float>& pixels, int width, 
     return r1 * (1.0f - ty) + r2 * ty;
 }
 
-static float sampleBilinearMask(const std::vector<float>& mask, int width, int height, float fx, float fy) {
+static float sampleBilinearMask(const std::vector<uint8_t>& mask, int width, int height, float fx, float fy) {
     int x1 = (int)std::floor(fx);
     int y1 = (int)std::floor(fy);
     int x2 = x1 + 1;
@@ -3106,10 +2948,10 @@ static float sampleBilinearMask(const std::vector<float>& mask, int width, int h
     y1 = std::clamp(y1, 0, height - 1);
     y2 = std::clamp(y2, 0, height - 1);
     
-    float c00 = mask[y1 * width + x1];
-    float c10 = mask[y1 * width + x2];
-    float c01 = mask[y2 * width + x1];
-    float c11 = mask[y2 * width + x2];
+    float c00 = SelU82F(mask[y1 * width + x1]);
+    float c10 = SelU82F(mask[y1 * width + x2]);
+    float c01 = SelU82F(mask[y2 * width + x1]);
+    float c11 = SelU82F(mask[y2 * width + x2]);
     
     float r1 = c00 * (1.0f - tx) + c10 * tx;
     float r2 = c01 * (1.0f - tx) + c11 * tx;
@@ -3127,7 +2969,7 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
         bool hasPixels = false;
         for (int y = 0; y < m_Height; ++y) {
             for (int x = 0; x < m_Width; ++x) {
-                if (m_OriginalSelectionMask[y * m_Width + x] > 0.0f) {
+                if (m_OriginalSelectionMask[y * m_Width + x] > 0) {
                     if (x < minX) minX = x;
                     if (x > maxX) maxX = x;
                     if (y < minY) minY = y;
@@ -3139,7 +2981,7 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
         float cx = hasPixels ? (minX + maxX) * 0.5f : m_Width * 0.5f;
         float cy = hasPixels ? (minY + maxY) * 0.5f : m_Height * 0.5f;
         
-        std::vector<float> finalPixels = layer.pixels;
+        std::vector<float> finalPixels = ExportLayerF(layer, m_Width, m_Height);
         for (int y = 0; y < m_Height; ++y) {
             for (int x = 0; x < m_Width; ++x) {
                 // Compute inverse transformation
@@ -3187,11 +3029,10 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
                 }
             }
         }
-        layer.pixels = finalPixels;
-        layer.needsUpload = true;
+        SetLayerPixelsF(layer, finalPixels, m_Width, m_Height, m_CanvasFormat);
         
         if (layer.hasMask && m_FloatingMaskSRV) {
-            std::vector<float> finalMask = layer.mask;
+            std::vector<uint8_t> finalMask = layer.mask;
             for (int y = 0; y < m_Height; ++y) {
                 for (int x = 0; x < m_Width; ++x) {
                     float px = (float)x - cx;
@@ -3217,7 +3058,7 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
                         float maskWeight = sampleBilinearMask(m_OriginalSelectionMask, m_Width, m_Height, srcX, srcY);
                         if (maskWeight > 0.0f) {
                             size_t destIdx = y * m_Width + x;
-                            finalMask[destIdx] = maskWeight;
+                            finalMask[destIdx] = SelF2U8(maskWeight);
                         }
                     }
                 }
@@ -3227,7 +3068,7 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
         }
         
         if (m_HasSelection) {
-            std::vector<float> shiftedSelection(m_Width * m_Height, 0.0f);
+            std::vector<uint8_t> shiftedSelection(m_Width * m_Height, 0);
             for (int y = 0; y < m_Height; ++y) {
                 for (int x = 0; x < m_Width; ++x) {
                     float px = (float)x - cx;
@@ -3251,7 +3092,7 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
                     
                     if (srcX >= 0.0f && srcX <= (float)m_Width - 1.0f && srcY >= 0.0f && srcY <= (float)m_Height - 1.0f) {
                         float maskWeight = sampleBilinearMask(m_OriginalSelectionMask, m_Width, m_Height, srcX, srcY);
-                        shiftedSelection[y * m_Width + x] = maskWeight;
+                        shiftedSelection[y * m_Width + x] = SelF2U8(maskWeight);
                     }
                 }
             }
@@ -3275,20 +3116,21 @@ void Canvas::CancelMovePixels(ID3D11Device* device) {
     
     if (m_StartActiveLayerIdx >= 0 && m_StartActiveLayerIdx < m_Layers.size()) {
         Layer& layer = m_Layers[m_StartActiveLayerIdx];
+        std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
         for (int y = 0; y < m_Height; ++y) {
             for (int x = 0; x < m_Width; ++x) {
                 size_t maskIdx = y * m_Width + x;
-                float weight = m_OriginalSelectionMask[maskIdx];
+                float weight = SelU82F(m_OriginalSelectionMask[maskIdx]);
                 if (weight > 0.0f) {
                     size_t pixelIdx = maskIdx * 4;
-                    layer.pixels[pixelIdx + 0] = m_FloatingPixels[pixelIdx + 0];
-                    layer.pixels[pixelIdx + 1] = m_FloatingPixels[pixelIdx + 1];
-                    layer.pixels[pixelIdx + 2] = m_FloatingPixels[pixelIdx + 2];
-                    layer.pixels[pixelIdx + 3] = m_FloatingPixels[pixelIdx + 3];
+                    layerPixels[pixelIdx + 0] = m_FloatingPixels[pixelIdx + 0];
+                    layerPixels[pixelIdx + 1] = m_FloatingPixels[pixelIdx + 1];
+                    layerPixels[pixelIdx + 2] = m_FloatingPixels[pixelIdx + 2];
+                    layerPixels[pixelIdx + 3] = m_FloatingPixels[pixelIdx + 3];
                 }
             }
         }
-        layer.needsUpload = true;
+        SetLayerPixelsF(layer, layerPixels, m_Width, m_Height, m_CanvasFormat);
     }
     
     if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
@@ -3308,7 +3150,7 @@ void Canvas::DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, flo
     bool hasPixels = false;
     for (int y = 0; y < m_Height; ++y) {
         for (int x = 0; x < m_Width; ++x) {
-            if (m_OriginalSelectionMask[y * m_Width + x] > 0.0f) {
+            if (m_OriginalSelectionMask[y * m_Width + x] > 0) {
                 if (x < minX) minX = x;
                 if (x > maxX) maxX = x;
                 if (y < minY) minY = y;
@@ -3466,100 +3308,112 @@ std::vector<float> Canvas_BuildSplineLUT(const std::vector<std::pair<float,float
 // ============================================================
 
 void Canvas::SelectAll() {
-    m_SelectionMask.assign((size_t)m_Width*m_Height, 1.0f);
+    m_SelectionMask.assign((size_t)m_Width * m_Height, 255);
     m_HasSelection = true;
+    m_SelectionMaskNeedsUpload = true;
     Logger::Get().Info("SelectAll");
 }
 
 void Canvas::InvertSelection() {
     if (!m_HasSelection) { SelectAll(); return; }
-    for (auto& v : m_SelectionMask) v = 1.0f - v;
+    for (auto& v : m_SelectionMask) v = 255 - v;
+    m_SelectionMaskNeedsUpload = true;
     Logger::Get().Info("InvertSelection");
 }
 
 void Canvas::InvertAlpha() {
     if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
     Layer& layer=m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) layer.pixels.assign((size_t)m_Width*m_Height*4,0.f);
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
     for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel=m_HasSelection?m_SelectionMask[y*m_Width+x]:1.f;
+        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
         if (sel<0.5f) continue;
         size_t idx=((size_t)y*m_Width+x)*4;
-        layer.pixels[idx+3]=1.f-layer.pixels[idx+3];
+        pixels[idx+3]=1.f-pixels[idx+3];
     }
-    layer.needsUpload=true; layer.filtersDirty=true;
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
+    layer.filtersDirty=true;
     Logger::Get().Info("InvertAlpha");
 }
 
 void Canvas::ApplyBlur(float radius) {
     if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
     Layer& layer=m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) layer.pixels.assign((size_t)m_Width*m_Height*4,0.f);
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
     int r=std::max(1,(int)radius);
-    std::vector<float> blurred=layer.pixels;
+    std::vector<float> blurred=pixels;
     for (int pass=0;pass<3;++pass){BoxBlurH(blurred,m_Width,m_Height,r);BoxBlurV(blurred,m_Width,m_Height,r);}
     for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel=m_HasSelection?m_SelectionMask[y*m_Width+x]:1.f;
+        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
         if (sel<1e-4f) continue;
         size_t idx=((size_t)y*m_Width+x)*4;
-        for(int c=0;c<4;++c) layer.pixels[idx+c]=layer.pixels[idx+c]*(1.f-sel)+blurred[idx+c]*sel;
+        for(int c=0;c<4;++c) pixels[idx+c]=pixels[idx+c]*(1.f-sel)+blurred[idx+c]*sel;
     }
-    layer.needsUpload=true; layer.filtersDirty=true;
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
+    layer.filtersDirty=true;
     Logger::Get().Info("ApplyBlur r="+std::to_string(r));
 }
 
 void Canvas::ApplyHSV(float dH, float dS, float dV) {
     if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
     Layer& layer=m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) layer.pixels.assign((size_t)m_Width*m_Height*4,0.f);
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
     for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel=m_HasSelection?m_SelectionMask[y*m_Width+x]:1.f;
+        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
         if (sel<1e-4f) continue;
         size_t idx=((size_t)y*m_Width+x)*4;
-        float rr=layer.pixels[idx],gg=layer.pixels[idx+1],bb=layer.pixels[idx+2];
+        float rr=pixels[idx],gg=pixels[idx+1],bb=pixels[idx+2];
         float h,s,v; RGBtoHSV(rr,gg,bb,h,s,v);
         h=fmodf(h+dH+1.f,1.f); s=std::clamp(s+dS,0.f,1.f); v=std::clamp(v+dV,0.f,1.f);
         float nr,ng,nb; HSVtoRGB(h,s,v,nr,ng,nb);
-        layer.pixels[idx]  =layer.pixels[idx]  *(1.f-sel)+nr*sel;
-        layer.pixels[idx+1]=layer.pixels[idx+1]*(1.f-sel)+ng*sel;
-        layer.pixels[idx+2]=layer.pixels[idx+2]*(1.f-sel)+nb*sel;
+        pixels[idx]  =pixels[idx]  *(1.f-sel)+nr*sel;
+        pixels[idx+1]=pixels[idx+1]*(1.f-sel)+ng*sel;
+        pixels[idx+2]=pixels[idx+2]*(1.f-sel)+nb*sel;
     }
-    layer.needsUpload=true; layer.filtersDirty=true;
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
+    layer.filtersDirty=true;
     Logger::Get().Info("ApplyHSV");
 }
 
 void Canvas::ApplyCurves(const std::vector<float>& lut256) {
     if ((int)lut256.size()<256||m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
     Layer& layer=m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) layer.pixels.assign((size_t)m_Width*m_Height*4,0.f);
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
     auto sample=[&](float v)->float{
         float fi=v*255.f; int i=std::clamp((int)fi,0,254); float t=fi-i;
         return lut256[i]*(1.f-t)+lut256[i+1]*t;
     };
     for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel=m_HasSelection?m_SelectionMask[y*m_Width+x]:1.f;
+        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
         if (sel<1e-4f) continue;
         size_t idx=((size_t)y*m_Width+x)*4;
-        for(int c=0;c<3;++c) layer.pixels[idx+c]=layer.pixels[idx+c]*(1.f-sel)+sample(layer.pixels[idx+c])*sel;
+        for(int c=0;c<3;++c) pixels[idx+c]=pixels[idx+c]*(1.f-sel)+sample(pixels[idx+c])*sel;
     }
-    layer.needsUpload=true; layer.filtersDirty=true;
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
+    layer.filtersDirty=true;
     Logger::Get().Info("ApplyCurves");
 }
 
 void Canvas::ApplyNoise(float strength, bool colorNoise) {
     if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
     Layer& layer=m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) layer.pixels.assign((size_t)m_Width*m_Height*4,0.f);
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
     std::mt19937 rng(std::random_device{}());
     std::uniform_real_distribution<float> dist(-1.f,1.f);
     for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel=m_HasSelection?m_SelectionMask[y*m_Width+x]:1.f;
+        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
         if (sel<1e-4f) continue;
         size_t idx=((size_t)y*m_Width+x)*4;
-        if (colorNoise) { for(int c=0;c<3;++c) layer.pixels[idx+c]=std::clamp(layer.pixels[idx+c]+dist(rng)*strength*sel,0.f,1.f); }
-        else { float n=dist(rng)*strength*sel; for(int c=0;c<3;++c) layer.pixels[idx+c]=std::clamp(layer.pixels[idx+c]+n,0.f,1.f); }
+        if (colorNoise) { for(int c=0;c<3;++c) pixels[idx+c]=std::clamp(pixels[idx+c]+dist(rng)*strength*sel,0.f,1.f); }
+        else { float n=dist(rng)*strength*sel; for(int c=0;c<3;++c) pixels[idx+c]=std::clamp(pixels[idx+c]+n,0.f,1.f); }
     }
-    layer.needsUpload=true; layer.filtersDirty=true;
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
+    layer.filtersDirty=true;
     Logger::Get().Info("ApplyNoise");
 }
 
@@ -3570,7 +3424,7 @@ void Canvas::ApplyNoise(float strength, bool colorNoise) {
 void Canvas::SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s) {
     if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
     Layer& layer=m_Layers[m_ActiveLayerIdx];
-    if (layer.pixels.empty()) layer.pixels.assign((size_t)m_Width*m_Height*4,0.f);
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
     int r=std::max(1,(int)s.radius);
 
     auto pickupAt=[&](float cx, float cy){
@@ -3579,8 +3433,9 @@ void Canvas::SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const Smud
             if (dx*dx+dy*dy>r*r) continue;
             int px=std::clamp((int)cx+dx,0,m_Width-1);
             int py=std::clamp((int)cy+dy,0,m_Height-1);
-            size_t idx=((size_t)py*m_Width+px)*4;
-            for(int c=0;c<4;++c) acc[c]+=layer.pixels[idx+c]; ++cnt;
+            float rgba[4];
+            layer.tileCache->GetPixelF(px, py, rgba);
+            for(int c=0;c<4;++c) acc[c]+=rgba[c]; ++cnt;
         }
         if (cnt>0) for(int c=0;c<4;++c) m_SmudgePickup[c]=acc[c]/(float)cnt;
     };
@@ -3606,10 +3461,12 @@ void Canvas::SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const Smud
         float blend=s.strength*falloff;
         int px=std::clamp((int)x+kx,0,m_Width-1);
         int py=std::clamp((int)y+ky,0,m_Height-1);
-        float sel=m_HasSelection?m_SelectionMask[py*m_Width+px]:1.f;
+        float sel = GetSelWeight(m_SelectionMask, m_Width, px, py, m_HasSelection);
         if (sel<1e-4f) continue;
-        size_t idx=((size_t)py*m_Width+px)*4;
-        for(int c=0;c<4;++c) layer.pixels[idx+c]=layer.pixels[idx+c]*(1.f-blend*sel)+m_SmudgePickup[c]*blend*sel;
+        float rgba[4];
+        layer.tileCache->GetPixelF(px, py, rgba);
+        for(int c=0;c<4;++c) rgba[c]=rgba[c]*(1.f-blend*sel)+m_SmudgePickup[c]*blend*sel;
+        layer.tileCache->SetPixelF(px, py, rgba);
     }
     pickupAt(x,y);
     layer.needsUpload=true;
@@ -3621,8 +3478,12 @@ void Canvas::SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const Smud
 
 void Canvas::RebuildFilteredPixels(Layer& layer) {
     if (!layer.filtersDirty) return;
-    if (layer.filters.empty()||layer.pixels.empty()) { layer.filteredPixels=layer.pixels; layer.filtersDirty=false; return; }
-    std::vector<float> tmp=layer.pixels;
+    if (layer.filters.empty() || !LayerHasPixels(layer)) {
+        layer.filteredCache.reset();
+        layer.filtersDirty=false;
+        return;
+    }
+    std::vector<float> tmp = ExportLayerF(layer, m_Width, m_Height);
     int w=m_Width,h=m_Height;
     for (auto& f : layer.filters) {
         if (!f.enabled) continue;
@@ -3653,7 +3514,13 @@ void Canvas::RebuildFilteredPixels(Layer& layer) {
         } break;
         }
     }
-    layer.filteredPixels=std::move(tmp); layer.filtersDirty=false;
+    if (!layer.filteredCache) {
+        layer.filteredCache = std::make_unique<TileCache>();
+    }
+    layer.filteredCache->Init(m_Width, m_Height, m_CanvasFormat);
+    layer.filteredCache->ImportRGBA32F(tmp.data(), m_Width, m_Height);
+    layer.filteredCache->MarkAllDirty();
+    layer.filtersDirty=false;
 }
 
 // ============================================================
@@ -3664,7 +3531,7 @@ void Canvas::CreateGroupCompositeResources(ID3D11Device* device) {
     ReleaseGroupCompositeResources();
     D3D11_TEXTURE2D_DESC desc={};
     desc.Width=m_Width; desc.Height=m_Height; desc.MipLevels=1; desc.ArraySize=1;
-    desc.Format=DXGI_FORMAT_R32G32B32A32_FLOAT; desc.SampleDesc.Count=1;
+    desc.Format=GetLayerDxgiFormat(); desc.SampleDesc.Count=1;
     desc.Usage=D3D11_USAGE_DEFAULT; desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
     if (SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&m_GroupCompositeTexture))) {
         device->CreateRenderTargetView(m_GroupCompositeTexture,nullptr,&m_GroupCompositeRTV);

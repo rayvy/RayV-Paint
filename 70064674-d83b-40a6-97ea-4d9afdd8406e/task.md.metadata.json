@@ -1,0 +1,5 @@
+{
+  "artifactType":  "ARTIFACT_TYPE_TASK",
+  "summary":  "Task list for RayV-Paint core reconstruction supporting 16K textures. Covers 8 phases: lazy start, TileCache new files, Canvas.h Layer struct overhaul, UndoRedo memory limits, PaintEngine TileCache interface, Canvas.cpp full refactor, DdsHelper streaming, ImageManager streaming.",
+  "updatedAt":  "2026-07-06T14:39:03.029215400Z"
+}

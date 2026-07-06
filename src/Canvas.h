@@ -7,6 +7,7 @@
 #include <string>
 #include <atomic>
 #include <functional>
+#include "core/TileCache.h"
 #include "core/PaintEngine.h"
 #include "core/DdsHelper.h"
 #include "core/UndoRedoManager.h"
@@ -46,27 +47,33 @@ struct Layer {
     bool visible = true;
     float opacity = 1.0f;
     BlendMode blendMode = BlendMode::Normal;
-    std::vector<float> pixels; // CPU pixel data: RGBA (32-bit float per channel, size width * height * 4)
+
+    // Primary pixel data (replaces std::vector<float> pixels).
+    // nullptr for group header layers (isGroup == true).
+    std::unique_ptr<TileCache> tileCache;
+
     ID3D11Texture2D* texture = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
-    bool needsUpload = false;
+    bool needsUpload = false; // set true to force full re-upload (fallback)
 
-    // Non-destructive filters (applied at composite time)
+    // Non-destructive filters
     std::vector<LayerFilter> filters;
-    // Cache: pixels with filters applied. Rebuilt when filtersDirty=true.
-    std::vector<float> filteredPixels;
+    // Cache: tileCache with filters applied. Rebuilt when filtersDirty=true.
+    std::unique_ptr<TileCache> filteredCache;
     bool filtersDirty = true;
 
-    std::vector<float> mask;
+    // Mask: single-channel, same canvas dimensions.
+    // Values 0-255 (RGBA8 docs) or float reinterpreted as uint8 for GPU (R8_UNORM).
+    std::vector<uint8_t> mask;
     ID3D11Texture2D* maskTexture = nullptr;
     ID3D11ShaderResourceView* maskSRV = nullptr;
     bool hasMask = false;
     bool maskNeedsUpload = false;
 
     // Group support
-    bool isGroup = false;         // true = this is a group header (no pixels)
-    int  parentGroupId = -1;      // -1 = top-level; index into m_Layers of the group header
-    bool groupExpanded = true;
+    bool isGroup        = false; // group header — no pixel data
+    int  parentGroupId  = -1;    // -1 = top-level
+    bool groupExpanded  = true;
 };
 
 
@@ -144,8 +151,8 @@ public:
     // Selection System
     bool HasSelection() const { return m_HasSelection; }
     void ClearSelection();
-    void SetSelectionMask(const std::vector<float>& mask);
-    const std::vector<float>& GetSelectionMask() const { return m_SelectionMask; }
+    void SetSelectionMask(const std::vector<uint8_t>& mask);
+    const std::vector<uint8_t>& GetSelectionMask() const { return m_SelectionMask; }
     void UpdateSelectionMaskTexture(ID3D11Device* device);
     void ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract);
     void ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, bool subtract);
@@ -285,6 +292,10 @@ private:
     float m_Zoom;
     DirectX::XMFLOAT2 m_Pan;
 
+    // Document pixel format — set at canvas creation or auto-detected on file open.
+    CanvasPixelFormat m_CanvasFormat = CanvasPixelFormat::RGBA8;
+    // Corresponding DXGI format used for layer textures and composite target.
+    DXGI_FORMAT GetLayerDxgiFormat() const;
     bool m_ChannelR = true;
     bool m_ChannelG = true;
     bool m_ChannelB = true;
@@ -372,7 +383,7 @@ private:
 
     // Selection State
     bool m_HasSelection = false;
-    std::vector<float> m_SelectionMask;
+    std::vector<uint8_t> m_SelectionMask; // 0=not selected, 255=fully selected
     ID3D11Texture2D* m_SelectionMaskTexture = nullptr;
     ID3D11ShaderResourceView* m_SelectionMaskSRV = nullptr;
     float m_SelectionOutlineTime = 0.0f;
@@ -383,7 +394,7 @@ private:
     // Move Pixels State
     bool m_IsMovingPixels = false;
     std::vector<float> m_FloatingPixels;
-    std::vector<float> m_OriginalSelectionMask;
+    std::vector<uint8_t> m_OriginalSelectionMask;
     int m_FloatingOffsetX = 0;
     int m_FloatingOffsetY = 0;
     int m_StartActiveLayerIdx = -1;

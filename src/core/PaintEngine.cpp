@@ -1,145 +1,138 @@
 #include "PaintEngine.h"
+#include "TileCache.h"
 #include <cmath>
 #include <algorithm>
 
-void PaintEngine::DrawStamp(std::vector<float>& pixels, int width, int height, 
-                          float cx, float cy, const BrushSettings& brush,
-                          bool mirrorH, bool mirrorV,
-                          const std::vector<float>& selectionMask) {
-    std::vector<std::pair<float, float>> points;
-    points.push_back({ cx, cy });
-    if (mirrorH) {
-        points.push_back({ static_cast<float>(width) - cx, cy });
-    }
-    if (mirrorV) {
-        points.push_back({ cx, static_cast<float>(height) - cy });
-    }
-    if (mirrorH && mirrorV) {
-        points.push_back({ static_cast<float>(width) - cx, static_cast<float>(height) - cy });
-    }
+// ---------------------------------------------------------------------------
+// Internal: single stamp at (px, py) into TileCache
+// ---------------------------------------------------------------------------
+static void StampAt(TileCache& cache, float px, float py,
+                    const BrushSettings& brush,
+                    const std::vector<uint8_t>& selectionMask) {
+    int width  = cache.GetWidth();
+    int height = cache.GetHeight();
+    float r  = brush.radius;
+    float h  = std::clamp(brush.hardness, 0.0f, 1.0f);
+    float op = std::clamp(brush.opacity,  0.0f, 1.0f);
 
-    float r = brush.radius;
-    float h = std::clamp(brush.hardness, 0.0f, 1.0f);
-    float op = std::clamp(brush.opacity, 0.0f, 1.0f);
+    int startX = std::max(0, (int)std::floor(px - r));
+    int endX   = std::min(width  - 1, (int)std::ceil(px + r));
+    int startY = std::max(0, (int)std::floor(py - r));
+    int endY   = std::min(height - 1, (int)std::ceil(py + r));
 
-    for (const auto& pt : points) {
-        float px = pt.first;
-        float py = pt.second;
+    if (startX > endX || startY > endY) return;
 
-        int startX = std::max(0, static_cast<int>(std::floor(px - r)));
-        int endX = std::min(width - 1, static_cast<int>(std::ceil(px + r)));
-        int startY = std::max(0, static_cast<int>(std::floor(py - r)));
-        int endY = std::min(height - 1, static_cast<int>(std::ceil(py + r)));
+    for (int y = startY; y <= endY; ++y) {
+        for (int x = startX; x <= endX; ++x) {
+            float dx   = x - px;
+            float dy   = y - py;
+            float dist = std::sqrt(dx*dx + dy*dy);
+            if (dist >= r) continue;
 
-        for (int y = startY; y <= endY; ++y) {
-            for (int x = startX; x <= endX; ++x) {
-                float dx = x - px;
-                float dy = y - py;
-                float dist = std::sqrt(dx * dx + dy * dy);
-                
-                if (dist < r) {
-                    float intensity = 1.0f;
-                    if (h < 1.0f) {
-                        float coreRadius = r * h;
-                        if (dist > coreRadius) {
-                            intensity = 1.0f - (dist - coreRadius) / (r - coreRadius);
-                        }
-                    }
-                    
-                    float selectionVal = 1.0f;
-                    if (!selectionMask.empty()) {
-                        selectionVal = selectionMask[(size_t)y * width + x];
-                    }
-                    
-                    float stampAlpha = brush.color[3] * op * intensity * selectionVal;
-                    if (stampAlpha <= 0.0f) continue;
-                    
-                    size_t idx = ((size_t)y * width + x) * 4;
-                    if (brush.erase) {
-                        if (brush.writeR) pixels[idx + 0] *= (1.0f - stampAlpha);
-                        if (brush.writeG) pixels[idx + 1] *= (1.0f - stampAlpha);
-                        if (brush.writeB) pixels[idx + 2] *= (1.0f - stampAlpha);
-                        if (brush.writeA) pixels[idx + 3] *= (1.0f - stampAlpha);
-                    } 
-                    else {
-                        float destR = pixels[idx + 0];
-                        float destG = pixels[idx + 1];
-                        float destB = pixels[idx + 2];
-                        float destA = pixels[idx + 3];
-                        
-                        float outA = stampAlpha + destA * (1.0f - stampAlpha);
-                        if (outA > 0.0f) {
-                            if (brush.writeR) pixels[idx + 0] = (brush.color[0] * stampAlpha + destR * destA * (1.0f - stampAlpha)) / outA;
-                            if (brush.writeG) pixels[idx + 1] = (brush.color[1] * stampAlpha + destG * destA * (1.0f - stampAlpha)) / outA;
-                            if (brush.writeB) pixels[idx + 2] = (brush.color[2] * stampAlpha + destB * destA * (1.0f - stampAlpha)) / outA;
-                            if (brush.writeA) pixels[idx + 3] = outA;
-                        }
-                    }
+            float intensity = 1.0f;
+            if (h < 1.0f) {
+                float core = r * h;
+                if (dist > core)
+                    intensity = 1.0f - (dist - core) / (r - core);
+            }
+
+            float selVal = 1.0f;
+            if (!selectionMask.empty()) {
+                selVal = selectionMask[(size_t)y * width + x] / 255.0f;
+            }
+
+            float stampAlpha = brush.color[3] * op * intensity * selVal;
+            if (stampAlpha <= 0.0f) continue;
+
+            float dest[4];
+            cache.GetPixelF(x, y, dest);
+
+            float out[4] = { dest[0], dest[1], dest[2], dest[3] };
+
+            if (brush.erase) {
+                float factor = 1.0f - stampAlpha;
+                if (brush.writeR) out[0] *= factor;
+                if (brush.writeG) out[1] *= factor;
+                if (brush.writeB) out[2] *= factor;
+                if (brush.writeA) out[3] *= factor;
+            } else {
+                float outA = stampAlpha + dest[3] * (1.0f - stampAlpha);
+                if (outA > 0.0f) {
+                    if (brush.writeR) out[0] = (brush.color[0]*stampAlpha + dest[0]*dest[3]*(1.0f-stampAlpha)) / outA;
+                    if (brush.writeG) out[1] = (brush.color[1]*stampAlpha + dest[1]*dest[3]*(1.0f-stampAlpha)) / outA;
+                    if (brush.writeB) out[2] = (brush.color[2]*stampAlpha + dest[2]*dest[3]*(1.0f-stampAlpha)) / outA;
+                    if (brush.writeA) out[3] = outA;
                 }
             }
+
+            cache.SetPixelF(x, y, out);
         }
     }
 }
 
-void PaintEngine::DrawLine(std::vector<float>& pixels, int width, int height, 
-                         float x0, float y0, float x1, float y1, const BrushSettings& brush,
-                         bool mirrorH, bool mirrorV,
-                         const std::vector<float>& selectionMask) {
-    float dx = x1 - x0;
-    float dy = y1 - y0;
-    float distance = std::sqrt(dx * dx + dy * dy);
-    
-    if (distance == 0.0f) {
-        DrawStamp(pixels, width, height, x0, y0, brush, mirrorH, mirrorV, selectionMask);
+// ---------------------------------------------------------------------------
+void PaintEngine::DrawStamp(TileCache& cache,
+                             float cx, float cy, const BrushSettings& brush,
+                             bool mirrorH, bool mirrorV,
+                             const std::vector<uint8_t>& selectionMask) {
+    int w = cache.GetWidth();
+    int h = cache.GetHeight();
+
+    StampAt(cache, cx, cy, brush, selectionMask);
+    if (mirrorH)             StampAt(cache, (float)w - cx, cy,         brush, selectionMask);
+    if (mirrorV)             StampAt(cache, cx,            (float)h-cy, brush, selectionMask);
+    if (mirrorH && mirrorV)  StampAt(cache, (float)w - cx, (float)h-cy, brush, selectionMask);
+}
+
+// ---------------------------------------------------------------------------
+void PaintEngine::DrawLine(TileCache& cache,
+                            float x0, float y0, float x1, float y1,
+                            const BrushSettings& brush,
+                            bool mirrorH, bool mirrorV,
+                            const std::vector<uint8_t>& selectionMask) {
+    float dx = x1 - x0, dy = y1 - y0;
+    float dist = std::sqrt(dx*dx + dy*dy);
+    if (dist == 0.0f) {
+        DrawStamp(cache, x0, y0, brush, mirrorH, mirrorV, selectionMask);
         return;
     }
-    
     float step = std::max(1.0f, brush.radius * 0.1f);
-    int numSteps = static_cast<int>(std::ceil(distance / step));
-    
-    for (int i = 0; i <= numSteps; ++i) {
-        float t = static_cast<float>(i) / numSteps;
-        float cx = x0 + dx * t;
-        float cy = y0 + dy * t;
-        DrawStamp(pixels, width, height, cx, cy, brush, mirrorH, mirrorV, selectionMask);
+    int   n    = (int)std::ceil(dist / step);
+    for (int i = 0; i <= n; ++i) {
+        float t = (float)i / n;
+        DrawStamp(cache, x0 + dx*t, y0 + dy*t, brush, mirrorH, mirrorV, selectionMask);
     }
 }
 
-void PaintEngine::DrawStrokeSegment(std::vector<float>& pixels, int width, int height,
-                                    float x0, float y0, float x1, float y1,
-                                    const BrushSettings& brush, float& distanceAccumulator,
-                                    float& lastDabX, float& lastDabY,
-                                    bool mirrorH, bool mirrorV,
-                                    const std::vector<float>& selectionMask) {
-    float dx = x1 - x0;
-    float dy = y1 - y0;
-    float segmentLength = std::sqrt(dx * dx + dy * dy);
+// ---------------------------------------------------------------------------
+void PaintEngine::DrawStrokeSegment(TileCache& cache,
+                                     float x0, float y0, float x1, float y1,
+                                     const BrushSettings& brush,
+                                     float& distanceAccumulator,
+                                     float& lastDabX, float& lastDabY,
+                                     bool mirrorH, bool mirrorV,
+                                     const std::vector<uint8_t>& selectionMask) {
+    float dx = x1 - x0, dy = y1 - y0;
+    float segLen = std::sqrt(dx*dx + dy*dy);
+    if (segLen == 0.0f) return;
 
-    float spacingDistance = std::max(1.0f, brush.radius * 2.0f * brush.spacing);
-
-    if (segmentLength == 0.0f) {
-        return;
-    }
-
-    float dirX = dx / segmentLength;
-    float dirY = dy / segmentLength;
-
+    float spacing = std::max(1.0f, brush.radius * 2.0f * brush.spacing);
+    float dirX    = dx / segLen, dirY = dy / segLen;
     float traveled = 0.0f;
-    while (traveled <= segmentLength) {
-        float needed = spacingDistance - distanceAccumulator;
-        
-        if (traveled + needed <= segmentLength) {
+
+    while (traveled <= segLen) {
+        float needed = spacing - distanceAccumulator;
+        if (traveled + needed <= segLen) {
             traveled += needed;
             float dabX = x0 + dirX * traveled;
             float dabY = y0 + dirY * traveled;
-            DrawStamp(pixels, width, height, dabX, dabY, brush, mirrorH, mirrorV, selectionMask);
+            DrawStamp(cache, dabX, dabY, brush, mirrorH, mirrorV, selectionMask);
             lastDabX = dabX;
             lastDabY = dabY;
             distanceAccumulator = 0.0f;
         } else {
-            float dxLast = x1 - lastDabX;
-            float dyLast = y1 - lastDabY;
-            distanceAccumulator = std::sqrt(dxLast * dxLast + dyLast * dyLast);
+            float ex = x1 - lastDabX, ey = y1 - lastDabY;
+            distanceAccumulator = std::sqrt(ex*ex + ey*ey);
             break;
         }
     }

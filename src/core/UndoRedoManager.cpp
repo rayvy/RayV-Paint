@@ -2,87 +2,57 @@
 #include "../Canvas.h"
 #include "Logger.h"
 #include "ConfigManager.h"
+#include "TileCache.h"
 
-PaintStrokeCommand::PaintStrokeCommand(const std::string& name, int layerIdx, std::vector<TileDelta> deltas)
+// ---------------------------------------------------------------------------
+// PaintStrokeCommand — now restores tiles via TileCache::RestoreTile
+// ---------------------------------------------------------------------------
+
+PaintStrokeCommand::PaintStrokeCommand(const std::string& name, int layerIdx,
+                                       std::vector<TileDelta> deltas)
     : m_Name(name), m_LayerIdx(layerIdx), m_Deltas(std::move(deltas)) {}
 
 void PaintStrokeCommand::Undo(Canvas* canvas) {
     auto& layers = canvas->GetLayers();
-    if (m_LayerIdx < 0 || m_LayerIdx >= static_cast<int>(layers.size())) return;
+    if (m_LayerIdx < 0 || m_LayerIdx >= (int)layers.size()) return;
     auto& layer = layers[m_LayerIdx];
-    int canvasWidth = canvas->GetWidth();
-    int canvasHeight = canvas->GetHeight();
+    if (!layer.tileCache) return;
 
     for (const auto& delta : m_Deltas) {
-        int startX = delta.tileX * 256;
-        int startY = delta.tileY * 256;
-        
-        for (int y = 0; y < 256; ++y) {
-            int canvasY = startY + y;
-            if (canvasY >= canvasHeight) break;
-            
-            for (int x = 0; x < 256; ++x) {
-                int canvasX = startX + x;
-                if (canvasX >= canvasWidth) break;
-                
-                int tileOffset = (y * 256 + x) * 4;
-                int canvasOffset = (canvasY * canvasWidth + canvasX) * 4;
-                
-                layer.pixels[canvasOffset + 0] = delta.oldPixels[tileOffset + 0];
-                layer.pixels[canvasOffset + 1] = delta.oldPixels[tileOffset + 1];
-                layer.pixels[canvasOffset + 2] = delta.oldPixels[tileOffset + 2];
-                layer.pixels[canvasOffset + 3] = delta.oldPixels[tileOffset + 3];
-            }
-        }
+        layer.tileCache->RestoreTile(delta.tileX, delta.tileY, delta.oldPixels);
     }
     layer.needsUpload = true;
 }
 
 void PaintStrokeCommand::Redo(Canvas* canvas) {
     auto& layers = canvas->GetLayers();
-    if (m_LayerIdx < 0 || m_LayerIdx >= static_cast<int>(layers.size())) return;
+    if (m_LayerIdx < 0 || m_LayerIdx >= (int)layers.size()) return;
     auto& layer = layers[m_LayerIdx];
-    int canvasWidth = canvas->GetWidth();
-    int canvasHeight = canvas->GetHeight();
+    if (!layer.tileCache) return;
 
     for (const auto& delta : m_Deltas) {
-        int startX = delta.tileX * 256;
-        int startY = delta.tileY * 256;
-        
-        for (int y = 0; y < 256; ++y) {
-            int canvasY = startY + y;
-            if (canvasY >= canvasHeight) break;
-            
-            for (int x = 0; x < 256; ++x) {
-                int canvasX = startX + x;
-                if (canvasX >= canvasWidth) break;
-                
-                int tileOffset = (y * 256 + x) * 4;
-                int canvasOffset = (canvasY * canvasWidth + canvasX) * 4;
-                
-                layer.pixels[canvasOffset + 0] = delta.newPixels[tileOffset + 0];
-                layer.pixels[canvasOffset + 1] = delta.newPixels[tileOffset + 1];
-                layer.pixels[canvasOffset + 2] = delta.newPixels[tileOffset + 2];
-                layer.pixels[canvasOffset + 3] = delta.newPixels[tileOffset + 3];
-            }
-        }
+        layer.tileCache->RestoreTile(delta.tileX, delta.tileY, delta.newPixels);
     }
     layer.needsUpload = true;
 }
 
 size_t PaintStrokeCommand::GetMemorySize() const {
-    size_t size = sizeof(PaintStrokeCommand) + m_Name.capacity();
-    for (const auto& delta : m_Deltas) {
-        size += sizeof(TileDelta) + 
-                delta.oldPixels.capacity() * sizeof(float) + 
-                delta.newPixels.capacity() * sizeof(float);
+    size_t sz = sizeof(PaintStrokeCommand) + m_Name.capacity();
+    for (const auto& d : m_Deltas) {
+        sz += sizeof(TileDelta)
+            + d.oldPixels.capacity()
+            + d.newPixels.capacity(); // uint8_t — 1 byte each
     }
-    return size;
+    return sz;
 }
 
-SelectionCommand::SelectionCommand(const std::string& name, 
-                                   std::vector<float> oldMask, bool oldHasSelection,
-                                   std::vector<float> newMask, bool newHasSelection)
+// ---------------------------------------------------------------------------
+// SelectionCommand — mask is now vector<uint8_t>
+// ---------------------------------------------------------------------------
+
+SelectionCommand::SelectionCommand(const std::string& name,
+                                   std::vector<uint8_t> oldMask, bool oldHasSelection,
+                                   std::vector<uint8_t> newMask, bool newHasSelection)
     : m_Name(name)
     , m_OldMask(std::move(oldMask))
     , m_OldHasSelection(oldHasSelection)
@@ -98,15 +68,20 @@ void SelectionCommand::Redo(Canvas* canvas) {
 }
 
 size_t SelectionCommand::GetMemorySize() const {
-    return sizeof(SelectionCommand) + m_Name.capacity() + 
-           m_OldMask.capacity() * sizeof(float) + 
-           m_NewMask.capacity() * sizeof(float);
+    return sizeof(SelectionCommand) + m_Name.capacity()
+        + m_OldMask.capacity() * sizeof(uint8_t)
+        + m_NewMask.capacity() * sizeof(uint8_t);
 }
+
+// ---------------------------------------------------------------------------
+// UndoRedoManager
+// ---------------------------------------------------------------------------
 
 UndoRedoManager::UndoRedoManager() {}
 
 void UndoRedoManager::PushCommand(std::shared_ptr<UndoCommand> command) {
-    m_UndoStack.push_back(command);
+    m_CurrentMemoryBytes += command->GetMemorySize();
+    m_UndoStack.push_back(std::move(command));
     m_RedoStack.clear();
     EnforceLimits();
 }
@@ -117,7 +92,6 @@ bool UndoRedoManager::Undo(Canvas* canvas) {
     m_UndoStack.pop_back();
     cmd->Undo(canvas);
     m_RedoStack.push_back(cmd);
-    EnforceLimits();
     return true;
 }
 
@@ -127,54 +101,45 @@ bool UndoRedoManager::Redo(Canvas* canvas) {
     m_RedoStack.pop_back();
     cmd->Redo(canvas);
     m_UndoStack.push_back(cmd);
-    EnforceLimits();
     return true;
 }
 
 void UndoRedoManager::Clear() {
     m_UndoStack.clear();
     m_RedoStack.clear();
+    m_CurrentMemoryBytes = 0;
 }
 
-bool UndoRedoManager::CanUndo() const {
-    return !m_UndoStack.empty();
-}
-
-bool UndoRedoManager::CanRedo() const {
-    return !m_RedoStack.empty();
-}
+bool UndoRedoManager::CanUndo() const { return !m_UndoStack.empty(); }
+bool UndoRedoManager::CanRedo() const { return !m_RedoStack.empty(); }
 
 std::string UndoRedoManager::GetUndoName() const {
-    if (m_UndoStack.empty()) return "";
-    return m_UndoStack.back()->GetName();
+    return m_UndoStack.empty() ? "" : m_UndoStack.back()->GetName();
 }
 
 std::string UndoRedoManager::GetRedoName() const {
-    if (m_RedoStack.empty()) return "";
-    return m_RedoStack.back()->GetName();
+    return m_RedoStack.empty() ? "" : m_RedoStack.back()->GetName();
 }
 
 void UndoRedoManager::EnforceLimits() {
+    // Step limit from config
     int maxSteps = ConfigManager::Get().GetMaxUndoSteps();
-    size_t maxMemoryBytes = static_cast<size_t>(ConfigManager::Get().GetMaxUndoMemoryMB()) * 1024 * 1024;
-
-    while (static_cast<int>(m_UndoStack.size()) > maxSteps) {
+    while ((int)m_UndoStack.size() > maxSteps && !m_UndoStack.empty()) {
+        m_CurrentMemoryBytes -= m_UndoStack.front()->GetMemorySize();
         m_UndoStack.erase(m_UndoStack.begin());
     }
 
-    while (true) {
-        size_t totalBytes = 0;
-        for (const auto& cmd : m_UndoStack) {
-            totalBytes += cmd->GetMemorySize();
-        }
-        for (const auto& cmd : m_RedoStack) {
-            totalBytes += cmd->GetMemorySize();
-        }
+    // Memory budget: use instance budget (set via SetMemoryBudget) OR config value
+    size_t configBudget = (size_t)ConfigManager::Get().GetMaxUndoMemoryMB() * 1024 * 1024;
+    size_t budget = (m_MemoryBudgetBytes > 0) ? m_MemoryBudgetBytes : configBudget;
 
-        if (totalBytes <= maxMemoryBytes || m_UndoStack.empty()) {
-            break;
-        }
+    // Recompute total (keeps m_CurrentMemoryBytes accurate)
+    m_CurrentMemoryBytes = 0;
+    for (const auto& cmd : m_UndoStack)  m_CurrentMemoryBytes += cmd->GetMemorySize();
+    for (const auto& cmd : m_RedoStack)  m_CurrentMemoryBytes += cmd->GetMemorySize();
 
+    while (m_CurrentMemoryBytes > budget && !m_UndoStack.empty()) {
+        m_CurrentMemoryBytes -= m_UndoStack.front()->GetMemorySize();
         m_UndoStack.erase(m_UndoStack.begin());
     }
 }
