@@ -19,8 +19,11 @@ struct DdsImage {
     std::vector<float> pixels; // Internal representation always float RGBA (32-bit float per channel)
 };
 
+class TileCache;
+
 class DdsHelper {
 public:
     static bool LoadDDS(const std::string& filename, DdsImage& outImage);
+    static bool LoadDDSToTileCache(const std::string& filename, TileCache& outCache, int& outWidth, int& outHeight, DdsFormat& outFormat);
     static bool SaveDDS(const std::string& filename, const DdsImage& image);
 };

@@ -63,7 +63,7 @@ static void stbi_write_func_vector(void* context, void* data, int size) {
     ctx->bytes.insert(ctx->bytes.end(), bytes, bytes + size);
 }
 
-bool ImageManager::LoadImageFromFile(const std::string& filepath, std::vector<float>& outPixels, int& outWidth, int& outHeight) {
+bool ImageManager::LoadImageFromFile(const std::string& filepath, std::vector<uint8_t>& outPixels, int& outWidth, int& outHeight) {
     std::vector<char> buffer;
 #ifdef _WIN32
     std::wstring wpath = UTF8ToWString(filepath);
@@ -93,10 +93,7 @@ bool ImageManager::LoadImageFromFile(const std::string& filepath, std::vector<fl
 
     size_t numPixels = (size_t)outWidth * outHeight;
     outPixels.resize(numPixels * 4);
-
-    for (size_t i = 0; i < numPixels * 4; ++i) {
-        outPixels[i] = data[i] / 255.0f;
-    }
+    std::memcpy(outPixels.data(), data, numPixels * 4);
 
     stbi_image_free(data);
     Logger::Get().Info("Image loaded successfully (" + std::to_string(outWidth) + "x" + std::to_string(outHeight) + "): " + filepath);

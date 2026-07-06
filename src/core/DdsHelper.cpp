@@ -1,8 +1,10 @@
 #include "DdsHelper.h"
+#include "TileCache.h"
 #include "Logger.h"
 #include <fstream>
 #include <cstring>
 #include <algorithm>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -70,6 +72,40 @@ struct DDS_HEADER_DXT10 {
     uint32_t arraySize;
     uint32_t miscFlags2;
 };
+
+static uint8_t FloatToU8(float v) {
+    return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+static float HalfToFloat(uint16_t h) {
+    uint32_t sign = (uint32_t(h) & 0x8000u) << 16;
+    uint32_t exp  = (uint32_t(h) & 0x7C00u) >> 10;
+    uint32_t mant = uint32_t(h) & 0x03FFu;
+
+    uint32_t bits = 0;
+    if (exp == 0) {
+        if (mant == 0) {
+            bits = sign;
+        } else {
+            // Normalize subnormal value.
+            exp = 1;
+            while ((mant & 0x0400u) == 0) {
+                mant <<= 1;
+                --exp;
+            }
+            mant &= 0x03FFu;
+            bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1F) {
+        bits = sign | 0x7F800000u | (mant << 13);
+    } else {
+        bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+
+    float out;
+    std::memcpy(&out, &bits, sizeof(out));
+    return out;
+}
 
 bool DdsHelper::LoadDDS(const std::string& filename, DdsImage& outImage) {
 #ifdef _WIN32
@@ -340,6 +376,402 @@ bool DdsHelper::LoadDDS(const std::string& filename, DdsImage& outImage) {
     }
 
     Logger::Get().Info("DDS texture loaded successfully (" + std::to_string(outImage.width) + "x" + std::to_string(outImage.height) + "): " + filename);
+    return true;
+}
+
+bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCache, int& outWidth, int& outHeight, DdsFormat& outFormat) {
+#ifdef _WIN32
+    std::ifstream file(UTF8ToWString(filename), std::ios::binary);
+#else
+    std::ifstream file(filename, std::ios::binary);
+#endif
+    if (!file.is_open()) {
+        Logger::Get().Error("Failed to open DDS file for reading: " + filename);
+        return false;
+    }
+
+    uint32_t magic = 0;
+    file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    if (magic != MAKEFOURCC('D', 'D', 'S', ' ')) {
+        Logger::Get().Error("Invalid DDS magic number in file: " + filename);
+        return false;
+    }
+
+    DDS_HEADER header;
+    file.read(reinterpret_cast<char*>(&header), sizeof(header));
+    if (header.dwSize != 124 || header.ddspf.dwSize != 32) {
+        Logger::Get().Error("Invalid DDS header size in file: " + filename);
+        return false;
+    }
+
+    outWidth = static_cast<int>(header.dwWidth);
+    outHeight = static_cast<int>(header.dwHeight);
+    outCache.Init(outWidth, outHeight, CanvasPixelFormat::RGBA8);
+
+    bool isDX10 = (header.ddspf.dwFlags & 0x4) && (header.ddspf.dwFourCC == MAKEFOURCC('D', 'X', '1', '0'));
+
+    enum class CompressionFormat {
+        None,
+        BC1,
+        BC2,
+        BC3,
+        BC4,
+        BC5,
+        BC7
+    };
+
+    CompressionFormat compFormat = CompressionFormat::None;
+    size_t blockSize = 0;
+    uint32_t dxgiFormat = 0;
+
+    if (isDX10) {
+        DDS_HEADER_DXT10 dxt10Header;
+        file.read(reinterpret_cast<char*>(&dxt10Header), sizeof(dxt10Header));
+        dxgiFormat = dxt10Header.dxgiFormat;
+
+        if (dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM) {
+            outFormat = DdsFormat::RGBA8_UNORM;
+        } else if (dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT) {
+            outFormat = DdsFormat::RGBA32_FLOAT;
+        } else if (dxgiFormat == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            outFormat = DdsFormat::RGBA16_FLOAT;
+        } else if (dxgiFormat == DXGI_FORMAT_R16G16B16A16_UNORM) {
+            outFormat = DdsFormat::RGBA16_UNORM;
+        } else if (dxgiFormat == DXGI_FORMAT_R32_FLOAT) {
+            outFormat = DdsFormat::R32_FLOAT;
+        } else if (dxgiFormat == DXGI_FORMAT_R16_FLOAT) {
+            outFormat = DdsFormat::R16_FLOAT;
+        } else if (dxgiFormat == DXGI_FORMAT_R8_UNORM) {
+            outFormat = DdsFormat::R8_UNORM;
+        } else if (dxgiFormat == 71 || dxgiFormat == 72) {
+            compFormat = CompressionFormat::BC1;
+            blockSize = 8;
+            outFormat = DdsFormat::RGBA8_UNORM;
+        } else if (dxgiFormat == 74 || dxgiFormat == 75) {
+            compFormat = CompressionFormat::BC2;
+            blockSize = 16;
+            outFormat = DdsFormat::RGBA8_UNORM;
+        } else if (dxgiFormat == 77 || dxgiFormat == 78) {
+            compFormat = CompressionFormat::BC3;
+            blockSize = 16;
+            outFormat = DdsFormat::RGBA8_UNORM;
+        } else if (dxgiFormat == 80 || dxgiFormat == 81) {
+            compFormat = CompressionFormat::BC4;
+            blockSize = 8;
+            outFormat = DdsFormat::R8_UNORM;
+        } else if (dxgiFormat == 83 || dxgiFormat == 84) {
+            compFormat = CompressionFormat::BC5;
+            blockSize = 16;
+            outFormat = DdsFormat::RGBA8_UNORM;
+        } else if (dxgiFormat == 98 || dxgiFormat == 99) {
+            compFormat = CompressionFormat::BC7;
+            blockSize = 16;
+            outFormat = DdsFormat::RGBA8_UNORM;
+        } else {
+            Logger::Get().Error("Unsupported DXGI format " + std::to_string(dxgiFormat) + " in DDS file: " + filename);
+            return false;
+        }
+    } else {
+        bool isFourCC = (header.ddspf.dwFlags & 0x4);
+        if (isFourCC) {
+            uint32_t fourCC = header.ddspf.dwFourCC;
+            if (fourCC == MAKEFOURCC('D', 'X', 'T', '1')) {
+                compFormat = CompressionFormat::BC1;
+                blockSize = 8;
+                outFormat = DdsFormat::RGBA8_UNORM;
+            } else if (fourCC == MAKEFOURCC('D', 'X', 'T', '3')) {
+                compFormat = CompressionFormat::BC2;
+                blockSize = 16;
+                outFormat = DdsFormat::RGBA8_UNORM;
+            } else if (fourCC == MAKEFOURCC('D', 'X', 'T', '5')) {
+                compFormat = CompressionFormat::BC3;
+                blockSize = 16;
+                outFormat = DdsFormat::RGBA8_UNORM;
+            } else if (fourCC == MAKEFOURCC('A', 'T', 'I', '1') || fourCC == MAKEFOURCC('B', 'C', '4', 'U')) {
+                compFormat = CompressionFormat::BC4;
+                blockSize = 8;
+                outFormat = DdsFormat::R8_UNORM;
+            } else if (fourCC == MAKEFOURCC('A', 'T', 'I', '2') || fourCC == MAKEFOURCC('B', 'C', '5', 'U')) {
+                compFormat = CompressionFormat::BC5;
+                blockSize = 16;
+                outFormat = DdsFormat::RGBA8_UNORM;
+            } else {
+                Logger::Get().Error("Unsupported legacy FourCC format in DDS file: " + filename);
+                return false;
+            }
+        } else {
+            bool isRGBA = (header.ddspf.dwFlags & 0x40) || (header.ddspf.dwFlags & 0x41);
+            if (isRGBA && header.ddspf.dwRGBBitCount == 32) {
+                outFormat = DdsFormat::RGBA8_UNORM;
+            } else {
+                Logger::Get().Error("Unsupported legacy DDS format. Only uncompressed 32-bit RGBA/BGRA is supported natively in: " + filename);
+                return false;
+            }
+        }
+    }
+
+    auto writeRowRGBA8 = [&](const std::vector<uint8_t>& row, int y) {
+        if (y >= 0 && y < outHeight) {
+            outCache.ImportRGBA8(row.data(), outWidth, 1, 0, y);
+        }
+    };
+
+    if (isDX10 && dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT) {
+        std::vector<float> rowFloats((size_t)outWidth * 4);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowFloats.data()), (std::streamsize)rowFloats.size() * (std::streamsize)sizeof(float));
+            if (!file) {
+                Logger::Get().Error("Failed reading RGBA32F pixel row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                size_t src = (size_t)x * 4;
+                size_t dst = src;
+                rowRGBA[dst + 0] = FloatToU8(rowFloats[src + 0]);
+                rowRGBA[dst + 1] = FloatToU8(rowFloats[src + 1]);
+                rowRGBA[dst + 2] = FloatToU8(rowFloats[src + 2]);
+                rowRGBA[dst + 3] = FloatToU8(rowFloats[src + 3]);
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        std::vector<uint16_t> rowHalf((size_t)outWidth * 4);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowHalf.data()), (std::streamsize)rowHalf.size() * (std::streamsize)sizeof(uint16_t));
+            if (!file) {
+                Logger::Get().Error("Failed reading RGBA16F pixel row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                size_t src = (size_t)x * 4;
+                size_t dst = src;
+                rowRGBA[dst + 0] = FloatToU8(HalfToFloat(rowHalf[src + 0]));
+                rowRGBA[dst + 1] = FloatToU8(HalfToFloat(rowHalf[src + 1]));
+                rowRGBA[dst + 2] = FloatToU8(HalfToFloat(rowHalf[src + 2]));
+                rowRGBA[dst + 3] = FloatToU8(HalfToFloat(rowHalf[src + 3]));
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R16G16B16A16_UNORM) {
+        std::vector<uint16_t> rowU16((size_t)outWidth * 4);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowU16.data()), (std::streamsize)rowU16.size() * (std::streamsize)sizeof(uint16_t));
+            if (!file) {
+                Logger::Get().Error("Failed reading RGBA16UNORM pixel row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                size_t src = (size_t)x * 4;
+                size_t dst = src;
+                rowRGBA[dst + 0] = static_cast<uint8_t>((rowU16[src + 0] / 65535.0f) * 255.0f + 0.5f);
+                rowRGBA[dst + 1] = static_cast<uint8_t>((rowU16[src + 1] / 65535.0f) * 255.0f + 0.5f);
+                rowRGBA[dst + 2] = static_cast<uint8_t>((rowU16[src + 2] / 65535.0f) * 255.0f + 0.5f);
+                rowRGBA[dst + 3] = static_cast<uint8_t>((rowU16[src + 3] / 65535.0f) * 255.0f + 0.5f);
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R32_FLOAT) {
+        std::vector<float> rowFloats((size_t)outWidth);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowFloats.data()), (std::streamsize)rowFloats.size() * (std::streamsize)sizeof(float));
+            if (!file) {
+                Logger::Get().Error("Failed reading R32F pixel row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                uint8_t v = FloatToU8(rowFloats[(size_t)x]);
+                size_t dst = (size_t)x * 4;
+                rowRGBA[dst + 0] = v;
+                rowRGBA[dst + 1] = v;
+                rowRGBA[dst + 2] = v;
+                rowRGBA[dst + 3] = 255;
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R16_FLOAT) {
+        std::vector<uint16_t> rowHalf((size_t)outWidth);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowHalf.data()), (std::streamsize)rowHalf.size() * (std::streamsize)sizeof(uint16_t));
+            if (!file) {
+                Logger::Get().Error("Failed reading R16F pixel row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                uint8_t v = FloatToU8(HalfToFloat(rowHalf[(size_t)x]));
+                size_t dst = (size_t)x * 4;
+                rowRGBA[dst + 0] = v;
+                rowRGBA[dst + 1] = v;
+                rowRGBA[dst + 2] = v;
+                rowRGBA[dst + 3] = 255;
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R8_UNORM) {
+        std::vector<uint8_t> rowR((size_t)outWidth);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowR.data()), (std::streamsize)rowR.size());
+            if (!file) {
+                Logger::Get().Error("Failed reading R8 pixel row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                uint8_t v = rowR[(size_t)x];
+                size_t dst = (size_t)x * 4;
+                rowRGBA[dst + 0] = v;
+                rowRGBA[dst + 1] = v;
+                rowRGBA[dst + 2] = v;
+                rowRGBA[dst + 3] = 255;
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM) {
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowRGBA.data()), (std::streamsize)rowRGBA.size());
+            if (!file) {
+                Logger::Get().Error("Failed reading RGBA8 pixel row from: " + filename);
+                return false;
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+    } else if (compFormat != CompressionFormat::None) {
+        int blocksW = (outWidth + 3) / 4;
+        int blocksH = (outHeight + 3) / 4;
+        std::vector<uint8_t> compressedRow((size_t)blocksW * blockSize);
+
+        if (compFormat == CompressionFormat::BC1 || compFormat == CompressionFormat::BC2 ||
+            compFormat == CompressionFormat::BC3 || compFormat == CompressionFormat::BC7) {
+            const int decodedStride = blocksW * 4 * 4;
+            std::vector<uint8_t> decoded((size_t)decodedStride * 4);
+            for (int by = 0; by < blocksH; ++by) {
+                file.read(reinterpret_cast<char*>(compressedRow.data()), (std::streamsize)compressedRow.size());
+                if (!file) {
+                    Logger::Get().Error("Failed to read compressed DDS row from: " + filename);
+                    return false;
+                }
+
+                for (int bx = 0; bx < blocksW; ++bx) {
+                    const uint8_t* blockSrc = compressedRow.data() + (size_t)bx * blockSize;
+                    uint8_t* blockDst = decoded.data() + (size_t)bx * 4 * 4;
+                    if (compFormat == CompressionFormat::BC1) {
+                        bcdec_bc1(blockSrc, blockDst, decodedStride);
+                    } else if (compFormat == CompressionFormat::BC2) {
+                        bcdec_bc2(blockSrc, blockDst, decodedStride);
+                    } else if (compFormat == CompressionFormat::BC3) {
+                        bcdec_bc3(blockSrc, blockDst, decodedStride);
+                    } else {
+                        bcdec_bc7(blockSrc, blockDst, decodedStride);
+                    }
+                }
+
+                for (int row = 0; row < 4; ++row) {
+                    int y = by * 4 + row;
+                    if (y >= outHeight) break;
+                    const uint8_t* rowPtr = decoded.data() + (size_t)row * decodedStride;
+                    outCache.ImportRGBA8(rowPtr, blocksW * 4, 1, 0, y);
+                }
+            }
+        } else if (compFormat == CompressionFormat::BC4) {
+            const int decodedStride = blocksW * 4;
+            std::vector<uint8_t> decodedR((size_t)decodedStride * 4);
+            std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+            for (int by = 0; by < blocksH; ++by) {
+                file.read(reinterpret_cast<char*>(compressedRow.data()), (std::streamsize)compressedRow.size());
+                if (!file) {
+                    Logger::Get().Error("Failed to read compressed DDS row from: " + filename);
+                    return false;
+                }
+
+                for (int bx = 0; bx < blocksW; ++bx) {
+                    const uint8_t* blockSrc = compressedRow.data() + (size_t)bx * blockSize;
+                    uint8_t* blockDst = decodedR.data() + (size_t)bx * 4;
+                    bcdec_bc4(blockSrc, blockDst, decodedStride);
+                }
+
+                for (int row = 0; row < 4; ++row) {
+                    int y = by * 4 + row;
+                    if (y >= outHeight) break;
+                    const uint8_t* srcRow = decodedR.data() + (size_t)row * decodedStride;
+                    for (int x = 0; x < outWidth; ++x) {
+                        uint8_t v = srcRow[x];
+                        size_t dst = (size_t)x * 4;
+                        rowRGBA[dst + 0] = v;
+                        rowRGBA[dst + 1] = v;
+                        rowRGBA[dst + 2] = v;
+                        rowRGBA[dst + 3] = 255;
+                    }
+                    writeRowRGBA8(rowRGBA, y);
+                }
+            }
+        } else if (compFormat == CompressionFormat::BC5) {
+            const int decodedStride = blocksW * 4 * 2;
+            std::vector<uint8_t> decodedRG((size_t)decodedStride * 4);
+            std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+            for (int by = 0; by < blocksH; ++by) {
+                file.read(reinterpret_cast<char*>(compressedRow.data()), (std::streamsize)compressedRow.size());
+                if (!file) {
+                    Logger::Get().Error("Failed to read compressed DDS row from: " + filename);
+                    return false;
+                }
+
+                for (int bx = 0; bx < blocksW; ++bx) {
+                    const uint8_t* blockSrc = compressedRow.data() + (size_t)bx * blockSize;
+                    uint8_t* blockDst = decodedRG.data() + (size_t)bx * 4 * 2;
+                    bcdec_bc5(blockSrc, blockDst, decodedStride);
+                }
+
+                for (int row = 0; row < 4; ++row) {
+                    int y = by * 4 + row;
+                    if (y >= outHeight) break;
+                    const uint8_t* srcRow = decodedRG.data() + (size_t)row * decodedStride;
+                    for (int x = 0; x < outWidth; ++x) {
+                        size_t src = (size_t)x * 2;
+                        size_t dst = (size_t)x * 4;
+                        rowRGBA[dst + 0] = srcRow[src + 0];
+                        rowRGBA[dst + 1] = srcRow[src + 1];
+                        rowRGBA[dst + 2] = 0;
+                        rowRGBA[dst + 3] = 255;
+                    }
+                    writeRowRGBA8(rowRGBA, y);
+                }
+            }
+        }
+    } else {
+        std::vector<uint8_t> rowBytes((size_t)outWidth * 4);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        bool isBGRA = (header.ddspf.dwRBitMask == 0x00ff0000);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowBytes.data()), (std::streamsize)rowBytes.size());
+            if (!file) {
+                Logger::Get().Error("Failed reading RGBA8 pixel row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                size_t src = (size_t)x * 4;
+                size_t dst = src;
+                if (isBGRA) {
+                    rowRGBA[dst + 0] = rowBytes[src + 2];
+                    rowRGBA[dst + 1] = rowBytes[src + 1];
+                    rowRGBA[dst + 2] = rowBytes[src + 0];
+                    rowRGBA[dst + 3] = rowBytes[src + 3];
+                } else {
+                    rowRGBA[dst + 0] = rowBytes[src + 0];
+                    rowRGBA[dst + 1] = rowBytes[src + 1];
+                    rowRGBA[dst + 2] = rowBytes[src + 2];
+                    rowRGBA[dst + 3] = rowBytes[src + 3];
+                }
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+    }
+
+    Logger::Get().Info("DDS texture loaded successfully (" + std::to_string(outWidth) + "x" + std::to_string(outHeight) + "): " + filename);
     return true;
 }
 

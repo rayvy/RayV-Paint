@@ -53,6 +53,7 @@ static void SetLayerPixelsF(Layer& layer, const std::vector<float>& pixels, int 
     layer.tileCache->ImportRGBA32F(pixels.data(), w, h);
     layer.tileCache->MarkAllDirty();
     layer.needsUpload = true;
+    layer.filtersDirty = true;
 }
 static bool LayerHasPixels(const Layer& layer) {
     return layer.tileCache && !layer.tileCache->IsEmpty();
@@ -118,6 +119,22 @@ static std::vector<float> ComposeVisibleLayers(const std::vector<Layer>& layers,
         }
     }
     return composite;
+}
+
+static void ComputeCompositePreviewSize(int canvasW, int canvasH, int& outW, int& outH) {
+    constexpr int kProxyThreshold = 4096;
+    constexpr int kProxyMaxDim = 2048;
+
+    int maxDim = std::max(canvasW, canvasH);
+    if (maxDim <= kProxyThreshold) {
+        outW = std::max(1, canvasW);
+        outH = std::max(1, canvasH);
+        return;
+    }
+
+    float scale = (float)kProxyMaxDim / (float)maxDim;
+    outW = std::max(1, (int)std::round(canvasW * scale));
+    outH = std::max(1, (int)std::round(canvasH * scale));
 }
 
 // Get the directory containing the running executable
@@ -454,9 +471,11 @@ void Canvas::Shutdown() {
 void Canvas::CreateCompositeResources(ID3D11Device* device) {
     ReleaseCompositeResources();
 
+    ComputeCompositePreviewSize(m_Width, m_Height, m_CompositeWidth, m_CompositeHeight);
+
     D3D11_TEXTURE2D_DESC desc = {};
-    desc.Width = m_Width;
-    desc.Height = m_Height;
+    desc.Width = m_CompositeWidth;
+    desc.Height = m_CompositeHeight;
     desc.MipLevels = 1;
     desc.ArraySize = 1;
     desc.Format = GetLayerDxgiFormat();
@@ -473,12 +492,15 @@ void Canvas::CreateCompositeResources(ID3D11Device* device) {
 
     m_SelectionMask.assign((size_t)m_Width * m_Height, 0);
     m_HasSelection = false;
+    m_CompositeDirty = true;
 }
 
 void Canvas::ReleaseCompositeResources() {
     if (m_CompositeTexture) { m_CompositeTexture->Release(); m_CompositeTexture = nullptr; }
     if (m_CompositeRTV) { m_CompositeRTV->Release(); m_CompositeRTV = nullptr; }
     if (m_CompositeSRV) { m_CompositeSRV->Release(); m_CompositeSRV = nullptr; }
+    m_CompositeWidth = 0;
+    m_CompositeHeight = 0;
     if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
     if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
     if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
@@ -496,6 +518,7 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
     if (device) {
         UpdateLayerMaskTexture(device, index);
     }
+    m_CompositeDirty = true;
     
     Logger::Get().Info("Created layer mask for layer: " + layer.name);
 }
@@ -517,6 +540,7 @@ void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     if (device) {
         UpdateLayerMaskTexture(device, index);
     }
+    m_CompositeDirty = true;
     
     Logger::Get().Info("Created layer mask from selection for layer: " + layer.name);
 }
@@ -530,6 +554,7 @@ void Canvas::DeleteLayerMask(int index) {
     layer.mask.clear();
     layer.hasMask = false;
     layer.maskNeedsUpload = false;
+    m_CompositeDirty = true;
     
     Logger::Get().Info("Deleted layer mask for layer: " + layer.name);
 }
@@ -566,6 +591,7 @@ void Canvas::ApplyLayerMask(int index) {
     layer.tileCache->MarkAllDirty();
     
     layer.needsUpload = true;
+    layer.filtersDirty = true;
     DeleteLayerMask(index);
     
     if (!m_ActiveStrokeDeltas.empty()) {
@@ -613,6 +639,7 @@ void Canvas::UpdateLayerMaskTexture(ID3D11Device* device, int index) {
         device->CreateShaderResourceView(layer.maskTexture, nullptr, &layer.maskSRV);
     }
     layer.maskNeedsUpload = false;
+    m_CompositeDirty = true;
 }
 
 DXGI_FORMAT Canvas::GetLayerDxgiFormat() const {
@@ -670,6 +697,7 @@ void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
 
     m_Layers.push_back(std::move(newLayer));
     m_ActiveLayerIdx = (int)m_Layers.size() - 1;
+    m_CompositeDirty = true;
     Logger::Get().Info("Created new layer: " + name);
 }
 
@@ -690,6 +718,8 @@ void Canvas::DeleteLayer(int index) {
     } else {
         m_ActiveLayerIdx = std::clamp(m_ActiveLayerIdx, 0, static_cast<int>(m_Layers.size()) - 1);
     }
+
+    m_CompositeDirty = true;
 }
 
 void Canvas::SetActiveLayerIndex(int idx) {
@@ -732,6 +762,8 @@ void Canvas::ToggleLayerIsolation(int layerIdx) {
         m_IsIsolatedMode = true;
         m_IsolatedLayerIdx = layerIdx;
     }
+
+    m_CompositeDirty = true;
 }
 
 void Canvas::BackupTile(int tileX, int tileY) {
@@ -829,6 +861,7 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                                m_MirrorHorizontal, m_MirrorVertical,
                                m_HasSelection ? m_SelectionMask : std::vector<uint8_t>{});
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
+        m_Layers[m_ActiveLayerIdx].filtersDirty = true;
     }
     else if (phase == StrokePhase::Update && m_IsStrokeActive) {
         // Apply stabilization
@@ -881,6 +914,7 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         m_PrevStabilizedX = stabilizedX;
         m_PrevStabilizedY = stabilizedY;
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
+        m_Layers[m_ActiveLayerIdx].filtersDirty = true;
     }
     else if (phase == StrokePhase::End) {
         m_IsStrokeActive = false;
@@ -972,6 +1006,8 @@ void Canvas::ResizeCanvas(ID3D11Device* device, int width, int height) {
             }
         }
     }
+
+    m_CompositeDirty = true;
 }
 
 
@@ -1001,17 +1037,18 @@ void Canvas::Update(float viewportWidth, float viewportHeight, bool isMouseOverC
 void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     ID3D11Device* device = nullptr;
     context->GetDevice(&device);
+    bool needsCompositeRebuild = m_CompositeDirty || m_IsMovingPixels;
 
     if (device) {
-        int tilesX = (m_Width  + TILE_SIZE - 1) / TILE_SIZE;
-        int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
-
-        for (auto& layer : m_Layers) {
+        for (size_t i = 0; i < m_Layers.size(); ++i) {
+            auto& layer = m_Layers[i];
             if (layer.isGroup) continue;
             if (!layer.texture) continue;
 
             // Pick source cache (filtered or raw)
             TileCache* src = nullptr;
+            bool layerNeedsUpload = layer.needsUpload;
+            bool filtersWereDirty = !layer.filters.empty() && layer.filtersDirty;
             if (!layer.filters.empty()) {
                 RebuildFilteredPixels(layer); // may rebuild filteredCache
                 src = layer.filteredCache.get();
@@ -1019,8 +1056,10 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             if (!src) src = layer.tileCache.get();
             if (!src) continue;
 
+            bool layerHadUploads = false;
             // Upload only dirty tiles
             src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
+                layerHadUploads = true;
                 D3D11_BOX box;
                 box.left   = tx * TILE_SIZE;
                 box.top    = ty * TILE_SIZE;
@@ -1033,6 +1072,14 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             });
             src->ClearAllDirty();
             layer.needsUpload = false;
+            if (layerHadUploads || filtersWereDirty || layerNeedsUpload) {
+                needsCompositeRebuild = true;
+            }
+
+            if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
+                UpdateLayerMaskTexture(device, static_cast<int>(i));
+                needsCompositeRebuild = true;
+            }
         }
 
         // Selection mask upload
@@ -1045,9 +1092,10 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
         device->Release();
     }
 
-    if (!m_CompositeRTV) return;
+    if (!m_CompositeRTV || !m_CompositeSRV) return;
+    if (!needsCompositeRebuild) return;
 
-    // 2. Clear composite target
+    // Rebuild the proxy composite only when visible content changed.
     float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // Clear to transparent!
     context->ClearRenderTargetView(m_CompositeRTV, clearColor);
 
@@ -1060,10 +1108,11 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     D3D11_VIEWPORT prevViewport = {};
     context->RSGetViewports(&numViewports, &prevViewport);
 
-    // Set viewport to exact canvas size
+    // Render into the proxy-sized composite target. The final viewport draw
+    // stretches this texture to screen size, avoiding a 16K full-frame pass.
     D3D11_VIEWPORT compViewport = {};
-    compViewport.Width = static_cast<float>(m_Width);
-    compViewport.Height = static_cast<float>(m_Height);
+    compViewport.Width = static_cast<float>(std::max(1, m_CompositeWidth));
+    compViewport.Height = static_cast<float>(std::max(1, m_CompositeHeight));
     compViewport.MinDepth = 0.0f;
     compViewport.MaxDepth = 1.0f;
     context->RSSetViewports(1, &compViewport);
@@ -1178,6 +1227,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
 
     context->RSSetViewports(1, &prevViewport);
     context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+    m_CompositeDirty = false;
 }
 
 void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float viewportHeight) {
@@ -1354,40 +1404,22 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     }
 
     int imgWidth = 0, imgHeight = 0;
-    std::vector<float>   loadedFloat;   // used for DDS float formats
-    std::vector<uint8_t> loadedU8;      // used for PNG/JPEG/BMP/standard DDS
+    std::vector<uint8_t> loadedU8;
     DdsFormat loadedDdsFormat = DdsFormat::RGBA8_UNORM;
-    bool isFloatSource = false;
+    std::unique_ptr<TileCache> loadedTileCache;
 
     if (ext == "dds") {
-        DdsImage dds;
-        if (!DdsHelper::LoadDDS(filepath, dds)) return false;
-        imgWidth       = dds.width;
-        imgHeight      = dds.height;
-        loadedDdsFormat = dds.format;
+        loadedTileCache = std::make_unique<TileCache>();
+        if (!DdsHelper::LoadDDSToTileCache(filepath, *loadedTileCache, imgWidth, imgHeight, loadedDdsFormat)) {
+            return false;
+        }
 
-        // Determine if this is a float-precision source
-        isFloatSource = (dds.format == DdsFormat::RGBA32_FLOAT ||
-                         dds.format == DdsFormat::RGBA16_FLOAT ||
-                         dds.format == DdsFormat::R32_FLOAT    ||
-                         dds.format == DdsFormat::R16_FLOAT);
-
-        // DdsHelper always returns float pixels internally
-        loadedFloat = std::move(dds.pixels);
-
-        if (dds.format == DdsFormat::R8_UNORM || dds.format == DdsFormat::R16_FLOAT || dds.format == DdsFormat::R32_FLOAT) {
+        if (loadedDdsFormat == DdsFormat::R8_UNORM || loadedDdsFormat == DdsFormat::R16_FLOAT || loadedDdsFormat == DdsFormat::R32_FLOAT) {
             m_ChannelR = true; m_ChannelG = false; m_ChannelB = false; m_ChannelA = false;
             Logger::Get().Info("Single-channel DDS detected. Auto-configured R-only channels.");
         }
     } else {
-        // Standard images: stb_image gives us uint8 RGBA
-        std::vector<float> tmp;
-        if (!ImageManager::LoadImageFromFile(filepath, tmp, imgWidth, imgHeight)) return false;
-        // Convert float [0,1] -> uint8
-        loadedU8.resize(tmp.size());
-        for (size_t i = 0; i < tmp.size(); ++i)
-            loadedU8[i] = (uint8_t)(std::clamp(tmp[i], 0.0f, 1.0f) * 255.0f + 0.5f);
-        isFloatSource = false;
+        if (!ImageManager::LoadImageFromFile(filepath, loadedU8, imgWidth, imgHeight)) return false;
     }
 
     std::string lowerPath = filepath;
@@ -1408,11 +1440,8 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     if (isFirst) {
         m_Width  = imgWidth;
         m_Height = imgHeight;
-
-        // Auto-detect document format: use RGBA32F for float sources
-        m_CanvasFormat = isFloatSource ? CanvasPixelFormat::RGBA32F : CanvasPixelFormat::RGBA8;
-        Logger::Get().Info(std::string("Canvas format: ") +
-            (m_CanvasFormat == CanvasPixelFormat::RGBA32F ? "RGBA32F" : "RGBA8"));
+        m_CanvasFormat = CanvasPixelFormat::RGBA8;
+        Logger::Get().Info("Canvas format: RGBA8");
 
         CreateCompositeResources(device);
         m_Layers.clear();
@@ -1439,20 +1468,27 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     imported.name    = filepath.substr(filepath.find_last_of("\\/") + 1);
     imported.visible = true;
     imported.opacity = 1.0f;
-    imported.tileCache = std::make_unique<TileCache>();
-    imported.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
-
-    if (!loadedFloat.empty()) {
-        // Float source (DDS): import via ImportRGBA32F (handles format conversion internally)
-        imported.tileCache->ImportRGBA32F(loadedFloat.data(), imgWidth, imgHeight);
-    } else if (!loadedU8.empty()) {
-        imported.tileCache->ImportRGBA8(loadedU8.data(), imgWidth, imgHeight);
+    if (loadedTileCache) {
+        if (loadedTileCache->GetWidth() == m_Width && loadedTileCache->GetHeight() == m_Height) {
+            imported.tileCache = std::move(loadedTileCache);
+        } else {
+            imported.tileCache = std::make_unique<TileCache>();
+            imported.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+            imported.tileCache->CopyFrom(*loadedTileCache, 0, 0, 0, 0, imgWidth, imgHeight);
+        }
+    } else {
+        imported.tileCache = std::make_unique<TileCache>();
+        imported.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+        if (!loadedU8.empty()) {
+            imported.tileCache->ImportRGBA8(loadedU8.data(), imgWidth, imgHeight);
+        }
     }
     imported.tileCache->MarkAllDirty();
 
     RecreateLayerTexture(device, imported);
     m_Layers.push_back(std::move(imported));
     m_ActiveLayerIdx = (int)m_Layers.size() - 1;
+    m_CompositeDirty = true;
 
     ResetView();
     Logger::Get().Info("Successfully imported layer from: " + filepath);
@@ -1595,6 +1631,7 @@ void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name
 
     m_Layers.insert(m_Layers.begin() + insertIdx, std::move(newLayer));
     m_ActiveLayerIdx = insertIdx;
+    m_CompositeDirty = true;
 
     ClearUndoHistory();
     m_IsDocumentModified = true;
@@ -1782,6 +1819,7 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
         m_Height = metadata["height"].get<int>();
         m_ActiveLayerIdx = metadata["active_layer"].get<int>();
         m_CurrentProjectFilePath = filepath;
+        m_CanvasFormat = CanvasPixelFormat::RGBA8;
 
         if (metadata.contains("project_type")) {
             std::string pt = metadata["project_type"].get<std::string>();
@@ -1845,6 +1883,7 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
 
             m_Layers.push_back(std::move(layer));
         }
+        m_CompositeDirty = true;
 
         m_UndoRedoManager.Clear();
         m_IsDocumentModified = false;
@@ -3470,6 +3509,7 @@ void Canvas::SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const Smud
     }
     pickupAt(x,y);
     layer.needsUpload=true;
+    layer.filtersDirty=true;
 }
 
 // ============================================================
@@ -3547,13 +3587,18 @@ void Canvas::CreateLayerGroup(ID3D11Device* device, const std::string& name) {
     Layer grp; grp.name=name; grp.isGroup=true; grp.visible=true; grp.opacity=1.f; grp.blendMode=BlendMode::Normal;
     m_Layers.push_back(std::move(grp));
     m_ActiveLayerIdx=(int)m_Layers.size()-1;
+    m_CompositeDirty = true;
     Logger::Get().Info("Created layer group: "+name);
 }
 void Canvas::AddLayerToGroup(int layerIdx, int groupLayerIdx) {
     if (layerIdx<0||layerIdx>=(int)m_Layers.size()||groupLayerIdx<0||groupLayerIdx>=(int)m_Layers.size()) return;
     if (!m_Layers[groupLayerIdx].isGroup) return;
     m_Layers[layerIdx].parentGroupId=groupLayerIdx;
+    m_CompositeDirty = true;
 }
 void Canvas::RemoveLayerFromGroup(int layerIdx) {
-    if (layerIdx>=0&&layerIdx<(int)m_Layers.size()) m_Layers[layerIdx].parentGroupId=-1;
+    if (layerIdx>=0&&layerIdx<(int)m_Layers.size()) {
+        m_Layers[layerIdx].parentGroupId=-1;
+        m_CompositeDirty = true;
+    }
 }

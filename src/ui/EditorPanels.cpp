@@ -1716,6 +1716,7 @@ namespace UI {
                         canvas.ToggleLayerIsolation(i);
                     } else {
                         layers[i].visible = vis;
+                        canvas.MarkCompositeDirty();
                     }
                 }
                 if (isIsolated) {
@@ -1740,7 +1741,9 @@ namespace UI {
                 }
 
                 ImGui::PushItemWidth(100);
-                ImGui::SliderFloat("Opacity", &layers[i].opacity, 0.0f, 1.0f, "%.2f");
+                if (ImGui::SliderFloat("Opacity", &layers[i].opacity, 0.0f, 1.0f, "%.2f")) {
+                    canvas.MarkCompositeDirty();
+                }
                 ImGui::PopItemWidth();
 
                 // Blend Mode
@@ -1753,6 +1756,7 @@ namespace UI {
                 ImGui::PushItemWidth(90);
                 if (ImGui::Combo("##blend", &blendIdx, blendNames, IM_ARRAYSIZE(blendNames))) {
                     layers[i].blendMode = (BlendMode)blendIdx;
+                    canvas.MarkCompositeDirty();
                 }
                 ImGui::PopItemWidth();
 

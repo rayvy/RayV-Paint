@@ -80,6 +80,9 @@ void TileCache::Init(int width, int height, CanvasPixelFormat format) {
     m_TilesX        = (width  + TILE_SIZE - 1) / TILE_SIZE;
     m_TilesY        = (height + TILE_SIZE - 1) / TILE_SIZE;
     m_AccessCounter = 0;
+    // Large documents need to stay resident; otherwise the cache will evict
+    // freshly imported tiles and the image appears truncated.
+    m_MaxTilesInRAM = std::max(m_MaxTilesInRAM, (size_t)m_TilesX * (size_t)m_TilesY);
     m_Tiles.clear();
 }
 
@@ -374,32 +377,30 @@ void TileCache::ExportRGBA8(uint8_t* outData, int outWidth, int outHeight) const
     int copyH = std::min(m_Height, outHeight);
 
     for (int y = 0; y < copyH; ++y) {
-        for (int x = 0; x < copyW; x += TILE_SIZE) {
-            int tx   = x / TILE_SIZE;
-            int ty   = y / TILE_SIZE;
-            int colEnd = std::min(x + TILE_SIZE, copyW);
+        int ty = y / TILE_SIZE;
+        int ly = y % TILE_SIZE;
+        uint8_t* dstRow = outData + ((size_t)y * outWidth) * 4;
+
+        for (int tx = 0; tx < m_TilesX; ++tx) {
+            int x0 = tx * TILE_SIZE;
+            if (x0 >= copyW) break;
+            int x1 = std::min(x0 + TILE_SIZE, copyW);
             const Tile* t = FindTile(tx, ty);
             if (!t) continue;
-            int ly = y % TILE_SIZE;
 
             if (m_Format == CanvasPixelFormat::RGBA8) {
-                for (int cx = x; cx < colEnd; ++cx) {
-                    int lx   = cx % TILE_SIZE;
-                    size_t si = ((size_t)ly * TILE_SIZE + lx) * 4;
-                    size_t di = ((size_t)y  * outWidth  + cx) * 4;
-                    outData[di+0]=t->data[si+0]; outData[di+1]=t->data[si+1];
-                    outData[di+2]=t->data[si+2]; outData[di+3]=t->data[si+3];
-                }
+                const uint8_t* srcRow = t->data.data() + ((size_t)ly * TILE_SIZE) * 4;
+                std::memcpy(dstRow + ((size_t)x0 * 4), srcRow, (size_t)(x1 - x0) * 4);
             } else {
                 const float* fp = reinterpret_cast<const float*>(t->data.data());
-                for (int cx = x; cx < colEnd; ++cx) {
-                    int lx   = cx % TILE_SIZE;
+                for (int cx = x0; cx < x1; ++cx) {
+                    int lx = cx - x0;
                     size_t si = ((size_t)ly * TILE_SIZE + lx) * 4;
-                    size_t di = ((size_t)y  * outWidth  + cx) * 4;
-                    outData[di+0]=(uint8_t)(std::clamp(fp[si+0],0.f,1.f)*255.f+.5f);
-                    outData[di+1]=(uint8_t)(std::clamp(fp[si+1],0.f,1.f)*255.f+.5f);
-                    outData[di+2]=(uint8_t)(std::clamp(fp[si+2],0.f,1.f)*255.f+.5f);
-                    outData[di+3]=(uint8_t)(std::clamp(fp[si+3],0.f,1.f)*255.f+.5f);
+                    size_t di = ((size_t)cx) * 4;
+                    dstRow[di + 0] = (uint8_t)(std::clamp(fp[si + 0], 0.f, 1.f) * 255.f + .5f);
+                    dstRow[di + 1] = (uint8_t)(std::clamp(fp[si + 1], 0.f, 1.f) * 255.f + .5f);
+                    dstRow[di + 2] = (uint8_t)(std::clamp(fp[si + 2], 0.f, 1.f) * 255.f + .5f);
+                    dstRow[di + 3] = (uint8_t)(std::clamp(fp[si + 3], 0.f, 1.f) * 255.f + .5f);
                 }
             }
         }
@@ -413,30 +414,29 @@ void TileCache::ExportRGBA32F(float* outData, int outWidth, int outHeight) const
     int copyH = std::min(m_Height, outHeight);
 
     for (int y = 0; y < copyH; ++y) {
-        for (int x = 0; x < copyW; x += TILE_SIZE) {
-            int tx     = x / TILE_SIZE;
-            int ty     = y / TILE_SIZE;
-            int colEnd = std::min(x + TILE_SIZE, copyW);
+        int ty = y / TILE_SIZE;
+        int ly = y % TILE_SIZE;
+        float* dstRow = outData + ((size_t)y * outWidth) * 4;
+
+        for (int tx = 0; tx < m_TilesX; ++tx) {
+            int x0 = tx * TILE_SIZE;
+            if (x0 >= copyW) break;
+            int x1 = std::min(x0 + TILE_SIZE, copyW);
             const Tile* t = FindTile(tx, ty);
             if (!t) continue;
-            int ly = y % TILE_SIZE;
 
             if (m_Format == CanvasPixelFormat::RGBA32F) {
                 const float* fp = reinterpret_cast<const float*>(t->data.data());
-                for (int cx = x; cx < colEnd; ++cx) {
-                    size_t si = ((size_t)ly * TILE_SIZE + (cx%TILE_SIZE)) * 4;
-                    size_t di = ((size_t)y  * outWidth  + cx) * 4;
-                    outData[di+0]=fp[si+0]; outData[di+1]=fp[si+1];
-                    outData[di+2]=fp[si+2]; outData[di+3]=fp[si+3];
-                }
+                std::memcpy(dstRow + ((size_t)x0 * 4), fp + ((size_t)ly * TILE_SIZE) * 4, (size_t)(x1 - x0) * 4 * sizeof(float));
             } else {
-                for (int cx = x; cx < colEnd; ++cx) {
-                    size_t si = ((size_t)ly * TILE_SIZE + (cx%TILE_SIZE)) * 4;
-                    size_t di = ((size_t)y  * outWidth  + cx) * 4;
-                    outData[di+0]=t->data[si+0]/255.f;
-                    outData[di+1]=t->data[si+1]/255.f;
-                    outData[di+2]=t->data[si+2]/255.f;
-                    outData[di+3]=t->data[si+3]/255.f;
+                for (int cx = x0; cx < x1; ++cx) {
+                    int lx = cx - x0;
+                    size_t si = ((size_t)ly * TILE_SIZE + lx) * 4;
+                    size_t di = ((size_t)cx) * 4;
+                    dstRow[di + 0] = t->data[si + 0] / 255.f;
+                    dstRow[di + 1] = t->data[si + 1] / 255.f;
+                    dstRow[di + 2] = t->data[si + 2] / 255.f;
+                    dstRow[di + 3] = t->data[si + 3] / 255.f;
                 }
             }
         }

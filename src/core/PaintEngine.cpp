@@ -2,6 +2,29 @@
 #include "TileCache.h"
 #include <cmath>
 #include <algorithm>
+#include <cstring>
+
+static inline void ReadPixelRaw(const uint8_t* p, CanvasPixelFormat fmt, float out[4]) {
+    if (fmt == CanvasPixelFormat::RGBA8) {
+        out[0] = p[0] / 255.0f;
+        out[1] = p[1] / 255.0f;
+        out[2] = p[2] / 255.0f;
+        out[3] = p[3] / 255.0f;
+    } else {
+        std::memcpy(out, p, 4 * sizeof(float));
+    }
+}
+
+static inline void WritePixelRaw(uint8_t* p, CanvasPixelFormat fmt, const float in[4]) {
+    if (fmt == CanvasPixelFormat::RGBA8) {
+        p[0] = (uint8_t)(std::clamp(in[0], 0.0f, 1.0f) * 255.0f + 0.5f);
+        p[1] = (uint8_t)(std::clamp(in[1], 0.0f, 1.0f) * 255.0f + 0.5f);
+        p[2] = (uint8_t)(std::clamp(in[2], 0.0f, 1.0f) * 255.0f + 0.5f);
+        p[3] = (uint8_t)(std::clamp(in[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+    } else {
+        std::memcpy(p, in, 4 * sizeof(float));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Internal: single stamp at (px, py) into TileCache
@@ -11,6 +34,8 @@ static void StampAt(TileCache& cache, float px, float py,
                     const std::vector<uint8_t>& selectionMask) {
     int width  = cache.GetWidth();
     int height = cache.GetHeight();
+    CanvasPixelFormat fmt = cache.GetFormat();
+    int bytesPerPixel = cache.GetBytesPerPixel();
     float r  = brush.radius;
     float h  = std::clamp(brush.hardness, 0.0f, 1.0f);
     float op = std::clamp(brush.opacity,  0.0f, 1.0f);
@@ -22,50 +47,80 @@ static void StampAt(TileCache& cache, float px, float py,
 
     if (startX > endX || startY > endY) return;
 
-    for (int y = startY; y <= endY; ++y) {
-        for (int x = startX; x <= endX; ++x) {
-            float dx   = x - px;
-            float dy   = y - py;
-            float dist = std::sqrt(dx*dx + dy*dy);
-            if (dist >= r) continue;
+    int startTileX = startX / TILE_SIZE;
+    int endTileX   = endX / TILE_SIZE;
+    int startTileY = startY / TILE_SIZE;
+    int endTileY   = endY / TILE_SIZE;
 
-            float intensity = 1.0f;
-            if (h < 1.0f) {
-                float core = r * h;
-                if (dist > core)
-                    intensity = 1.0f - (dist - core) / (r - core);
-            }
+    for (int ty = startTileY; ty <= endTileY; ++ty) {
+        int tileY0 = ty * TILE_SIZE;
+        int tileY1 = tileY0 + TILE_SIZE - 1;
+        int py0 = std::max(startY, tileY0);
+        int py1 = std::min(endY, tileY1);
 
-            float selVal = 1.0f;
-            if (!selectionMask.empty()) {
-                selVal = selectionMask[(size_t)y * width + x] / 255.0f;
-            }
+        for (int tx = startTileX; tx <= endTileX; ++tx) {
+            int tileX0 = tx * TILE_SIZE;
+            int tileX1 = tileX0 + TILE_SIZE - 1;
+            int px0 = std::max(startX, tileX0);
+            int px1 = std::min(endX, tileX1);
 
-            float stampAlpha = brush.color[3] * op * intensity * selVal;
-            if (stampAlpha <= 0.0f) continue;
+            uint8_t* raw = cache.LockTile(tx, ty);
 
-            float dest[4];
-            cache.GetPixelF(x, y, dest);
+            for (int y = py0; y <= py1; ++y) {
+                int ly = y - tileY0;
+                uint8_t* row = raw + ((size_t)ly * TILE_SIZE) * bytesPerPixel;
 
-            float out[4] = { dest[0], dest[1], dest[2], dest[3] };
+                for (int x = px0; x <= px1; ++x) {
+                    float dx = x - px;
+                    float dy = y - py;
+                    float dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist >= r) continue;
 
-            if (brush.erase) {
-                float factor = 1.0f - stampAlpha;
-                if (brush.writeR) out[0] *= factor;
-                if (brush.writeG) out[1] *= factor;
-                if (brush.writeB) out[2] *= factor;
-                if (brush.writeA) out[3] *= factor;
-            } else {
-                float outA = stampAlpha + dest[3] * (1.0f - stampAlpha);
-                if (outA > 0.0f) {
-                    if (brush.writeR) out[0] = (brush.color[0]*stampAlpha + dest[0]*dest[3]*(1.0f-stampAlpha)) / outA;
-                    if (brush.writeG) out[1] = (brush.color[1]*stampAlpha + dest[1]*dest[3]*(1.0f-stampAlpha)) / outA;
-                    if (brush.writeB) out[2] = (brush.color[2]*stampAlpha + dest[2]*dest[3]*(1.0f-stampAlpha)) / outA;
-                    if (brush.writeA) out[3] = outA;
+                    float intensity = 1.0f;
+                    if (h < 1.0f) {
+                        float core = r * h;
+                        if (dist > core) {
+                            float denom = (r - core);
+                            if (denom > 1e-6f) {
+                                intensity = 1.0f - (dist - core) / denom;
+                            }
+                        }
+                    }
+
+                    float selVal = 1.0f;
+                    if (!selectionMask.empty()) {
+                        selVal = selectionMask[(size_t)y * width + x] / 255.0f;
+                    }
+
+                    float stampAlpha = brush.color[3] * op * intensity * selVal;
+                    if (stampAlpha <= 0.0f) continue;
+
+                    int lx = x - tileX0;
+                    uint8_t* p = row + (size_t)lx * bytesPerPixel;
+
+                    float dest[4];
+                    ReadPixelRaw(p, fmt, dest);
+                    float out[4] = { dest[0], dest[1], dest[2], dest[3] };
+
+                    if (brush.erase) {
+                        float factor = 1.0f - stampAlpha;
+                        if (brush.writeR) out[0] *= factor;
+                        if (brush.writeG) out[1] *= factor;
+                        if (brush.writeB) out[2] *= factor;
+                        if (brush.writeA) out[3] *= factor;
+                    } else {
+                        float outA = stampAlpha + dest[3] * (1.0f - stampAlpha);
+                        if (outA > 0.0f) {
+                            if (brush.writeR) out[0] = (brush.color[0] * stampAlpha + dest[0] * dest[3] * (1.0f - stampAlpha)) / outA;
+                            if (brush.writeG) out[1] = (brush.color[1] * stampAlpha + dest[1] * dest[3] * (1.0f - stampAlpha)) / outA;
+                            if (brush.writeB) out[2] = (brush.color[2] * stampAlpha + dest[2] * dest[3] * (1.0f - stampAlpha)) / outA;
+                            if (brush.writeA) out[3] = outA;
+                        }
+                    }
+
+                    WritePixelRaw(p, fmt, out);
                 }
             }
-
-            cache.SetPixelF(x, y, out);
         }
     }
 }

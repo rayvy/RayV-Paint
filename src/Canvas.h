@@ -117,6 +117,7 @@ public:
     void DeleteLayer(int index);
     void SetActiveLayerIndex(int idx);
     void ToggleLayerIsolation(int layerIdx);
+    void MarkCompositeDirty() { m_CompositeDirty = true; }
     bool IsLayerIsolated(int layerIdx) const { return m_IsIsolatedMode && m_IsolatedLayerIdx == layerIdx; }
     bool IsInIsolationMode() const { return m_IsIsolatedMode; }
     int GetActiveLayerIndex() const { return m_ActiveLayerIdx; }
@@ -329,6 +330,9 @@ private:
     ID3D11Texture2D* m_CompositeTexture = nullptr;
     ID3D11RenderTargetView* m_CompositeRTV = nullptr;
     ID3D11ShaderResourceView* m_CompositeSRV = nullptr;
+    int m_CompositeWidth = 0;
+    int m_CompositeHeight = 0;
+    bool m_CompositeDirty = true;
     ID3D11BlendState* m_LayerBlendState = nullptr;
     ID3D11RasterizerState* m_RasterizerState = nullptr;
 
