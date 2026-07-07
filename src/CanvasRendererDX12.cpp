@@ -12,12 +12,14 @@ bool CanvasRendererDX12::Initialize(
     ID3D12Device* device,
     ID3D12CommandQueue* queue,
     AllocateSrvFn allocFn,
-    FreeSrvFn freeFn
+    FreeSrvFn freeFn,
+    uint64_t maxGpuTiles
 ) {
     m_Device = device;
     m_CommandQueue = queue;
     m_AllocFn = allocFn;
     m_FreeFn = freeFn;
+    m_MaxGpuTiles = maxGpuTiles;
 
     if (!CreateRootSignatures()) return false;
     if (!CreatePipelineStates()) return false;
@@ -150,6 +152,13 @@ bool CanvasRendererDX12::Render(
     int canvasHeight = canvas.GetHeight();
     if (canvasWidth <= 0 || canvasHeight <= 0) return true;
 
+    // Limit composite RT size to hardware maximum (typically 16384 for D3D12 Feature Level 11_0)
+    UINT maxTexSize = 16384;
+    if (canvasWidth > (int)maxTexSize || canvasHeight > (int)maxTexSize) {
+        Logger::Get().Error("Canvas exceeds max texture size — viewport clipping not yet implemented.");
+        return false;
+    }
+
     // 1. Maintain Composite Ping-pong RT sizes
     if (!m_CompositeRTs[0] || m_CompositeWidth != canvasWidth || m_CompositeHeight != canvasHeight) {
         m_CompositeWidth = canvasWidth;
@@ -199,6 +208,9 @@ bool CanvasRendererDX12::Render(
 
     // Garbage collect CPU-deleted layer caches
     GarbageCollectGpuLayers(canvas);
+
+    // Trim GPU tile cache to prevent VRAM overflow
+    TrimGpuTileCache();
 
     // 2. Clear first composite target to clear base
     TransitionResource(cmdList, m_CompositeRTs[0].Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -266,6 +278,7 @@ bool CanvasRendererDX12::Render(
 
         // Render each active tile onto the composite
         for (auto& [tileKey, albedoTile] : gpuRes.albedoTiles) {
+            albedoTile.lastAccess = m_AccessCounter;
             int tx = tileKey & 0xFFFF;
             int ty = tileKey >> 16;
 
@@ -302,6 +315,7 @@ bool CanvasRendererDX12::Render(
 
             if (layer.hasMask && gpuRes.maskTiles.count(tileKey)) {
                 auto& maskTile = gpuRes.maskTiles[tileKey];
+                maskTile.lastAccess = m_AccessCounter;
                 if (m_AsyncUploaderReady && maskTile.uploadFenceValue > 0) {
                     uint64_t completedFence = m_AsyncUploader.GetCompletedFenceValue();
                     if (maskTile.uploadFenceValue > completedFence) {
@@ -357,6 +371,7 @@ bool CanvasRendererDX12::Render(
             float normOffY = static_cast<float>(canvas.GetFloatingOffsetY()) / static_cast<float>(canvasHeight);
 
             for (auto& [tileKey, albedoTile] : floatGpuRes.albedoTiles) {
+                albedoTile.lastAccess = m_AccessCounter;
                 int tx = tileKey & 0xFFFF;
                 int ty = tileKey >> 16;
 
@@ -676,6 +691,53 @@ void CanvasRendererDX12::GarbageCollectGpuLayers(const Canvas& canvas) {
             }
             ++it;
         }
+    }
+}
+
+void CanvasRendererDX12::TrimGpuTileCache() {
+    // Collect all GPU tiles sorted by lastAccess
+    struct TileRef {
+        TileCache* cache;
+        uint32_t tileKey;
+        uint64_t lastAccess;
+        bool isAlbedo;
+    };
+    
+    std::vector<TileRef> allTiles;
+    for (auto& [tc, gpuRes] : m_GpuLayers) {
+        for (auto& [key, tile] : gpuRes.albedoTiles)
+            allTiles.push_back({const_cast<TileCache*>(tc), key, tile.lastAccess, true});
+        for (auto& [key, tile] : gpuRes.maskTiles)
+            allTiles.push_back({const_cast<TileCache*>(tc), key, tile.lastAccess, false});
+    }
+    
+    if (allTiles.size() <= m_MaxGpuTiles) return;  // Not overflowed
+    
+    // Sort by lastAccess - oldest first
+    std::sort(allTiles.begin(), allTiles.end(),
+        [](const TileRef& a, const TileRef& b) { return a.lastAccess < b.lastAccess; });
+    
+    // Evict oldest tiles
+    size_t toEvict = allTiles.size() - m_MaxGpuTiles;
+    for (size_t i = 0; i < toEvict; ++i) {
+        auto& ref = allTiles[i];
+        auto it = m_GpuLayers.find(ref.cache);
+        if (it == m_GpuLayers.end()) continue;
+        
+        auto& tiles = ref.isAlbedo ? it->second.albedoTiles : it->second.maskTiles;
+        auto tileIt = tiles.find(ref.tileKey);
+        if (tileIt == tiles.end()) continue;
+        
+        // Free GPU resources
+        if (tileIt->second.srvCpuHandle.ptr != 0) {
+            m_FreeFn(tileIt->second.srvCpuHandle, tileIt->second.srvGpuHandle);
+        }
+        tiles.erase(tileIt);
+        
+        // Mark corresponding CPU tile as dirty so it will be re-uploaded on next access
+        int tx = ref.tileKey & 0xFFFF;
+        int ty = ref.tileKey >> 16;
+        ref.cache->MarkDirty(tx, ty);
     }
 }
 

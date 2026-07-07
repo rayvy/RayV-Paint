@@ -28,7 +28,8 @@ public:
         ID3D12Device* device,
         ID3D12CommandQueue* queue,
         AllocateSrvFn allocFn,
-        FreeSrvFn freeFn
+        FreeSrvFn freeFn,
+        uint64_t maxGpuTiles = 2048
     );
 
     void Shutdown();
@@ -113,6 +114,7 @@ private:
     );
 
     void GarbageCollectGpuLayers(const Canvas& canvas);
+    void TrimGpuTileCache();
 
     [[nodiscard]] Microsoft::WRL::ComPtr<ID3D12Resource> CreateTextureResource(
         int width,
@@ -218,6 +220,7 @@ private:
     uint64_t m_UploadFenceValue = 0;
 
     uint64_t m_AccessCounter = 0;
+    uint64_t m_MaxGpuTiles = 2048;
 
     Dx12AsyncUploader m_AsyncUploader;
     bool m_AsyncUploaderReady = false;

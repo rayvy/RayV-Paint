@@ -41,6 +41,7 @@ namespace UI {
         bool openLoadConfigModal = false;
         bool openSaveConfigModal = false;
         bool showRecoveryModal = false;
+        bool showDeviceLostModal = false;
 
         // Transform tool action signals
         bool commitTransform = false;

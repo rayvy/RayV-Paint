@@ -173,6 +173,32 @@ bool Dx12Device::Initialize(HWND hwnd, bool useNullDriver) {
 
     m_Initialized = true;
 
+    // Query VRAM Budget
+    SIZE_T vramBytes = 0;
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+    if (m_Adapter && SUCCEEDED(m_Adapter.As(&adapter3))) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO memInfo = {};
+        if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memInfo))) {
+            vramBytes = memInfo.Budget;
+        }
+    }
+    
+    if (vramBytes == 0) {
+        // Fallback: assume 2GB if query failed or in software mode
+        vramBytes = 2048ULL * 1024 * 1024;
+    }
+    
+    Logger::Get().Info("VRAM Budget: " + std::to_string(vramBytes / (1024 * 1024)) + " MB");
+    
+    // Set m_MaxGpuTiles based on VRAM
+    // 256KB per RGBA8 tile, leave 50% VRAM for other needs
+    uint64_t maxTilesFromVram = (vramBytes / 2) / (256 * 1024);
+    m_MaxGpuTiles = std::min(maxTilesFromVram, static_cast<uint64_t>(4096));
+    if (m_MaxGpuTiles == 0) {
+        m_MaxGpuTiles = 2048; // Fallback
+    }
+    Logger::Get().Info("Max GPU Tiles set to: " + std::to_string(m_MaxGpuTiles));
+
     // Create render targets initially
     if (!CreateRenderTarget()) {
         return false;
@@ -244,8 +270,8 @@ bool Dx12Device::BeginFrame() {
     return true;
 }
 
-void Dx12Device::EndFrame() {
-    if (!m_Initialized) return;
+HRESULT Dx12Device::EndFrame() {
+    if (!m_Initialized) return S_FALSE;
 
     // Transition backbuffer to PRESENT
     D3D12_RESOURCE_BARRIER barrier = {};
@@ -262,11 +288,18 @@ void Dx12Device::EndFrame() {
     ID3D12CommandList* commandLists[] = { m_CommandList.Get() };
     m_CommandQueue->ExecuteCommandLists(1, commandLists);
 
+    HRESULT presentHr = S_OK;
     if (m_SwapChain) {
-        HRESULT hr = m_SwapChain->Present(1, 0);
-        if (FAILED(hr)) {
-            Logger::Get().Error("Failed to Present swap chain");
+        presentHr = m_SwapChain->Present(1, 0);
+        if (FAILED(presentHr)) {
+            char hexStr[32];
+            sprintf_s(hexStr, "0x%08X", presentHr);
+            Logger::Get().Error("Failed to Present swap chain, HRESULT: " + std::string(hexStr));
         }
+    }
+
+    if (presentHr == DXGI_ERROR_DEVICE_REMOVED || presentHr == DXGI_ERROR_DEVICE_RESET) {
+        return presentHr;
     }
 
     // Signal fence for the completed frame
@@ -285,6 +318,8 @@ void Dx12Device::EndFrame() {
         m_Fence->SetEventOnCompletion(m_FenceValues[m_BackBufferIndex], m_FenceEvent);
         WaitForSingleObject(m_FenceEvent, INFINITE);
     }
+
+    return presentHr;
 }
 
 void Dx12Device::WaitForGpu() {

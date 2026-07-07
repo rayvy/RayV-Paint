@@ -857,6 +857,7 @@ namespace UI {
         if (state.openLoadConfigModal) { ImGui::OpenPopup("Load Config"); state.openLoadConfigModal = false; }
         if (state.openSaveConfigModal) { ImGui::OpenPopup("Save Config"); state.openSaveConfigModal = false; }
         if (state.showRecoveryModal) { ImGui::OpenPopup("Restore Auto-Saved Session?"); state.showRecoveryModal = false; }
+        if (state.showDeviceLostModal) { ImGui::OpenPopup("GPU Device Lost"); state.showDeviceLostModal = false; }
 
         // Load Config Modal
         if (ImGui::BeginPopupModal("Load Config", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -1397,6 +1398,20 @@ namespace UI {
                 try {
                     std::filesystem::remove(state.backupPath);
                 } catch (...) {}
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // GPU Device Lost Recovery Modal
+        if (ImGui::BeginPopupModal("GPU Device Lost", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "CRITICAL: GPU Device Lost!");
+            ImGui::Text("RayV-Paint detected DXGI_ERROR_DEVICE_REMOVED / RESET.");
+            ImGui::Text("An emergency autosave has been performed to prevent progress loss.");
+            ImGui::Text("Path: %s/emergency_autosave.rayp", state.backupDir.c_str());
+            ImGui::Text("The graphics subsystem has been successfully reinitialized.");
+            ImGui::Separator();
+            if (ImGui::Button("Acknowledge", ImVec2(120, 0))) {
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndPopup();

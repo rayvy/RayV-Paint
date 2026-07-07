@@ -33,7 +33,7 @@ public:
 
     // Frame management
     [[nodiscard]] bool BeginFrame();  // returns false if minimized/zero size
-    void EndFrame();                  // Present + Signal fence
+    HRESULT EndFrame();                  // Present + Signal fence
 
     // GPU sync — wait for all in-flight frames
     void WaitForGpu();
@@ -47,6 +47,7 @@ public:
     ID3D12CommandAllocator*   GetCommandAllocator() const { return m_CommandAllocators[m_BackBufferIndex].Get(); }
     IDXGISwapChain3*          GetSwapChain()   const { return m_SwapChain.Get(); }
     ID3D12DescriptorHeap*     GetSrvHeap()     const { return m_SrvHeap.Get(); }
+    uint64_t                  GetMaxGpuTiles() const { return m_MaxGpuTiles; }
 
     uint32_t GetCurrentBackBufferIndex() const { return m_BackBufferIndex; }
     D3D12_CPU_DESCRIPTOR_HANDLE GetCurrentRtv() const;
@@ -85,4 +86,5 @@ private:
     std::mutex                                      m_SrvMutex;
 
     bool m_Initialized = false;
+    uint64_t m_MaxGpuTiles = 2048;
 };

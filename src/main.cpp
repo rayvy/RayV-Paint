@@ -115,6 +115,8 @@ static Canvas g_Canvas;
 static ImVec2 g_LastDragDelta = ImVec2(0.0f, 0.0f);
 static CanvasRendererDX12 g_CanvasRenderer;
 static bool g_CanvasRendererReady = false;
+bool g_DeviceLostOccurred = false;
+static HWND g_hWnd = nullptr;
 
 // Global startup time
 static double g_StartupTimeMs = 0.0;
@@ -199,6 +201,7 @@ void ResizeCanvasRenderTarget(int width, int height);
 void CleanupCanvasRenderTarget();
 void RenderCanvasToTexture(int width, int height);
 void RedirectIOToConsole();
+void HandleDeviceLost(HWND hWnd);
 
 // Entry point helper to dynamically spawn or attach console
 void SetupConsole(bool forceConsole) {
@@ -322,6 +325,98 @@ void ApplyTheme(const std::string& themeName) {
 
 
 
+void HandleDeviceLost(HWND hWnd) {
+    Logger::Get().Error("GPU Device Lost detected. Attempting recovery...");
+    
+    // Save document to disk (emergency autosave)
+    if (g_Canvas.IsDocumentModified()) {
+        std::string emergencyPath = ConfigManager::Get().GetBackupDir() + "/emergency_autosave.rayp";
+        Logger::Get().Info("Emergency autosave to: " + emergencyPath);
+        g_Canvas.SaveCanvasRayp(emergencyPath);  // sync, blocking
+    }
+    
+    // Set the device lost flag (so next frame shows modal/UI message)
+    g_DeviceLostOccurred = true;
+    
+    // Remember current canvas RT dimensions before cleanup
+    int width = static_cast<int>(g_canvasRTWidth);
+    int height = static_cast<int>(g_canvasRTHeight);
+    
+    // Destroy all GPU resources
+    g_CanvasRenderer.Shutdown();
+    g_CanvasRendererReady = false;
+    ImGui_ImplDX12_Shutdown();
+    CleanupCanvasRenderTarget();
+    
+    // Attempt to recreate device
+    bool recovered = false;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        
+        HRESULT reason = g_DX12.GetDevice() ? g_DX12.GetDevice()->GetDeviceRemovedReason() : S_OK;
+        char hexStr[32];
+        sprintf_s(hexStr, "0x%08X", reason);
+        Logger::Get().Error("Device removed reason on attempt " + std::to_string(attempt + 1) + ": " + std::string(hexStr));
+
+        g_DX12.Shutdown();
+        
+        if (g_DX12.Initialize(hWnd, false)) {
+            Logger::Get().Info("Device recovered successfully.");
+            recovered = true;
+            break;
+        }
+    }
+    
+    if (!recovered) {
+        Logger::Get().Error("Device recovery failed. Exiting.");
+        PostQuitMessage(0);
+        return;
+    }
+
+    // Reinitialize ImGui DX12 backend
+    ImGui_ImplDX12_InitInfo dx12InitInfo = {};
+    dx12InitInfo.Device = g_DX12.GetDevice();
+    dx12InitInfo.CommandQueue = g_DX12.GetCommandQueue();
+    dx12InitInfo.NumFramesInFlight = kFrameCount;
+    dx12InitInfo.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+    dx12InitInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
+    dx12InitInfo.SrvDescriptorHeap = g_DX12.GetSrvHeap();
+    dx12InitInfo.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_desc_handle, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_desc_handle) {
+        out_cpu_desc_handle->ptr = 0;
+        out_gpu_desc_handle->ptr = 0;
+        if (!g_DX12.AllocateSrv(out_cpu_desc_handle, out_gpu_desc_handle)) {
+            Logger::Get().Error("DX12 SRV descriptor heap exhausted");
+        }
+    };
+    dx12InitInfo.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu_desc_handle, D3D12_GPU_DESCRIPTOR_HANDLE gpu_desc_handle) {
+        g_DX12.FreeSrv(cpu_desc_handle, gpu_desc_handle);
+    };
+    if (!ImGui_ImplDX12_Init(&dx12InitInfo)) {
+        Logger::Get().Error("Failed to reinitialize ImGui DX12 backend after device lost");
+        PostQuitMessage(0);
+        return;
+    }
+
+    // Reinitialize Canvas Renderer
+    if (g_CanvasRenderer.Initialize(
+        g_DX12.GetDevice(),
+        g_DX12.GetCommandQueue(),
+        [](D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu) { return g_DX12.AllocateSrv(cpu, gpu); },
+        [](D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu) { g_DX12.FreeSrv(cpu, gpu); },
+        g_DX12.GetMaxGpuTiles()
+    )) {
+        g_CanvasRendererReady = true;
+        Logger::Get().Info("CanvasRendererDX12 reinitialized successfully after recovery.");
+    } else {
+        Logger::Get().Error("Failed to reinitialize CanvasRendererDX12 after recovery.");
+    }
+
+    // Recreate the canvas render target since we cleaned it up
+    if (width > 0 && height > 0) {
+        ResizeCanvasRenderTarget(width, height);
+    }
+}
+
 int main(int argc, char* argv[]) {
     auto startupStart = std::chrono::high_resolution_clock::now();
 
@@ -418,6 +513,7 @@ int main(int argc, char* argv[]) {
     log_step("GLFW Window Creation");
 
     HWND hWnd = glfwGetWin32Window(window);
+    g_hWnd = hWnd;
 
     // Subclass window procedure for high-precision pointer/tablet messages
     g_OriginalWndProc = (WNDPROC)SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)SubclassedWndProc);
@@ -507,7 +603,8 @@ int main(int argc, char* argv[]) {
         g_DX12.GetDevice(),
         g_DX12.GetCommandQueue(),
         [](D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu) { return g_DX12.AllocateSrv(cpu, gpu); },
-        [](D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu) { g_DX12.FreeSrv(cpu, gpu); }
+        [](D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu) { g_DX12.FreeSrv(cpu, gpu); },
+        g_DX12.GetMaxGpuTiles()
     )) {
         Logger::Get().Error("Failed to initialize CanvasRendererDX12");
         // Non-fatal: falls back to grey clear
@@ -549,6 +646,11 @@ int main(int argc, char* argv[]) {
     // 9. Main loop
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        if (g_DeviceLostOccurred) {
+            uiState.showDeviceLostModal = true;
+            g_DeviceLostOccurred = false;
+        }
 
         // Handle window resizing
         int winW, winH;
@@ -1392,7 +1494,10 @@ int main(int argc, char* argv[]) {
                     ImGui::UpdatePlatformWindows();
                     ImGui::RenderPlatformWindowsDefault();
                 }
-                g_DX12.EndFrame();
+                HRESULT hr = g_DX12.EndFrame();
+                if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+                    HandleDeviceLost(g_hWnd);
+                }
             }
             break;
         }
@@ -1414,7 +1519,10 @@ int main(int argc, char* argv[]) {
                 ImGui::RenderPlatformWindowsDefault();
             }
 
-            g_DX12.EndFrame();
+            HRESULT hr = g_DX12.EndFrame();
+            if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+                HandleDeviceLost(g_hWnd);
+            }
         }
 
         // End frame timing
@@ -1611,4 +1719,9 @@ void RenderCanvasToTexture(int width, int height) {
     ID3D12CommandList* commandLists[] = { g_DX12.GetCommandList() };
     g_DX12.GetCommandQueue()->ExecuteCommandLists(1, commandLists);
     g_DX12.WaitForGpu();
+
+    HRESULT reason = g_DX12.GetDevice() ? g_DX12.GetDevice()->GetDeviceRemovedReason() : S_OK;
+    if (FAILED(reason)) {
+        HandleDeviceLost(g_hWnd);
+    }
 }
