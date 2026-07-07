@@ -525,7 +525,7 @@ namespace UI {
         ImGui::PopID();
     }
 
-    void RenderAll(UIState& state, Canvas& canvas, BrushSettings& brush, ActiveTool& activeTool, ID3D11Device* device, ID3D11DeviceContext* context, GLFWwindow* window) {
+    void RenderAll(UIState& state, Canvas& canvas, BrushSettings& brush, ActiveTool& activeTool, GLFWwindow* window) {
         ImGuiViewport* mainViewport = ImGui::GetMainViewport();
 
         // 1. Persistent Header (Main Menu Bar)
@@ -591,23 +591,23 @@ namespace UI {
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Rotate Canvas 90 CW")) {
-                    canvas.RotateCanvas90(device, true);
+                    canvas.RotateCanvas90(true);
                 }
                 if (ImGui::MenuItem("Rotate Canvas 90 CCW")) {
-                    canvas.RotateCanvas90(device, false);
+                    canvas.RotateCanvas90(false);
                 }
                 if (ImGui::MenuItem("Flip Canvas Horizontally")) {
-                    canvas.FlipCanvasHorizontal(device);
+                    canvas.FlipCanvasHorizontal();
                 }
                 if (ImGui::MenuItem("Flip Canvas Vertically")) {
-                    canvas.FlipCanvasVertical(device);
+                    canvas.FlipCanvasVertical();
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Flip Active Layer Horizontally", nullptr, false, canvas.GetActiveLayerIndex() != -1)) {
-                    canvas.FlipActiveLayerHorizontal(device);
+                    canvas.FlipActiveLayerHorizontal();
                 }
                 if (ImGui::MenuItem("Flip Active Layer Vertically", nullptr, false, canvas.GetActiveLayerIndex() != -1)) {
-                    canvas.FlipActiveLayerVertical(device);
+                    canvas.FlipActiveLayerVertical();
                 }
                 ImGui::EndMenu();
             }
@@ -912,7 +912,7 @@ namespace UI {
             }
             ImGui::Separator();
             if (ImGui::Button("Import", ImVec2(120, 0))) {
-                if (canvas.LoadImageToLayer(device, importPath)) {
+                if (canvas.LoadImageToLayer(importPath)) {
                     ImGui::CloseCurrentPopup();
                 }
             }
@@ -1323,7 +1323,7 @@ namespace UI {
 
             ImGui::Separator();
             if (ImGui::Button("Resize", ImVec2(120, 0))) {
-                canvas.ResizeCanvas(device, targetW, targetH);
+                canvas.ResizeCanvas(targetW, targetH);
                 initSize = false;
                 ImGui::CloseCurrentPopup();
             }
@@ -1368,7 +1368,7 @@ namespace UI {
             }
             ImGui::Separator();
             if (ImGui::Button("Load", ImVec2(120, 0))) {
-                if (canvas.LoadCanvasRayp(loadPath, device)) {
+                if (canvas.LoadCanvasRayp(loadPath)) {
                     ImGui::CloseCurrentPopup();
                 }
             }
@@ -1385,7 +1385,7 @@ namespace UI {
             ImGui::Text("Would you like to restore your auto-saved session?");
             ImGui::Separator();
             if (ImGui::Button("Restore Session", ImVec2(140, 0))) {
-                if (canvas.LoadCanvasRayp(state.backupPath, device)) {
+                if (canvas.LoadCanvasRayp(state.backupPath)) {
                     Logger::Get().Info("Restored auto-saved session successfully.");
                 } else {
                     Logger::Get().Error("Failed to restore auto-saved session.");
@@ -1690,7 +1690,7 @@ namespace UI {
             
             if (ImGui::Button("Add Layer", ImVec2(-1, 25))) {
                 std::string lName = "Layer " + std::to_string(canvas.GetLayers().size() + 1);
-                canvas.CreateNewLayer(device, lName);
+                canvas.CreateNewLayer(lName);
             }
 
             ImGui::BeginChild("LayersList", ImVec2(0, 0), true);
@@ -1823,11 +1823,11 @@ namespace UI {
                         }
                     } else {
                         if (ImGui::Button("Create Mask")) {
-                            canvas.CreateLayerMask(device, i);
+                            canvas.CreateLayerMask(i);
                         }
                         ImGui::SameLine();
                         if (ImGui::Button("Mask from Sel")) {
-                            canvas.CreateLayerMaskFromSelection(device, i);
+                            canvas.CreateLayerMaskFromSelection(i);
                         }
                     }
                 }

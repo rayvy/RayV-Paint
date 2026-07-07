@@ -3,8 +3,6 @@
 #endif
 #include <windows.h>
 #include <d3d12.h>
-#include <d3d11.h>
-#include <d3d11on12.h>
 #include <dxgi.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
@@ -95,13 +93,10 @@ bool g_IsLayersHovered = false;
 
 
 
-// DirectX 12 renderer + D3D11On12 bridge objects
+// DirectX 12 renderer objects
 static constexpr UINT kFrameCount = 2;
 static ID3D12Device*                g_pd3d12Device = nullptr;
 static ID3D12CommandQueue*          g_pd3d12CommandQueue = nullptr;
-static ID3D11On12Device*            g_pd3d11On12Device = nullptr;
-static ID3D11Device*                g_pd3dDevice = nullptr;
-static ID3D11DeviceContext*         g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain3*             g_pSwapChain = nullptr;
 static ID3D12Resource*              g_swapChainBackBuffers[kFrameCount] = {};
 static D3D12_CPU_DESCRIPTOR_HANDLE  g_mainRenderTargetViews[kFrameCount] = {};
@@ -114,6 +109,8 @@ static HANDLE                       g_pd3d12FenceEvent = nullptr;
 static UINT64                       g_pd3d12FenceValue = 0;
 static UINT                         g_rtvDescriptorSize = 0;
 static ID3D12DescriptorHeap*        g_srvDescHeap = nullptr;
+static ID3D12DescriptorHeap*        g_canvasRtvHeap = nullptr;
+static D3D12_CPU_DESCRIPTOR_HANDLE  g_canvasRtvHandle = {};
 static UINT                         g_srvDescriptorSize = 0;
 static UINT                         g_srvHeapCapacity = 0;
 static UINT                         g_srvHeapNextFree = 0;
@@ -166,11 +163,8 @@ static void FreeSrvDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle, D3D12_GPU_D
 
 // Canvas Render-to-Texture Objects
 static ID3D12Resource*              g_canvasTexture12 = nullptr;
-static ID3D11Resource*              g_canvasTexture11 = nullptr;
-static ID3D11RenderTargetView*      g_canvasRTV = nullptr;
 static D3D12_CPU_DESCRIPTOR_HANDLE  g_canvasTextureSrvCpuHandle = {};
 static D3D12_GPU_DESCRIPTOR_HANDLE  g_canvasTextureSrvGpuHandle = {};
-static bool                         g_canvasTextureAcquired = false;
 static float                        g_canvasRTWidth = 0.0f;
 static float                        g_canvasRTHeight = 0.0f;
 
@@ -214,7 +208,7 @@ static void CustomDropCallback(GLFWwindow* window, int count, const char** paths
     std::string path = paths[0];
     
     if (g_IsViewportHovered || g_IsLayersHovered) {
-        if (g_Canvas.LoadImageToLayer(g_pd3dDevice, path)) {
+        if (g_Canvas.LoadImageToLayer(path)) {
             Logger::Get().Info("Dropped file imported as layer: " + path);
         } else {
             Logger::Get().Error("Failed to import dropped file as layer: " + path);
@@ -228,7 +222,7 @@ static void CustomDropCallback(GLFWwindow* window, int count, const char** paths
         }
         
         if (ext == "rayp") {
-            if (g_Canvas.LoadCanvasRayp(path, g_pd3dDevice)) {
+            if (g_Canvas.LoadCanvasRayp(path)) {
                 Logger::Get().Info("Successfully loaded project from drop: " + path);
             } else {
                 Logger::Get().Error("Failed to load project from drop: " + path);
@@ -239,11 +233,11 @@ static void CustomDropCallback(GLFWwindow* window, int count, const char** paths
             g_Canvas.SetActiveLayerIndex(-1);
             g_Canvas.SetCurrentProjectFilePath("");
             
-            if (g_Canvas.LoadImageToLayer(g_pd3dDevice, path)) {
+            if (g_Canvas.LoadImageToLayer(path)) {
                 Logger::Get().Info("Dropped file opened as new project: " + path);
             } else {
                 Logger::Get().Error("Failed to open dropped file as new project: " + path);
-                g_Canvas.CreateNewLayer(g_pd3dDevice, "Background");
+                g_Canvas.CreateNewLayer("Background");
             }
         }
     }
@@ -489,7 +483,7 @@ int main(int argc, char* argv[]) {
     KeymapManager::Get().Load();
     log_step("Keymap Manager Init");
 
-    // 6. Initialize DX12-backed renderer (native swapchain + D3D11On12 canvas bridge)
+    // 6. Initialize DX12-backed renderer (native swapchain)
     if (!CreateDeviceD3D(hWnd, headlessMode)) {
         Logger::Get().Error("Failed to initialize DX12-backed renderer");
         glfwDestroyWindow(window);
@@ -556,7 +550,7 @@ int main(int argc, char* argv[]) {
     log_step("ImGui Context & Backend Init");
 
     // 8. Initialize Canvas Renderer
-    if (!g_Canvas.Initialize(g_pd3dDevice)) {
+    if (!g_Canvas.Initialize()) {
         Logger::Get().Error("Failed to initialize Canvas renderer");
         ImGui_ImplDX12_Shutdown();
         ImGui_ImplGlfw_Shutdown();
@@ -575,7 +569,7 @@ int main(int argc, char* argv[]) {
 
     // Load startup image if specified on CLI
     if (!startupImagePath.empty()) {
-        g_Canvas.LoadImageToLayer(g_pd3dDevice, startupImagePath);
+        g_Canvas.LoadImageToLayer(startupImagePath);
     }
 
     // Measure startup time
@@ -623,7 +617,7 @@ int main(int argc, char* argv[]) {
         g_IsLayersHovered = false;
 
         // Render all UI Panels and Modals (Toolbar, Properties, Layers, Brush settings, Console logs, Colors)
-        UI::RenderAll(uiState, g_Canvas, g_Brush, g_ActiveTool, g_pd3dDevice, g_pd3dDeviceContext, window);
+        UI::RenderAll(uiState, g_Canvas, g_Brush, g_ActiveTool, window);
 
         // Keyboard Shortcuts Handler (Layout-Independent via KeymapManager)
         ImGuiIO& io = ImGui::GetIO();
@@ -746,7 +740,7 @@ int main(int argc, char* argv[]) {
                 std::vector<float> pastedPixels;
                 int pastedW = 0, pastedH = 0;
                 if (ClipboardHelper::PasteImageFromClipboard(pastedPixels, pastedW, pastedH)) {
-                    g_Canvas.CreateLayerFromPixels(g_pd3dDevice, "Pasted Layer", pastedPixels, pastedW, pastedH);
+                    g_Canvas.CreateLayerFromPixels("Pasted Layer", pastedPixels, pastedW, pastedH);
                 }
             }
         }
@@ -1135,12 +1129,12 @@ int main(int argc, char* argv[]) {
                 uiState.cancelTransform = false;
 
                 if (doCommit) {
-                    g_Canvas.CommitMovePixels(g_pd3dDevice);
+                    g_Canvas.CommitMovePixels();
                     g_MoveAccumulatedOffsetX = 0;
                     g_MoveAccumulatedOffsetY = 0;
                 }
                 else if (doCancel) {
-                    g_Canvas.CancelMovePixels(g_pd3dDevice);
+                    g_Canvas.CancelMovePixels();
                     g_MoveAccumulatedOffsetX = 0;
                     g_MoveAccumulatedOffsetY = 0;
                 }
@@ -1148,7 +1142,7 @@ int main(int argc, char* argv[]) {
 
             // Auto-commit Move Pixels if tool switched
             if (g_ActiveTool != ActiveTool::MovePixels && g_Canvas.IsMovingPixels()) {
-                g_Canvas.CommitMovePixels(g_pd3dDevice);
+                g_Canvas.CommitMovePixels();
                 g_MoveAccumulatedOffsetX = 0;
                 g_MoveAccumulatedOffsetY = 0;
             }
@@ -1157,7 +1151,7 @@ int main(int argc, char* argv[]) {
             if ((ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) && !ImGui::GetIO().WantTextInput) {
                 if (ImGui::IsKeyPressed(ImGuiKey_D)) {
                     g_Canvas.ClearSelection();
-                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                    g_Canvas.MarkSelectionMaskDirty();
                 }
             }
 
@@ -1182,7 +1176,7 @@ int main(int argc, char* argv[]) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                         bool add = ImGui::GetIO().KeyShift;
                         bool subtract = ImGui::GetIO().KeyAlt;
-                        g_Canvas.ApplyMagicWandSelection(g_pd3dDevice, (int)canvasX, (int)canvasY, uiState.magicWandTolerance, add, subtract, uiState.magicWandContiguous);
+                        g_Canvas.ApplyMagicWandSelection((int)canvasX, (int)canvasY, uiState.magicWandTolerance, add, subtract, uiState.magicWandContiguous);
                     }
                 }
                 // Bucket Fill
@@ -1210,7 +1204,7 @@ int main(int argc, char* argv[]) {
                 else if (g_ActiveTool == ActiveTool::MovePixels) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                         if (!g_Canvas.IsMovingPixels()) {
-                            g_Canvas.StartMovePixels(g_pd3dDevice);
+                            g_Canvas.StartMovePixels();
                         }
                         g_IsMoveDragging = true;
                         g_MoveDragStartX = canvasX;
@@ -1251,18 +1245,18 @@ int main(int argc, char* argv[]) {
 
                 if (g_ActiveTool == ActiveTool::RectSelect) {
                     g_Canvas.ApplyRectSelection(x1, y1, x2, y2, add, subtract);
-                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                    g_Canvas.MarkSelectionMaskDirty();
                 }
                 else if (g_ActiveTool == ActiveTool::EllipseSelect) {
                     g_Canvas.ApplyEllipseSelection(x1, y1, x2, y2, add, subtract);
-                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                    g_Canvas.MarkSelectionMaskDirty();
                 }
                 else if (g_ActiveTool == ActiveTool::LassoSelect) {
                     g_Canvas.ApplyLassoSelection(g_LassoPoints, add, subtract);
-                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                    g_Canvas.MarkSelectionMaskDirty();
                 }
                 else if (g_ActiveTool == ActiveTool::SmartSelect) {
-                    g_Canvas.ApplySmartSelectSelection(g_pd3dDevice, g_LassoPoints, add, subtract);
+                    g_Canvas.ApplySmartSelectSelection(g_LassoPoints, add, subtract);
                 }
                 g_LassoPoints.clear();
             }
@@ -1271,7 +1265,7 @@ int main(int argc, char* argv[]) {
             if (g_IsMoveDragging) {
                 int dx = (int)floor(canvasX - g_MoveDragStartX);
                 int dy = (int)floor(canvasY - g_MoveDragStartY);
-                g_Canvas.UpdateMovePixels(g_pd3dDevice, g_MoveAccumulatedOffsetX + dx, g_MoveAccumulatedOffsetY + dy);
+                g_Canvas.UpdateMovePixels(g_MoveAccumulatedOffsetX + dx, g_MoveAccumulatedOffsetY + dy);
             }
 
             // Move drag release
@@ -1478,11 +1472,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
 // DX12-backed renderer helpers.
 bool CreateDeviceD3D(HWND hWnd, bool useNullDriver) {
-    UINT createDeviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-#ifdef _DEBUG
-    createDeviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
-
     HRESULT hr = S_OK;
     IDXGIFactory4* factory4 = nullptr;
     IDXGIFactory6* factory6 = nullptr;
@@ -1491,8 +1480,6 @@ bool CreateDeviceD3D(HWND hWnd, bool useNullDriver) {
     IDXGIAdapter* warpAdapter = nullptr;
     ID3D12Device* d3d12Device = nullptr;
     ID3D12CommandQueue* commandQueue = nullptr;
-    ID3D11Device* d3d11Device = nullptr;
-    ID3D11DeviceContext* d3d11Context = nullptr;
 
     hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory4));
     if (FAILED(hr)) {
@@ -1558,47 +1545,8 @@ bool CreateDeviceD3D(HWND hWnd, bool useNullDriver) {
         return false;
     }
 
-    const D3D_FEATURE_LEVEL featureLevelArray[2] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
-    IUnknown* queues[] = { commandQueue };
-    D3D_FEATURE_LEVEL chosenFeatureLevel = D3D_FEATURE_LEVEL_11_0;
-    hr = D3D11On12CreateDevice(
-        d3d12Device,
-        createDeviceFlags,
-        featureLevelArray,
-        2,
-        queues,
-        1,
-        0,
-        &d3d11Device,
-        &d3d11Context,
-        &chosenFeatureLevel
-    );
-    (void)chosenFeatureLevel;
-    if (FAILED(hr)) {
-        commandQueue->Release();
-        d3d12Device->Release();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-
-    hr = d3d11Device->QueryInterface(IID_PPV_ARGS(&g_pd3d11On12Device));
-    if (FAILED(hr)) {
-        d3d11Context->Release();
-        d3d11Device->Release();
-        commandQueue->Release();
-        d3d12Device->Release();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-
     g_pd3d12Device = d3d12Device;
     g_pd3d12CommandQueue = commandQueue;
-    g_pd3dDevice = d3d11Device;
-    g_pd3dDeviceContext = d3d11Context;
 
     g_rtvDescriptorSize = g_pd3d12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     g_srvDescriptorSize = g_pd3d12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -1717,13 +1665,12 @@ void CleanupDeviceD3D() {
     if (g_pd3d12CommandList) { g_pd3d12CommandList->Release(); g_pd3d12CommandList = nullptr; }
     if (g_pd3d12CommandAllocator) { g_pd3d12CommandAllocator->Release(); g_pd3d12CommandAllocator = nullptr; }
     if (g_swapChainRtvHeap) { g_swapChainRtvHeap->Release(); g_swapChainRtvHeap = nullptr; }
+    if (g_canvasRtvHeap) { g_canvasRtvHeap->Release(); g_canvasRtvHeap = nullptr; }
     if (g_srvDescHeap) { g_srvDescHeap->Release(); g_srvDescHeap = nullptr; }
     if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
-    if (g_pd3dDeviceContext) { g_pd3dDeviceContext->Release(); g_pd3dDeviceContext = nullptr; }
-    if (g_pd3dDevice) { g_pd3dDevice->Release(); g_pd3dDevice = nullptr; }
-    if (g_pd3d11On12Device) { g_pd3d11On12Device->Release(); g_pd3d11On12Device = nullptr; }
     if (g_pd3d12CommandQueue) { g_pd3d12CommandQueue->Release(); g_pd3d12CommandQueue = nullptr; }
     if (g_pd3d12Device) { g_pd3d12Device->Release(); g_pd3d12Device = nullptr; }
+    g_canvasRtvHandle.ptr = 0;
     g_rtvDescriptorSize = 0;
     g_srvDescriptorSize = 0;
     g_srvHeapCapacity = 0;
@@ -1815,7 +1762,7 @@ void ResizeCanvasRenderTarget(int width, int height) {
     g_canvasRTWidth = static_cast<float>(width);
     g_canvasRTHeight = static_cast<float>(height);
 
-    if (!g_pd3d12Device || !g_pd3d11On12Device || !g_pd3dDevice) {
+    if (!g_pd3d12Device) {
         return;
     }
 
@@ -1857,25 +1804,18 @@ void ResizeCanvasRenderTarget(int width, int height) {
         return;
     }
 
-    D3D11_RESOURCE_FLAGS wrapFlags = {};
-    wrapFlags.BindFlags = D3D11_BIND_RENDER_TARGET;
-    hr = g_pd3d11On12Device->CreateWrappedResource(
-        g_canvasTexture12,
-        &wrapFlags,
-        D3D12_RESOURCE_STATE_RENDER_TARGET,
-        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
-        IID_PPV_ARGS(&g_canvasTexture11)
-    );
-    if (FAILED(hr) || !g_canvasTexture11) {
+    D3D12_DESCRIPTOR_HEAP_DESC canvasRtvHeapDesc = {};
+    canvasRtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    canvasRtvHeapDesc.NumDescriptors = 1;
+    canvasRtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    hr = g_pd3d12Device->CreateDescriptorHeap(&canvasRtvHeapDesc, IID_PPV_ARGS(&g_canvasRtvHeap));
+    if (FAILED(hr) || !g_canvasRtvHeap) {
         CleanupCanvasRenderTarget();
         return;
     }
 
-    hr = g_pd3dDevice->CreateRenderTargetView(g_canvasTexture11, nullptr, &g_canvasRTV);
-    if (FAILED(hr) || !g_canvasRTV) {
-        CleanupCanvasRenderTarget();
-        return;
-    }
+    g_canvasRtvHandle = g_canvasRtvHeap->GetCPUDescriptorHandleForHeapStart();
+    g_pd3d12Device->CreateRenderTargetView(g_canvasTexture12, nullptr, g_canvasRtvHandle);
 
     if (!AllocateSrvDescriptor(&g_canvasTextureSrvCpuHandle, &g_canvasTextureSrvGpuHandle)) {
         CleanupCanvasRenderTarget();
@@ -1894,55 +1834,49 @@ void ResizeCanvasRenderTarget(int width, int height) {
 }
 
 void CleanupCanvasRenderTarget() {
-    if (g_canvasTextureAcquired && g_pd3d11On12Device && g_canvasTexture11) {
-        ID3D11Resource* resources[] = { g_canvasTexture11 };
-        g_pd3d11On12Device->ReleaseWrappedResources(resources, 1);
-        if (g_pd3dDeviceContext) {
-            g_pd3dDeviceContext->Flush();
-        }
-        g_canvasTextureAcquired = false;
-    }
-
     if (g_canvasTextureSrvCpuHandle.ptr != 0 && g_canvasTextureSrvGpuHandle.ptr != 0) {
         FreeSrvDescriptor(g_canvasTextureSrvCpuHandle, g_canvasTextureSrvGpuHandle);
         g_canvasTextureSrvCpuHandle.ptr = 0;
         g_canvasTextureSrvGpuHandle.ptr = 0;
     }
 
-    if (g_canvasRTV) { g_canvasRTV->Release(); g_canvasRTV = nullptr; }
-    if (g_canvasTexture11) { g_canvasTexture11->Release(); g_canvasTexture11 = nullptr; }
+    if (g_canvasRtvHeap) { g_canvasRtvHeap->Release(); g_canvasRtvHeap = nullptr; }
+    g_canvasRtvHandle.ptr = 0;
     if (g_canvasTexture12) { g_canvasTexture12->Release(); g_canvasTexture12 = nullptr; }
     g_canvasRTWidth = 0.0f;
     g_canvasRTHeight = 0.0f;
 }
 
 void RenderCanvasToTexture(int width, int height) {
-    if (!g_canvasRTV || !g_canvasTexture11) return;
-
-    if (!g_canvasTextureAcquired) {
-        ID3D11Resource* resources[] = { g_canvasTexture11 };
-        g_pd3d11On12Device->AcquireWrappedResources(resources, 1);
-        g_canvasTextureAcquired = true;
+    (void)width;
+    (void)height;
+    if (!g_canvasTexture12 || !g_canvasRtvHeap || !g_pd3d12CommandAllocator || !g_pd3d12CommandList || !g_pd3d12CommandQueue) {
+        return;
     }
 
-    D3D11_VIEWPORT vp = {};
-    vp.Width = static_cast<float>(width);
-    vp.Height = static_cast<float>(height);
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-    g_pd3dDeviceContext->RSSetViewports(1, &vp);
+    if (FAILED(g_pd3d12CommandAllocator->Reset()) ||
+        FAILED(g_pd3d12CommandList->Reset(g_pd3d12CommandAllocator, nullptr))) {
+        return;
+    }
+
+    D3D12_RESOURCE_BARRIER toRenderTarget = {};
+    toRenderTarget.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    toRenderTarget.Transition.pResource = g_canvasTexture12;
+    toRenderTarget.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    toRenderTarget.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    toRenderTarget.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    g_pd3d12CommandList->ResourceBarrier(1, &toRenderTarget);
 
     float clearColor[4] = { 0.12f, 0.12f, 0.14f, 1.0f };
-    g_pd3dDeviceContext->ClearRenderTargetView(g_canvasRTV, clearColor);
-    g_pd3dDeviceContext->OMSetRenderTargets(1, &g_canvasRTV, nullptr);
+    g_pd3d12CommandList->ClearRenderTargetView(g_canvasRtvHandle, clearColor, 0, nullptr);
 
-    g_Canvas.Render(g_pd3dDeviceContext, static_cast<float>(width), static_cast<float>(height));
+    D3D12_RESOURCE_BARRIER toShaderResource = toRenderTarget;
+    toShaderResource.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    toShaderResource.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+    g_pd3d12CommandList->ResourceBarrier(1, &toShaderResource);
 
-    ID3D11RenderTargetView* nullRTV = nullptr;
-    g_pd3dDeviceContext->OMSetRenderTargets(1, &nullRTV, nullptr);
-
-    ID3D11Resource* resources[] = { g_canvasTexture11 };
-    g_pd3d11On12Device->ReleaseWrappedResources(resources, 1);
-    g_pd3dDeviceContext->Flush();
-    g_canvasTextureAcquired = false;
+    g_pd3d12CommandList->Close();
+    ID3D12CommandList* commandLists[] = { g_pd3d12CommandList };
+    g_pd3d12CommandQueue->ExecuteCommandLists(1, commandLists);
+    WaitForGpu();
 }

@@ -2,7 +2,6 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include <string>
 #include <vector>
-#include <d3d11.h>
 #include <imgui.h>
 #include "../Canvas.h"
 #include "../core/PaintEngine.h"
@@ -92,5 +91,5 @@ namespace UI {
         double startupTimeMs = 0.0f;
     };
 
-    void RenderAll(UIState& state, Canvas& canvas, BrushSettings& brush, ActiveTool& activeTool, ID3D11Device* device, ID3D11DeviceContext* context, GLFWwindow* window);
+    void RenderAll(UIState& state, Canvas& canvas, BrushSettings& brush, ActiveTool& activeTool, GLFWwindow* window);
 }

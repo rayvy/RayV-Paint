@@ -866,7 +866,7 @@ bool DdsHelper::SaveDDS(const std::string& filename, const DdsImage& image) {
     // Populate DDS_HEADER_DXT10
     DDS_HEADER_DXT10 dxt10Header = {};
     dxt10Header.dxgiFormat = dxgiFormat;
-    dxt10Header.resourceDimension = 3; // D3D11_RESOURCE_DIMENSION_TEXTURE2D
+    dxt10Header.resourceDimension = 3; // DDS DX10 Texture2D resource dimension
     dxt10Header.arraySize = 1;
 
     file.write(reinterpret_cast<const char*>(&dxt10Header), sizeof(dxt10Header));

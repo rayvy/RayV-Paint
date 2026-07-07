@@ -56,7 +56,6 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-    ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp
 )
 
@@ -127,7 +126,6 @@ target_link_libraries(RayVPaint_Core PRIVATE
     glfw
     imgui
     d3d12
-    d3d11
     dxgi
     d3dcompiler
     nlohmann_json::nlohmann_json

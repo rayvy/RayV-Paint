@@ -1,7 +1,6 @@
 #pragma once
 #include <imgui.h>
 
-#include <d3d11.h>
 #include <directxmath.h>
 #include <vector>
 #include <string>
@@ -52,9 +51,7 @@ struct Layer {
     // nullptr for group header layers (isGroup == true).
     std::unique_ptr<TileCache> tileCache;
 
-    ID3D11Texture2D* texture = nullptr;
-    ID3D11ShaderResourceView* srv = nullptr;
-    bool needsUpload = false; // set true to force full re-upload (fallback)
+    bool needsUpload = false; // set true when renderer must upload changed layer data
 
     // Non-destructive filters
     std::vector<LayerFilter> filters;
@@ -65,8 +62,6 @@ struct Layer {
     // Mask: single-channel, same canvas dimensions.
     // Values 0-255 (RGBA8 docs) or float reinterpreted as uint8 for GPU (R8_UNORM).
     std::vector<uint8_t> mask;
-    ID3D11Texture2D* maskTexture = nullptr;
-    ID3D11ShaderResourceView* maskSRV = nullptr;
     bool hasMask = false;
     bool maskNeedsUpload = false;
 
@@ -88,16 +83,13 @@ public:
     Canvas();
     ~Canvas();
 
-    bool Initialize(ID3D11Device* device);
+    bool Initialize();
     void Shutdown();
 
     // Updates pan/zoom parameters based on UI inputs
     void Update(float viewportWidth, float viewportHeight, bool isMouseOverCanvas, 
                 float mouseX, float mouseY, bool isDragging, float dragDx, float dragDy, float wheelDelta);
     
-    // Renders the canvas (checkerboard background + blended layers)
-    void Render(ID3D11DeviceContext* context, float viewportWidth, float viewportHeight);
-
     void ResetView();
 
     float GetZoom() const { return m_Zoom; }
@@ -110,10 +102,10 @@ public:
     int GetHeight() const { return m_Height; }
 
     // Resizes canvas and all layers (retaining existing pixel data where possible)
-    void ResizeCanvas(ID3D11Device* device, int width, int height);
+    void ResizeCanvas(int width, int height);
 
     // Layer Management
-    void CreateNewLayer(ID3D11Device* device, const std::string& name);
+    void CreateNewLayer(const std::string& name);
     void DeleteLayer(int index);
     void SetActiveLayerIndex(int idx);
     void ToggleLayerIsolation(int layerIdx);
@@ -124,11 +116,11 @@ public:
     std::vector<Layer>& GetLayers() { return m_Layers; }
 
     // Layer Mask operations
-    void CreateLayerMask(ID3D11Device* device, int index);
-    void CreateLayerMaskFromSelection(ID3D11Device* device, int index);
+    void CreateLayerMask(int index);
+    void CreateLayerMaskFromSelection(int index);
     void DeleteLayerMask(int index);
     void ApplyLayerMask(int index);
-    void UpdateLayerMaskTexture(ID3D11Device* device, int index);
+    void MarkLayerMaskDirty(int index);
 
     // Paint Operation
     void PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush);
@@ -145,7 +137,7 @@ public:
     void ApplyNoise(float strength, bool colorNoise);
 
     // Layer group management
-    void CreateLayerGroup(ID3D11Device* device, const std::string& name);
+    void CreateLayerGroup(const std::string& name);
     void AddLayerToGroup(int layerIdx, int groupLayerIdx);
     void RemoveLayerFromGroup(int layerIdx);
 
@@ -154,12 +146,12 @@ public:
     void ClearSelection();
     void SetSelectionMask(const std::vector<uint8_t>& mask);
     const std::vector<uint8_t>& GetSelectionMask() const { return m_SelectionMask; }
-    void UpdateSelectionMaskTexture(ID3D11Device* device);
+    void MarkSelectionMaskDirty();
     void ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract);
     void ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, bool subtract);
     void ApplyLassoSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
-    void ApplyMagicWandSelection(ID3D11Device* device, int startX, int startY, float tolerance, bool add, bool subtract, bool contiguous);
-    void ApplySmartSelectSelection(ID3D11Device* device, const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
+    void ApplyMagicWandSelection(int startX, int startY, float tolerance, bool add, bool subtract, bool contiguous);
+    void ApplySmartSelectSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
     bool IsSmartSelectInProgress() const { return m_SmartSelectInProgress.load(); }
     void CancelSmartSelect() { m_SmartSelectCancelled.store(true); }
     void ApplyBucketFill(int startX, int startY, float tolerance, const float color[4], bool contiguous);
@@ -167,10 +159,10 @@ public:
 
     // Move Pixels operations
     bool IsMovingPixels() const { return m_IsMovingPixels; }
-    void StartMovePixels(ID3D11Device* device);
-    void UpdateMovePixels(ID3D11Device* device, int dx, int dy);
-    void CommitMovePixels(ID3D11Device* device);
-    void CancelMovePixels(ID3D11Device* device);
+    void StartMovePixels();
+    void UpdateMovePixels(int dx, int dy);
+    void CommitMovePixels();
+    void CancelMovePixels();
     void DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen);
     float GetFloatingScaleX() const { return m_FloatingScaleX; }
     float GetFloatingScaleY() const { return m_FloatingScaleY; }
@@ -180,19 +172,19 @@ public:
     void SetFloatingRotation(float rot) { m_FloatingRotation = rot; }
 
     // File Import / Export
-    bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath);
+    bool LoadImageToLayer(const std::string& filepath);
     bool SaveCanvas(const std::string& filepath, DdsFormat ddsFormat);
     bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath = "");
     bool SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed);
     std::vector<float> GetCompositePixels() const;
-    void CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height);
+    void CreateLayerFromPixels(const std::string& name, const std::vector<float>& pixels, int width, int height);
 
     // Pixel Transformations
-    void FlipActiveLayerHorizontal(ID3D11Device* device);
-    void FlipActiveLayerVertical(ID3D11Device* device);
-    void RotateCanvas90(ID3D11Device* device, bool clockwise);
-    void FlipCanvasHorizontal(ID3D11Device* device);
-    void FlipCanvasVertical(ID3D11Device* device);
+    void FlipActiveLayerHorizontal();
+    void FlipActiveLayerVertical();
+    void RotateCanvas90(bool clockwise);
+    void FlipCanvasHorizontal();
+    void FlipCanvasVertical();
     void CommitTransformation(const std::string& actionName);
 
 
@@ -257,36 +249,14 @@ public:
     // Native RAYP Format
     bool SaveCanvasRayp(const std::string& filepath);
     void SaveCanvasRaypAsync(const std::string& filepath, std::function<void(bool)> callback = nullptr);
-    bool LoadCanvasRayp(const std::string& filepath, ID3D11Device* device);
+    bool LoadCanvasRayp(const std::string& filepath);
 
     std::vector<float> GetComposedPixels();
 
 private:
     void BackupTile(int tileX, int tileY);
 
-    struct Vertex {
-        DirectX::XMFLOAT2 pos;
-        DirectX::XMFLOAT2 uv;
-    };
-
-    struct CanvasBuffer {
-        DirectX::XMFLOAT4 viewportSizeAndZoom;
-        DirectX::XMFLOAT4 offsetAndCanvasSize;
-        DirectX::XMFLOAT4 channelMasks;
-        DirectX::XMFLOAT4 viewportFlags; // x: flipH, y: flipV, zw: unused
-    };
-
-    struct LayerBuffer {
-        DirectX::XMFLOAT4 layerParams;     // x: opacity, y: hasMask, zw: translation (uOff, vOff)
-        DirectX::XMFLOAT4 transformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
-        DirectX::XMFLOAT4 centerParams;    // x: centerX, y: centerY, z: blendMode (as float uint), w: unused
-    };
-
-
-    void ComposeLayers(ID3D11DeviceContext* context);
-    void CreateCompositeResources(ID3D11Device* device);
-    void ReleaseCompositeResources();
-    void RecreateLayerTexture(ID3D11Device* device, Layer& layer);
+    void MarkCompositeResourcesDirty();
 
     int m_Width;
     int m_Height;
@@ -295,8 +265,6 @@ private:
 
     // Document pixel format — set at canvas creation or auto-detected on file open.
     CanvasPixelFormat m_CanvasFormat = CanvasPixelFormat::RGBA8;
-    // Corresponding DXGI format used for layer textures and composite target.
-    DXGI_FORMAT GetLayerDxgiFormat() const;
     bool m_ChannelR = true;
     bool m_ChannelG = true;
     bool m_ChannelB = true;
@@ -312,36 +280,9 @@ private:
     int m_IsolatedLayerIdx = -1;
     std::vector<bool> m_PreIsolationVisibility;
 
-    // Direct3D 11 Resources
-    ID3D11Buffer* m_VertexBuffer = nullptr;
-    ID3D11Buffer* m_IndexBuffer = nullptr;
-    ID3D11Buffer* m_ConstantBuffer = nullptr;
-    ID3D11Buffer* m_LayerConstantBuffer = nullptr;
-
-    ID3D11VertexShader* m_VertexShader = nullptr;
-    ID3D11VertexShader* m_LayerVertexShader = nullptr;
-    ID3D11PixelShader* m_PixelShader = nullptr;
-    ID3D11PixelShader* m_LayerBlendPixelShader = nullptr;
-    ID3D11PixelShader* m_SelectionOutlinePixelShader = nullptr;
-    ID3D11InputLayout* m_InputLayout = nullptr;
-    ID3D11SamplerState* m_SamplerState = nullptr;
-
-    // Layer Composition Target
-    ID3D11Texture2D* m_CompositeTexture = nullptr;
-    ID3D11RenderTargetView* m_CompositeRTV = nullptr;
-    ID3D11ShaderResourceView* m_CompositeSRV = nullptr;
     int m_CompositeWidth = 0;
     int m_CompositeHeight = 0;
     bool m_CompositeDirty = true;
-    ID3D11BlendState* m_LayerBlendState = nullptr;
-    ID3D11RasterizerState* m_RasterizerState = nullptr;
-
-    // Group Compositing: temp RT for rendering a group's children before blending into main
-    ID3D11Texture2D* m_GroupCompositeTexture = nullptr;
-    ID3D11RenderTargetView* m_GroupCompositeRTV = nullptr;
-    ID3D11ShaderResourceView* m_GroupCompositeSRV = nullptr;
-    void CreateGroupCompositeResources(ID3D11Device* device);
-    void ReleaseGroupCompositeResources();
 
     // Applies filters to layer.pixels → layer.filteredPixels (rebuilds if filtersDirty)
     void RebuildFilteredPixels(Layer& layer);
@@ -388,8 +329,6 @@ private:
     // Selection State
     bool m_HasSelection = false;
     std::vector<uint8_t> m_SelectionMask; // 0=not selected, 255=fully selected
-    ID3D11Texture2D* m_SelectionMaskTexture = nullptr;
-    ID3D11ShaderResourceView* m_SelectionMaskSRV = nullptr;
     float m_SelectionOutlineTime = 0.0f;
     bool m_SelectionMaskNeedsUpload = false;
     std::atomic<bool> m_SmartSelectInProgress{false};
@@ -406,8 +345,4 @@ private:
     float m_FloatingScaleY = 1.0f;
     float m_FloatingRotation = 0.0f; // in radians
 
-    ID3D11Texture2D* m_FloatingTexture = nullptr;
-    ID3D11ShaderResourceView* m_FloatingSRV = nullptr;
-    ID3D11Texture2D* m_FloatingMaskTexture = nullptr;
-    ID3D11ShaderResourceView* m_FloatingMaskSRV = nullptr;
 };
