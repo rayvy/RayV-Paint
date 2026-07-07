@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <atomic>
+#include <mutex>
 #include <functional>
 #include "core/TileCache.h"
 #include "core/PaintEngine.h"
@@ -342,6 +343,11 @@ private:
     bool m_SelectionMaskNeedsUpload = false;
     std::atomic<bool> m_SmartSelectInProgress{false};
     std::atomic<bool> m_SmartSelectCancelled{false};
+    std::mutex m_SelectionMutex;
+
+private:
+    void MagicWandBFS_Tiled(std::vector<uint8_t>& outMask, int startX, int startY, const float seedColor[4], float tolerance);
+    void MagicWandGlobalThreshold(std::vector<uint8_t>& outMask, const float seedColor[4], float tolerance);
 
     // Move Pixels State
     bool m_IsMovingPixels = false;

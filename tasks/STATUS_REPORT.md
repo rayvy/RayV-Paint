@@ -27,6 +27,7 @@
 - **Shader pipeline** — CSO precompile через fxc + runtime fallback + embedded HLSL
 - **PaintEngine** — CPU brush stamping с TileCache
 - **UndoRedoManager** — tile-level delta snapshots
+- **Async copy queue** — Dx12AsyncUploader for uploading dirty tiles on a background copy queue
 
 ### ⚠️ Выполнено криво
 
@@ -60,16 +61,15 @@
    - Синхронная операция: полный обход всех тайлов с alpha blend на CPU
    - Вызывается при каждом Copy и Export
 
-8. **Magic Wand / Bucket Fill — без ограничений**
-   - CPU flood fill по всему canvas без chunking или threading
-   - На 8K: 64M+ итераций, возможный stack overflow
+8. **Magic Wand / Bucket Fill — ✅ Оптимизировано и Перенесено в background/GPU**
+   - Фоновые потоки через ThreadPool с поддержкой отмены и тайловым кэш-дружелюбным доступом.
+   - Добавлен вспомогательный класс GpuComputeTools и шейдер FloodFill.hlsl для GPU-ускоренных вычислений.
 
 ### ❌ Не реализовано (из плана Phase 7-8)
 - `src/render/Dx12Device.h/.cpp` — device изолирован в main.cpp
 - `src/render/Dx12Descriptors.h/.cpp` — heap управление в main.cpp
 - GPU compute brush / blur / HSV
 - Tiled selection mask
-- Async copy queue
 - VRAM overflow / eviction policy
 - Canvas.cpp не разбит на субмодули
 

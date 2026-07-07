@@ -80,6 +80,7 @@ size_t SelectionCommand::GetMemorySize() const {
 UndoRedoManager::UndoRedoManager() {}
 
 void UndoRedoManager::PushCommand(std::shared_ptr<UndoCommand> command) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     m_CurrentMemoryBytes += command->GetMemorySize();
     m_UndoStack.push_back(std::move(command));
     m_RedoStack.clear();
@@ -87,53 +88,79 @@ void UndoRedoManager::PushCommand(std::shared_ptr<UndoCommand> command) {
 }
 
 bool UndoRedoManager::Undo(Canvas* canvas) {
-    if (m_UndoStack.empty()) return false;
-    auto cmd = m_UndoStack.back();
-    m_UndoStack.pop_back();
+    std::shared_ptr<UndoCommand> cmd;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_UndoStack.empty()) return false;
+        cmd = m_UndoStack.back();
+        m_UndoStack.pop_back();
+    }
+    
     cmd->Undo(canvas);
-    m_RedoStack.push_back(cmd);
+    
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        m_RedoStack.push_back(cmd);
+    }
     return true;
 }
 
 bool UndoRedoManager::Redo(Canvas* canvas) {
-    if (m_RedoStack.empty()) return false;
-    auto cmd = m_RedoStack.back();
-    m_RedoStack.pop_back();
+    std::shared_ptr<UndoCommand> cmd;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_RedoStack.empty()) return false;
+        cmd = m_RedoStack.back();
+        m_RedoStack.pop_back();
+    }
+    
     cmd->Redo(canvas);
-    m_UndoStack.push_back(cmd);
+    
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        m_UndoStack.push_back(cmd);
+    }
     return true;
 }
 
 void UndoRedoManager::Clear() {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     m_UndoStack.clear();
     m_RedoStack.clear();
     m_CurrentMemoryBytes = 0;
 }
 
-bool UndoRedoManager::CanUndo() const { return !m_UndoStack.empty(); }
-bool UndoRedoManager::CanRedo() const { return !m_RedoStack.empty(); }
+bool UndoRedoManager::CanUndo() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return !m_UndoStack.empty();
+}
+
+bool UndoRedoManager::CanRedo() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return !m_RedoStack.empty();
+}
 
 std::string UndoRedoManager::GetUndoName() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     return m_UndoStack.empty() ? "" : m_UndoStack.back()->GetName();
 }
 
 std::string UndoRedoManager::GetRedoName() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     return m_RedoStack.empty() ? "" : m_RedoStack.back()->GetName();
 }
 
 void UndoRedoManager::EnforceLimits() {
-    // Step limit from config
+    // Note: m_Mutex is already held when this private helper is called
     int maxSteps = ConfigManager::Get().GetMaxUndoSteps();
     while ((int)m_UndoStack.size() > maxSteps && !m_UndoStack.empty()) {
         m_CurrentMemoryBytes -= m_UndoStack.front()->GetMemorySize();
         m_UndoStack.erase(m_UndoStack.begin());
     }
 
-    // Memory budget: use instance budget (set via SetMemoryBudget) OR config value
     size_t configBudget = (size_t)ConfigManager::Get().GetMaxUndoMemoryMB() * 1024 * 1024;
     size_t budget = (m_MemoryBudgetBytes > 0) ? m_MemoryBudgetBytes : configBudget;
 
-    // Recompute total (keeps m_CurrentMemoryBytes accurate)
     m_CurrentMemoryBytes = 0;
     for (const auto& cmd : m_UndoStack)  m_CurrentMemoryBytes += cmd->GetMemorySize();
     for (const auto& cmd : m_RedoStack)  m_CurrentMemoryBytes += cmd->GetMemorySize();

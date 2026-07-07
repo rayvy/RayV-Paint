@@ -1324,6 +1324,60 @@ int main(int argc, char* argv[]) {
 
         // Handle Test Mode Execution: Perform 1 Frame and Exit
         if (testMode) {
+            Logger::Get().Info("[TEST] Initiating asynchronous selection/fill tests...");
+            g_Canvas.ResizeCanvas(512, 512);
+            g_Canvas.SetActiveLayerIndex(0);
+            
+            // Fill layer with green
+            float greenColor[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
+            g_Canvas.ApplyBucketFill(0, 0, 0.1f, greenColor, true);
+            
+            // Wait for bucket fill to finish (since it is async)
+            while (g_Canvas.IsSmartSelectInProgress()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            Logger::Get().Info("[TEST] Bucket fill completed.");
+
+            // Verify a pixel is green
+            auto& layers = g_Canvas.GetLayers();
+            float testPixel[4] = {};
+            layers[0].tileCache->GetPixelF(0, 0, testPixel);
+            if (testPixel[1] != 1.0f) {
+                Logger::Get().Error("[TEST] Bucket Fill test failed! Green channel is " + std::to_string(testPixel[1]));
+                std::exit(1);
+            }
+            Logger::Get().Info("[TEST] Bucket Fill test succeeded.");
+
+            // Apply Magic Wand on the green canvas (contiguous)
+            g_Canvas.ApplyMagicWandSelection(0, 0, 0.1f, false, false, true);
+            while (g_Canvas.IsSmartSelectInProgress()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            Logger::Get().Info("[TEST] Magic Wand selection completed.");
+
+            // Verify selection mask
+            auto mask = g_Canvas.GetSelectionMask();
+            if (mask.empty() || mask[0] != 255) {
+                Logger::Get().Error("[TEST] Magic Wand test failed! Mask at 0 is " + std::to_string(mask.empty() ? -1 : mask[0]));
+                std::exit(1);
+            }
+            Logger::Get().Info("[TEST] Magic Wand test succeeded.");
+
+            // Apply Magic Wand non-contiguous
+            g_Canvas.ApplyMagicWandSelection(0, 0, 0.1f, false, false, false);
+            while (g_Canvas.IsSmartSelectInProgress()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            Logger::Get().Info("[TEST] Magic Wand non-contiguous completed successfully.");
+
+            // Test cancellation
+            g_Canvas.ApplyMagicWandSelection(0, 0, 0.1f, false, false, true);
+            g_Canvas.CancelSmartSelect();
+            while (g_Canvas.IsSmartSelectInProgress()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            Logger::Get().Info("[TEST] Magic Wand cancellation succeeded.");
+
             Logger::Get().Info("[TEST] Render completed. Saving config and exiting successfully.");
             ImGui::Render();
             if (g_DX12.BeginFrame()) {

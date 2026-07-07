@@ -2,6 +2,7 @@
 #include "core/Logger.h"
 #include "core/PaintEngine.h"
 #include "core/ImageManager.h"
+#include "core/ThreadPool.h"
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cstring>
@@ -315,90 +316,118 @@ void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const floa
 
     auto& layer = m_Layers[m_ActiveLayerIdx];
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
-    std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
 
-    cv::Mat mat = ImageManager::PixelsToMat8UC3(layerPixels, m_Width, m_Height);
-    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    m_SmartSelectInProgress.store(true);
+    m_SmartSelectCancelled.store(false);
 
-    if (contiguous) {
-        cv::Mat mask = cv::Mat::zeros(m_Height + 2, m_Width + 2, CV_8UC1);
-        cv::Scalar loDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
-        cv::Scalar upDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
-        cv::floodFill(mat, mask, cv::Point(startX, startY), cv::Scalar(255), nullptr, loDiff, upDiff, 4 | cv::FLOODFILL_MASK_ONLY | (255 << 8));
-        temp = mask(cv::Range(1, m_Height + 1), cv::Range(1, m_Width + 1)).clone();
-    } else {
-        cv::Vec3b seedColor = mat.at<cv::Vec3b>(startY, startX);
-        for (int y = 0; y < m_Height; ++y) {
-            for (int x = 0; x < m_Width; ++x) {
-                cv::Vec3b colorVal = mat.at<cv::Vec3b>(y, x);
-                float diff = std::sqrt(
-                    std::pow(static_cast<float>(colorVal[0]) - seedColor[0], 2) +
-                    std::pow(static_cast<float>(colorVal[1]) - seedColor[1], 2) +
-                    std::pow(static_cast<float>(colorVal[2]) - seedColor[2], 2)
-                ) / 255.0f;
-                if (diff <= tolerance * std::sqrt(3.0f)) {
-                    temp.at<uint8_t>(y, x) = 255;
-                }
-            }
+    float fillColor[4] = { color[0], color[1], color[2], color[3] };
+
+    ThreadPool::Get().Enqueue([this, startX, startY, tolerance, fillColor, contiguous]() {
+        if (m_SmartSelectCancelled.load()) {
+            m_SmartSelectInProgress.store(false);
+            return;
         }
-    }
 
-    for (int ty = 0; ty < (m_Height + 255) / 256; ++ty) {
-        for (int tx = 0; tx < (m_Width + 255) / 256; ++tx) {
-            bool tileAffected = false;
-            for (int y = ty * 256; y < std::min((ty + 1) * 256, m_Height); ++y) {
-                for (int x = tx * 256; x < std::min((tx + 1) * 256, m_Width); ++x) {
-                    if (temp.at<uint8_t>(y, x) > 0) {
-                        tileAffected = true;
-                        break;
+        std::vector<float> layerPixels = ExportLayerF(m_Layers[m_ActiveLayerIdx], m_Width, m_Height);
+        cv::Mat mat = ImageManager::PixelsToMat8UC3(layerPixels, m_Width, m_Height);
+        cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+
+        if (contiguous) {
+            cv::Mat mask = cv::Mat::zeros(m_Height + 2, m_Width + 2, CV_8UC1);
+            cv::Scalar loDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
+            cv::Scalar upDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
+            cv::floodFill(mat, mask, cv::Point(startX, startY), cv::Scalar(255), nullptr, loDiff, upDiff, 4 | cv::FLOODFILL_MASK_ONLY | (255 << 8));
+            temp = mask(cv::Range(1, m_Height + 1), cv::Range(1, m_Width + 1)).clone();
+        } else {
+            cv::Vec3b seedColor = mat.at<cv::Vec3b>(startY, startX);
+            for (int y = 0; y < m_Height; ++y) {
+                if (m_SmartSelectCancelled.load()) break;
+                for (int x = 0; x < m_Width; ++x) {
+                    cv::Vec3b colorVal = mat.at<cv::Vec3b>(y, x);
+                    float diff = std::sqrt(
+                        std::pow(static_cast<float>(colorVal[0]) - seedColor[0], 2) +
+                        std::pow(static_cast<float>(colorVal[1]) - seedColor[1], 2) +
+                        std::pow(static_cast<float>(colorVal[2]) - seedColor[2], 2)
+                    ) / 255.0f;
+                    if (diff <= tolerance * std::sqrt(3.0f)) {
+                        temp.at<uint8_t>(y, x) = 255;
                     }
                 }
-                if (tileAffected) break;
-            }
-            if (tileAffected) {
-                BackupTile(tx, ty);
             }
         }
-    }
 
-    for (int y = 0; y < m_Height; ++y) {
-        for (int x = 0; x < m_Width; ++x) {
-            float selectionVal = m_HasSelection ? SelU82F(m_SelectionMask[(size_t)y * m_Width + x]) : 1.0f;
-            float maskVal = temp.at<uint8_t>(y, x) / 255.0f;
-            float fillAlpha = maskVal * selectionVal * color[3];
+        if (m_SmartSelectCancelled.load()) {
+            m_SmartSelectInProgress.store(false);
+            return;
+        }
 
-            if (fillAlpha > 0.0f) {
-                float dest[4];
-                layer.tileCache->GetPixelF(x, y, dest);
-                float outA = fillAlpha + dest[3] * (1.0f - fillAlpha);
-                if (outA > 0.0f) {
-                    float out[4];
-                    out[0] = (color[0] * fillAlpha + dest[0] * dest[3] * (1.0f - fillAlpha)) / outA;
-                    out[1] = (color[1] * fillAlpha + dest[1] * dest[3] * (1.0f - fillAlpha)) / outA;
-                    out[2] = (color[2] * fillAlpha + dest[2] * dest[3] * (1.0f - fillAlpha)) / outA;
-                    out[3] = outA;
-                    layer.tileCache->SetPixelF(x, y, out);
+        {
+            std::lock_guard<std::mutex> lock(m_SelectionMutex);
+            auto& activeLayer = m_Layers[m_ActiveLayerIdx];
+            m_ActiveStrokeDeltas.clear();
+
+
+            for (int ty = 0; ty < (m_Height + 255) / 256; ++ty) {
+                for (int tx = 0; tx < (m_Width + 255) / 256; ++tx) {
+                    bool tileAffected = false;
+                    for (int y = ty * 256; y < std::min((ty + 1) * 256, m_Height); ++y) {
+                        for (int x = tx * 256; x < std::min((tx + 1) * 256, m_Width); ++x) {
+                            if (temp.at<uint8_t>(y, x) > 0) {
+                                tileAffected = true;
+                                break;
+                            }
+                        }
+                        if (tileAffected) break;
+                    }
+                    if (tileAffected) {
+                        BackupTile(tx, ty);
+                    }
                 }
             }
-        }
-    }
 
-    layer.needsUpload = true;
-    layer.filtersDirty = true;
-    m_IsDocumentModified = true;
+            for (int y = 0; y < m_Height; ++y) {
+                for (int x = 0; x < m_Width; ++x) {
+                    float selectionVal = m_HasSelection ? SelU82F(m_SelectionMask[(size_t)y * m_Width + x]) : 1.0f;
+                    float maskVal = temp.at<uint8_t>(y, x) / 255.0f;
+                    float fillAlpha = maskVal * selectionVal * fillColor[3];
 
-    if (!m_ActiveStrokeDeltas.empty()) {
-        std::vector<TileDelta> deltas;
-        for (auto& pair : m_ActiveStrokeDeltas) {
-            auto& delta = pair.second;
-            delta.newPixels = layer.tileCache
-                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                : std::vector<uint8_t>{};
-            deltas.push_back(std::move(delta));
+                    if (fillAlpha > 0.0f) {
+                        float dest[4];
+                        activeLayer.tileCache->GetPixelF(x, y, dest);
+                        float outA = fillAlpha + dest[3] * (1.0f - fillAlpha);
+                        if (outA > 0.0f) {
+                            float out[4];
+                            out[0] = (fillColor[0] * fillAlpha + dest[0] * dest[3] * (1.0f - fillAlpha)) / outA;
+                            out[1] = (fillColor[1] * fillAlpha + dest[1] * dest[3] * (1.0f - fillAlpha)) / outA;
+                            out[2] = (fillColor[2] * fillAlpha + dest[2] * dest[3] * (1.0f - fillAlpha)) / outA;
+                            out[3] = outA;
+                            activeLayer.tileCache->SetPixelF(x, y, out);
+
+                        }
+                    }
+                }
+            }
+
+            activeLayer.needsUpload = true;
+            activeLayer.filtersDirty = true;
+            m_IsDocumentModified = true;
+
+            if (!m_ActiveStrokeDeltas.empty()) {
+                std::vector<TileDelta> deltas;
+                for (auto& pair : m_ActiveStrokeDeltas) {
+                    auto& delta = pair.second;
+                    delta.newPixels = activeLayer.tileCache
+                        ? activeLayer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                        : std::vector<uint8_t>{};
+                    deltas.push_back(std::move(delta));
+                }
+                m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Bucket Fill", m_ActiveLayerIdx, std::move(deltas)));
+                m_ActiveStrokeDeltas.clear();
+            }
         }
-        m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Bucket Fill", m_ActiveLayerIdx, std::move(deltas)));
-        m_ActiveStrokeDeltas.clear();
-    }
+
+        m_SmartSelectInProgress.store(false);
+    });
 }
 
 void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColor[4], const float endColor[4]) {

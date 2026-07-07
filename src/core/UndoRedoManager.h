@@ -1,5 +1,5 @@
 #pragma once
-
+#include <mutex>
 #include <string>
 #include <vector>
 #include <memory>
@@ -85,6 +85,7 @@ private:
 
     static constexpr size_t kDefaultMemoryBudget = 256ull * 1024 * 1024; // 256 MB
 
+    mutable std::mutex m_Mutex;
     std::vector<std::shared_ptr<UndoCommand>> m_UndoStack;
     std::vector<std::shared_ptr<UndoCommand>> m_RedoStack;
     size_t m_MemoryBudgetBytes  = kDefaultMemoryBudget;

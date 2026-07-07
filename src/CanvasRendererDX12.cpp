@@ -35,10 +35,27 @@ bool CanvasRendererDX12::Initialize(
         return false;
     }
 
+    if (m_AsyncUploader.Initialize(m_Device, m_CommandQueue)) {
+        m_AsyncUploaderReady = true;
+        Logger::Get().Info("Async upload queue initialized.");
+    } else {
+        Logger::Get().Info("Async upload unavailable — using sync path.");
+    }
+
+    if (!m_ComputeTools.Initialize(device, allocFn, freeFn)) {
+        Logger::Get().Error("Failed to initialize GpuComputeTools");
+        return false;
+    }
+
     return true;
 }
 
 void CanvasRendererDX12::Shutdown() {
+    if (m_AsyncUploaderReady) {
+        m_AsyncUploader.Shutdown();
+        m_AsyncUploaderReady = false;
+    }
+
     for (auto& [cache, gpuRes] : m_GpuLayers) {
         for (auto& [key, tile] : gpuRes.albedoTiles) {
             if (tile.srvCpuHandle.ptr != 0) {
@@ -102,6 +119,7 @@ void CanvasRendererDX12::Shutdown() {
         m_UploadFenceEvent = nullptr;
     }
     m_UploadFence.Reset();
+    m_ComputeTools.Shutdown();
 }
 
 bool CanvasRendererDX12::Render(
@@ -113,6 +131,9 @@ bool CanvasRendererDX12::Render(
     int viewportHeight
 ) {
     m_AccessCounter++;
+    if (m_AsyncUploaderReady) {
+        m_AsyncUploader.FlushCompleted(0);
+    }
     m_CurrentFrameIdx = (m_CurrentFrameIdx + 1) % kMaxFramesInFlight;
     auto& currentPool = m_StagingPools[m_CurrentFrameIdx];
 
@@ -248,6 +269,15 @@ bool CanvasRendererDX12::Render(
             int tx = tileKey & 0xFFFF;
             int ty = tileKey >> 16;
 
+            if (m_AsyncUploaderReady && albedoTile.uploadFenceValue > 0) {
+                uint64_t completedFence = m_AsyncUploader.GetCompletedFenceValue();
+                if (albedoTile.uploadFenceValue > completedFence) {
+                    m_AsyncUploader.FlushCompleted(INFINITE);
+                }
+                TransitionResource(cmdList, albedoTile.resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                albedoTile.uploadFenceValue = 0;
+            }
+
             UpdateLayerBuffer(
                 cmdList,
                 layer.opacity,
@@ -271,7 +301,16 @@ bool CanvasRendererDX12::Render(
             cmdList->SetGraphicsRootDescriptorTable(3, albedoTile.srvGpuHandle);
 
             if (layer.hasMask && gpuRes.maskTiles.count(tileKey)) {
-                cmdList->SetGraphicsRootDescriptorTable(4, gpuRes.maskTiles[tileKey].srvGpuHandle);
+                auto& maskTile = gpuRes.maskTiles[tileKey];
+                if (m_AsyncUploaderReady && maskTile.uploadFenceValue > 0) {
+                    uint64_t completedFence = m_AsyncUploader.GetCompletedFenceValue();
+                    if (maskTile.uploadFenceValue > completedFence) {
+                        m_AsyncUploader.FlushCompleted(INFINITE);
+                    }
+                    TransitionResource(cmdList, maskTile.resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    maskTile.uploadFenceValue = 0;
+                }
+                cmdList->SetGraphicsRootDescriptorTable(4, maskTile.srvGpuHandle);
             } else {
                 cmdList->SetGraphicsRootDescriptorTable(4, m_DummyWhiteSrvGpu);
             }
@@ -320,6 +359,15 @@ bool CanvasRendererDX12::Render(
             for (auto& [tileKey, albedoTile] : floatGpuRes.albedoTiles) {
                 int tx = tileKey & 0xFFFF;
                 int ty = tileKey >> 16;
+
+                if (m_AsyncUploaderReady && albedoTile.uploadFenceValue > 0) {
+                    uint64_t completedFence = m_AsyncUploader.GetCompletedFenceValue();
+                    if (albedoTile.uploadFenceValue > completedFence) {
+                        m_AsyncUploader.FlushCompleted(INFINITE);
+                    }
+                    TransitionResource(cmdList, albedoTile.resource.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+                    albedoTile.uploadFenceValue = 0;
+                }
 
                 UpdateLayerBuffer(
                     cmdList,
@@ -379,7 +427,7 @@ bool CanvasRendererDX12::Render(
             if (m_SelectionMaskTex && m_SelectionMaskSrvCpu.ptr != 0) {
                 m_FreeFn(m_SelectionMaskSrvCpu, m_SelectionMaskSrvGpu);
             }
-            m_SelectionMaskTex = CreateTextureResource(sW, sH, DXGI_FORMAT_R8_UNORM);
+            m_SelectionMaskTex = CreateTextureResource(sW, sH, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
             m_SelectionMaskWidth = sW;
             m_SelectionMaskHeight = sH;
             m_AllocFn(&m_SelectionMaskSrvCpu, &m_SelectionMaskSrvGpu);
@@ -480,35 +528,54 @@ void CanvasRendererDX12::UploadDirtyTiles(
             m_Device->CreateShaderResourceView(tile.resource.Get(), &srvDesc, tile.srvCpuHandle);
         }
 
-        auto staging = CreateStagingResource(totalBytes);
-        pool.resources.push_back(staging);
+        if (m_AsyncUploaderReady) {
+            // Async path: copy data and queue upload
+            TransitionResource(cmdList, tile.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
 
-        void* mapped = nullptr;
-        if (SUCCEEDED(staging->Map(0, nullptr, &mapped))) {
-            std::memcpy(mapped, srcData, totalBytes);
-            staging->Unmap(0, nullptr);
+            UploadRequest req;
+            req.data.assign(srcData, srcData + totalBytes);
+            req.dstResource = tile.resource.Get();
+            req.format = format;
+            req.width = TILE_SIZE;
+            req.height = TILE_SIZE;
+            req.onComplete = [&tile, this]() {
+                tile.lastAccess = m_AccessCounter;
+            };
+
+            tile.uploadFenceValue = m_AsyncUploader.EnqueueUpload(std::move(req));
+        } else {
+            // Sync path
+            auto staging = CreateStagingResource(totalBytes);
+            pool.resources.push_back(staging);
+
+            void* mapped = nullptr;
+            if (SUCCEEDED(staging->Map(0, nullptr, &mapped))) {
+                std::memcpy(mapped, srcData, totalBytes);
+                staging->Unmap(0, nullptr);
+            }
+
+            TransitionResource(cmdList, tile.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+
+            D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
+            srcLocation.pResource = staging.Get();
+            srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            srcLocation.PlacedFootprint.Footprint.Format = format;
+            srcLocation.PlacedFootprint.Footprint.Width = TILE_SIZE;
+            srcLocation.PlacedFootprint.Footprint.Height = TILE_SIZE;
+            srcLocation.PlacedFootprint.Footprint.Depth = 1;
+            srcLocation.PlacedFootprint.Footprint.RowPitch = rowPitch;
+
+            D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
+            dstLocation.pResource = tile.resource.Get();
+            dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dstLocation.SubresourceIndex = 0;
+
+            cmdList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
+            TransitionResource(cmdList, tile.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+            tile.lastAccess = m_AccessCounter;
+            tile.uploadFenceValue = 0;
         }
-
-        TransitionResource(cmdList, tile.resource.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
-
-        D3D12_TEXTURE_COPY_LOCATION srcLocation = {};
-        srcLocation.pResource = staging.Get();
-        srcLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        srcLocation.PlacedFootprint.Footprint.Format = format;
-        srcLocation.PlacedFootprint.Footprint.Width = TILE_SIZE;
-        srcLocation.PlacedFootprint.Footprint.Height = TILE_SIZE;
-        srcLocation.PlacedFootprint.Footprint.Depth = 1;
-        srcLocation.PlacedFootprint.Footprint.RowPitch = rowPitch;
-
-        D3D12_TEXTURE_COPY_LOCATION dstLocation = {};
-        dstLocation.pResource = tile.resource.Get();
-        dstLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        dstLocation.SubresourceIndex = 0;
-
-        cmdList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, nullptr);
-        TransitionResource(cmdList, tile.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-
-        tile.lastAccess = m_AccessCounter;
     };
 
     if (isMask) {
@@ -570,9 +637,21 @@ void CanvasRendererDX12::GarbageCollectGpuLayers(const Canvas& canvas) {
     for (auto it = m_GpuLayers.begin(); it != m_GpuLayers.end(); ) {
         if (activeCaches.count(it->first) == 0) {
             for (auto& [key, tile] : it->second.albedoTiles) {
+                if (m_AsyncUploaderReady && tile.uploadFenceValue > 0) {
+                    uint64_t completedFence = m_AsyncUploader.GetCompletedFenceValue();
+                    if (tile.uploadFenceValue > completedFence) {
+                        m_AsyncUploader.FlushCompleted(INFINITE);
+                    }
+                }
                 if (tile.srvCpuHandle.ptr != 0) m_FreeFn(tile.srvCpuHandle, tile.srvGpuHandle);
             }
             for (auto& [key, tile] : it->second.maskTiles) {
+                if (m_AsyncUploaderReady && tile.uploadFenceValue > 0) {
+                    uint64_t completedFence = m_AsyncUploader.GetCompletedFenceValue();
+                    if (tile.uploadFenceValue > completedFence) {
+                        m_AsyncUploader.FlushCompleted(INFINITE);
+                    }
+                }
                 if (tile.srvCpuHandle.ptr != 0) m_FreeFn(tile.srvCpuHandle, tile.srvGpuHandle);
             }
             it = m_GpuLayers.erase(it);
@@ -583,6 +662,12 @@ void CanvasRendererDX12::GarbageCollectGpuLayers(const Canvas& canvas) {
                 int tx = tileIt->first & 0xFFFF;
                 int ty = tileIt->first >> 16;
                 if (!tc->HasTile(tx, ty)) {
+                    if (m_AsyncUploaderReady && tileIt->second.uploadFenceValue > 0) {
+                        uint64_t completedFence = m_AsyncUploader.GetCompletedFenceValue();
+                        if (tileIt->second.uploadFenceValue > completedFence) {
+                            m_AsyncUploader.FlushCompleted(INFINITE);
+                        }
+                    }
                     if (tileIt->second.srvCpuHandle.ptr != 0) m_FreeFn(tileIt->second.srvCpuHandle, tileIt->second.srvGpuHandle);
                     tileIt = it->second.albedoTiles.erase(tileIt);
                 } else {

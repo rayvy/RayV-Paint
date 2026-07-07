@@ -90,6 +90,10 @@ set(SOURCES
     src/CanvasRendererDX12.h
     src/render/Dx12Device.cpp
     src/render/Dx12Device.h
+    src/render/Dx12AsyncUploader.cpp
+    src/render/Dx12AsyncUploader.h
+    src/render/GpuComputeTools.cpp
+    src/render/GpuComputeTools.h
     src/core/TileCache.cpp
     src/core/TileCache.h
     src/core/Logger.cpp
@@ -120,6 +124,7 @@ set(SOURCES
 set(SHADER_FILES
     src/shaders/Canvas.hlsl
     src/shaders/CanvasTiles.hlsl
+    src/shaders/FloodFill.hlsl
 )
 set_source_files_properties(${SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 
@@ -203,6 +208,7 @@ if(FXC_EXE)
 
     set(CANVAS_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/Canvas.hlsl")
     set(TILES_HLSL  "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/CanvasTiles.hlsl")
+    set(FLOODFILL_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/FloodFill.hlsl")
     set(SHADER_INC  "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders")
     set(SHADER_OUT  "$<TARGET_FILE_DIR:RayVPaint_Core>/shaders")
 
@@ -223,6 +229,9 @@ if(FXC_EXE)
     add_fxc_target("${CANVAS_HLSL}" PSSelectionOutline ps_5_0 Canvas_PSSelectionOutline.cso)
     add_fxc_target("${TILES_HLSL}"  VSTileMain         vs_5_0 Canvas_VSTileMain.cso)
     add_fxc_target("${TILES_HLSL}"  PSTileBlend        ps_5_0 Canvas_PSTileBlend.cso)
+    add_fxc_target("${FLOODFILL_HLSL}" CSInit             cs_5_0 FloodFill_CSInit.cso)
+    add_fxc_target("${FLOODFILL_HLSL}" CSMain             cs_5_0 FloodFill_CSMain.cso)
+    add_fxc_target("${FLOODFILL_HLSL}" CSGlobalThreshold  cs_5_0 FloodFill_CSGlobalThreshold.cso)
 else()
     message(WARNING "fxc not found — shaders will be compiled at runtime by D3DCompile.")
 endif()

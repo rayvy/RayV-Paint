@@ -10,6 +10,8 @@
 #include <memory>
 #include <directxmath.h>
 #include "Canvas.h"
+#include "render/Dx12AsyncUploader.h"
+#include "render/GpuComputeTools.h"
 
 class CanvasRendererDX12 {
 public:
@@ -52,6 +54,7 @@ private:
         D3D12_CPU_DESCRIPTOR_HANDLE srvCpuHandle = {};
         D3D12_GPU_DESCRIPTOR_HANDLE srvGpuHandle = {};
         uint64_t lastAccess = 0;
+        uint64_t uploadFenceValue = 0;
     };
 
     struct LayerGpuResources {
@@ -215,4 +218,8 @@ private:
     uint64_t m_UploadFenceValue = 0;
 
     uint64_t m_AccessCounter = 0;
+
+    Dx12AsyncUploader m_AsyncUploader;
+    bool m_AsyncUploaderReady = false;
+    GpuComputeTools m_ComputeTools;
 };
