@@ -27,7 +27,8 @@ cbuffer LayerBuffer : register(b1)
 };
 
 Texture2D g_Texture : register(t0);
-SamplerState g_Sampler : register(s0);
+SamplerState g_SamplerPoint  : register(s0);
+SamplerState g_SamplerLinear : register(s1);
 
 PS_INPUT VSMain(VS_INPUT input)
 {
@@ -110,7 +111,7 @@ float4 PSMain(PS_INPUT input) : SV_TARGET
     float3 checkColor = lerp(color1, color2, check);
     
     // Sample composed layer texture
-    float4 texCol = g_Texture.Sample(g_Sampler, input.uv);
+    float4 texCol = g_Texture.Sample(g_SamplerPoint, input.uv);
     
     bool r = u_ChannelMasksAndFlags.x > 0.5f;
     bool g = u_ChannelMasksAndFlags.y > 0.5f;
@@ -207,7 +208,7 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    float4 col = g_Texture.Sample(g_Sampler, uv);
+    float4 col = g_Texture.Sample(g_SamplerPoint, uv);
     
     // If master Alpha channel is disabled, treat the layer as fully opaque
     if (u_ChannelMasksAndFlags.w < 0.5f)
@@ -220,7 +221,7 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
     // If layer mask is enabled, sample it and modulate alpha
     if (u_LayerParams.y > 0.5f)
     {
-        float maskVal = g_LayerMask.Sample(g_Sampler, uv).r;
+        float maskVal = g_LayerMask.Sample(g_SamplerPoint, uv).r;
         col.a *= maskVal;
     }
 
@@ -228,7 +229,7 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
     uint blendMode = (uint)(u_CenterParams.z + 0.5f);
     if (blendMode > 0u)
     {
-        float4 dst = g_Composite.Sample(g_Sampler, input.uv); // existing composite
+        float4 dst = g_Composite.Sample(g_SamplerPoint, input.uv); // existing composite
         float3 s = col.rgb;
         float3 d = dst.rgb;
         float3 result = s; // default = Normal
@@ -276,16 +277,16 @@ Texture2D g_SelectionMask : register(t1);
 
 float4 PSSelectionOutline(PS_INPUT input) : SV_TARGET
 {
-    float mask = g_SelectionMask.Sample(g_Sampler, input.uv).r;
+    float mask = g_SelectionMask.Sample(g_SamplerPoint, input.uv).r;
     
     float2 canvasSize = u_OffsetAndCanvasSize.zw;
     float zoom = u_ViewportSizeAndZoom.z;
     float2 uvStep = 1.0f / (canvasSize * zoom);
     
-    float mLeft  = g_SelectionMask.Sample(g_Sampler, input.uv - float2(uvStep.x, 0.0f)).r;
-    float mRight = g_SelectionMask.Sample(g_Sampler, input.uv + float2(uvStep.x, 0.0f)).r;
-    float mUp    = g_SelectionMask.Sample(g_Sampler, input.uv - float2(0.0f, uvStep.y)).r;
-    float mDown  = g_SelectionMask.Sample(g_Sampler, input.uv + float2(0.0f, uvStep.y)).r;
+    float mLeft  = g_SelectionMask.Sample(g_SamplerPoint, input.uv - float2(uvStep.x, 0.0f)).r;
+    float mRight = g_SelectionMask.Sample(g_SamplerPoint, input.uv + float2(uvStep.x, 0.0f)).r;
+    float mUp    = g_SelectionMask.Sample(g_SamplerPoint, input.uv - float2(0.0f, uvStep.y)).r;
+    float mDown  = g_SelectionMask.Sample(g_SamplerPoint, input.uv + float2(0.0f, uvStep.y)).r;
     
     // Check if there is an edge
     if (abs(mask - mLeft) > 0.1f || abs(mask - mRight) > 0.1f || abs(mask - mUp) > 0.1f || abs(mask - mDown) > 0.1f)

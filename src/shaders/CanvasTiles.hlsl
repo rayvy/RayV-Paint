@@ -86,14 +86,15 @@ PS_TILE_INPUT VSTileMain(VS_TILE_INPUT input)
 Texture2D    g_Texture   : register(t0);
 Texture2D    g_LayerMask : register(t1);
 Texture2D    g_Composite : register(t2);
-SamplerState g_Sampler   : register(s0);
+SamplerState g_SamplerPoint  : register(s0);
+SamplerState g_SamplerLinear : register(s1);
 
 // Blends one 256×256 tile onto the ping-pong composite RT,
 // applying opacity, layer mask, and the encoded blend mode.
 float4 PSTileBlend(PS_TILE_INPUT input) : SV_TARGET
 {
     // UV within this tile maps 1-to-1 to [0,1] of the tile texture.
-    float4 col = g_Texture.Sample(g_Sampler, input.uv);
+    float4 col = g_Texture.Sample(g_SamplerPoint, input.uv);
 
     // If alpha channel is globally disabled, treat tile as fully opaque.
     if (u_ChannelMasksAndFlags.w < 0.5f)
@@ -107,7 +108,7 @@ float4 PSTileBlend(PS_TILE_INPUT input) : SV_TARGET
     // Apply layer mask if enabled.
     if (u_LayerParams.y > 0.5f)
     {
-        float maskVal = g_LayerMask.Sample(g_Sampler, input.uv).r;
+        float maskVal = g_LayerMask.Sample(g_SamplerPoint, input.uv).r;
         col.a *= maskVal;
     }
 
@@ -117,7 +118,7 @@ float4 PSTileBlend(PS_TILE_INPUT input) : SV_TARGET
     {
         // Convert tile screen-space position back to canvas UV for reading composite.
         float2 canvasUV = input.screenPos / u_OffsetAndCanvasSize.zw;
-        float4 dst = g_Composite.Sample(g_Sampler, canvasUV);
+        float4 dst = g_Composite.Sample(g_SamplerPoint, canvasUV);
         float3 s = col.rgb;
         float3 d = dst.rgb;
         float3 result = s;

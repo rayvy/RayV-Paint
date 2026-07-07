@@ -199,7 +199,7 @@ void EndMainRenderTarget();
 void WaitForGpu();
 void ResizeCanvasRenderTarget(int width, int height);
 void CleanupCanvasRenderTarget();
-void RenderCanvasToTexture(int width, int height);
+void RecordCanvasCommands(ID3D12GraphicsCommandList* cmdList, int width, int height);
 void RedirectIOToConsole();
 void HandleDeviceLost(HWND hWnd);
 
@@ -647,6 +647,9 @@ int main(int argc, char* argv[]) {
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
 
+        int viewportWidth = 0;
+        int viewportHeight = 0;
+
         if (g_DeviceLostOccurred) {
             uiState.showDeviceLostModal = true;
             g_DeviceLostOccurred = false;
@@ -829,14 +832,11 @@ int main(int argc, char* argv[]) {
         ImGui::PopStyleVar();
 
         ImVec2 viewportPanelSize = ImGui::GetContentRegionAvail();
-        int viewportWidth = static_cast<int>(viewportPanelSize.x);
-        int viewportHeight = static_cast<int>(viewportPanelSize.y);
+        viewportWidth = static_cast<int>(viewportPanelSize.x);
+        viewportHeight = static_cast<int>(viewportPanelSize.y);
 
         if (viewportWidth > 0 && viewportHeight > 0) {
             ResizeCanvasRenderTarget(viewportWidth, viewportHeight);
-
-            // Render first to have the texture ready for ImGui::Image
-            RenderCanvasToTexture(viewportWidth, viewportHeight);
 
             // Draw the viewport image using exact integer dimensions to prevent pixel interpolation blurring
             if (g_canvasTextureSrvGpuHandle.ptr != 0) {
@@ -1505,14 +1505,22 @@ int main(int argc, char* argv[]) {
         // Standard Render Presentation
         ImGui::Render();
         if (g_DX12.BeginFrame()) {
+            auto* cmdList = g_DX12.GetCommandList();
             ID3D12DescriptorHeap* heaps[] = { g_DX12.GetSrvHeap() };
-            g_DX12.GetCommandList()->SetDescriptorHeaps(1, heaps);
+            cmdList->SetDescriptorHeaps(1, heaps);
+
+            // 1. Canvas render (record commands)
+            if (viewportWidth > 0 && viewportHeight > 0) {
+                RecordCanvasCommands(cmdList, viewportWidth, viewportHeight);
+            }
+
+            // 2. Main RT -> ImGui
             D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_DX12.GetCurrentRtv();
-            g_DX12.GetCommandList()->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+            cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
             float clearColor[4] = { 0.08f, 0.08f, 0.10f, 1.0f };
-            g_DX12.GetCommandList()->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
+            cmdList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
             
-            ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_DX12.GetCommandList());
+            ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), cmdList);
 
             if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
                 ImGui::UpdatePlatformWindows();
@@ -1657,6 +1665,35 @@ void ResizeCanvasRenderTarget(int width, int height) {
     srvDesc.Texture2D.PlaneSlice = 0;
     srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
     g_DX12.GetDevice()->CreateShaderResourceView(g_canvasTexture12, &srvDesc, g_canvasTextureSrvCpuHandle);
+
+    // Initial clear of the canvas render target to grey
+    ID3D12CommandAllocator* cmdAlloc = g_DX12.GetCommandAllocator();
+    ID3D12GraphicsCommandList* cmdList = g_DX12.GetCommandList();
+    ID3D12CommandQueue* cmdQueue = g_DX12.GetCommandQueue();
+    if (cmdAlloc && cmdList && cmdQueue) {
+        cmdAlloc->Reset();
+        cmdList->Reset(cmdAlloc, nullptr);
+
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = g_canvasTexture12;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        cmdList->ResourceBarrier(1, &barrier);
+
+        float clearColor[4] = { 0.12f, 0.12f, 0.14f, 1.0f };
+        cmdList->ClearRenderTargetView(g_canvasRtvHandle, clearColor, 0, nullptr);
+
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        cmdList->ResourceBarrier(1, &barrier);
+
+        cmdList->Close();
+        ID3D12CommandList* commandLists[] = { cmdList };
+        cmdQueue->ExecuteCommandLists(1, commandLists);
+        g_DX12.WaitForGpu();
+    }
 }
 
 void CleanupCanvasRenderTarget() {
@@ -1673,23 +1710,14 @@ void CleanupCanvasRenderTarget() {
     g_canvasRTHeight = 0.0f;
 }
 
-void RenderCanvasToTexture(int width, int height) {
-    if (!g_canvasTexture12 || !g_canvasRtvHeap ||
-        !g_DX12.GetCommandAllocator() || !g_DX12.GetCommandList() || !g_DX12.GetCommandQueue()) {
+void RecordCanvasCommands(ID3D12GraphicsCommandList* cmdList, int width, int height) {
+    if (!g_canvasTexture12 || !g_canvasRtvHeap) {
         return;
     }
-
-    if (FAILED(g_DX12.GetCommandAllocator()->Reset()) ||
-        FAILED(g_DX12.GetCommandList()->Reset(g_DX12.GetCommandAllocator(), nullptr))) {
-        return;
-    }
-
-    ID3D12DescriptorHeap* heaps[] = { g_DX12.GetSrvHeap() };
-    g_DX12.GetCommandList()->SetDescriptorHeaps(1, heaps);
 
     if (g_CanvasRendererReady) {
         bool renderOk = g_CanvasRenderer.Render(
-            g_DX12.GetCommandList(),
+            cmdList,
             g_Canvas,
             g_canvasTexture12,
             g_canvasRtvHandle,
@@ -1706,22 +1734,12 @@ void RenderCanvasToTexture(int width, int height) {
         toRT.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         toRT.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
         toRT.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        g_DX12.GetCommandList()->ResourceBarrier(1, &toRT);
+        cmdList->ResourceBarrier(1, &toRT);
         float clearColor[4] = { 0.12f, 0.12f, 0.14f, 1.0f };
-        g_DX12.GetCommandList()->ClearRenderTargetView(g_canvasRtvHandle, clearColor, 0, nullptr);
+        cmdList->ClearRenderTargetView(g_canvasRtvHandle, clearColor, 0, nullptr);
         D3D12_RESOURCE_BARRIER toSRV = toRT;
         toSRV.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         toSRV.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        g_DX12.GetCommandList()->ResourceBarrier(1, &toSRV);
-    }
-
-    g_DX12.GetCommandList()->Close();
-    ID3D12CommandList* commandLists[] = { g_DX12.GetCommandList() };
-    g_DX12.GetCommandQueue()->ExecuteCommandLists(1, commandLists);
-    g_DX12.WaitForGpu();
-
-    HRESULT reason = g_DX12.GetDevice() ? g_DX12.GetDevice()->GetDeviceRemovedReason() : S_OK;
-    if (FAILED(reason)) {
-        HandleDeviceLost(g_hWnd);
+        cmdList->ResourceBarrier(1, &toSRV);
     }
 }
