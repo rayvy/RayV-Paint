@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <cmath>
+#include <cassert>
 
 bool CanvasRendererDX12::Initialize(
     ID3D12Device* device,
@@ -23,6 +24,16 @@ bool CanvasRendererDX12::Initialize(
     if (!CreateConstantBuffers()) return false;
     if (!CreateDummyResources()) return false;
     if (!CreateQuadVertexBuffer()) return false;
+
+    if (FAILED(m_Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_UploadFence)))) {
+        Logger::Get().Error("Failed to create upload fence");
+        return false;
+    }
+    m_UploadFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    if (!m_UploadFenceEvent) {
+        Logger::Get().Error("Failed to create upload fence event");
+        return false;
+    }
 
     return true;
 }
@@ -74,7 +85,23 @@ void CanvasRendererDX12::Shutdown() {
     m_PsoLayerBlend.Reset();
     m_PsoSelectionOutline.Reset();
     m_RootSignature.Reset();
-    m_StagingResources.clear();
+
+    if (m_UploadFence) {
+        m_UploadFenceValue++;
+        m_CommandQueue->Signal(m_UploadFence.Get(), m_UploadFenceValue);
+        if (m_UploadFence->GetCompletedValue() < m_UploadFenceValue) {
+            m_UploadFence->SetEventOnCompletion(m_UploadFenceValue, m_UploadFenceEvent);
+            WaitForSingleObject(m_UploadFenceEvent, INFINITE);
+        }
+    }
+    for (auto& pool : m_StagingPools) {
+        pool.resources.clear();
+    }
+    if (m_UploadFenceEvent) {
+        CloseHandle(m_UploadFenceEvent);
+        m_UploadFenceEvent = nullptr;
+    }
+    m_UploadFence.Reset();
 }
 
 bool CanvasRendererDX12::Render(
@@ -86,7 +113,16 @@ bool CanvasRendererDX12::Render(
     int viewportHeight
 ) {
     m_AccessCounter++;
-    m_StagingResources.clear(); // Free resources uploaded in previous frame
+    m_CurrentFrameIdx = (m_CurrentFrameIdx + 1) % kMaxFramesInFlight;
+    auto& currentPool = m_StagingPools[m_CurrentFrameIdx];
+
+    if (currentPool.fenceValue > 0 &&
+        m_UploadFence->GetCompletedValue() < currentPool.fenceValue) {
+        m_UploadFence->SetEventOnCompletion(currentPool.fenceValue, m_UploadFenceEvent);
+        WaitForSingleObject(m_UploadFenceEvent, INFINITE);
+    }
+    currentPool.resources.clear();
+
     m_CbOffset = 0;             // Reset dynamic constant buffer ring allocator
 
     int canvasWidth = canvas.GetWidth();
@@ -174,11 +210,11 @@ bool CanvasRendererDX12::Render(
         LayerGpuResources& gpuRes = m_GpuLayers[activeCache];
 
         // Upload dirty tiles to albedo
-        UploadDirtyTiles(cmdList, *activeCache, gpuRes, false, {}, 0, 0);
+        UploadDirtyTiles(cmdList, *activeCache, gpuRes, false, {}, 0, 0, currentPool);
 
         // Upload masks to corresponding albedo tile keys
         if (layer.hasMask && !layer.mask.empty()) {
-            UploadDirtyTiles(cmdList, *activeCache, gpuRes, true, layer.mask, canvasWidth, canvasHeight);
+            UploadDirtyTiles(cmdList, *activeCache, gpuRes, true, layer.mask, canvasWidth, canvasHeight, currentPool);
         }
 
         layer.needsUpload = false;
@@ -292,7 +328,7 @@ bool CanvasRendererDX12::Render(
         int totalBytes = sH * rowPitch;
 
         auto staging = CreateStagingResource(totalBytes);
-        m_StagingResources.push_back(staging);
+        currentPool.resources.push_back(staging);
 
         void* mapped = nullptr;
         if (SUCCEEDED(staging->Map(0, nullptr, &mapped))) {
@@ -333,6 +369,11 @@ bool CanvasRendererDX12::Render(
 
     TransitionResource(cmdList, viewportRT, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 
+    // Signal fence
+    m_UploadFenceValue++;
+    m_CommandQueue->Signal(m_UploadFence.Get(), m_UploadFenceValue);
+    currentPool.fenceValue = m_UploadFenceValue;
+
     return true;
 }
 
@@ -343,7 +384,8 @@ void CanvasRendererDX12::UploadDirtyTiles(
     bool isMask,
     const std::vector<uint8_t>& rawMaskData,
     int canvasWidth,
-    int canvasHeight
+    int canvasHeight,
+    FrameStagingPool& pool
 ) {
     int bytesPerPixel = isMask ? 1 : BytesPerPixel(tileCache.GetFormat());
     DXGI_FORMAT format = isMask ? DXGI_FORMAT_R8_UNORM :
@@ -369,7 +411,7 @@ void CanvasRendererDX12::UploadDirtyTiles(
         }
 
         auto staging = CreateStagingResource(totalBytes);
-        m_StagingResources.push_back(staging);
+        pool.resources.push_back(staging);
 
         void* mapped = nullptr;
         if (SUCCEEDED(staging->Map(0, nullptr, &mapped))) {
@@ -995,15 +1037,25 @@ void CanvasRendererDX12::TransitionResource(
 }
 
 uint32_t CanvasRendererDX12::AllocateConstantBufferSpace(const void* data, uint32_t size) {
-    m_CbOffset = (m_CbOffset + 255) & ~255;
-    if (m_CbOffset + size > MAX_CB_SIZE) {
-        Logger::Get().Error("Dynamical Constant Buffer Heap overrun! Resetting offset.");
-        m_CbOffset = 0;
+    uint32_t alignedOffset = (m_CbOffset + 255) & ~255;
+    uint32_t requiredEnd = alignedOffset + size;
+
+    if (requiredEnd > MAX_CB_SIZE) {
+        // Ring wrap: reset to beginning
+        Logger::Get().Error("CB ring overflow — wrapping. Consider increasing MAX_CB_SIZE.");
+        alignedOffset = 0;
+        requiredEnd = size;
+        if (requiredEnd > MAX_CB_SIZE) {
+            Logger::Get().Error("Single CB allocation exceeds MAX_CB_SIZE — skipping.");
+            return 0;
+        }
     }
-    std::memcpy(m_CbMappedData + m_CbOffset, data, size);
-    uint32_t allocatedOffset = m_CbOffset;
-    m_CbOffset += size;
-    return allocatedOffset;
+
+    assert((alignedOffset % 256) == 0 && "CBV must be 256-byte aligned");
+
+    std::memcpy(m_CbMappedData + alignedOffset, data, size);
+    m_CbOffset = requiredEnd;
+    return alignedOffset;
 }
 
 uint32_t CanvasRendererDX12::UpdateCanvasBuffer(

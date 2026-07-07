@@ -42,6 +42,11 @@ public:
     );
 
 private:
+    struct FrameStagingPool {
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> resources;
+        uint64_t fenceValue = 0;
+    };
+
     struct GpuTile {
         Microsoft::WRL::ComPtr<ID3D12Resource> resource;
         D3D12_CPU_DESCRIPTOR_HANDLE srvCpuHandle = {};
@@ -83,7 +88,8 @@ private:
         bool isMask,
         const std::vector<uint8_t>& rawMaskData,
         int canvasWidth,
-        int canvasHeight
+        int canvasHeight,
+        FrameStagingPool& pool
     );
 
     [[nodiscard]] bool CreateRootSignatures();
@@ -193,11 +199,19 @@ private:
     Microsoft::WRL::ComPtr<ID3D12Resource> m_ConstantBufferUpload;
     uint8_t* m_CbMappedData = nullptr;
     uint32_t m_CbOffset = 0;
-    static constexpr uint32_t MAX_CB_SIZE = 1024 * 1024; // 1 MB ring buffer
+    static constexpr uint32_t MAX_CB_SIZE = 32 * 1024 * 1024; // 32 MB ring buffer
 
     Microsoft::WRL::ComPtr<ID3D12Resource> m_QuadVertexBuffer;
     D3D12_VERTEX_BUFFER_VIEW m_QuadVertexBufferView = {};
 
-    std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> m_StagingResources;
+    static constexpr int kMaxFramesInFlight = 2;
+    FrameStagingPool m_StagingPools[kMaxFramesInFlight];
+    int m_CurrentFrameIdx = 0;
+
+    // Fence for sync
+    Microsoft::WRL::ComPtr<ID3D12Fence> m_UploadFence;
+    HANDLE m_UploadFenceEvent = nullptr;
+    uint64_t m_UploadFenceValue = 0;
+
     uint64_t m_AccessCounter = 0;
 };
