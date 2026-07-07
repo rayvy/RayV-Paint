@@ -1,8 +1,12 @@
 #include "Canvas.h"
 #include "core/Logger.h"
+#include "core/ThreadPool.h"
 #include <algorithm>
 #include <cmath>
 #include <random>
+#include <mutex>
+#include <future>
+#include <thread>
 
 // --- Helpers ---
 static std::vector<float> ExportLayerF(const Layer& layer, int w, int h) {
@@ -129,99 +133,680 @@ std::vector<float> Canvas_BuildSplineLUT(const std::vector<std::pair<float,float
 // ============================================================
 
 void Canvas::InvertAlpha() {
-    if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
-    auto pixels = ExportLayerF(layer, m_Width, m_Height);
-    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
-        if (sel<0.5f) continue;
-        size_t idx=((size_t)y*m_Width+x)*4;
-        pixels[idx+3]=1.f-pixels[idx+3];
+    if (!layer.tileCache) return;
+
+    auto& tc = *layer.tileCache;
+    int tilesX = tc.GetTilesX();
+    int tilesY = tc.GetTilesY();
+    int bpp = tc.GetBytesPerPixel();
+
+    std::vector<std::pair<int, int>> activeTiles;
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX; ++tx) {
+            if (tc.HasTile(tx, ty)) {
+                activeTiles.push_back({tx, ty});
+            }
+        }
     }
-    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
-    layer.filtersDirty=true;
-    Logger::Get().Info("InvertAlpha");
+
+    if (activeTiles.empty()) return;
+
+    // Backup tiles for undo
+    for (const auto& [tx, ty] : activeTiles) {
+        BackupTile(tx, ty);
+    }
+
+    std::atomic<size_t> nextTileIndex{0};
+    size_t totalTiles = activeTiles.size();
+    int numWorkers = std::min((int)std::thread::hardware_concurrency(), (int)totalTiles);
+    if (numWorkers < 1) numWorkers = 1;
+
+    std::mutex tcMutex;
+
+    std::vector<std::future<void>> futures;
+    for (int w = 0; w < numWorkers; ++w) {
+        futures.push_back(ThreadPool::Get().Enqueue([&]() {
+            size_t idx;
+            while ((idx = nextTileIndex.fetch_add(1)) < totalTiles) {
+                int tx = activeTiles[idx].first;
+                int ty = activeTiles[idx].second;
+
+                uint8_t* tileData = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(tcMutex);
+                    tileData = tc.LockTile(tx, ty);
+                }
+
+                if (!tileData) continue;
+
+                for (int i = 0; i < TILE_SIZE * TILE_SIZE; ++i) {
+                    int px = i % TILE_SIZE;
+                    int py = i / TILE_SIZE;
+                    int canvasX = tx * TILE_SIZE + px;
+                    int canvasY = ty * TILE_SIZE + py;
+
+                    float sel = 1.0f;
+                    if (m_HasSelection && canvasX < m_Width && canvasY < m_Height) {
+                        sel = m_SelectionMask[canvasY * m_Width + canvasX] / 255.f;
+                    } else if (canvasX >= m_Width || canvasY >= m_Height) {
+                        sel = 0.0f;
+                    }
+
+                    if (sel < 1e-4f) continue;
+
+                    if (bpp == 4) { // RGBA8
+                        float a = tileData[i * 4 + 3] / 255.f;
+                        float na = a * (1.f - sel) + (1.f - a) * sel;
+                        tileData[i * 4 + 3] = static_cast<uint8_t>(std::clamp(na * 255.f + 0.5f, 0.f, 255.f));
+                    } else { // RGBA32F
+                        float* fp = reinterpret_cast<float*>(tileData) + i * 4;
+                        float a = fp[3];
+                        float na = a * (1.f - sel) + (1.f - a) * sel;
+                        fp[3] = na;
+                    }
+                }
+            }
+        }));
+    }
+    for (auto& f : futures) f.wait();
+
+    for (const auto& [tx, ty] : activeTiles) {
+        tc.MarkDirty(tx, ty);
+    }
+
+    if (!m_ActiveStrokeDeltas.empty()) {
+        std::vector<TileDelta> deltas;
+        for (auto& pair : m_ActiveStrokeDeltas) {
+            auto& delta = pair.second;
+            delta.newPixels = layer.tileCache
+                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                : std::vector<uint8_t>{};
+            deltas.push_back(std::move(delta));
+        }
+        m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Invert Alpha", m_ActiveLayerIdx, std::move(deltas)));
+        m_ActiveStrokeDeltas.clear();
+    }
+
+    layer.needsUpload = true;
+    m_CompositeDirty = true;
+    SetDocumentModified(true);
+    Logger::Get().Info("InvertAlpha (Tiled CPU)");
 }
 
 void Canvas::ApplyBlur(float radius) {
-    if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
-    auto pixels = ExportLayerF(layer, m_Width, m_Height);
-    int r=std::max(1,(int)radius);
-    std::vector<float> blurred=pixels;
-    for (int pass=0;pass<3;++pass){BoxBlurH(blurred,m_Width,m_Height,r);BoxBlurV(blurred,m_Width,m_Height,r);}
-    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
-        if (sel<1e-4f) continue;
-        size_t idx=((size_t)y*m_Width+x)*4;
-        for(int c=0;c<4;++c) pixels[idx+c]=pixels[idx+c]*(1.f-sel)+blurred[idx+c]*sel;
+    if (!layer.tileCache) return;
+
+    auto& tc = *layer.tileCache;
+    int R = static_cast<int>(std::ceil(radius));
+    if (R < 1) return;
+
+    int tilesX = tc.GetTilesX();
+    int tilesY = tc.GetTilesY();
+    int bpp = tc.GetBytesPerPixel();
+
+    std::vector<std::pair<int, int>> activeTiles;
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX; ++tx) {
+            if (tc.HasTile(tx, ty)) {
+                activeTiles.push_back({tx, ty});
+            }
+        }
     }
-    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
-    layer.filtersDirty=true;
-    Logger::Get().Info("ApplyBlur r="+std::to_string(r));
+
+    if (activeTiles.empty()) return;
+
+    // Backup tiles for undo
+    for (const auto& [tx, ty] : activeTiles) {
+        BackupTile(tx, ty);
+    }
+
+    // Pre-allocate output tiles
+    std::vector<std::vector<float>> outputTiles(activeTiles.size());
+
+    std::atomic<size_t> nextTileIndex{0};
+    size_t totalTiles = activeTiles.size();
+    int numWorkers = std::min((int)std::thread::hardware_concurrency(), (int)totalTiles);
+    if (numWorkers < 1) numWorkers = 1;
+
+    std::mutex tcMutex;
+
+    std::vector<std::future<void>> futures;
+    for (int w = 0; w < numWorkers; ++w) {
+        futures.push_back(ThreadPool::Get().Enqueue([&]() {
+            size_t idx;
+            while ((idx = nextTileIndex.fetch_add(1)) < totalTiles) {
+                int tx = activeTiles[idx].first;
+                int ty = activeTiles[idx].second;
+
+                // Load neighborhood under mutex lock
+                int paddedSize = TILE_SIZE + 2 * R;
+                std::vector<float> padded(paddedSize * paddedSize * 4, 0.0f);
+                {
+                    std::lock_guard<std::mutex> lock(tcMutex);
+                    for (int py = -R; py < TILE_SIZE + R; ++py) {
+                        for (int px = -R; px < TILE_SIZE + R; ++px) {
+                            int canvasX = tx * TILE_SIZE + px;
+                            int canvasY = ty * TILE_SIZE + py;
+                            float rgba[4] = {};
+                            tc.GetPixelF(canvasX, canvasY, rgba);
+                            int pidx = ((py + R) * paddedSize + (px + R)) * 4;
+                            padded[pidx + 0] = rgba[0];
+                            padded[pidx + 1] = rgba[1];
+                            padded[pidx + 2] = rgba[2];
+                            padded[pidx + 3] = rgba[3];
+                        }
+                    }
+                }
+
+                // 1. Horizontal blur pass on padded: (TILE_SIZE + 2*R) x (TILE_SIZE + 2*R) -> TILE_SIZE x (TILE_SIZE + 2*R)
+                std::vector<float> tempH(TILE_SIZE * paddedSize * 4, 0.0f);
+                
+                // Build Gaussian weights
+                std::vector<float> weights(2 * R + 1);
+                float weightSum = 0.0f;
+                for (int k = -R; k <= R; ++k) {
+                    weights[k + R] = std::exp(-k * k / (2.0f * radius * radius));
+                    weightSum += weights[k + R];
+                }
+                for (int i = 0; i < weights.size(); ++i) {
+                    weights[i] /= weightSum;
+                }
+
+                for (int py = 0; py < paddedSize; ++py) {
+                    for (int px = 0; px < TILE_SIZE; ++px) {
+                        float sum[4] = {};
+                        for (int k = -R; k <= R; ++k) {
+                            int srcX = px + R + k;
+                            int srcIdx = (py * paddedSize + srcX) * 4;
+                            float w = weights[k + R];
+                            sum[0] += padded[srcIdx + 0] * w;
+                            sum[1] += padded[srcIdx + 1] * w;
+                            sum[2] += padded[srcIdx + 2] * w;
+                            sum[3] += padded[srcIdx + 3] * w;
+                        }
+                        int dstIdx = (py * TILE_SIZE + px) * 4;
+                        tempH[dstIdx + 0] = sum[0];
+                        tempH[dstIdx + 1] = sum[1];
+                        tempH[dstIdx + 2] = sum[2];
+                        tempH[dstIdx + 3] = sum[3];
+                    }
+                }
+
+                // 2. Vertical blur pass: TILE_SIZE x (TILE_SIZE + 2*R) -> TILE_SIZE x TILE_SIZE
+                std::vector<float> result(TILE_SIZE * TILE_SIZE * 4, 0.0f);
+                for (int py = 0; py < TILE_SIZE; ++py) {
+                    for (int px = 0; px < TILE_SIZE; ++px) {
+                        float sum[4] = {};
+                        for (int k = -R; k <= R; ++k) {
+                            int srcY = py + R + k;
+                            int srcIdx = (srcY * TILE_SIZE + px) * 4;
+                            float w = weights[k + R];
+                            sum[0] += tempH[srcIdx + 0] * w;
+                            sum[1] += tempH[srcIdx + 1] * w;
+                            sum[2] += tempH[srcIdx + 2] * w;
+                            sum[3] += tempH[srcIdx + 3] * w;
+                        }
+                        int dstIdx = (py * TILE_SIZE + px) * 4;
+                        result[dstIdx + 0] = sum[0];
+                        result[dstIdx + 1] = sum[1];
+                        result[dstIdx + 2] = sum[2];
+                        result[dstIdx + 3] = sum[3];
+                    }
+                }
+
+                // Apply selection blending and format write
+                for (int py = 0; py < TILE_SIZE; ++py) {
+                    for (int px = 0; px < TILE_SIZE; ++px) {
+                        int canvasX = tx * TILE_SIZE + px;
+                        int canvasY = ty * TILE_SIZE + py;
+                        
+                        float sel = 1.0f;
+                        if (m_HasSelection && canvasX < m_Width && canvasY < m_Height) {
+                            sel = m_SelectionMask[canvasY * m_Width + canvasX] / 255.f;
+                        } else if (canvasX >= m_Width || canvasY >= m_Height) {
+                            sel = 0.0f;
+                        }
+
+                        int dstIdx = (py * TILE_SIZE + px) * 4;
+                        if (sel < 1.0f) {
+                            int origIdx = ((py + R) * paddedSize + (px + R)) * 4;
+                            result[dstIdx + 0] = padded[origIdx + 0] * (1.f - sel) + result[dstIdx + 0] * sel;
+                            result[dstIdx + 1] = padded[origIdx + 1] * (1.f - sel) + result[dstIdx + 1] * sel;
+                            result[dstIdx + 2] = padded[origIdx + 2] * (1.f - sel) + result[dstIdx + 2] * sel;
+                            result[dstIdx + 3] = padded[origIdx + 3] * (1.f - sel) + result[dstIdx + 3] * sel;
+                        }
+                    }
+                }
+
+                outputTiles[idx] = std::move(result);
+            }
+        }));
+    }
+    for (auto& f : futures) f.wait();
+
+    // Write back to active layer tile cache
+    for (size_t idx = 0; idx < activeTiles.size(); ++idx) {
+        int tx = activeTiles[idx].first;
+        int ty = activeTiles[idx].second;
+        const auto& blurred = outputTiles[idx];
+
+        uint8_t* tileData = tc.LockTile(tx, ty);
+        if (!tileData) continue;
+
+        if (bpp == 4) { // RGBA8
+            for (int i = 0; i < TILE_SIZE * TILE_SIZE; ++i) {
+                tileData[i * 4 + 0] = static_cast<uint8_t>(std::clamp(blurred[i * 4 + 0] * 255.f + 0.5f, 0.f, 255.f));
+                tileData[i * 4 + 1] = static_cast<uint8_t>(std::clamp(blurred[i * 4 + 1] * 255.f + 0.5f, 0.f, 255.f));
+                tileData[i * 4 + 2] = static_cast<uint8_t>(std::clamp(blurred[i * 4 + 2] * 255.f + 0.5f, 0.f, 255.f));
+                tileData[i * 4 + 3] = static_cast<uint8_t>(std::clamp(blurred[i * 4 + 3] * 255.f + 0.5f, 0.f, 255.f));
+            }
+        } else { // RGBA32F
+            float* fp = reinterpret_cast<float*>(tileData);
+            std::memcpy(fp, blurred.data(), TILE_SIZE * TILE_SIZE * 16);
+        }
+        tc.MarkDirty(tx, ty);
+    }
+
+    if (!m_ActiveStrokeDeltas.empty()) {
+        std::vector<TileDelta> deltas;
+        for (auto& pair : m_ActiveStrokeDeltas) {
+            auto& delta = pair.second;
+            delta.newPixels = layer.tileCache
+                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                : std::vector<uint8_t>{};
+            deltas.push_back(std::move(delta));
+        }
+        m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Blur", m_ActiveLayerIdx, std::move(deltas)));
+        m_ActiveStrokeDeltas.clear();
+    }
+
+    layer.needsUpload = true;
+    m_CompositeDirty = true;
+    SetDocumentModified(true);
+    Logger::Get().Info("ApplyBlur (Tiled CPU) r=" + std::to_string(R));
 }
 
 void Canvas::ApplyHSV(float dH, float dS, float dV) {
-    if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
-    auto pixels = ExportLayerF(layer, m_Width, m_Height);
-    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
-        if (sel<1e-4f) continue;
-        size_t idx=((size_t)y*m_Width+x)*4;
-        float rr=pixels[idx],gg=pixels[idx+1],bb=pixels[idx+2];
-        float h,s,v; RGBtoHSV(rr,gg,bb,h,s,v);
-        h=fmodf(h+dH+1.f,1.f); s=std::clamp(s+dS,0.f,1.f); v=std::clamp(v+dV,0.f,1.f);
-        float nr,ng,nb; HSVtoRGB(h,s,v,nr,ng,nb);
-        pixels[idx]  =pixels[idx]  *(1.f-sel)+nr*sel;
-        pixels[idx+1]=pixels[idx+1]*(1.f-sel)+ng*sel;
-        pixels[idx+2]=pixels[idx+2]*(1.f-sel)+nb*sel;
+    if (!layer.tileCache) return;
+
+    auto& tc = *layer.tileCache;
+    int tilesX = tc.GetTilesX();
+    int tilesY = tc.GetTilesY();
+    int bpp = tc.GetBytesPerPixel();
+
+    std::vector<std::pair<int, int>> activeTiles;
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX; ++tx) {
+            if (tc.HasTile(tx, ty)) {
+                activeTiles.push_back({tx, ty});
+            }
+        }
     }
-    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
-    layer.filtersDirty=true;
-    Logger::Get().Info("ApplyHSV");
+
+    if (activeTiles.empty()) return;
+
+    // Backup tiles for undo
+    for (const auto& [tx, ty] : activeTiles) {
+        BackupTile(tx, ty);
+    }
+
+    std::atomic<size_t> nextTileIndex{0};
+    size_t totalTiles = activeTiles.size();
+    int numWorkers = std::min((int)std::thread::hardware_concurrency(), (int)totalTiles);
+    if (numWorkers < 1) numWorkers = 1;
+
+    std::mutex tcMutex;
+
+    std::vector<std::future<void>> futures;
+    for (int w = 0; w < numWorkers; ++w) {
+        futures.push_back(ThreadPool::Get().Enqueue([&]() {
+            size_t idx;
+            while ((idx = nextTileIndex.fetch_add(1)) < totalTiles) {
+                int tx = activeTiles[idx].first;
+                int ty = activeTiles[idx].second;
+
+                uint8_t* tileData = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(tcMutex);
+                    tileData = tc.LockTile(tx, ty);
+                }
+
+                if (!tileData) continue;
+
+                for (int i = 0; i < TILE_SIZE * TILE_SIZE; ++i) {
+                    int px = i % TILE_SIZE;
+                    int py = i / TILE_SIZE;
+                    int canvasX = tx * TILE_SIZE + px;
+                    int canvasY = ty * TILE_SIZE + py;
+
+                    float sel = 1.0f;
+                    if (m_HasSelection && canvasX < m_Width && canvasY < m_Height) {
+                        sel = m_SelectionMask[canvasY * m_Width + canvasX] / 255.f;
+                    } else if (canvasX >= m_Width || canvasY >= m_Height) {
+                        sel = 0.0f;
+                    }
+
+                    if (sel < 1e-4f) continue;
+
+                    float r, g, b, a;
+                    if (bpp == 4) { // RGBA8
+                        r = tileData[i * 4 + 0] / 255.f;
+                        g = tileData[i * 4 + 1] / 255.f;
+                        b = tileData[i * 4 + 2] / 255.f;
+                        a = tileData[i * 4 + 3] / 255.f;
+                    } else { // RGBA32F
+                        float* fp = reinterpret_cast<float*>(tileData) + i * 4;
+                        r = fp[0]; g = fp[1]; b = fp[2]; a = fp[3];
+                    }
+
+                    float h, s, v;
+                    RGBtoHSV(r, g, b, h, s, v);
+                    h = std::fmod(h + dH + 1.f, 1.f);
+                    s = std::clamp(s + dS, 0.f, 1.f);
+                    v = std::clamp(v + dV, 0.f, 1.f);
+                    float nr, ng, nb;
+                    HSVtoRGB(h, s, v, nr, ng, nb);
+
+                    nr = r * (1.f - sel) + nr * sel;
+                    ng = g * (1.f - sel) + ng * sel;
+                    nb = b * (1.f - sel) + nb * sel;
+
+                    if (bpp == 4) {
+                        tileData[i * 4 + 0] = static_cast<uint8_t>(std::clamp(nr * 255.f + 0.5f, 0.f, 255.f));
+                        tileData[i * 4 + 1] = static_cast<uint8_t>(std::clamp(ng * 255.f + 0.5f, 0.f, 255.f));
+                        tileData[i * 4 + 2] = static_cast<uint8_t>(std::clamp(nb * 255.f + 0.5f, 0.f, 255.f));
+                    } else {
+                        float* fp = reinterpret_cast<float*>(tileData) + i * 4;
+                        fp[0] = nr; fp[1] = ng; fp[2] = nb;
+                    }
+                }
+            }
+        }));
+    }
+    for (auto& f : futures) f.wait();
+
+    for (const auto& [tx, ty] : activeTiles) {
+        tc.MarkDirty(tx, ty);
+    }
+
+    if (!m_ActiveStrokeDeltas.empty()) {
+        std::vector<TileDelta> deltas;
+        for (auto& pair : m_ActiveStrokeDeltas) {
+            auto& delta = pair.second;
+            delta.newPixels = layer.tileCache
+                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                : std::vector<uint8_t>{};
+            deltas.push_back(std::move(delta));
+        }
+        m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("HSV Adjustment", m_ActiveLayerIdx, std::move(deltas)));
+        m_ActiveStrokeDeltas.clear();
+    }
+
+    layer.needsUpload = true;
+    m_CompositeDirty = true;
+    SetDocumentModified(true);
+    Logger::Get().Info("ApplyHSV (Tiled CPU)");
 }
 
 void Canvas::ApplyCurves(const std::vector<float>& lut256) {
-    if ((int)lut256.size()<256||m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if ((int)lut256.size() < 256 || m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
-    auto pixels = ExportLayerF(layer, m_Width, m_Height);
-    auto sample=[&](float v)->float{
-        float fi=v*255.f; int i=std::clamp((int)fi,0,254); float t=fi-i;
-        return lut256[i]*(1.f-t)+lut256[i+1]*t;
-    };
-    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
-        if (sel<1e-4f) continue;
-        size_t idx=((size_t)y*m_Width+x)*4;
-        for(int c=0;c<3;++c) pixels[idx+c]=pixels[idx+c]*(1.f-sel)+sample(pixels[idx+c])*sel;
+    if (!layer.tileCache) return;
+
+    auto& tc = *layer.tileCache;
+    int tilesX = tc.GetTilesX();
+    int tilesY = tc.GetTilesY();
+    int bpp = tc.GetBytesPerPixel();
+
+    std::vector<std::pair<int, int>> activeTiles;
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX; ++tx) {
+            if (tc.HasTile(tx, ty)) {
+                activeTiles.push_back({tx, ty});
+            }
+        }
     }
-    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
-    layer.filtersDirty=true;
-    Logger::Get().Info("ApplyCurves");
+
+    if (activeTiles.empty()) return;
+
+    // Backup tiles for undo
+    for (const auto& [tx, ty] : activeTiles) {
+        BackupTile(tx, ty);
+    }
+
+    std::atomic<size_t> nextTileIndex{0};
+    size_t totalTiles = activeTiles.size();
+    int numWorkers = std::min((int)std::thread::hardware_concurrency(), (int)totalTiles);
+    if (numWorkers < 1) numWorkers = 1;
+
+    std::mutex tcMutex;
+
+    std::vector<std::future<void>> futures;
+    for (int w = 0; w < numWorkers; ++w) {
+        futures.push_back(ThreadPool::Get().Enqueue([&]() {
+            size_t idx;
+            while ((idx = nextTileIndex.fetch_add(1)) < totalTiles) {
+                int tx = activeTiles[idx].first;
+                int ty = activeTiles[idx].second;
+
+                uint8_t* tileData = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(tcMutex);
+                    tileData = tc.LockTile(tx, ty);
+                }
+
+                if (!tileData) continue;
+
+                auto sample = [&](float val) -> float {
+                    float fi = val * 255.f;
+                    int ii = std::clamp((int)fi, 0, 254);
+                    float t = fi - ii;
+                    return lut256[ii] * (1.f - t) + lut256[ii + 1] * t;
+                };
+
+                for (int i = 0; i < TILE_SIZE * TILE_SIZE; ++i) {
+                    int px = i % TILE_SIZE;
+                    int py = i / TILE_SIZE;
+                    int canvasX = tx * TILE_SIZE + px;
+                    int canvasY = ty * TILE_SIZE + py;
+
+                    float sel = 1.0f;
+                    if (m_HasSelection && canvasX < m_Width && canvasY < m_Height) {
+                        sel = m_SelectionMask[canvasY * m_Width + canvasX] / 255.f;
+                    } else if (canvasX >= m_Width || canvasY >= m_Height) {
+                        sel = 0.0f;
+                    }
+
+                    if (sel < 1e-4f) continue;
+
+                    float r, g, b, a;
+                    if (bpp == 4) { // RGBA8
+                        r = tileData[i * 4 + 0] / 255.f;
+                        g = tileData[i * 4 + 1] / 255.f;
+                        b = tileData[i * 4 + 2] / 255.f;
+                        a = tileData[i * 4 + 3] / 255.f;
+                    } else { // RGBA32F
+                        float* fp = reinterpret_cast<float*>(tileData) + i * 4;
+                        r = fp[0]; g = fp[1]; b = fp[2]; a = fp[3];
+                    }
+
+                    float nr = r * (1.f - sel) + sample(r) * sel;
+                    float ng = g * (1.f - sel) + sample(g) * sel;
+                    float nb = b * (1.f - sel) + sample(b) * sel;
+
+                    if (bpp == 4) {
+                        tileData[i * 4 + 0] = static_cast<uint8_t>(std::clamp(nr * 255.f + 0.5f, 0.f, 255.f));
+                        tileData[i * 4 + 1] = static_cast<uint8_t>(std::clamp(ng * 255.f + 0.5f, 0.f, 255.f));
+                        tileData[i * 4 + 2] = static_cast<uint8_t>(std::clamp(nb * 255.f + 0.5f, 0.f, 255.f));
+                    } else {
+                        float* fp = reinterpret_cast<float*>(tileData) + i * 4;
+                        fp[0] = nr; fp[1] = ng; fp[2] = nb;
+                    }
+                }
+            }
+        }));
+    }
+    for (auto& f : futures) f.wait();
+
+    for (const auto& [tx, ty] : activeTiles) {
+        tc.MarkDirty(tx, ty);
+    }
+
+    if (!m_ActiveStrokeDeltas.empty()) {
+        std::vector<TileDelta> deltas;
+        for (auto& pair : m_ActiveStrokeDeltas) {
+            auto& delta = pair.second;
+            delta.newPixels = layer.tileCache
+                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                : std::vector<uint8_t>{};
+            deltas.push_back(std::move(delta));
+        }
+        m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Curves", m_ActiveLayerIdx, std::move(deltas)));
+        m_ActiveStrokeDeltas.clear();
+    }
+
+    layer.needsUpload = true;
+    m_CompositeDirty = true;
+    SetDocumentModified(true);
+    Logger::Get().Info("ApplyCurves (Tiled CPU)");
 }
 
 void Canvas::ApplyNoise(float strength, bool colorNoise) {
-    if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
-    auto pixels = ExportLayerF(layer, m_Width, m_Height);
-    std::mt19937 rng(std::random_device{}());
-    std::uniform_real_distribution<float> dist(-1.f,1.f);
-    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
-        if (sel<1e-4f) continue;
-        size_t idx=((size_t)y*m_Width+x)*4;
-        if (colorNoise) { for(int c=0;c<3;++c) pixels[idx+c]=std::clamp(pixels[idx+c]+dist(rng)*strength*sel,0.f,1.f); }
-        else { float n=dist(rng)*strength*sel; for(int c=0;c<3;++c) pixels[idx+c]=std::clamp(pixels[idx+c]+n,0.f,1.f); }
+    if (!layer.tileCache) return;
+
+    auto& tc = *layer.tileCache;
+    int tilesX = tc.GetTilesX();
+    int tilesY = tc.GetTilesY();
+    int bpp = tc.GetBytesPerPixel();
+
+    std::vector<std::pair<int, int>> activeTiles;
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX; ++tx) {
+            if (tc.HasTile(tx, ty)) {
+                activeTiles.push_back({tx, ty});
+            }
+        }
     }
-    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
-    layer.filtersDirty=true;
-    Logger::Get().Info("ApplyNoise");
+
+    if (activeTiles.empty()) return;
+
+    // Backup tiles for undo
+    for (const auto& [tx, ty] : activeTiles) {
+        BackupTile(tx, ty);
+    }
+
+    std::atomic<size_t> nextTileIndex{0};
+    size_t totalTiles = activeTiles.size();
+    int numWorkers = std::min((int)std::thread::hardware_concurrency(), (int)totalTiles);
+    if (numWorkers < 1) numWorkers = 1;
+
+    std::mutex tcMutex;
+
+    std::vector<std::future<void>> futures;
+    for (int w = 0; w < numWorkers; ++w) {
+        futures.push_back(ThreadPool::Get().Enqueue([&]() {
+            size_t idx;
+            while ((idx = nextTileIndex.fetch_add(1)) < totalTiles) {
+                int tx = activeTiles[idx].first;
+                int ty = activeTiles[idx].second;
+
+                uint8_t* tileData = nullptr;
+                {
+                    std::lock_guard<std::mutex> lock(tcMutex);
+                    tileData = tc.LockTile(tx, ty);
+                }
+
+                if (!tileData) continue;
+
+                thread_local std::mt19937 rng(std::random_device{}());
+                std::uniform_real_distribution<float> dist(-1.f, 1.f);
+
+                for (int i = 0; i < TILE_SIZE * TILE_SIZE; ++i) {
+                    int px = i % TILE_SIZE;
+                    int py = i / TILE_SIZE;
+                    int canvasX = tx * TILE_SIZE + px;
+                    int canvasY = ty * TILE_SIZE + py;
+
+                    float sel = 1.0f;
+                    if (m_HasSelection && canvasX < m_Width && canvasY < m_Height) {
+                        sel = m_SelectionMask[canvasY * m_Width + canvasX] / 255.f;
+                    } else if (canvasX >= m_Width || canvasY >= m_Height) {
+                        sel = 0.0f;
+                    }
+
+                    if (sel < 1e-4f) continue;
+
+                    float r, g, b, a;
+                    if (bpp == 4) { // RGBA8
+                        r = tileData[i * 4 + 0] / 255.f;
+                        g = tileData[i * 4 + 1] / 255.f;
+                        b = tileData[i * 4 + 2] / 255.f;
+                        a = tileData[i * 4 + 3] / 255.f;
+                    } else { // RGBA32F
+                        float* fp = reinterpret_cast<float*>(tileData) + i * 4;
+                        r = fp[0]; g = fp[1]; b = fp[2]; a = fp[3];
+                    }
+
+                    float nr, ng, nb;
+                    if (colorNoise) {
+                        nr = std::clamp(r + dist(rng) * strength * sel, 0.f, 1.f);
+                        ng = std::clamp(g + dist(rng) * strength * sel, 0.f, 1.f);
+                        nb = std::clamp(b + dist(rng) * strength * sel, 0.f, 1.f);
+                    } else {
+                        float n = dist(rng) * strength * sel;
+                        nr = std::clamp(r + n, 0.f, 1.f);
+                        ng = std::clamp(g + n, 0.f, 1.f);
+                        nb = std::clamp(b + n, 0.f, 1.f);
+                    }
+
+                    if (bpp == 4) {
+                        tileData[i * 4 + 0] = static_cast<uint8_t>(std::clamp(nr * 255.f + 0.5f, 0.f, 255.f));
+                        tileData[i * 4 + 1] = static_cast<uint8_t>(std::clamp(ng * 255.f + 0.5f, 0.f, 255.f));
+                        tileData[i * 4 + 2] = static_cast<uint8_t>(std::clamp(nb * 255.f + 0.5f, 0.f, 255.f));
+                    } else {
+                        float* fp = reinterpret_cast<float*>(tileData) + i * 4;
+                        fp[0] = nr; fp[1] = ng; fp[2] = nb;
+                    }
+                }
+            }
+        }));
+    }
+    for (auto& f : futures) f.wait();
+
+    for (const auto& [tx, ty] : activeTiles) {
+        tc.MarkDirty(tx, ty);
+    }
+
+    if (!m_ActiveStrokeDeltas.empty()) {
+        std::vector<TileDelta> deltas;
+        for (auto& pair : m_ActiveStrokeDeltas) {
+            auto& delta = pair.second;
+            delta.newPixels = layer.tileCache
+                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                : std::vector<uint8_t>{};
+            deltas.push_back(std::move(delta));
+        }
+        m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Noise", m_ActiveLayerIdx, std::move(deltas)));
+        m_ActiveStrokeDeltas.clear();
+    }
+
+    layer.needsUpload = true;
+    m_CompositeDirty = true;
+    SetDocumentModified(true);
+    Logger::Get().Info("ApplyNoise (Tiled CPU)");
 }
 
 // ============================================================
