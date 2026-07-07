@@ -210,15 +210,18 @@ bool CanvasRendererDX12::Render(
         LayerGpuResources& gpuRes = m_GpuLayers[activeCache];
 
         // Upload dirty tiles to albedo
-        UploadDirtyTiles(cmdList, *activeCache, gpuRes, false, {}, 0, 0, currentPool);
+        UploadDirtyTiles(cmdList, *activeCache, gpuRes, false, {}, {}, 0, 0, currentPool);
 
         // Upload masks to corresponding albedo tile keys
         if (layer.hasMask && !layer.mask.empty()) {
-            UploadDirtyTiles(cmdList, *activeCache, gpuRes, true, layer.mask, canvasWidth, canvasHeight, currentPool);
+            if (layer.maskNeedsUpload) {
+                UploadDirtyTiles(cmdList, *activeCache, gpuRes, true, layer.mask, layer.maskDirtyTiles, canvasWidth, canvasHeight, currentPool);
+                layer.maskNeedsUpload = false;
+                std::fill(layer.maskDirtyTiles.begin(), layer.maskDirtyTiles.end(), false);
+            }
         }
 
         layer.needsUpload = false;
-        layer.maskNeedsUpload = false;
 
         // Perform Ping-Pong blend
         int nextCompositeIdx = 1 - currentCompositeIdx;
@@ -383,6 +386,7 @@ void CanvasRendererDX12::UploadDirtyTiles(
     LayerGpuResources& gpuRes,
     bool isMask,
     const std::vector<uint8_t>& rawMaskData,
+    const std::vector<bool>& maskDirtyTiles,
     int canvasWidth,
     int canvasHeight,
     FrameStagingPool& pool
@@ -446,9 +450,19 @@ void CanvasRendererDX12::UploadDirtyTiles(
         // we synthesize dirty tiles matching the populated albedo list.
         std::vector<uint8_t> localBuffer(TILE_SIZE * TILE_SIZE, 0);
 
+        int tilesX = (canvasWidth + TILE_SIZE - 1) / TILE_SIZE;
+
         for (auto& [tileKey, albedoTile] : gpuRes.albedoTiles) {
             int tx = tileKey & 0xFFFF;
             int ty = tileKey >> 16;
+
+            int tileIdx = ty * tilesX + tx;
+            bool isDirty = maskDirtyTiles.empty() || 
+                           (tileIdx >= (int)maskDirtyTiles.size()) || 
+                           maskDirtyTiles[tileIdx];
+            if (!isDirty) {
+                continue;
+            }
 
             for (int y = 0; y < TILE_SIZE; ++y) {
                 int srcY = ty * TILE_SIZE + y;

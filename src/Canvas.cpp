@@ -186,6 +186,10 @@ void Canvas::CreateLayerMask(int index) {
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
     
+    int tilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+    int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+    layer.maskDirtyTiles.assign(tilesX * tilesY, true);
+    
     m_CompositeDirty = true;
     
     Logger::Get().Info("Created layer mask for layer: " + layer.name);
@@ -205,6 +209,10 @@ void Canvas::CreateLayerMaskFromSelection(int index) {
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
     
+    int tilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+    int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+    layer.maskDirtyTiles.assign(tilesX * tilesY, true);
+    
     m_CompositeDirty = true;
     
     Logger::Get().Info("Created layer mask from selection for layer: " + layer.name);
@@ -215,6 +223,7 @@ void Canvas::DeleteLayerMask(int index) {
     Layer& layer = m_Layers[index];
     
     layer.mask.clear();
+    layer.maskDirtyTiles.clear();
     layer.hasMask = false;
     layer.maskNeedsUpload = false;
     m_CompositeDirty = true;
@@ -279,6 +288,11 @@ void Canvas::MarkLayerMaskDirty(int index) {
     Layer& layer = m_Layers[index];
     if (!layer.hasMask) return;
     layer.maskNeedsUpload = true;
+    
+    int tilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+    int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+    layer.maskDirtyTiles.assign(tilesX * tilesY, true);
+
     m_CompositeDirty = true;
 }
 
@@ -590,6 +604,9 @@ void Canvas::ResizeCanvas(int width, int height) {
                 }
             }
             layer.maskNeedsUpload = true;
+            int tilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+            int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+            layer.maskDirtyTiles.assign(tilesX * tilesY, true);
         }
     }
 
@@ -2140,11 +2157,22 @@ void Canvas::StartMovePixels() {
         m_FloatingPixels = nextFloating;
     }
     if (layer.hasMask) {
+        int tilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+        int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+        if (layer.maskDirtyTiles.size() != (size_t)tilesX * tilesY) {
+            layer.maskDirtyTiles.assign(tilesX * tilesY, false);
+        }
         for (int y = 0; y < m_Height; ++y) {
             for (int x = 0; x < m_Width; ++x) {
                 size_t idx = (size_t)y * m_Width + x;
                 if (m_OriginalSelectionMask[idx] > 0) {
                     layer.mask[idx] = 255;
+                    int tx = x / TILE_SIZE;
+                    int ty = y / TILE_SIZE;
+                    int tileIdx = ty * tilesX + tx;
+                    if (tileIdx < (int)layer.maskDirtyTiles.size()) {
+                        layer.maskDirtyTiles[tileIdx] = true;
+                    }
                 }
             }
         }
@@ -2281,6 +2309,11 @@ void Canvas::CommitMovePixels() {
         
         if (layer.hasMask) {
             std::vector<uint8_t> finalMask = layer.mask;
+            int tilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+            int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+            if (layer.maskDirtyTiles.size() != (size_t)tilesX * tilesY) {
+                layer.maskDirtyTiles.assign(tilesX * tilesY, false);
+            }
             for (int y = 0; y < m_Height; ++y) {
                 for (int x = 0; x < m_Width; ++x) {
                     float px = (float)x - cx;
@@ -2306,7 +2339,16 @@ void Canvas::CommitMovePixels() {
                         float maskWeight = sampleBilinearMask(m_OriginalSelectionMask, m_Width, m_Height, srcX, srcY);
                         if (maskWeight > 0.0f) {
                             size_t destIdx = y * m_Width + x;
-                            finalMask[destIdx] = SelF2U8(maskWeight);
+                            uint8_t newVal = SelF2U8(maskWeight);
+                            if (finalMask[destIdx] != newVal) {
+                                finalMask[destIdx] = newVal;
+                                int tx = x / TILE_SIZE;
+                                int ty = y / TILE_SIZE;
+                                int tileIdx = ty * tilesX + tx;
+                                if (tileIdx < (int)layer.maskDirtyTiles.size()) {
+                                    layer.maskDirtyTiles[tileIdx] = true;
+                                }
+                            }
                         }
                     }
                 }

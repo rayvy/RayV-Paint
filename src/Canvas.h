@@ -64,6 +64,7 @@ struct Layer {
     std::vector<uint8_t> mask;
     bool hasMask = false;
     bool maskNeedsUpload = false;
+    std::vector<bool> maskDirtyTiles;  // [tileY * tilesX + tileX] = dirty
 
     // Group support
     bool isGroup        = false; // group header — no pixel data

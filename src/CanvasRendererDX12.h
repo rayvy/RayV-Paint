@@ -87,6 +87,7 @@ private:
         LayerGpuResources& gpuRes,
         bool isMask,
         const std::vector<uint8_t>& rawMaskData,
+        const std::vector<bool>& maskDirtyTiles,
         int canvasWidth,
         int canvasHeight,
         FrameStagingPool& pool
