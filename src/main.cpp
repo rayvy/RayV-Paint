@@ -2,6 +2,8 @@
 #define _WIN32_WINNT 0x0602
 #endif
 #include <windows.h>
+#include <psapi.h>
+
 #include <d3d12.h>
 #include <dxgi.h>
 #include <dxgi1_6.h>
@@ -427,6 +429,18 @@ int main(int argc, char* argv[]) {
     std::string configPath = "";
     std::string startupImagePath = "";
 
+    // Brush emulation & custom draw CLI arguments
+    bool hasDrawCommand = false;
+    std::string drawLineArg = "";
+    std::string drawStrokeArg = "";
+    float brushColor[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
+    float brushRadius = 10.0f;
+    float brushHardness = 0.5f;
+    float brushOpacity = 1.0f;
+    int canvasWidth = 512;
+    int canvasHeight = 512;
+    std::string exportPath = "";
+
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--test") {
@@ -442,10 +456,37 @@ int main(int argc, char* argv[]) {
             return 0;
         } else if (arg == "--config" && i + 1 < argc) {
             configPath = argv[++i];
+        } else if (arg == "--brush-color" && i + 1 < argc) {
+            std::string val = argv[++i];
+            sscanf_s(val.c_str(), "%f,%f,%f,%f", &brushColor[0], &brushColor[1], &brushColor[2], &brushColor[3]);
+        } else if (arg == "--brush-radius" && i + 1 < argc) {
+            brushRadius = std::stof(argv[++i]);
+        } else if (arg == "--brush-hardness" && i + 1 < argc) {
+            brushHardness = std::stof(argv[++i]);
+        } else if (arg == "--brush-opacity" && i + 1 < argc) {
+            brushOpacity = std::stof(argv[++i]);
+        } else if (arg == "--width" && i + 1 < argc) {
+            canvasWidth = std::stoi(argv[++i]);
+        } else if (arg == "--height" && i + 1 < argc) {
+            canvasHeight = std::stoi(argv[++i]);
+        } else if (arg == "--draw-line" && i + 1 < argc) {
+            drawLineArg = argv[++i];
+            hasDrawCommand = true;
+        } else if (arg == "--draw-stroke" && i + 1 < argc) {
+            drawStrokeArg = argv[++i];
+            hasDrawCommand = true;
+        } else if (arg == "--export" && i + 1 < argc) {
+            exportPath = argv[++i];
         } else if (arg[0] != '-') {
             startupImagePath = arg;
         }
     }
+
+    if (hasDrawCommand) {
+        testMode = true;
+        headlessMode = true;
+    }
+
 
     // Force console if in test mode or headless mode
     if (testMode || headlessMode) {
@@ -1422,65 +1463,238 @@ int main(int argc, char* argv[]) {
 
         ImGui::End();
 
+        // 9.5 Render Status Bar HUD (Task 14)
+        {
+            static auto lastStatsTime = std::chrono::steady_clock::now();
+            static size_t cachedProcessRamBytes = 0;
+            static Dx12Device::VramInfo cachedVram = {};
+            static CanvasRendererDX12::GpuStats cachedGpuStats = {};
+            static int cachedCpuTiles = 0;
+            static int cachedMaxTiles = 0;
+            static size_t cachedCpuRam = 0;
+            static int cachedLayersCount = 0;
+            static int cachedCanvasW = 0;
+            static int cachedCanvasH = 0;
+            static std::string cachedFormatStr = "RGBA8";
+
+            auto nowTime = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - lastStatsTime).count() > 500 || cachedProcessRamBytes == 0) {
+                lastStatsTime = nowTime;
+                
+                PROCESS_MEMORY_COUNTERS pmc;
+                if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc))) {
+                    cachedProcessRamBytes = pmc.WorkingSetSize;
+                }
+                
+                cachedVram = g_DX12.QueryVramInfo();
+                cachedGpuStats = g_CanvasRenderer.GetGpuStats();
+                cachedLayersCount = static_cast<int>(g_Canvas.GetLayers().size());
+                cachedCanvasW = g_Canvas.GetWidth();
+                cachedCanvasH = g_Canvas.GetHeight();
+                
+                int tempCpuTiles = 0;
+                int tempMaxTiles = 0;
+                size_t tempCpuRam = 0;
+                if (cachedLayersCount > 0) {
+                    auto& firstLayer = g_Canvas.GetLayers()[0];
+                    if (firstLayer.tileCache) {
+                        tempCpuTiles = firstLayer.tileCache->GetAllocatedTileCount();
+                        tempMaxTiles = firstLayer.tileCache->GetMaxTileCount();
+                        tempCpuRam = firstLayer.tileCache->GetCpuRamBytes();
+                        cachedFormatStr = (firstLayer.tileCache->GetFormat() == CanvasPixelFormat::RGBA8) ? "RGBA8" : "RGBA32F";
+                    }
+                }
+                cachedCpuTiles = tempCpuTiles;
+                cachedMaxTiles = tempMaxTiles;
+                cachedCpuRam = tempCpuRam;
+            }
+
+            ImGuiViewport* main_viewport = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(ImVec2(main_viewport->WorkPos.x, main_viewport->WorkPos.y + main_viewport->WorkSize.y - 24.0f));
+            ImGui::SetNextWindowSize(ImVec2(main_viewport->WorkSize.x, 24.0f));
+            
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.06f, 0.06f, 0.07f, 1.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 4.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+            
+            ImGuiWindowFlags status_flags = ImGuiWindowFlags_NoDecoration 
+                                          | ImGuiWindowFlags_NoMove 
+                                          | ImGuiWindowFlags_NoScrollWithMouse 
+                                          | ImGuiWindowFlags_NoBringToFrontOnFocus 
+                                          | ImGuiWindowFlags_NoNav 
+                                          | ImGuiWindowFlags_NoDocking;
+            
+            if (ImGui::Begin("##StatusBarHUD", nullptr, status_flags)) {
+                ImGui::Text("Canvas: %dx%d (%s) | Layers: %d", cachedCanvasW, cachedCanvasH, cachedFormatStr.c_str(), cachedLayersCount);
+                
+                ImGui::SameLine(0.0f, 20.0f);
+                ImGui::TextDisabled("|");
+                ImGui::SameLine(0.0f, 20.0f);
+                
+                ImGui::Text("Tiles (CPU): %d/%d (RAM: %.1f MB)", cachedCpuTiles, cachedMaxTiles, (double)cachedCpuRam / (1024.0 * 1024.0));
+                
+                ImGui::SameLine(0.0f, 20.0f);
+                ImGui::TextDisabled("|");
+                ImGui::SameLine(0.0f, 20.0f);
+                
+                ImGui::Text("Tiles (GPU): %llu/%llu", cachedGpuStats.gpuTileCount, cachedGpuStats.gpuTileMaxCapacity);
+                
+                ImGui::SameLine(0.0f, 20.0f);
+                ImGui::TextDisabled("|");
+                ImGui::SameLine(0.0f, 20.0f);
+                
+                ImGui::Text("Sys RAM: %.1f MB", (double)cachedProcessRamBytes / (1024.0 * 1024.0));
+                
+                ImGui::SameLine(0.0f, 20.0f);
+                ImGui::TextDisabled("|");
+                ImGui::SameLine(0.0f, 20.0f);
+                
+                double vramUsedMb = (double)cachedVram.usageBytes / (1024.0 * 1024.0);
+                double vramBudgetMb = (double)cachedVram.budgetBytes / (1024.0 * 1024.0);
+                bool vramWarning = (cachedVram.budgetBytes > 0) && (cachedVram.usageBytes > (cachedVram.budgetBytes * 8 / 10));
+                
+                ImGui::Text("VRAM: ");
+                ImGui::SameLine(0.0f, 0.0f);
+                if (vramWarning) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "%.1f / %.1f MB (warning)", vramUsedMb, vramBudgetMb);
+                } else {
+                    ImGui::Text("%.1f / %.1f MB", vramUsedMb, vramBudgetMb);
+                }
+                
+                ImGui::SameLine(ImGui::GetWindowWidth() - 90.0f);
+                ImGui::Text("FPS: %.1f", io.Framerate);
+            }
+            ImGui::End();
+            
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor();
+        }
+
+
 
 
         // Handle Test Mode Execution: Perform 1 Frame and Exit
         if (testMode) {
-            Logger::Get().Info("[TEST] Initiating asynchronous selection/fill tests...");
-            g_Canvas.ResizeCanvas(512, 512);
-            g_Canvas.SetActiveLayerIndex(0);
+            Logger::Get().Info("[TEST] Initiating test mode execution...");
             
-            // Fill layer with green
-            float greenColor[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
-            g_Canvas.ApplyBucketFill(0, 0, 0.1f, greenColor, true);
-            
-            // Wait for bucket fill to finish (since it is async)
-            while (g_Canvas.IsSmartSelectInProgress()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            Logger::Get().Info("[TEST] Bucket fill completed.");
+            if (hasDrawCommand) {
+                Logger::Get().Info("[TEST] Executing custom brush drawing command...");
+                g_Canvas.ResizeCanvas(canvasWidth, canvasHeight);
+                g_Canvas.SetActiveLayerIndex(0);
 
-            // Verify a pixel is green
-            auto& layers = g_Canvas.GetLayers();
-            float testPixel[4] = {};
-            layers[0].tileCache->GetPixelF(0, 0, testPixel);
-            if (testPixel[1] != 1.0f) {
-                Logger::Get().Error("[TEST] Bucket Fill test failed! Green channel is " + std::to_string(testPixel[1]));
-                std::exit(1);
-            }
-            Logger::Get().Info("[TEST] Bucket Fill test succeeded.");
+                // Set brush settings
+                g_Brush.radius = brushRadius;
+                g_Brush.hardness = brushHardness;
+                g_Brush.opacity = brushOpacity;
+                std::copy(std::begin(brushColor), std::end(brushColor), std::begin(g_Brush.color));
 
-            // Apply Magic Wand on the green canvas (contiguous)
-            g_Canvas.ApplyMagicWandSelection(0, 0, 0.1f, false, false, true);
-            while (g_Canvas.IsSmartSelectInProgress()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            Logger::Get().Info("[TEST] Magic Wand selection completed.");
+                if (!drawLineArg.empty()) {
+                    float x0 = 0.0f, y0 = 0.0f, x1 = 0.0f, y1 = 0.0f;
+                    if (sscanf_s(drawLineArg.c_str(), "%f,%f,%f,%f", &x0, &y0, &x1, &y1) == 4) {
+                        Logger::Get().Info("[TEST] Drawing line from (" + std::to_string(x0) + "," + std::to_string(y0) + 
+                                           ") to (" + std::to_string(x1) + "," + std::to_string(y1) + ")...");
+                        g_Canvas.PaintOnActiveLayer(x0, y0, StrokePhase::Begin, g_Brush);
+                        g_Canvas.PaintOnActiveLayer(x1, y1, StrokePhase::Update, g_Brush);
+                        g_Canvas.PaintOnActiveLayer(x1, y1, StrokePhase::End, g_Brush);
+                    } else {
+                        Logger::Get().Error("[TEST] Invalid --draw-line format: " + drawLineArg);
+                    }
+                } else if (!drawStrokeArg.empty()) {
+                    Logger::Get().Info("[TEST] Drawing custom stroke path...");
+                    std::string s = drawStrokeArg;
+                    size_t pos = 0;
+                    bool first = true;
+                    while ((pos = s.find(';')) != std::string::npos || !s.empty()) {
+                        std::string pt = s.substr(0, pos);
+                        float x = 0.0f, y = 0.0f;
+                        if (sscanf_s(pt.c_str(), "%f,%f", &x, &y) == 2) {
+                            if (first) {
+                                g_Canvas.PaintOnActiveLayer(x, y, StrokePhase::Begin, g_Brush);
+                                first = false;
+                            } else {
+                                g_Canvas.PaintOnActiveLayer(x, y, StrokePhase::Update, g_Brush);
+                            }
+                        }
+                        if (pos == std::string::npos) break;
+                        s.erase(0, pos + 1);
+                    }
+                    if (!first) {
+                        g_Canvas.PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
+                    }
+                }
 
-            // Verify selection mask
-            auto mask = g_Canvas.GetSelectionMask();
-            if (mask.empty() || mask[0] != 255) {
-                Logger::Get().Error("[TEST] Magic Wand test failed! Mask at 0 is " + std::to_string(mask.empty() ? -1 : mask[0]));
-                std::exit(1);
-            }
-            Logger::Get().Info("[TEST] Magic Wand test succeeded.");
+                // Wait for any tasks to finish
+                while (g_Canvas.IsSmartSelectInProgress()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
 
-            // Apply Magic Wand non-contiguous
-            g_Canvas.ApplyMagicWandSelection(0, 0, 0.1f, false, false, false);
-            while (g_Canvas.IsSmartSelectInProgress()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            Logger::Get().Info("[TEST] Magic Wand non-contiguous completed successfully.");
+                if (!exportPath.empty()) {
+                    Logger::Get().Info("[TEST] Exporting canvas to: " + exportPath);
+                    if (g_Canvas.SaveCanvasStandard(exportPath, "")) {
+                        Logger::Get().Info("[TEST] Export succeeded.");
+                    } else {
+                        Logger::Get().Error("[TEST] Export failed!");
+                        std::exit(1);
+                    }
+                }
+            } else {
+                Logger::Get().Info("[TEST] Initiating asynchronous selection/fill tests...");
+                g_Canvas.ResizeCanvas(512, 512);
+                g_Canvas.SetActiveLayerIndex(0);
+                
+                // Fill layer with green
+                float greenColor[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
+                g_Canvas.ApplyBucketFill(0, 0, 0.1f, greenColor, true);
+                
+                // Wait for bucket fill to finish (since it is async)
+                while (g_Canvas.IsSmartSelectInProgress()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                Logger::Get().Info("[TEST] Bucket fill completed.");
 
-            // Test cancellation
-            g_Canvas.ApplyMagicWandSelection(0, 0, 0.1f, false, false, true);
-            g_Canvas.CancelSmartSelect();
-            while (g_Canvas.IsSmartSelectInProgress()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                // Verify a pixel is green
+                auto& layers = g_Canvas.GetLayers();
+                float testPixel[4] = {};
+                layers[0].tileCache->GetPixelF(0, 0, testPixel);
+                if (testPixel[1] != 1.0f) {
+                    Logger::Get().Error("[TEST] Bucket Fill test failed! Green channel is " + std::to_string(testPixel[1]));
+                    std::exit(1);
+                }
+                Logger::Get().Info("[TEST] Bucket Fill test succeeded.");
+
+                // Apply Magic Wand on the green canvas (contiguous)
+                g_Canvas.ApplyMagicWandSelection(0, 0, 0.1f, false, false, true);
+                while (g_Canvas.IsSmartSelectInProgress()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                Logger::Get().Info("[TEST] Magic Wand selection completed.");
+
+                // Verify selection mask
+                auto mask = g_Canvas.GetSelectionMask();
+                if (mask.empty() || mask[0] != 255) {
+                    Logger::Get().Error("[TEST] Magic Wand test failed! Mask at 0 is " + std::to_string(mask.empty() ? -1 : mask[0]));
+                    std::exit(1);
+                }
+                Logger::Get().Info("[TEST] Magic Wand test succeeded.");
+
+                // Apply Magic Wand non-contiguous
+                g_Canvas.ApplyMagicWandSelection(0, 0, 0.1f, false, false, false);
+                while (g_Canvas.IsSmartSelectInProgress()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                Logger::Get().Info("[TEST] Magic Wand non-contiguous completed successfully.");
+
+                // Test cancellation
+                g_Canvas.ApplyMagicWandSelection(0, 0, 0.1f, false, false, true);
+                g_Canvas.CancelSmartSelect();
+                while (g_Canvas.IsSmartSelectInProgress()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                Logger::Get().Info("[TEST] Magic Wand cancellation succeeded.");
             }
-            Logger::Get().Info("[TEST] Magic Wand cancellation succeeded.");
 
             Logger::Get().Info("[TEST] Render completed. Saving config and exiting successfully.");
+
             ImGui::Render();
             if (g_DX12.BeginFrame()) {
                 ID3D12DescriptorHeap* heaps[] = { g_DX12.GetSrvHeap() };

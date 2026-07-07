@@ -40,6 +40,14 @@ public:
 
     void Shutdown();
 
+    struct VramInfo {
+        SIZE_T budgetBytes = 0;
+        SIZE_T usageBytes = 0;
+        SIZE_T availableBytes = 0;
+    };
+    VramInfo QueryVramInfo() const;
+
+
     // Accessors (raw pointers — valid until Shutdown())
     ID3D12Device*             GetDevice()       const { return m_Device.Get(); }
     ID3D12CommandQueue*       GetCommandQueue() const { return m_CommandQueue.Get(); }

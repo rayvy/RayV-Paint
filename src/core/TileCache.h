@@ -52,6 +52,11 @@ public:
     size_t GetTileCount()   const { return m_Tiles.size(); }
     bool IsEmpty()          const { return m_Tiles.empty(); }
 
+    int GetAllocatedTileCount() const;
+    size_t GetCpuRamBytes() const;
+    int GetMaxTileCount() const;
+
+
     // ---- Tile existence ----
     bool HasTile(int tileX, int tileY) const;
 

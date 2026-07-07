@@ -514,3 +514,16 @@ void TileCache::RestoreTile(int tileX, int tileY, const std::vector<uint8_t>& da
     t.data    = data;
     t.dirty   = true;
 }
+
+int TileCache::GetAllocatedTileCount() const {
+    return static_cast<int>(m_Tiles.size());
+}
+
+size_t TileCache::GetCpuRamBytes() const {
+    return m_Tiles.size() * TILE_SIZE * TILE_SIZE * m_BytesPerPixel;
+}
+
+int TileCache::GetMaxTileCount() const {
+    return m_TilesX * m_TilesY;
+}
+

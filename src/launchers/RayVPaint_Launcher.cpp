@@ -10,8 +10,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     size_t pos = ws.find_last_of(L"\\/");
     std::wstring dir = ws.substr(0, pos);
     
-    // Target executable path is inside bin/RayVPaint_Core.exe
-    std::wstring target = dir + L"\\bin\\RayVPaint_Core.exe";
+    // Target executable path is inside bin/rayvpaint_core.exe
+    std::wstring target = dir + L"\\bin\\rayvpaint_core.exe";
+
 
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);

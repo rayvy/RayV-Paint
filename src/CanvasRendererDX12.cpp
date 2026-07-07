@@ -1664,3 +1664,19 @@ float4 PSTileBlend(PS_INPUT input) : SV_TARGET
 }
 )hlsl";
 }
+
+CanvasRendererDX12::GpuStats CanvasRendererDX12::GetGpuStats() const {
+    GpuStats stats;
+    for (auto& [tc, gpuRes] : m_GpuLayers) {
+        stats.gpuTileCount += gpuRes.albedoTiles.size();
+        stats.gpuTileCount += gpuRes.maskTiles.size();
+    }
+    stats.gpuTileMaxCapacity = m_MaxGpuTiles;
+    // Composite RTs
+    if (m_CompositeWidth > 0 && m_CompositeHeight > 0) {
+        stats.vramEstimateBytes += 2 * (size_t)m_CompositeWidth * m_CompositeHeight * 4;  // 2x ping-pong RGBA8
+    }
+    // Tile memory estimate (assuming RGBA8 256x256 tiles)
+    stats.vramEstimateBytes += stats.gpuTileCount * 256 * 256 * 4;
+    return stats;
+}

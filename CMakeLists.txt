@@ -136,6 +136,7 @@ set(OPENCV_LIBS_DIR "${OPENCV_INSTALL_DIR}/x64/vc17/staticlib")
 add_executable(RayVPaint_Core WIN32 ${SOURCES} ${SHADER_FILES})
 set_target_properties(RayVPaint_Core PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin"
+    OUTPUT_NAME "rayvpaint_core"
 )
 
 # Link dependencies to Core
@@ -171,9 +172,17 @@ add_custom_command(
 # Create Launchers
 add_executable(RayVPaint WIN32 src/launchers/RayVPaint_Launcher.cpp)
 add_executable(RayVPaint_Console src/launchers/RayVPaint_Console_Launcher.cpp)
-set_target_properties(RayVPaint RayVPaint_Console PROPERTIES
+
+set_target_properties(RayVPaint PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+    OUTPUT_NAME "rayvpaint"
 )
+set_target_properties(RayVPaint_Console PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+    OUTPUT_NAME "rayvpaint_console"
+)
+
+
 
 # Ensure launchers depend on Core so it builds first
 add_dependencies(RayVPaint RayVPaint_Core)
@@ -235,3 +244,12 @@ if(FXC_EXE)
 else()
     message(WARNING "fxc not found — shaders will be compiled at runtime by D3DCompile.")
 endif()
+
+# Custom target to execute automated tests (Task 15)
+add_custom_target(run_tests
+    COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.ps1"
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Running automated test suite..."
+    USES_TERMINAL
+)
+

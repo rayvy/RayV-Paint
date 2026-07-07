@@ -12,18 +12,13 @@ if %ERRORLEVEL% neq 0 (
     exit /b %ERRORLEVEL%
 )
 
-set "EXE_PATH=build\Release\RayVPaint.exe"
+set "EXE_PATH=build\Release\rayvpaint_console.exe"
 if not exist "!EXE_PATH!" (
     echo Error: Executable not found at !EXE_PATH!
     exit /b 1
 )
 
-echo Launching executable in test mode (hidden window)...
-"!EXE_PATH!" --test
-if %ERRORLEVEL% neq 0 (
-    echo Test failed with code %ERRORLEVEL%
-    exit /b %ERRORLEVEL%
-)
+echo Launching automated PowerShell test suite...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tests\run_tests.ps1"
+exit /b %ERRORLEVEL%
 
-echo Test completed successfully!
-exit /b 0

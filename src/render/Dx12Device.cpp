@@ -404,3 +404,23 @@ void Dx12Device::FreeSrv(D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_H
         m_SrvFreeList.push_back(index);
     }
 }
+
+Dx12Device::VramInfo Dx12Device::QueryVramInfo() const {
+    VramInfo info = {};
+    Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+    if (m_Adapter && SUCCEEDED(m_Adapter.As(&adapter3))) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO memInfo = {};
+        if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memInfo))) {
+            info.budgetBytes    = memInfo.Budget;
+            info.usageBytes     = memInfo.CurrentUsage;
+            info.availableBytes = memInfo.Budget > memInfo.CurrentUsage
+                                ? memInfo.Budget - memInfo.CurrentUsage : 0;
+        }
+    }
+    if (info.budgetBytes == 0) {
+        // Fallback if query failed
+        info.budgetBytes = 2048ULL * 1024 * 1024;
+    }
+    return info;
+}
+

@@ -34,6 +34,14 @@ public:
 
     void Shutdown();
 
+    struct GpuStats {
+        uint64_t gpuTileCount = 0;
+        uint64_t gpuTileMaxCapacity = 0;
+        size_t   vramEstimateBytes = 0;
+    };
+    GpuStats GetGpuStats() const;
+
+
     // Composites active layers and renders the viewport checkerboard, albedo composite, and selection outline.
     [[nodiscard]] bool Render(
         ID3D12GraphicsCommandList* cmdList,
