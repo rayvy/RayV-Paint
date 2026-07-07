@@ -81,6 +81,8 @@ set(SOURCES
     src/Canvas.h
     src/CanvasRendererDX12.cpp
     src/CanvasRendererDX12.h
+    src/render/Dx12Device.cpp
+    src/render/Dx12Device.h
     src/core/TileCache.cpp
     src/core/TileCache.h
     src/core/Logger.cpp

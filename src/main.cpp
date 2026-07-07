@@ -36,6 +36,7 @@
 #include "core/ClipboardHelper.h"
 #include "ui/EditorPanels.h"
 #include "CanvasRendererDX12.h"
+#include "render/Dx12Device.h"
 
 
 // Tablet Pointer API support
@@ -97,71 +98,10 @@ bool g_IsLayersHovered = false;
 
 // DirectX 12 renderer objects
 static constexpr UINT kFrameCount = 2;
-static ID3D12Device*                g_pd3d12Device = nullptr;
-static ID3D12CommandQueue*          g_pd3d12CommandQueue = nullptr;
-static IDXGISwapChain3*             g_pSwapChain = nullptr;
-static ID3D12Resource*              g_swapChainBackBuffers[kFrameCount] = {};
-static D3D12_CPU_DESCRIPTOR_HANDLE  g_mainRenderTargetViews[kFrameCount] = {};
-static ID3D12DescriptorHeap*        g_swapChainRtvHeap = nullptr;
-static UINT                         g_mainBackBufferIndex = 0;
-static ID3D12CommandAllocator*      g_pd3d12CommandAllocator = nullptr;
-static ID3D12GraphicsCommandList*   g_pd3d12CommandList = nullptr;
-static ID3D12Fence*                 g_pd3d12Fence = nullptr;
-static HANDLE                       g_pd3d12FenceEvent = nullptr;
-static UINT64                       g_pd3d12FenceValue = 0;
-static UINT                         g_rtvDescriptorSize = 0;
-static ID3D12DescriptorHeap*        g_srvDescHeap = nullptr;
+static Dx12Device g_DX12;
+
 static ID3D12DescriptorHeap*        g_canvasRtvHeap = nullptr;
 static D3D12_CPU_DESCRIPTOR_HANDLE  g_canvasRtvHandle = {};
-static UINT                         g_srvDescriptorSize = 0;
-static UINT                         g_srvHeapCapacity = 0;
-static UINT                         g_srvHeapNextFree = 0;
-static std::vector<UINT>            g_srvHeapFreeList;
-
-static bool AllocateSrvDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE* outCpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE* outGpuHandle) {
-    if (!g_srvDescHeap || g_srvDescriptorSize == 0) {
-        return false;
-    }
-
-    UINT index = 0;
-    if (!g_srvHeapFreeList.empty()) {
-        index = g_srvHeapFreeList.back();
-        g_srvHeapFreeList.pop_back();
-    } else {
-        if (g_srvHeapNextFree >= g_srvHeapCapacity) {
-            return false;
-        }
-        index = g_srvHeapNextFree++;
-    }
-
-    D3D12_CPU_DESCRIPTOR_HANDLE cpuStart = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
-    D3D12_GPU_DESCRIPTOR_HANDLE gpuStart = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
-    outCpuHandle->ptr = cpuStart.ptr + static_cast<SIZE_T>(index) * g_srvDescriptorSize;
-    outGpuHandle->ptr = gpuStart.ptr + static_cast<UINT64>(index) * g_srvDescriptorSize;
-    return true;
-}
-
-static void FreeSrvDescriptor(D3D12_CPU_DESCRIPTOR_HANDLE cpuHandle, D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle) {
-    (void)gpuHandle;
-    if (!g_srvDescHeap || g_srvDescriptorSize == 0) {
-        return;
-    }
-
-    const SIZE_T base = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart().ptr;
-    if (cpuHandle.ptr < base) {
-        return;
-    }
-
-    const SIZE_T offset = cpuHandle.ptr - base;
-    if (offset % g_srvDescriptorSize != 0) {
-        return;
-    }
-
-    const UINT index = static_cast<UINT>(offset / g_srvDescriptorSize);
-    if (index < g_srvHeapCapacity) {
-        g_srvHeapFreeList.push_back(index);
-    }
-}
 
 // Canvas Render-to-Texture Objects
 static ID3D12Resource*              g_canvasTexture12 = nullptr;
@@ -488,14 +428,12 @@ int main(int argc, char* argv[]) {
     log_step("Keymap Manager Init");
 
     // 6. Initialize DX12-backed renderer (native swapchain)
-    if (!CreateDeviceD3D(hWnd, headlessMode)) {
+    if (!g_DX12.Initialize(hWnd, headlessMode)) {
         Logger::Get().Error("Failed to initialize DX12-backed renderer");
         glfwDestroyWindow(window);
         glfwTerminate();
         return 1;
     }
-
-    CreateRenderTarget();
     log_step("DX12-backed Device Creation");
 
     // 7. Initialize Dear ImGui
@@ -526,27 +464,27 @@ int main(int argc, char* argv[]) {
     glfwSetDropCallback(window, CustomDropCallback);
 
     ImGui_ImplDX12_InitInfo dx12InitInfo = {};
-    dx12InitInfo.Device = g_pd3d12Device;
-    dx12InitInfo.CommandQueue = g_pd3d12CommandQueue;
+    dx12InitInfo.Device = g_DX12.GetDevice();
+    dx12InitInfo.CommandQueue = g_DX12.GetCommandQueue();
     dx12InitInfo.NumFramesInFlight = kFrameCount;
     dx12InitInfo.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
     dx12InitInfo.DSVFormat = DXGI_FORMAT_UNKNOWN;
-    dx12InitInfo.SrvDescriptorHeap = g_srvDescHeap;
+    dx12InitInfo.SrvDescriptorHeap = g_DX12.GetSrvHeap();
     dx12InitInfo.SrvDescriptorAllocFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu_desc_handle, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu_desc_handle) {
         out_cpu_desc_handle->ptr = 0;
         out_gpu_desc_handle->ptr = 0;
-        if (!AllocateSrvDescriptor(out_cpu_desc_handle, out_gpu_desc_handle)) {
+        if (!g_DX12.AllocateSrv(out_cpu_desc_handle, out_gpu_desc_handle)) {
             Logger::Get().Error("DX12 SRV descriptor heap exhausted");
         }
     };
     dx12InitInfo.SrvDescriptorFreeFn = [](ImGui_ImplDX12_InitInfo*, D3D12_CPU_DESCRIPTOR_HANDLE cpu_desc_handle, D3D12_GPU_DESCRIPTOR_HANDLE gpu_desc_handle) {
-        FreeSrvDescriptor(cpu_desc_handle, gpu_desc_handle);
+        g_DX12.FreeSrv(cpu_desc_handle, gpu_desc_handle);
     };
     if (!ImGui_ImplDX12_Init(&dx12InitInfo)) {
         Logger::Get().Error("Failed to initialize ImGui DX12 backend");
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
-        CleanupDeviceD3D();
+        g_DX12.Shutdown();
         glfwDestroyWindow(window);
         glfwTerminate();
         return 1;
@@ -559,17 +497,17 @@ int main(int argc, char* argv[]) {
         ImGui_ImplDX12_Shutdown();
         ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext();
-        CleanupDeviceD3D();
+        g_DX12.Shutdown();
         glfwDestroyWindow(window);
         glfwTerminate();
         return 1;
     }
         // Initialize tiled DX12 Canvas Renderer
     if (!g_CanvasRenderer.Initialize(
-        g_pd3d12Device,
-        g_pd3d12CommandQueue,
-        AllocateSrvDescriptor,
-        FreeSrvDescriptor
+        g_DX12.GetDevice(),
+        g_DX12.GetCommandQueue(),
+        [](D3D12_CPU_DESCRIPTOR_HANDLE* cpu, D3D12_GPU_DESCRIPTOR_HANDLE* gpu) { return g_DX12.AllocateSrv(cpu, gpu); },
+        [](D3D12_CPU_DESCRIPTOR_HANDLE cpu, D3D12_GPU_DESCRIPTOR_HANDLE gpu) { g_DX12.FreeSrv(cpu, gpu); }
     )) {
         Logger::Get().Error("Failed to initialize CanvasRendererDX12");
         // Non-fatal: falls back to grey clear
@@ -616,10 +554,7 @@ int main(int argc, char* argv[]) {
         int winW, winH;
         glfwGetFramebufferSize(window, &winW, &winH);
         if (winW > 0 && winH > 0 && (winW != currentWindowWidth || winH != currentWindowHeight)) {
-            WaitForGpu();
-            CleanupRenderTarget();
-            g_pSwapChain->ResizeBuffers(0, winW, winH, DXGI_FORMAT_UNKNOWN, 0);
-            CreateRenderTarget();
+            g_DX12.ResizeSwapchain(static_cast<uint32_t>(winW), static_cast<uint32_t>(winH));
             currentWindowWidth = winW;
             currentWindowHeight = winH;
             Logger::Get().Debug("Swapchain backbuffers resized to " + std::to_string(winW) + "x" + std::to_string(winH));
@@ -1391,50 +1326,41 @@ int main(int argc, char* argv[]) {
         if (testMode) {
             Logger::Get().Info("[TEST] Render completed. Saving config and exiting successfully.");
             ImGui::Render();
-            if (BeginMainRenderTarget()) {
-                ID3D12DescriptorHeap* heaps[] = { g_srvDescHeap };
-                g_pd3d12CommandList->SetDescriptorHeaps(1, heaps);
-                g_pd3d12CommandList->OMSetRenderTargets(1, &g_mainRenderTargetViews[g_mainBackBufferIndex], FALSE, nullptr);
+            if (g_DX12.BeginFrame()) {
+                ID3D12DescriptorHeap* heaps[] = { g_DX12.GetSrvHeap() };
+                g_DX12.GetCommandList()->SetDescriptorHeaps(1, heaps);
+                D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_DX12.GetCurrentRtv();
+                g_DX12.GetCommandList()->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
                 float clearColor[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
-                g_pd3d12CommandList->ClearRenderTargetView(g_mainRenderTargetViews[g_mainBackBufferIndex], clearColor, 0, nullptr);
-                ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_pd3d12CommandList);
+                g_DX12.GetCommandList()->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
+                ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_DX12.GetCommandList());
                 if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
                     ImGui::UpdatePlatformWindows();
                     ImGui::RenderPlatformWindowsDefault();
                 }
-                EndMainRenderTarget();
-
-                ID3D12CommandList* commandLists[] = { g_pd3d12CommandList };
-                g_pd3d12CommandQueue->ExecuteCommandLists(1, commandLists);
-                if (!headlessMode) {
-                    g_pSwapChain->Present(1, 0);
-                }
-                WaitForGpu();
+                g_DX12.EndFrame();
             }
             break;
         }
 
         // Standard Render Presentation
         ImGui::Render();
-        if (BeginMainRenderTarget()) {
-            ID3D12DescriptorHeap* heaps[] = { g_srvDescHeap };
-            g_pd3d12CommandList->SetDescriptorHeaps(1, heaps);
-            g_pd3d12CommandList->OMSetRenderTargets(1, &g_mainRenderTargetViews[g_mainBackBufferIndex], FALSE, nullptr);
+        if (g_DX12.BeginFrame()) {
+            ID3D12DescriptorHeap* heaps[] = { g_DX12.GetSrvHeap() };
+            g_DX12.GetCommandList()->SetDescriptorHeaps(1, heaps);
+            D3D12_CPU_DESCRIPTOR_HANDLE rtv = g_DX12.GetCurrentRtv();
+            g_DX12.GetCommandList()->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
             float clearColor[4] = { 0.08f, 0.08f, 0.10f, 1.0f };
-            g_pd3d12CommandList->ClearRenderTargetView(g_mainRenderTargetViews[g_mainBackBufferIndex], clearColor, 0, nullptr);
+            g_DX12.GetCommandList()->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
             
-            ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_pd3d12CommandList);
+            ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), g_DX12.GetCommandList());
 
             if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
                 ImGui::UpdatePlatformWindows();
                 ImGui::RenderPlatformWindowsDefault();
             }
 
-            EndMainRenderTarget();
-            ID3D12CommandList* commandLists[] = { g_pd3d12CommandList };
-            g_pd3d12CommandQueue->ExecuteCommandLists(1, commandLists);
-            g_pSwapChain->Present(1, 0); // VSync enabled
-            WaitForGpu();
+            g_DX12.EndFrame();
         }
 
         // End frame timing
@@ -1469,8 +1395,7 @@ int main(int argc, char* argv[]) {
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
-    CleanupRenderTarget();
-    CleanupDeviceD3D();
+    g_DX12.Shutdown();
     if (g_OriginalWndProc) {
         SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)g_OriginalWndProc);
         g_OriginalWndProc = nullptr;
@@ -1491,287 +1416,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 }
 
 // DX12-backed renderer helpers.
-bool CreateDeviceD3D(HWND hWnd, bool useNullDriver) {
-    HRESULT hr = S_OK;
-    IDXGIFactory4* factory4 = nullptr;
-    IDXGIFactory6* factory6 = nullptr;
-    IDXGISwapChain1* swapChain1 = nullptr;
-    IDXGIAdapter1* adapter = nullptr;
-    IDXGIAdapter* warpAdapter = nullptr;
-    ID3D12Device* d3d12Device = nullptr;
-    ID3D12CommandQueue* commandQueue = nullptr;
-
-    hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory4));
-    if (FAILED(hr)) {
-        return false;
-    }
-
-    factory4->QueryInterface(IID_PPV_ARGS(&factory6));
-
-    if (useNullDriver) {
-        if (!factory6 || FAILED(factory6->EnumWarpAdapter(IID_PPV_ARGS(&warpAdapter)))) {
-            if (warpAdapter) warpAdapter->Release();
-            if (factory6) factory6->Release();
-            factory4->Release();
-            return false;
-        }
-        hr = D3D12CreateDevice(warpAdapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12Device));
-        warpAdapter->Release();
-    } else {
-        if (factory6) {
-            for (UINT i = 0;; ++i) {
-                HRESULT enumHr = factory6->EnumAdapterByGpuPreference(i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter));
-                if (enumHr == DXGI_ERROR_NOT_FOUND) {
-                    break;
-                }
-                if (FAILED(enumHr) || !adapter) {
-                    break;
-                }
-                DXGI_ADAPTER_DESC1 desc = {};
-                adapter->GetDesc1(&desc);
-                if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
-                    adapter->Release();
-                    adapter = nullptr;
-                    continue;
-                }
-                if (SUCCEEDED(D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12Device)))) {
-                    break;
-                }
-                adapter->Release();
-                adapter = nullptr;
-            }
-        }
-        if (!d3d12Device) {
-            hr = D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12Device));
-        }
-    }
-
-    if (FAILED(hr) || !d3d12Device) {
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-
-    D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-    queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    hr = d3d12Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&commandQueue));
-    if (FAILED(hr)) {
-        d3d12Device->Release();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-
-    g_pd3d12Device = d3d12Device;
-    g_pd3d12CommandQueue = commandQueue;
-
-    g_rtvDescriptorSize = g_pd3d12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    g_srvDescriptorSize = g_pd3d12Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-    D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-    rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    rtvHeapDesc.NumDescriptors = kFrameCount;
-    rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    hr = g_pd3d12Device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&g_swapChainRtvHeap));
-    if (FAILED(hr)) {
-        CleanupDeviceD3D();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-
-    D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-    srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srvHeapDesc.NumDescriptors = 64;
-    srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    hr = g_pd3d12Device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&g_srvDescHeap));
-    if (FAILED(hr)) {
-        CleanupDeviceD3D();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-    g_srvHeapCapacity = srvHeapDesc.NumDescriptors;
-    g_srvHeapNextFree = 0;
-    g_srvHeapFreeList.clear();
-
-    hr = g_pd3d12Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_pd3d12CommandAllocator));
-    if (FAILED(hr)) {
-        CleanupDeviceD3D();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-
-    hr = g_pd3d12Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_pd3d12CommandAllocator, nullptr, IID_PPV_ARGS(&g_pd3d12CommandList));
-    if (FAILED(hr)) {
-        CleanupDeviceD3D();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-    g_pd3d12CommandList->Close();
-
-    hr = g_pd3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_pd3d12Fence));
-    if (FAILED(hr)) {
-        CleanupDeviceD3D();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-    g_pd3d12FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-    if (!g_pd3d12FenceEvent) {
-        CleanupDeviceD3D();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-
-    DXGI_SWAP_CHAIN_DESC1 sd = {};
-    sd.BufferCount = kFrameCount;
-    sd.Width = 0;
-    sd.Height = 0;
-    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    sd.SampleDesc.Count = 1;
-    sd.SampleDesc.Quality = 0;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
-    sd.Scaling = DXGI_SCALING_STRETCH;
-    sd.Stereo = FALSE;
-
-    IDXGIFactory2* swapFactory = factory6 ? static_cast<IDXGIFactory2*>(factory6) : static_cast<IDXGIFactory2*>(factory4);
-    hr = swapFactory->CreateSwapChainForHwnd(commandQueue, hWnd, &sd, nullptr, nullptr, &swapChain1);
-    if (SUCCEEDED(hr)) {
-        swapFactory->MakeWindowAssociation(hWnd, DXGI_MWA_NO_ALT_ENTER);
-        hr = swapChain1->QueryInterface(IID_PPV_ARGS(&g_pSwapChain));
-    }
-
-    if (swapChain1) {
-        swapChain1->Release();
-    }
-
-    if (FAILED(hr) || !g_pSwapChain) {
-        CleanupDeviceD3D();
-        if (adapter) adapter->Release();
-        if (factory6) factory6->Release();
-        factory4->Release();
-        return false;
-    }
-
-    if (adapter) adapter->Release();
-    if (factory6) factory6->Release();
-    factory4->Release();
-
-    return true;
-}
-
-void CleanupDeviceD3D() {
-    WaitForGpu();
-    CleanupRenderTarget();
-    CleanupCanvasRenderTarget();
-
-    if (g_pd3d12FenceEvent) { CloseHandle(g_pd3d12FenceEvent); g_pd3d12FenceEvent = nullptr; }
-    if (g_pd3d12Fence) { g_pd3d12Fence->Release(); g_pd3d12Fence = nullptr; }
-    if (g_pd3d12CommandList) { g_pd3d12CommandList->Release(); g_pd3d12CommandList = nullptr; }
-    if (g_pd3d12CommandAllocator) { g_pd3d12CommandAllocator->Release(); g_pd3d12CommandAllocator = nullptr; }
-    if (g_swapChainRtvHeap) { g_swapChainRtvHeap->Release(); g_swapChainRtvHeap = nullptr; }
-    if (g_canvasRtvHeap) { g_canvasRtvHeap->Release(); g_canvasRtvHeap = nullptr; }
-    if (g_srvDescHeap) { g_srvDescHeap->Release(); g_srvDescHeap = nullptr; }
-    if (g_pSwapChain) { g_pSwapChain->Release(); g_pSwapChain = nullptr; }
-    if (g_pd3d12CommandQueue) { g_pd3d12CommandQueue->Release(); g_pd3d12CommandQueue = nullptr; }
-    if (g_pd3d12Device) { g_pd3d12Device->Release(); g_pd3d12Device = nullptr; }
-    g_canvasRtvHandle.ptr = 0;
-    g_rtvDescriptorSize = 0;
-    g_srvDescriptorSize = 0;
-    g_srvHeapCapacity = 0;
-    g_srvHeapNextFree = 0;
-    g_srvHeapFreeList.clear();
-}
-
-void CreateRenderTarget() {
-    if (!g_pSwapChain || !g_pd3d12Device || !g_swapChainRtvHeap) return;
-
-    CleanupRenderTarget();
-
-    g_mainBackBufferIndex = g_pSwapChain->GetCurrentBackBufferIndex();
-    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_swapChainRtvHeap->GetCPUDescriptorHandleForHeapStart();
-    for (UINT i = 0; i < kFrameCount; ++i) {
-        HRESULT hr = g_pSwapChain->GetBuffer(i, IID_PPV_ARGS(&g_swapChainBackBuffers[i]));
-        if (FAILED(hr) || !g_swapChainBackBuffers[i]) {
-            continue;
-        }
-
-        D3D12_CPU_DESCRIPTOR_HANDLE currentHandle = rtvHandle;
-        currentHandle.ptr += static_cast<SIZE_T>(i) * g_rtvDescriptorSize;
-        g_mainRenderTargetViews[i] = currentHandle;
-        g_pd3d12Device->CreateRenderTargetView(g_swapChainBackBuffers[i], nullptr, currentHandle);
-    }
-}
-
-void CleanupRenderTarget() {
-    for (UINT i = 0; i < kFrameCount; ++i) {
-        if (g_swapChainBackBuffers[i]) { g_swapChainBackBuffers[i]->Release(); g_swapChainBackBuffers[i] = nullptr; }
-        g_mainRenderTargetViews[i].ptr = 0;
-    }
-}
-
-bool BeginMainRenderTarget() {
-    if (!g_pd3d12CommandAllocator || !g_pd3d12CommandList || !g_pSwapChain || !g_pd3d12Device) {
-        return false;
-    }
-
-    g_pd3d12CommandAllocator->Reset();
-    g_pd3d12CommandList->Reset(g_pd3d12CommandAllocator, nullptr);
-    g_mainBackBufferIndex = g_pSwapChain->GetCurrentBackBufferIndex();
-
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barrier.Transition.pResource = g_swapChainBackBuffers[g_mainBackBufferIndex];
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    g_pd3d12CommandList->ResourceBarrier(1, &barrier);
-    return true;
-}
-
-void EndMainRenderTarget() {
-    if (!g_pd3d12CommandList || !g_pSwapChain) {
-        return;
-    }
-
-    D3D12_RESOURCE_BARRIER barrier = {};
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barrier.Transition.pResource = g_swapChainBackBuffers[g_mainBackBufferIndex];
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    g_pd3d12CommandList->ResourceBarrier(1, &barrier);
-    g_pd3d12CommandList->Close();
-}
-
-void WaitForGpu() {
-    if (!g_pd3d12CommandQueue || !g_pd3d12Fence || !g_pd3d12FenceEvent) {
-        return;
-    }
-
-    const UINT64 fenceValue = ++g_pd3d12FenceValue;
-    g_pd3d12CommandQueue->Signal(g_pd3d12Fence, fenceValue);
-    g_pd3d12Fence->SetEventOnCompletion(fenceValue, g_pd3d12FenceEvent);
-    WaitForSingleObject(g_pd3d12FenceEvent, INFINITE);
-}
-
 void ResizeCanvasRenderTarget(int width, int height) {
     if (g_canvasTexture12 && static_cast<int>(g_canvasRTWidth) == width && static_cast<int>(g_canvasRTHeight) == height) {
         return;
@@ -1782,7 +1426,7 @@ void ResizeCanvasRenderTarget(int width, int height) {
     g_canvasRTWidth = static_cast<float>(width);
     g_canvasRTHeight = static_cast<float>(height);
 
-    if (!g_pd3d12Device) {
+    if (!g_DX12.GetDevice()) {
         return;
     }
 
@@ -1811,7 +1455,7 @@ void ResizeCanvasRenderTarget(int width, int height) {
     clearValue.Color[2] = 0.14f;
     clearValue.Color[3] = 1.0f;
 
-    HRESULT hr = g_pd3d12Device->CreateCommittedResource(
+    HRESULT hr = g_DX12.GetDevice()->CreateCommittedResource(
         &heapProps,
         D3D12_HEAP_FLAG_NONE,
         &desc,
@@ -1828,16 +1472,16 @@ void ResizeCanvasRenderTarget(int width, int height) {
     canvasRtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     canvasRtvHeapDesc.NumDescriptors = 1;
     canvasRtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-    hr = g_pd3d12Device->CreateDescriptorHeap(&canvasRtvHeapDesc, IID_PPV_ARGS(&g_canvasRtvHeap));
+    hr = g_DX12.GetDevice()->CreateDescriptorHeap(&canvasRtvHeapDesc, IID_PPV_ARGS(&g_canvasRtvHeap));
     if (FAILED(hr) || !g_canvasRtvHeap) {
         CleanupCanvasRenderTarget();
         return;
     }
 
     g_canvasRtvHandle = g_canvasRtvHeap->GetCPUDescriptorHandleForHeapStart();
-    g_pd3d12Device->CreateRenderTargetView(g_canvasTexture12, nullptr, g_canvasRtvHandle);
+    g_DX12.GetDevice()->CreateRenderTargetView(g_canvasTexture12, nullptr, g_canvasRtvHandle);
 
-    if (!AllocateSrvDescriptor(&g_canvasTextureSrvCpuHandle, &g_canvasTextureSrvGpuHandle)) {
+    if (!g_DX12.AllocateSrv(&g_canvasTextureSrvCpuHandle, &g_canvasTextureSrvGpuHandle)) {
         CleanupCanvasRenderTarget();
         return;
     }
@@ -1850,12 +1494,12 @@ void ResizeCanvasRenderTarget(int width, int height) {
     srvDesc.Texture2D.MostDetailedMip = 0;
     srvDesc.Texture2D.PlaneSlice = 0;
     srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
-    g_pd3d12Device->CreateShaderResourceView(g_canvasTexture12, &srvDesc, g_canvasTextureSrvCpuHandle);
+    g_DX12.GetDevice()->CreateShaderResourceView(g_canvasTexture12, &srvDesc, g_canvasTextureSrvCpuHandle);
 }
 
 void CleanupCanvasRenderTarget() {
     if (g_canvasTextureSrvCpuHandle.ptr != 0 && g_canvasTextureSrvGpuHandle.ptr != 0) {
-        FreeSrvDescriptor(g_canvasTextureSrvCpuHandle, g_canvasTextureSrvGpuHandle);
+        g_DX12.FreeSrv(g_canvasTextureSrvCpuHandle, g_canvasTextureSrvGpuHandle);
         g_canvasTextureSrvCpuHandle.ptr = 0;
         g_canvasTextureSrvGpuHandle.ptr = 0;
     }
@@ -1869,21 +1513,21 @@ void CleanupCanvasRenderTarget() {
 
 void RenderCanvasToTexture(int width, int height) {
     if (!g_canvasTexture12 || !g_canvasRtvHeap ||
-        !g_pd3d12CommandAllocator || !g_pd3d12CommandList || !g_pd3d12CommandQueue) {
+        !g_DX12.GetCommandAllocator() || !g_DX12.GetCommandList() || !g_DX12.GetCommandQueue()) {
         return;
     }
 
-    if (FAILED(g_pd3d12CommandAllocator->Reset()) ||
-        FAILED(g_pd3d12CommandList->Reset(g_pd3d12CommandAllocator, nullptr))) {
+    if (FAILED(g_DX12.GetCommandAllocator()->Reset()) ||
+        FAILED(g_DX12.GetCommandList()->Reset(g_DX12.GetCommandAllocator(), nullptr))) {
         return;
     }
 
-    ID3D12DescriptorHeap* heaps[] = { g_srvDescHeap };
-    g_pd3d12CommandList->SetDescriptorHeaps(1, heaps);
+    ID3D12DescriptorHeap* heaps[] = { g_DX12.GetSrvHeap() };
+    g_DX12.GetCommandList()->SetDescriptorHeaps(1, heaps);
 
     if (g_CanvasRendererReady) {
         bool renderOk = g_CanvasRenderer.Render(
-            g_pd3d12CommandList,
+            g_DX12.GetCommandList(),
             g_Canvas,
             g_canvasTexture12,
             g_canvasRtvHandle,
@@ -1900,17 +1544,17 @@ void RenderCanvasToTexture(int width, int height) {
         toRT.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
         toRT.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
         toRT.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        g_pd3d12CommandList->ResourceBarrier(1, &toRT);
+        g_DX12.GetCommandList()->ResourceBarrier(1, &toRT);
         float clearColor[4] = { 0.12f, 0.12f, 0.14f, 1.0f };
-        g_pd3d12CommandList->ClearRenderTargetView(g_canvasRtvHandle, clearColor, 0, nullptr);
+        g_DX12.GetCommandList()->ClearRenderTargetView(g_canvasRtvHandle, clearColor, 0, nullptr);
         D3D12_RESOURCE_BARRIER toSRV = toRT;
         toSRV.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
         toSRV.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        g_pd3d12CommandList->ResourceBarrier(1, &toSRV);
+        g_DX12.GetCommandList()->ResourceBarrier(1, &toSRV);
     }
 
-    g_pd3d12CommandList->Close();
-    ID3D12CommandList* commandLists[] = { g_pd3d12CommandList };
-    g_pd3d12CommandQueue->ExecuteCommandLists(1, commandLists);
-    WaitForGpu();
+    g_DX12.GetCommandList()->Close();
+    ID3D12CommandList* commandLists[] = { g_DX12.GetCommandList() };
+    g_DX12.GetCommandQueue()->ExecuteCommandLists(1, commandLists);
+    g_DX12.WaitForGpu();
 }
