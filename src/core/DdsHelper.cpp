@@ -32,10 +32,13 @@ static std::wstring UTF8ToWString(const std::string& str) {
 constexpr uint32_t DXGI_FORMAT_R32G32B32A32_FLOAT = 2;
 constexpr uint32_t DXGI_FORMAT_R16G16B16A16_FLOAT = 10;
 constexpr uint32_t DXGI_FORMAT_R16G16B16A16_UNORM = 11;
-constexpr uint32_t DXGI_FORMAT_R8G8B8A8_UNORM = 28;
+constexpr uint32_t DXGI_FORMAT_R8G8B8A8_UNORM     = 28;
+constexpr uint32_t DXGI_FORMAT_R8G8B8A8_SNORM     = 29;  // Signed normal — normal maps from GIMI/XXMI
+constexpr uint32_t DXGI_FORMAT_B8G8R8A8_UNORM     = 87;  // Common BGRA screenshot format
+constexpr uint32_t DXGI_FORMAT_B8G8R8X8_UNORM     = 88;  // Common BGRX format (A forced to 255)
 constexpr uint32_t DXGI_FORMAT_R32_FLOAT = 41;
 constexpr uint32_t DXGI_FORMAT_R16_FLOAT = 54;
-constexpr uint32_t DXGI_FORMAT_R8_UNORM = 61;
+constexpr uint32_t DXGI_FORMAT_R8_UNORM  = 61;
 
 struct DDS_PIXELFORMAT {
     uint32_t dwSize;
@@ -162,8 +165,11 @@ bool DdsHelper::LoadDDS(const std::string& filename, DdsImage& outImage) {
         if (dxt10Header.dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT) {
             isFloatFormat = true;
         } 
-        else if (dxt10Header.dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM) {
-            // normal uncompressed
+        else if (dxt10Header.dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM ||
+                 dxt10Header.dxgiFormat == DXGI_FORMAT_R8G8B8A8_SNORM ||
+                 dxt10Header.dxgiFormat == DXGI_FORMAT_B8G8R8A8_UNORM ||
+                 dxt10Header.dxgiFormat == DXGI_FORMAT_B8G8R8X8_UNORM) {
+            // 8-bit per channel uncompressed — handled below
         }
         else if (dxt10Header.dxgiFormat == 71 || dxt10Header.dxgiFormat == 72) { // BC1
             compFormat = CompressionFormat::BC1;
@@ -207,11 +213,36 @@ bool DdsHelper::LoadDDS(const std::string& filename, DdsImage& outImage) {
             std::vector<uint8_t> rawBytes(numPixels * 4);
             file.read(reinterpret_cast<char*>(rawBytes.data()), numPixels * 4);
             if (!file) {
-                Logger::Get().Error("Failed reading R8G8B8A8_UNORM pixel data from: " + filename);
+                Logger::Get().Error("Failed reading 8bpc pixel data from: " + filename);
                 return false;
             }
-            for (size_t i = 0; i < numPixels * 4; ++i) {
-                outImage.pixels[i] = rawBytes[i] / 255.0f;
+            bool isSNORM  = (dxt10Header.dxgiFormat == DXGI_FORMAT_R8G8B8A8_SNORM);
+            bool isBGRA   = (dxt10Header.dxgiFormat == DXGI_FORMAT_B8G8R8A8_UNORM);
+            bool isBGRX   = (dxt10Header.dxgiFormat == DXGI_FORMAT_B8G8R8X8_UNORM);
+            for (size_t i = 0; i < numPixels; ++i) {
+                size_t s = i * 4;
+                float r, g, b, a;
+                if (isBGRA || isBGRX) {
+                    b = rawBytes[s + 0] / 255.0f;
+                    g = rawBytes[s + 1] / 255.0f;
+                    r = rawBytes[s + 2] / 255.0f;
+                    a = isBGRX ? 1.0f : rawBytes[s + 3] / 255.0f;
+                } else if (isSNORM) {
+                    // signed: byte reinterpret as int8, map [-128,127] -> [0,1]
+                    r = (static_cast<int8_t>(rawBytes[s + 0]) + 128) / 255.0f;
+                    g = (static_cast<int8_t>(rawBytes[s + 1]) + 128) / 255.0f;
+                    b = (static_cast<int8_t>(rawBytes[s + 2]) + 128) / 255.0f;
+                    a = (static_cast<int8_t>(rawBytes[s + 3]) + 128) / 255.0f;
+                } else {
+                    r = rawBytes[s + 0] / 255.0f;
+                    g = rawBytes[s + 1] / 255.0f;
+                    b = rawBytes[s + 2] / 255.0f;
+                    a = rawBytes[s + 3] / 255.0f;
+                }
+                outImage.pixels[s + 0] = r;
+                outImage.pixels[s + 1] = g;
+                outImage.pixels[s + 2] = b;
+                outImage.pixels[s + 3] = a;
             }
         }
     } 
@@ -429,7 +460,10 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
         file.read(reinterpret_cast<char*>(&dxt10Header), sizeof(dxt10Header));
         dxgiFormat = dxt10Header.dxgiFormat;
 
-        if (dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM) {
+        if (dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM ||
+            dxgiFormat == DXGI_FORMAT_R8G8B8A8_SNORM ||
+            dxgiFormat == DXGI_FORMAT_B8G8R8A8_UNORM ||
+            dxgiFormat == DXGI_FORMAT_B8G8R8X8_UNORM) {
             outFormat = DdsFormat::RGBA8_UNORM;
         } else if (dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT) {
             outFormat = DdsFormat::RGBA32_FLOAT;
@@ -630,13 +664,40 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             }
             writeRowRGBA8(rowRGBA, y);
         }
-    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM) {
+    } else if (isDX10 && (
+        dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM ||
+        dxgiFormat == DXGI_FORMAT_R8G8B8A8_SNORM ||
+        dxgiFormat == DXGI_FORMAT_B8G8R8A8_UNORM ||
+        dxgiFormat == DXGI_FORMAT_B8G8R8X8_UNORM)) {
+        bool isSNORM = (dxgiFormat == DXGI_FORMAT_R8G8B8A8_SNORM);
+        bool isBGRA  = (dxgiFormat == DXGI_FORMAT_B8G8R8A8_UNORM);
+        bool isBGRX  = (dxgiFormat == DXGI_FORMAT_B8G8R8X8_UNORM);
+        std::vector<uint8_t> rawRow((size_t)outWidth * 4);
         std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
-            file.read(reinterpret_cast<char*>(rowRGBA.data()), (std::streamsize)rowRGBA.size());
+            file.read(reinterpret_cast<char*>(rawRow.data()), (std::streamsize)rawRow.size());
             if (!file) {
-                Logger::Get().Error("Failed reading RGBA8 pixel row from: " + filename);
+                Logger::Get().Error("Failed reading 8bpc pixel row from: " + filename);
                 return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                size_t s = (size_t)x * 4;
+                if (isBGRA || isBGRX) {
+                    rowRGBA[s + 0] = rawRow[s + 2];  // R
+                    rowRGBA[s + 1] = rawRow[s + 1];  // G
+                    rowRGBA[s + 2] = rawRow[s + 0];  // B
+                    rowRGBA[s + 3] = isBGRX ? 255 : rawRow[s + 3];
+                } else if (isSNORM) {
+                    rowRGBA[s + 0] = static_cast<uint8_t>(static_cast<int8_t>(rawRow[s + 0]) + 128);
+                    rowRGBA[s + 1] = static_cast<uint8_t>(static_cast<int8_t>(rawRow[s + 1]) + 128);
+                    rowRGBA[s + 2] = static_cast<uint8_t>(static_cast<int8_t>(rawRow[s + 2]) + 128);
+                    rowRGBA[s + 3] = static_cast<uint8_t>(static_cast<int8_t>(rawRow[s + 3]) + 128);
+                } else {
+                    rowRGBA[s + 0] = rawRow[s + 0];
+                    rowRGBA[s + 1] = rawRow[s + 1];
+                    rowRGBA[s + 2] = rawRow[s + 2];
+                    rowRGBA[s + 3] = rawRow[s + 3];
+                }
             }
             writeRowRGBA8(rowRGBA, y);
         }

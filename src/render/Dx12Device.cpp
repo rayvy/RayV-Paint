@@ -98,7 +98,7 @@ bool Dx12Device::Initialize(HWND hwnd, bool useNullDriver) {
     // Create SRV descriptor heap
     D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
     srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    srvHeapDesc.NumDescriptors = 64;
+    srvHeapDesc.NumDescriptors = 8192;  // 4096 albedo tiles + 4096 mask/misc/ImGui. 64 was catastrophically small (2K=64 tiles fills it, 4K=256 tiles overflows).
     srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     hr = m_Device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_SrvHeap));
     if (FAILED(hr)) {
