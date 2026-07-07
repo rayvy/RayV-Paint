@@ -254,6 +254,10 @@ public:
     bool LoadCanvasRayp(const std::string& filepath);
 
     std::vector<float> GetComposedPixels();
+    
+    bool IsRendererInvalidated() const { return m_RendererInvalidated; }
+    void ClearRendererInvalidated() { m_RendererInvalidated = false; }
+    void SetRendererInvalidated(bool v) { m_RendererInvalidated = v; }
 
     // Move Pixels Accessors
     const TileCache* GetFloatingTileCache() const { return m_FloatingTileCache.get(); }
@@ -293,6 +297,7 @@ private:
     int m_CompositeWidth = 0;
     int m_CompositeHeight = 0;
     bool m_CompositeDirty = true;
+    bool m_RendererInvalidated = false;
 
     // Applies filters to layer.pixels → layer.filteredPixels (rebuilds if filtersDirty)
     void RebuildFilteredPixels(Layer& layer);

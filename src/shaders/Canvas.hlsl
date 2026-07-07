@@ -61,9 +61,8 @@ PS_INPUT VSMain(VS_INPUT input)
     rotatedPixelPos.y = rel.x * sinA + rel.y * cosA;
     rotatedPixelPos += center;
     
-    // Apply zoom, translation, and center relative to viewport with integer pixel alignment
     float2 screenOrigin = floor(panOffset + viewportSize * 0.5f);
-    float2 screenPixelPos = floor(rotatedPixelPos * zoom) + screenOrigin;
+    float2 screenPixelPos = (rotatedPixelPos * zoom) + screenOrigin;
     
     // Transform from Screen-space pixels to NDC [-1, 1]
     float2 ndcPos = (screenPixelPos / viewportSize) * 2.0f - 1.0f;

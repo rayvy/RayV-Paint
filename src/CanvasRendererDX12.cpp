@@ -148,6 +148,39 @@ bool CanvasRendererDX12::Render(
 
     m_CbOffset = 0;             // Reset dynamic constant buffer ring allocator
 
+    if (canvas.IsRendererInvalidated()) {
+        for (auto& [cache, gpuRes] : m_GpuLayers) {
+            for (auto& [key, tile] : gpuRes.albedoTiles) {
+                if (m_AsyncUploaderReady && tile.uploadFenceValue > 0) {
+                    uint64_t completedFence = m_AsyncUploader.GetCompletedFenceValue();
+                    if (tile.uploadFenceValue > completedFence) {
+                        m_AsyncUploader.FlushCompleted(INFINITE);
+                    }
+                }
+                if (tile.srvCpuHandle.ptr != 0) {
+                    m_FreeFn(tile.srvCpuHandle, tile.srvGpuHandle);
+                }
+            }
+            for (auto& [key, tile] : gpuRes.maskTiles) {
+                if (m_AsyncUploaderReady && tile.uploadFenceValue > 0) {
+                    uint64_t completedFence = m_AsyncUploader.GetCompletedFenceValue();
+                    if (tile.uploadFenceValue > completedFence) {
+                        m_AsyncUploader.FlushCompleted(INFINITE);
+                    }
+                }
+                if (tile.srvCpuHandle.ptr != 0) {
+                    m_FreeFn(tile.srvCpuHandle, tile.srvGpuHandle);
+                }
+            }
+        }
+        m_GpuLayers.clear();
+
+        m_CompositeWidth = 0;
+        m_CompositeHeight = 0;
+
+        canvas.ClearRendererInvalidated();
+    }
+
     int canvasWidth = canvas.GetWidth();
     int canvasHeight = canvas.GetHeight();
     if (canvasWidth <= 0 || canvasHeight <= 0) return true;

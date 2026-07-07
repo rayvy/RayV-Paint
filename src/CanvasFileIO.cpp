@@ -251,6 +251,7 @@ bool Canvas::LoadImageToLayer(const std::string& filepath) {
 
         MarkCompositeResourcesDirty();
         m_Layers.clear();
+        m_RendererInvalidated = true;
         m_ProjectType        = ProjectType::Simple;
         m_CurrentProjectFilePath = filepath;
         m_ExportPath         = filepath;
@@ -520,6 +521,7 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath) {
         json metadata = json::parse(metadataStr);
 
         m_Layers.clear();
+        m_RendererInvalidated = true;
 
         m_Width = metadata["width"].get<int>();
         m_Height = metadata["height"].get<int>();
@@ -600,12 +602,11 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath) {
         return false;
     }
 }
-
 static bool SaveCanvasRaypInternal(const std::string& filepath, int width, int height, int activeLayerIdx,
                                   const std::vector<std::string>& layerNames,
                                   const std::vector<bool>& layerVisibles,
                                   const std::vector<float>& layerOpacities,
-                                  const std::vector<std::vector<float>>& layerPixels,
+                                  std::vector<std::unique_ptr<TileCache>> layerCaches,
                                   const std::string& exportPath,
                                   const std::string& exportFormat,
                                   bool exportAdvancedMode,
@@ -639,6 +640,7 @@ static bool SaveCanvasRaypInternal(const std::string& filepath, int width, int h
 
         std::string metadataStr = metadata.dump();
 
+        // 2. Open binary file for writing
 #ifdef _WIN32
         std::ofstream out(UTF8ToWString(filepath), std::ios::binary);
 #else
@@ -656,13 +658,16 @@ static bool SaveCanvasRaypInternal(const std::string& filepath, int width, int h
         out.write(reinterpret_cast<const char*>(&metadataSize), sizeof(metadataSize));
         out.write(metadataStr.data(), metadataStr.size());
 
-        for (size_t i = 0; i < layerPixels.size(); ++i) {
-            const auto& pixels = layerPixels[i];
+        for (size_t i = 0; i < layerCaches.size(); ++i) {
+            std::vector<float> pixels((size_t)width * height * 4, 0.0f);
+            if (layerCaches[i]) {
+                layerCaches[i]->ExportRGBA32F(pixels.data(), width, height);
+            }
             uint64_t uncompressedSize = pixels.size() * sizeof(float);
             
             int compSize = 0;
             unsigned char* compData = stbi_zlib_compress(
-                reinterpret_cast<unsigned char*>(const_cast<float*>(pixels.data())),
+                reinterpret_cast<unsigned char*>(pixels.data()),
                 static_cast<int>(uncompressedSize),
                 &compSize,
                 8
@@ -694,19 +699,27 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
     std::vector<std::string> names;
     std::vector<bool> visibles;
     std::vector<float> opacities;
-    std::vector<std::vector<float>> pixels;
+    std::vector<std::unique_ptr<TileCache>> layerCaches;
     
     names.reserve(m_Layers.size());
     visibles.reserve(m_Layers.size());
     opacities.reserve(m_Layers.size());
-    pixels.reserve(m_Layers.size());
+    layerCaches.reserve(m_Layers.size());
     
     for (size_t i = 0; i < m_Layers.size(); ++i) {
         const auto& layer = m_Layers[i];
         names.push_back(layer.name);
         visibles.push_back(layer.visible);
         opacities.push_back(layer.opacity);
-        pixels.push_back(ExportLayerF(layer, width, height));
+        
+        if (layer.tileCache) {
+            auto tcCopy = std::make_unique<TileCache>();
+            tcCopy->Init(width, height, layer.tileCache->GetFormat());
+            tcCopy->CopyFrom(*layer.tileCache, 0, 0, 0, 0, width, height);
+            layerCaches.push_back(std::move(tcCopy));
+        } else {
+            layerCaches.push_back(nullptr);
+        }
     }
 
     std::string expPath = m_ExportPath;
@@ -717,8 +730,8 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
     std::string expMipF = m_ExportMipFilter;
     std::string expPngCS = m_ExportPngColorSpace;
     
-    std::thread([=, pixels = std::move(pixels)]() {
-        bool success = SaveCanvasRaypInternal(filepath, width, height, activeLayer, names, visibles, opacities, pixels,
+    std::thread([=, layerCaches = std::move(layerCaches)]() mutable {
+        bool success = SaveCanvasRaypInternal(filepath, width, height, activeLayer, names, visibles, opacities, std::move(layerCaches),
                                              expPath, expFormat, expAdv, expSpeed, expMips, expMipF, expPngCS);
         if (callback) {
             callback(success);

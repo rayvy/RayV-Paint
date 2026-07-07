@@ -125,6 +125,7 @@ void Canvas::ResizeCanvas(int width, int height) {
     
     m_Width = std::max(1, std::min(width, 16384));
     m_Height = std::max(1, std::min(height, 16384));
+    m_RendererInvalidated = true;
 
     if (m_Width == oldW && m_Height == oldH) return;
 
