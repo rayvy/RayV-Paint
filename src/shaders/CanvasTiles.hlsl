@@ -51,6 +51,28 @@ PS_TILE_INPUT VSTileMain(VS_TILE_INPUT input)
         tileY * 256.0f + input.pos.y * 256.0f
     );
 
+    // If this is a floating layer, apply rotation, scale, and translation around the center pivot (u_CenterParams.xy)
+    if (u_TransformParams.w > 0.5f) {
+        float2 center = u_CenterParams.xy * float2(canvasWidth, canvasHeight);
+        float2 rel = pixelPos - center;
+        
+        // 1. Scale
+        rel *= u_TransformParams.xy;
+        
+        // 2. Rotate
+        float angle = u_TransformParams.z;
+        float cosA = cos(angle);
+        float sinA = sin(angle);
+        float2 rotated;
+        rotated.x = rel.x * cosA - rel.y * sinA;
+        rotated.y = rel.x * sinA + rel.y * cosA;
+        
+        // 3. Translate (u_LayerParams.zw is normalized translation offset)
+        float2 translation = u_LayerParams.zw * float2(canvasWidth, canvasHeight);
+        
+        pixelPos = rotated + center + translation;
+    }
+
     // Canvas pixels → NDC [-1, 1]
     float2 ndc = (pixelPos / float2(canvasWidth, canvasHeight)) * 2.0f - 1.0f;
     ndc.y = -ndc.y; // DirectX Y inversion

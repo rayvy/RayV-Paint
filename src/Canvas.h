@@ -254,6 +254,14 @@ public:
 
     std::vector<float> GetComposedPixels();
 
+    // Move Pixels Accessors
+    const TileCache* GetFloatingTileCache() const { return m_FloatingTileCache.get(); }
+    TileCache* GetFloatingTileCache() { return m_FloatingTileCache.get(); }
+    int GetFloatingOffsetX() const { return m_FloatingOffsetX; }
+    int GetFloatingOffsetY() const { return m_FloatingOffsetY; }
+    int GetStartActiveLayerIdx() const { return m_StartActiveLayerIdx; }
+    const std::vector<uint8_t>& GetOriginalSelectionMask() const { return m_OriginalSelectionMask; }
+
 private:
     void BackupTile(int tileX, int tileY);
 
@@ -337,7 +345,7 @@ private:
 
     // Move Pixels State
     bool m_IsMovingPixels = false;
-    std::vector<float> m_FloatingPixels;
+    std::unique_ptr<TileCache> m_FloatingTileCache;
     std::vector<uint8_t> m_OriginalSelectionMask;
     int m_FloatingOffsetX = 0;
     int m_FloatingOffsetY = 0;

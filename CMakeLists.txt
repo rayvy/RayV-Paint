@@ -78,6 +78,13 @@ target_link_libraries(imgui PUBLIC glfw)
 set(SOURCES
     src/main.cpp
     src/Canvas.cpp
+    src/CanvasLayers.cpp
+    src/CanvasSelection.cpp
+    src/CanvasPaint.cpp
+    src/CanvasAdjustments.cpp
+    src/CanvasTransforms.cpp
+    src/CanvasFileIO.cpp
+    src/CanvasUndo.cpp
     src/Canvas.h
     src/CanvasRendererDX12.cpp
     src/CanvasRendererDX12.h

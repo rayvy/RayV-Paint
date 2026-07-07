@@ -281,6 +281,72 @@ bool CanvasRendererDX12::Render(
             cmdList->DrawInstanced(6, 1, 0, 0);
         }
 
+        // If this is the active layer and we are moving pixels, render the floating layer on top of it
+        if ((int)layerIdx == canvas.GetStartActiveLayerIdx() && canvas.IsMovingPixels() && canvas.GetFloatingTileCache()) {
+            TileCache* floatCache = canvas.GetFloatingTileCache();
+            LayerGpuResources& floatGpuRes = m_GpuLayers[floatCache];
+
+            // 1. Upload dirty tiles of floating cache
+            UploadDirtyTiles(cmdList, *floatCache, floatGpuRes, false, {}, {}, 0, 0, currentPool);
+
+            // Compute selection bounding box center (pivot)
+            int minX = canvasWidth, maxX = 0, minY = canvasHeight, maxY = 0;
+            bool hasPixels = false;
+            const auto& origMask = canvas.GetOriginalSelectionMask();
+            if (!origMask.empty()) {
+                for (int y = 0; y < canvasHeight; ++y) {
+                    for (int x = 0; x < canvasWidth; ++x) {
+                        if (origMask[(size_t)y * canvasWidth + x] > 0) {
+                            if (x < minX) minX = x;
+                            if (x > maxX) maxX = x;
+                            if (y < minY) minY = y;
+                            if (y > maxY) maxY = y;
+                            hasPixels = true;
+                        }
+                    }
+                }
+            }
+            float cx = hasPixels ? (minX + maxX) * 0.5f : canvasWidth * 0.5f;
+            float cy = hasPixels ? (minY + maxY) * 0.5f : canvasHeight * 0.5f;
+
+            // Normalized pivot coordinates for the shader [0..1]
+            float normCx = cx / static_cast<float>(canvasWidth);
+            float normCy = cy / static_cast<float>(canvasHeight);
+
+            // Normalized offsets [0..1]
+            float normOffX = static_cast<float>(canvas.GetFloatingOffsetX()) / static_cast<float>(canvasWidth);
+            float normOffY = static_cast<float>(canvas.GetFloatingOffsetY()) / static_cast<float>(canvasHeight);
+
+            for (auto& [tileKey, albedoTile] : floatGpuRes.albedoTiles) {
+                int tx = tileKey & 0xFFFF;
+                int ty = tileKey >> 16;
+
+                UpdateLayerBuffer(
+                    cmdList,
+                    layer.opacity,
+                    false, // Floating cache does not have its own separate layer mask during move
+                    normOffX, normOffY,
+                    canvas.GetFloatingScaleX(), canvas.GetFloatingScaleY(),
+                    canvas.GetFloatingRotation(),
+                    true, // isFloating
+                    normCx, normCy,
+                    layer.blendMode
+                );
+
+                TileParamsData tileData = {};
+                tileData.tileParams = DirectX::XMFLOAT4(static_cast<float>(tx), static_cast<float>(ty), static_cast<float>(canvasWidth), static_cast<float>(canvasHeight));
+                uint32_t tileCbOffset = AllocateConstantBufferSpace(&tileData, sizeof(tileData));
+
+                cmdList->SetGraphicsRootConstantBufferView(2, m_ConstantBufferUpload->GetGPUVirtualAddress() + tileCbOffset);
+
+                cmdList->SetGraphicsRootDescriptorTable(3, albedoTile.srvGpuHandle);
+                cmdList->SetGraphicsRootDescriptorTable(4, m_DummyWhiteSrvGpu); // No mask
+                cmdList->SetGraphicsRootDescriptorTable(5, m_CompositeSrvGpus[currentCompositeIdx]);
+
+                cmdList->DrawInstanced(6, 1, 0, 0);
+            }
+        }
+
         TransitionResource(cmdList, m_CompositeRTs[nextCompositeIdx].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         currentCompositeIdx = nextCompositeIdx;
     }
@@ -495,6 +561,10 @@ void CanvasRendererDX12::GarbageCollectGpuLayers(const Canvas& canvas) {
     for (const auto& layer : const_cast<Canvas&>(canvas).GetLayers()) {
         if (layer.tileCache) activeCaches.insert(layer.tileCache.get());
         if (layer.filteredCache) activeCaches.insert(layer.filteredCache.get());
+    }
+
+    if (canvas.IsMovingPixels() && canvas.GetFloatingTileCache()) {
+        activeCaches.insert(canvas.GetFloatingTileCache());
     }
 
     for (auto it = m_GpuLayers.begin(); it != m_GpuLayers.end(); ) {
@@ -1323,8 +1393,30 @@ PS_INPUT VSTileMain(VS_INPUT input)
     float2 pixelPos = float2(tileX * 256.0f + input.pos.x * 256.0f,
                              tileY * 256.0f + input.pos.y * 256.0f);
                              
+    // If this is a floating layer, apply rotation, scale, and translation around the center pivot (u_CenterParams.xy)
+    if (u_TransformParams.w > 0.5f) {
+        float2 center = u_CenterParams.xy * float2(canvasWidth, canvasHeight);
+        float2 rel = pixelPos - center;
+        
+        // 1. Scale
+        rel *= u_TransformParams.xy;
+        
+        // 2. Rotate
+        float angle = u_TransformParams.z;
+        float cosA = cos(angle);
+        float sinA = sin(angle);
+        float2 rotated;
+        rotated.x = rel.x * cosA - rel.y * sinA;
+        rotated.y = rel.x * sinA + rel.y * cosA;
+        
+        // 3. Translate (u_LayerParams.zw is normalized translation offset)
+        float2 translation = u_LayerParams.zw * float2(canvasWidth, canvasHeight);
+        
+        pixelPos = rotated + center + translation;
+    }
+
     float2 ndc = (pixelPos / float2(canvasWidth, canvasHeight)) * 2.0f - 1.0f;
-    ndc.y = -ndc.y; // DirectX coordinates inversion
+    ndc.y = -ndc.y; // DirectX Y inversion
     
     output.pos = float4(ndc, 0.0f, 1.0f);
     output.uv = input.uv;
