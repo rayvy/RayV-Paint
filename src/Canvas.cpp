@@ -137,7 +137,6 @@ static void ComputeCompositePreviewSize(int canvasW, int canvasH, int& outW, int
     outH = std::max(1, (int)std::round(canvasH * scale));
 }
 
-// Get the directory containing the running executable
 static std::wstring GetExecutableDir() {
     wchar_t buffer[MAX_PATH];
     GetModuleFileNameW(nullptr, buffer, MAX_PATH);
@@ -146,37 +145,31 @@ static std::wstring GetExecutableDir() {
     return (pos == std::wstring::npos) ? L"" : path.substr(0, pos);
 }
 
-// Helper to compile shaders from file at runtime (with caching support)
 static HRESULT CompileShaderFromFile(const WCHAR* szFileName, LPCSTR szEntryPoint, LPCSTR szShaderModel, ID3DBlob** ppBlobOut) {
-    // Build cache file path: e.g. "shaders/VSMain.cso"
     std::wstring cachePath = GetExecutableDir() + L"\\shaders\\" + std::wstring(szEntryPoint, szEntryPoint + strlen(szEntryPoint)) + L".cso";
-    
-    // Check if Canvas.hlsl and cache file exist
+
     bool hlslExists = std::filesystem::exists(szFileName);
     bool cacheExists = std::filesystem::exists(cachePath);
-    
     bool useCache = false;
+
     if (cacheExists) {
         if (hlslExists) {
-            // Compare timestamps
             auto hlslTime = std::filesystem::last_write_time(szFileName);
             auto cacheTime = std::filesystem::last_write_time(cachePath);
             if (cacheTime >= hlslTime) {
                 useCache = true;
             }
         } else {
-            // HLSL doesn't exist but cache does
             useCache = true;
         }
     }
-    
+
     if (useCache) {
-        // Read compiled shader bytecode directly from disk
         std::ifstream file(cachePath, std::ios::binary | std::ios::ate);
         if (file.is_open()) {
             std::streamsize size = file.tellg();
             file.seekg(0, std::ios::beg);
-            
+
             HRESULT hr = D3DCreateBlob(static_cast<SIZE_T>(size), ppBlobOut);
             if (SUCCEEDED(hr)) {
                 if (file.read(reinterpret_cast<char*>((*ppBlobOut)->GetBufferPointer()), size)) {
@@ -189,7 +182,6 @@ static HRESULT CompileShaderFromFile(const WCHAR* szFileName, LPCSTR szEntryPoin
         }
     }
 
-    // Otherwise, compile it
     Logger::Get().Info("Compiling shader: " + std::string(szEntryPoint));
     DWORD dwShaderFlags = D3DCOMPILE_ENABLE_STRICTNESS;
 #ifdef _DEBUG
@@ -212,9 +204,7 @@ static HRESULT CompileShaderFromFile(const WCHAR* szFileName, LPCSTR szEntryPoin
     }
     if (pErrorBlob) pErrorBlob->Release();
 
-    // Cache the compiled bytecode to disk
     if (SUCCEEDED(hr) && *ppBlobOut) {
-        // Ensure directory exists
         std::filesystem::create_directories(GetExecutableDir() + L"\\shaders");
         std::ofstream file(cachePath, std::ios::binary);
         if (file.is_open()) {
@@ -248,12 +238,11 @@ void Canvas::ResetView() {
 }
 
 bool Canvas::Initialize(ID3D11Device* device) {
-    HRESULT hr;
+    if (!device) return false;
 
-    // Build absolute path to shaders folder inside output directory
+    HRESULT hr;
     std::wstring shaderPath = GetExecutableDir() + L"\\shaders\\Canvas.hlsl";
 
-    // 1. Compile and Create Vertex Shader
     ID3DBlob* vsBlob = nullptr;
     hr = CompileShaderFromFile(shaderPath.c_str(), "VSMain", "vs_4_0", &vsBlob);
     if (FAILED(hr)) {
@@ -267,7 +256,6 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // Compile and Create Layer Composition Vertex Shader
     ID3DBlob* vsLayerBlob = nullptr;
     hr = CompileShaderFromFile(shaderPath.c_str(), "VSLayerMain", "vs_4_0", &vsLayerBlob);
     if (FAILED(hr)) {
@@ -283,20 +271,16 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // Define the input layout for the shader
     D3D11_INPUT_ELEMENT_DESC layout[] = {
         { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 },
     };
-    UINT numElements = sizeof(layout) / sizeof(layout[0]);
-
-    hr = device->CreateInputLayout(layout, numElements, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_InputLayout);
+    hr = device->CreateInputLayout(layout, sizeof(layout) / sizeof(layout[0]), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &m_InputLayout);
     vsBlob->Release();
     if (FAILED(hr)) {
         return false;
     }
 
-    // 2. Compile and Create Pixel Shader (Presentation)
     ID3DBlob* psBlob = nullptr;
     hr = CompileShaderFromFile(shaderPath.c_str(), "PSMain", "ps_4_0", &psBlob);
     if (FAILED(hr)) {
@@ -310,7 +294,6 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 3. Compile and Create Pixel Shader (Layer Blend)
     ID3DBlob* layerBlob = nullptr;
     hr = CompileShaderFromFile(shaderPath.c_str(), "PSLayerBlend", "ps_4_0", &layerBlob);
     if (FAILED(hr)) {
@@ -324,7 +307,6 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 3.5 Compile and Create Pixel Shader (Selection Outline)
     ID3DBlob* outlineBlob = nullptr;
     hr = CompileShaderFromFile(shaderPath.c_str(), "PSSelectionOutline", "ps_4_0", &outlineBlob);
     if (FAILED(hr)) {
@@ -338,28 +320,26 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 4. Create Vertex Buffer (Unit Quad)
     Vertex vertices[] = {
-        { DirectX::XMFLOAT2(0.0f, 0.0f), DirectX::XMFLOAT2(0.0f, 0.0f) }, // Top-Left
-        { DirectX::XMFLOAT2(1.0f, 0.0f), DirectX::XMFLOAT2(1.0f, 0.0f) }, // Top-Right
-        { DirectX::XMFLOAT2(1.0f, 1.0f), DirectX::XMFLOAT2(1.0f, 1.0f) }, // Bottom-Right
-        { DirectX::XMFLOAT2(0.0f, 1.0f), DirectX::XMFLOAT2(0.0f, 1.0f) }, // Bottom-Left
+        { DirectX::XMFLOAT2(0.0f, 0.0f), DirectX::XMFLOAT2(0.0f, 0.0f) },
+        { DirectX::XMFLOAT2(1.0f, 0.0f), DirectX::XMFLOAT2(1.0f, 0.0f) },
+        { DirectX::XMFLOAT2(1.0f, 1.0f), DirectX::XMFLOAT2(1.0f, 1.0f) },
+        { DirectX::XMFLOAT2(0.0f, 1.0f), DirectX::XMFLOAT2(0.0f, 1.0f) },
     };
 
     D3D11_BUFFER_DESC bd = {};
     bd.Usage = D3D11_USAGE_DEFAULT;
     bd.ByteWidth = sizeof(vertices);
     bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    
-    D3D11_SUBRESOURCE_DATA InitData = {};
-    InitData.pSysMem = vertices;
 
-    hr = device->CreateBuffer(&bd, &InitData, &m_VertexBuffer);
+    D3D11_SUBRESOURCE_DATA initData = {};
+    initData.pSysMem = vertices;
+
+    hr = device->CreateBuffer(&bd, &initData, &m_VertexBuffer);
     if (FAILED(hr)) {
         return false;
     }
 
-    // 5. Create Index Buffer
     unsigned short indices[] = {
         0, 1, 2,
         0, 2, 3
@@ -367,14 +347,13 @@ bool Canvas::Initialize(ID3D11Device* device) {
 
     bd.ByteWidth = sizeof(indices);
     bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
-    InitData.pSysMem = indices;
+    initData.pSysMem = indices;
 
-    hr = device->CreateBuffer(&bd, &InitData, &m_IndexBuffer);
+    hr = device->CreateBuffer(&bd, &initData, &m_IndexBuffer);
     if (FAILED(hr)) {
         return false;
     }
 
-    // 6. Create Constant Buffers
     bd.ByteWidth = sizeof(CanvasBuffer);
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.Usage = D3D11_USAGE_DYNAMIC;
@@ -391,7 +370,6 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 7. Create Sampler State (Point filtering for crisp pixels)
     D3D11_SAMPLER_DESC sampDesc = {};
     sampDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
     sampDesc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -406,7 +384,6 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // 8. Create Blend State for Layer Composition (Pre-multiplied / Standard Alpha)
     D3D11_BLEND_DESC blendDesc = {};
     blendDesc.RenderTarget[0].BlendEnable = TRUE;
     blendDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
@@ -422,7 +399,6 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // Create rasterizer state with CullMode = D3D11_CULL_NONE
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
@@ -433,8 +409,11 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
-    // Composite targets and default layer are created lazily on first use.
-
+    m_CompositeDirty = true;
+    m_IsStrokeActive = false;
+    m_IsMovingPixels = false;
+    m_SmartSelectInProgress.store(false);
+    m_SmartSelectCancelled.store(false);
     return true;
 }
 
@@ -2636,6 +2615,7 @@ void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const floa
     if (startX < 0 || startX >= m_Width || startY < 0 || startY >= m_Height) return;
 
     auto& layer = m_Layers[m_ActiveLayerIdx];
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
     std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
 
     cv::Mat mat = ImageManager::PixelsToMat8UC3(layerPixels, m_Width, m_Height);
@@ -2689,24 +2669,23 @@ void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const floa
             float fillAlpha = maskVal * selectionVal * color[3];
 
             if (fillAlpha > 0.0f) {
-                size_t idx = ((size_t)y * m_Width + x) * 4;
-                float destR = layerPixels[idx + 0];
-                float destG = layerPixels[idx + 1];
-                float destB = layerPixels[idx + 2];
-                float destA = layerPixels[idx + 3];
-
-                float outA = fillAlpha + destA * (1.0f - fillAlpha);
+                float dest[4];
+                layer.tileCache->GetPixelF(x, y, dest);
+                float outA = fillAlpha + dest[3] * (1.0f - fillAlpha);
                 if (outA > 0.0f) {
-                    layerPixels[idx + 0] = (color[0] * fillAlpha + destR * destA * (1.0f - fillAlpha)) / outA;
-                    layerPixels[idx + 1] = (color[1] * fillAlpha + destG * destA * (1.0f - fillAlpha)) / outA;
-                    layerPixels[idx + 2] = (color[2] * fillAlpha + destB * destA * (1.0f - fillAlpha)) / outA;
-                    layerPixels[idx + 3] = outA;
+                    float out[4];
+                    out[0] = (color[0] * fillAlpha + dest[0] * dest[3] * (1.0f - fillAlpha)) / outA;
+                    out[1] = (color[1] * fillAlpha + dest[1] * dest[3] * (1.0f - fillAlpha)) / outA;
+                    out[2] = (color[2] * fillAlpha + dest[2] * dest[3] * (1.0f - fillAlpha)) / outA;
+                    out[3] = outA;
+                    layer.tileCache->SetPixelF(x, y, out);
                 }
             }
         }
     }
 
-    SetLayerPixelsF(layer, layerPixels, m_Width, m_Height, m_CanvasFormat);
+    layer.needsUpload = true;
+    layer.filtersDirty = true;
     m_IsDocumentModified = true;
 
     if (!m_ActiveStrokeDeltas.empty()) {
@@ -2727,7 +2706,7 @@ void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColo
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
 
     auto& layer = m_Layers[m_ActiveLayerIdx];
-    std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
 
     float dx = (float)(x2 - x1);
     float dy = (float)(y2 - y1);
@@ -2759,24 +2738,23 @@ void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColo
             float alphaVal = lerpColor[3] * selectionVal;
 
             if (alphaVal > 0.0f) {
-                size_t idx = ((size_t)y * m_Width + x) * 4;
-                float destR = layerPixels[idx + 0];
-                float destG = layerPixels[idx + 1];
-                float destB = layerPixels[idx + 2];
-                float destA = layerPixels[idx + 3];
-
-                float outA = alphaVal + destA * (1.0f - alphaVal);
+                float dest[4];
+                layer.tileCache->GetPixelF(x, y, dest);
+                float outA = alphaVal + dest[3] * (1.0f - alphaVal);
                 if (outA > 0.0f) {
-                    layerPixels[idx + 0] = (lerpColor[0] * alphaVal + destR * destA * (1.0f - alphaVal)) / outA;
-                    layerPixels[idx + 1] = (lerpColor[1] * alphaVal + destG * destA * (1.0f - alphaVal)) / outA;
-                    layerPixels[idx + 2] = (lerpColor[2] * alphaVal + destB * destA * (1.0f - alphaVal)) / outA;
-                    layerPixels[idx + 3] = outA;
+                    float out[4];
+                    out[0] = (lerpColor[0] * alphaVal + dest[0] * dest[3] * (1.0f - alphaVal)) / outA;
+                    out[1] = (lerpColor[1] * alphaVal + dest[1] * dest[3] * (1.0f - alphaVal)) / outA;
+                    out[2] = (lerpColor[2] * alphaVal + dest[2] * dest[3] * (1.0f - alphaVal)) / outA;
+                    out[3] = outA;
+                    layer.tileCache->SetPixelF(x, y, out);
                 }
             }
         }
     }
 
-    SetLayerPixelsF(layer, layerPixels, m_Width, m_Height, m_CanvasFormat);
+    layer.needsUpload = true;
+    layer.filtersDirty = true;
     m_IsDocumentModified = true;
 
     if (!m_ActiveStrokeDeltas.empty()) {
