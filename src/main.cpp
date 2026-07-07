@@ -35,6 +35,8 @@
 #include "core/KeymapManager.h"
 #include "core/ClipboardHelper.h"
 #include "ui/EditorPanels.h"
+#include "CanvasRendererDX12.h"
+
 
 // Tablet Pointer API support
 float g_PenPressure = 1.0f;
@@ -171,6 +173,8 @@ static float                        g_canvasRTHeight = 0.0f;
 // Canvas Instance
 static Canvas g_Canvas;
 static ImVec2 g_LastDragDelta = ImVec2(0.0f, 0.0f);
+static CanvasRendererDX12 g_CanvasRenderer;
+static bool g_CanvasRendererReady = false;
 
 // Global startup time
 static double g_StartupTimeMs = 0.0;
@@ -560,6 +564,20 @@ int main(int argc, char* argv[]) {
         glfwTerminate();
         return 1;
     }
+        // Initialize tiled DX12 Canvas Renderer
+    if (!g_CanvasRenderer.Initialize(
+        g_pd3d12Device,
+        g_pd3d12CommandQueue,
+        AllocateSrvDescriptor,
+        FreeSrvDescriptor
+    )) {
+        Logger::Get().Error("Failed to initialize CanvasRendererDX12");
+        // Non-fatal: falls back to grey clear
+    } else {
+        g_CanvasRendererReady = true;
+        Logger::Get().Info("CanvasRendererDX12 initialized successfully.");
+    }
+
     log_step("Canvas Renderer D3D Init (including Shader Loading/Compiling)");
 
     // Check for crash recovery / autosave restore
@@ -1443,6 +1461,8 @@ int main(int argc, char* argv[]) {
     } catch (...) {}
 
     // Cleanup Subsystems in reverse order
+    g_CanvasRenderer.Shutdown();
+        g_CanvasRendererReady = false;
     g_Canvas.Shutdown();
     CleanupCanvasRenderTarget();
     ImGui_ImplDX12_Shutdown();
@@ -1848,9 +1868,8 @@ void CleanupCanvasRenderTarget() {
 }
 
 void RenderCanvasToTexture(int width, int height) {
-    (void)width;
-    (void)height;
-    if (!g_canvasTexture12 || !g_canvasRtvHeap || !g_pd3d12CommandAllocator || !g_pd3d12CommandList || !g_pd3d12CommandQueue) {
+    if (!g_canvasTexture12 || !g_canvasRtvHeap ||
+        !g_pd3d12CommandAllocator || !g_pd3d12CommandList || !g_pd3d12CommandQueue) {
         return;
     }
 
@@ -1859,21 +1878,36 @@ void RenderCanvasToTexture(int width, int height) {
         return;
     }
 
-    D3D12_RESOURCE_BARRIER toRenderTarget = {};
-    toRenderTarget.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    toRenderTarget.Transition.pResource = g_canvasTexture12;
-    toRenderTarget.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    toRenderTarget.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    toRenderTarget.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    g_pd3d12CommandList->ResourceBarrier(1, &toRenderTarget);
+    ID3D12DescriptorHeap* heaps[] = { g_srvDescHeap };
+    g_pd3d12CommandList->SetDescriptorHeaps(1, heaps);
 
-    float clearColor[4] = { 0.12f, 0.12f, 0.14f, 1.0f };
-    g_pd3d12CommandList->ClearRenderTargetView(g_canvasRtvHandle, clearColor, 0, nullptr);
-
-    D3D12_RESOURCE_BARRIER toShaderResource = toRenderTarget;
-    toShaderResource.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    toShaderResource.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-    g_pd3d12CommandList->ResourceBarrier(1, &toShaderResource);
+    if (g_CanvasRendererReady) {
+        bool renderOk = g_CanvasRenderer.Render(
+            g_pd3d12CommandList,
+            g_Canvas,
+            g_canvasTexture12,
+            g_canvasRtvHandle,
+            width, height
+        );
+        if (!renderOk) {
+            Logger::Get().Error("CanvasRendererDX12::Render failed this frame.");
+        }
+    } else {
+        // Fallback: clear to grey
+        D3D12_RESOURCE_BARRIER toRT = {};
+        toRT.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toRT.Transition.pResource = g_canvasTexture12;
+        toRT.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        toRT.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        toRT.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        g_pd3d12CommandList->ResourceBarrier(1, &toRT);
+        float clearColor[4] = { 0.12f, 0.12f, 0.14f, 1.0f };
+        g_pd3d12CommandList->ClearRenderTargetView(g_canvasRtvHandle, clearColor, 0, nullptr);
+        D3D12_RESOURCE_BARRIER toSRV = toRT;
+        toSRV.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+        toSRV.Transition.StateAfter  = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        g_pd3d12CommandList->ResourceBarrier(1, &toSRV);
+    }
 
     g_pd3d12CommandList->Close();
     ID3D12CommandList* commandLists[] = { g_pd3d12CommandList };

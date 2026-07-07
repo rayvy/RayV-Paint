@@ -79,6 +79,8 @@ set(SOURCES
     src/main.cpp
     src/Canvas.cpp
     src/Canvas.h
+    src/CanvasRendererDX12.cpp
+    src/CanvasRendererDX12.h
     src/core/TileCache.cpp
     src/core/TileCache.h
     src/core/Logger.cpp
