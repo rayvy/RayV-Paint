@@ -622,54 +622,118 @@ bool CanvasRendererDX12::CompileShaders(
     Microsoft::WRL::ComPtr<ID3DBlob>& vsTile,
     Microsoft::WRL::ComPtr<ID3DBlob>& psTileBlend
 ) {
-    std::string hlslSource;
-    std::ifstream file("Canvas.hlsl");
-    if (file.is_open()) {
-        std::stringstream ss;
-        ss << file.rdbuf();
-        hlslSource = ss.str();
-        Logger::Get().Info("Loaded Canvas.hlsl from working directory.");
+    // Helper: wrap raw bytes into an ID3DBlob
+    auto makeBlobFromBytes = [](const std::vector<uint8_t>& bytes,
+                                Microsoft::WRL::ComPtr<ID3DBlob>& dest) -> bool {
+        if (bytes.empty()) return false;
+        if (FAILED(D3DCreateBlob(bytes.size(), &dest))) return false;
+        std::memcpy(dest->GetBufferPointer(), bytes.data(), bytes.size());
+        return true;
+    };
+
+    // Try shaders/ subdir first, then working dir
+    auto tryCso = [&](const char* name) -> std::vector<uint8_t> {
+        auto b = LoadCsoFile(std::string("shaders/") + name);
+        if (b.empty()) b = LoadCsoFile(name);
+        return b;
+    };
+
+    // --- Attempt 1: load precompiled .cso ---
+    auto csoVSMain    = tryCso("Canvas_VSMain.cso");
+    auto csoPSMain    = tryCso("Canvas_PSMain.cso");
+    auto csoVSLayer   = tryCso("Canvas_VSLayerMain.cso");
+    auto csoPSLayer   = tryCso("Canvas_PSLayerBlend.cso");
+    auto csoPSOutline = tryCso("Canvas_PSSelectionOutline.cso");
+    auto csoVSTile    = tryCso("Canvas_VSTileMain.cso");
+    auto csoPSTile    = tryCso("Canvas_PSTileBlend.cso");
+
+    bool allFound = !csoVSMain.empty() && !csoPSMain.empty() &&
+                    !csoVSLayer.empty() && !csoPSLayer.empty() &&
+                    !csoPSOutline.empty() && !csoVSTile.empty() && !csoPSTile.empty();
+
+    if (allFound) {
+        Logger::Get().Info("Loading precompiled shader .cso files.");
+        if (makeBlobFromBytes(csoVSMain,    vsMain)              &&
+            makeBlobFromBytes(csoPSMain,    psMain)              &&
+            makeBlobFromBytes(csoVSLayer,   vsLayer)             &&
+            makeBlobFromBytes(csoPSLayer,   psLayerBlend)        &&
+            makeBlobFromBytes(csoPSOutline, psSelectionOutline)  &&
+            makeBlobFromBytes(csoVSTile,    vsTile)              &&
+            makeBlobFromBytes(csoPSTile,    psTileBlend)) {
+            Logger::Get().Info("All precompiled shaders loaded successfully.");
+            return true;
+        }
+        Logger::Get().Error(".cso blob wrap failed — falling back to runtime compile.");
     } else {
-        hlslSource = GetEmbeddedHLSL();
+        Logger::Get().Info("Precompiled .cso not found — runtime compile fallback.");
+    }
+
+    // --- Attempt 2: Runtime D3DCompile ---
+    std::string canvasHlsl;
+    std::ifstream canvasFile("shaders/Canvas.hlsl");
+    if (!canvasFile.is_open()) canvasFile.open("Canvas.hlsl");
+    if (canvasFile.is_open()) {
+        std::stringstream ss; ss << canvasFile.rdbuf();
+        canvasHlsl = ss.str();
+        Logger::Get().Info("Loaded Canvas.hlsl from disk for runtime compile.");
+    } else {
+        canvasHlsl = GetEmbeddedHLSL();
         Logger::Get().Info("Using embedded Canvas.hlsl fallback.");
     }
 
-    // Append specialized custom high-performance tile rendering shaders
-    hlslSource += "\n\n" + GetTileShadersHLSL();
+    std::string tileHlsl;
+    std::ifstream tileFile("shaders/CanvasTiles.hlsl");
+    if (!tileFile.is_open()) tileFile.open("CanvasTiles.hlsl");
+    if (tileFile.is_open()) {
+        std::stringstream ss; ss << tileFile.rdbuf();
+        tileHlsl = ss.str();
+        Logger::Get().Info("Loaded CanvasTiles.hlsl from disk for runtime compile.");
+    } else {
+        tileHlsl = GetTileShadersHLSL();
+        Logger::Get().Info("Using embedded CanvasTiles fallback.");
+    }
 
-    auto compile = [&](const char* entry, const char* target, Microsoft::WRL::ComPtr<ID3DBlob>& dest) -> bool {
+    std::string combined = canvasHlsl + "\n\n" + tileHlsl;
+
+    auto compile = [&](const char* entry, const char* target,
+                       Microsoft::WRL::ComPtr<ID3DBlob>& dest) -> bool {
         UINT flags = D3DCOMPILE_ENABLE_STRICTNESS;
 #ifdef _DEBUG
         flags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
 #endif
         Microsoft::WRL::ComPtr<ID3DBlob> err;
-        HRESULT hr = D3DCompile(
-            hlslSource.data(), hlslSource.size(),
-            nullptr, nullptr, nullptr,
-            entry, target,
-            flags, 0,
-            &dest, &err
-        );
+        HRESULT hr = D3DCompile(combined.data(), combined.size(),
+            nullptr, nullptr, nullptr, entry, target, flags, 0, &dest, &err);
         if (FAILED(hr)) {
-            if (err) {
-                Logger::Get().Error("Shader Compile Error (" + std::string(entry) + "): " +
-                    std::string(reinterpret_cast<const char*>(err->GetBufferPointer())));
-            }
+            if (err) Logger::Get().Error("Shader compile error (" + std::string(entry) + "): " +
+                std::string(reinterpret_cast<const char*>(err->GetBufferPointer())));
             return false;
         }
         return true;
     };
 
-    if (!compile("VSMain", "vs_5_0", vsMain)) return false;
-    if (!compile("PSMain", "ps_5_0", psMain)) return false;
-    if (!compile("VSLayerMain", "vs_5_0", vsLayer)) return false;
-    if (!compile("PSLayerBlend", "ps_5_0", psLayerBlend)) return false;
+    if (!compile("VSMain",             "vs_5_0", vsMain))            return false;
+    if (!compile("PSMain",             "ps_5_0", psMain))            return false;
+    if (!compile("VSLayerMain",        "vs_5_0", vsLayer))           return false;
+    if (!compile("PSLayerBlend",       "ps_5_0", psLayerBlend))      return false;
     if (!compile("PSSelectionOutline", "ps_5_0", psSelectionOutline)) return false;
-    if (!compile("VSTileMain", "vs_5_0", vsTile)) return false;
-    if (!compile("PSTileBlend", "ps_5_0", psTileBlend)) return false;
+    if (!compile("VSTileMain",         "vs_5_0", vsTile))            return false;
+    if (!compile("PSTileBlend",        "ps_5_0", psTileBlend))       return false;
 
     return true;
 }
+
+std::vector<uint8_t> CanvasRendererDX12::LoadCsoFile(const std::string& path) {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f.is_open()) return {};
+    auto size = f.tellg();
+    if (size <= 0) return {};
+    f.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buf(static_cast<size_t>(size));
+    if (!f.read(reinterpret_cast<char*>(buf.data()), size)) return {};
+    return buf;
+}
+
 
 bool CanvasRendererDX12::CreateConstantBuffers() {
     D3D12_HEAP_PROPERTIES heapProps = {};

@@ -13,17 +13,17 @@ struct PS_INPUT
 
 cbuffer CanvasBuffer : register(b0)
 {
-    float4 u_ViewportSizeAndZoom; // xy: Viewport size in pixels, z: Zoom, w: rotation
-    float4 u_OffsetAndCanvasSize; // xy: Offset/Pan in pixels, zw: Canvas size in pixels
+    float4 u_ViewportSizeAndZoom;  // xy: Viewport size in pixels, z: Zoom, w: rotation
+    float4 u_OffsetAndCanvasSize;  // xy: Offset/Pan in pixels, zw: Canvas size in pixels
     float4 u_ChannelMasksAndFlags; // x: R active, y: G active, z: B active, w: A active (1.0f or 0.0f)
-    float4 u_ViewportFlags; // x: flipH, y: flipV, zw: unused
+    float4 u_ViewportFlags;        // x: flipH, y: flipV, z: outlineTime (seconds), w: unused
 };
 
 cbuffer LayerBuffer : register(b1)
 {
     float4 u_LayerParams;     // x: opacity, y: hasMask, zw: translation (uOff, vOff)
     float4 u_TransformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
-    float4 u_CenterParams;    // x: centerX, y: centerY, zw: unused
+    float4 u_CenterParams;    // x: centerX, y: centerY, z: blendMode (float-encoded), w: unused
 };
 
 Texture2D g_Texture : register(t0);
@@ -103,8 +103,8 @@ float4 PSMain(PS_INPUT input) : SV_TARGET
     // Alternating checkerboard color
     int sum = cellIndex.x + cellIndex.y;
     if (sum < 0) sum = -sum;
-    
-    float check = (sum % 2 == 0) ? 1.0f : 0.0f;
+
+    float check = ((uint)sum % 2u == 0u) ? 1.0f : 0.0f;
     float3 color1 = float3(0.18f, 0.18f, 0.18f); // Dark gray
     float3 color2 = float3(0.24f, 0.24f, 0.24f); // Lighter gray
     float3 checkColor = lerp(color1, color2, check);

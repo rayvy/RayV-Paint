@@ -59,20 +59,20 @@ private:
         DirectX::XMFLOAT2 uv;
     };
 
-    struct CanvasBufferData {
+    struct alignas(16) CanvasBufferData {
         DirectX::XMFLOAT4 viewportSizeAndZoom;   // xy: size, z: zoom, w: rotation
         DirectX::XMFLOAT4 offsetAndCanvasSize;   // xy: pan, zw: canvas size
         DirectX::XMFLOAT4 channelMasksAndFlags;  // x: R, y: G, z: B, w: A (1.0f/0.0f)
         DirectX::XMFLOAT4 viewportFlags;         // x: flipH, y: flipV, z: outlineTime, w: unused
     };
 
-    struct LayerBufferData {
+    struct alignas(16) LayerBufferData {
         DirectX::XMFLOAT4 layerParams;     // x: opacity, y: hasMask, zw: translation
         DirectX::XMFLOAT4 transformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
         DirectX::XMFLOAT4 centerParams;    // x: centerX, y: centerY, z: blendMode, w: unused
     };
 
-    struct TileParamsData {
+    struct alignas(16) TileParamsData {
         DirectX::XMFLOAT4 tileParams;      // x: tileX, y: tileY, z: canvasWidth, w: canvasHeight
     };
 
@@ -146,6 +146,9 @@ private:
 
     std::string GetEmbeddedHLSL() const;
     std::string GetTileShadersHLSL() const;
+
+    // Loads a precompiled .cso file. Returns empty vector on failure.
+    static std::vector<uint8_t> LoadCsoFile(const std::string& path);
 
     ID3D12Device* m_Device = nullptr;
     ID3D12CommandQueue* m_CommandQueue = nullptr;

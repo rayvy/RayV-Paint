@@ -110,6 +110,7 @@ set(SOURCES
 # Shaders
 set(SHADER_FILES
     src/shaders/Canvas.hlsl
+    src/shaders/CanvasTiles.hlsl
 )
 set_source_files_properties(${SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 
@@ -175,3 +176,44 @@ foreach(shader_file ${SHADER_FILES})
         COMMENT "Copying shader ${shader_name} to output directory"
     )
 endforeach()
+
+# ---------------------------------------------------------------------------
+# Precompile HLSL shaders to .cso using fxc (Windows SDK)
+# Falls back gracefully if fxc is not found — runtime D3DCompile will be used.
+# ---------------------------------------------------------------------------
+find_program(FXC_EXE fxc
+    HINTS
+        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64"
+        "C:/Program Files (x86)/Windows Kits/10/bin/10.0.22621.0/x64"
+        "C:/Program Files (x86)/Windows Kits/10/bin/x64"
+    DOC "FXC HLSL shader compiler"
+)
+
+if(FXC_EXE)
+    message(STATUS "Found fxc: ${FXC_EXE}")
+
+    set(CANVAS_HLSL "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/Canvas.hlsl")
+    set(TILES_HLSL  "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/CanvasTiles.hlsl")
+    set(SHADER_INC  "${CMAKE_CURRENT_SOURCE_DIR}/src/shaders")
+    set(SHADER_OUT  "$<TARGET_FILE_DIR:RayVPaint_Core>/shaders")
+
+    # Helper macro to add one fxc compilation step
+    macro(add_fxc_target SRC ENTRY PROFILE CSO)
+        add_custom_command(TARGET RayVPaint_Core POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_OUT}"
+            COMMAND "${FXC_EXE}" /nologo /T "${PROFILE}" /E "${ENTRY}" /I "${SHADER_INC}"
+                    /Fo "${SHADER_OUT}/${CSO}" "${SRC}"
+            COMMENT "FXC: ${ENTRY} -> ${CSO}"
+        )
+    endmacro()
+
+    add_fxc_target("${CANVAS_HLSL}" VSMain             vs_5_0 Canvas_VSMain.cso)
+    add_fxc_target("${CANVAS_HLSL}" PSMain             ps_5_0 Canvas_PSMain.cso)
+    add_fxc_target("${CANVAS_HLSL}" VSLayerMain        vs_5_0 Canvas_VSLayerMain.cso)
+    add_fxc_target("${CANVAS_HLSL}" PSLayerBlend       ps_5_0 Canvas_PSLayerBlend.cso)
+    add_fxc_target("${CANVAS_HLSL}" PSSelectionOutline ps_5_0 Canvas_PSSelectionOutline.cso)
+    add_fxc_target("${TILES_HLSL}"  VSTileMain         vs_5_0 Canvas_VSTileMain.cso)
+    add_fxc_target("${TILES_HLSL}"  PSTileBlend        ps_5_0 Canvas_PSTileBlend.cso)
+else()
+    message(WARNING "fxc not found — shaders will be compiled at runtime by D3DCompile.")
+endif()
