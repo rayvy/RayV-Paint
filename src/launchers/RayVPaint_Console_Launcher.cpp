@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <shellapi.h>
 #include <string>
 #include <iostream>
 
@@ -11,18 +12,29 @@ int main() {
     std::wstring dir = ws.substr(0, pos);
     
     std::wstring target = dir + L"\\bin\\RayVPaint_Core.exe";
+
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    std::wstring cmd = L"\"" + target + L"\"";
+    for (int i = 1; i < argc; ++i) {
+        cmd += L" ";
+        cmd += L"\"";
+        cmd += argv[i];
+        cmd += L"\"";
+    }
+    cmd += L" --console";
+    if (argv) {
+        LocalFree(argv);
+    }
     
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
     si.cb = sizeof(si);
-    
-    // Append the --console flag so the core executable knows it should attach/allocate a console
-    std::wstring cmd = GetCommandLineW();
-    cmd += L" --console";
-    
+
+    std::wstring mutableCmd = cmd;
     if (CreateProcessW(
         target.c_str(),
-        const_cast<wchar_t*>(cmd.c_str()),
+        mutableCmd.data(),
         NULL, NULL, FALSE, 0, NULL,
         dir.c_str(), // Set working directory to the parent directory
         &si, &pi)) {

@@ -57,6 +57,7 @@ add_library(imgui STATIC
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp
 )
 
 # Set include directories for imgui
@@ -125,6 +126,7 @@ set_target_properties(RayVPaint_Core PROPERTIES
 target_link_libraries(RayVPaint_Core PRIVATE
     glfw
     imgui
+    d3d12
     d3d11
     dxgi
     d3dcompiler

@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <shellapi.h>
 #include <string>
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
@@ -11,15 +12,29 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     
     // Target executable path is inside bin/RayVPaint_Core.exe
     std::wstring target = dir + L"\\bin\\RayVPaint_Core.exe";
+
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    std::wstring cmd = L"\"" + target + L"\"";
+    for (int i = 1; i < argc; ++i) {
+        cmd += L" ";
+        cmd += L"\"";
+        cmd += argv[i];
+        cmd += L"\"";
+    }
+    if (argv) {
+        LocalFree(argv);
+    }
     
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
     si.cb = sizeof(si);
     
     // Create the process, passing the original command line arguments
+    std::wstring mutableCmd = cmd;
     if (CreateProcessW(
         target.c_str(),
-        const_cast<wchar_t*>(GetCommandLineW()),
+        mutableCmd.data(),
         NULL, NULL, FALSE, 0, NULL, 
         dir.c_str(), // Set working directory to the parent directory where configs/logs will live if needed, or launcher dir
         &si, &pi)) {
