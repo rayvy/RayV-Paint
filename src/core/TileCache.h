@@ -20,9 +20,35 @@ inline int BytesPerPixel(CanvasPixelFormat fmt) {
 // Tile side: 256 pixels. One RGBA8 tile = 256KB, RGBA32F tile = 1MB.
 static constexpr int TILE_SIZE = 256;
 
+// ---------------------------------------------------------------------------
+// Shared tile pixel blob (Krita-like COW unit).
+// Multiple TileCache slots and undo snapshots can share one TileData.
+// Writes must go through EnsureWritable() so shared blobs are cloned first.
+// ---------------------------------------------------------------------------
+struct TileData {
+    std::vector<uint8_t> pixels;
+
+    explicit TileData(size_t byteCount)
+        : pixels(byteCount, 0) {}
+
+    TileData(const TileData& other) = default;
+    TileData& operator=(const TileData& other) = default;
+
+    size_t ByteSize() const { return pixels.size(); }
+};
+
+using TileDataPtr = std::shared_ptr<TileData>;
+
+// Undo/history handle: nullptr data == tile absent (fully transparent).
+struct TileSnapshot {
+    TileDataPtr data; // shared; empty/null => no tile
+
+    bool IsEmpty() const { return !data; }
+    size_t ByteSize() const { return data ? data->ByteSize() : 0; }
+};
+
 // ---- TileCache ----
-// Sparse, LRU-backed pixel store. Replaces std::vector<float> pixels in Layer.
-// Only allocated tiles are in RAM; empty regions cost nothing.
+// Sparse store. Pixel buffers are ref-counted (COW on write).
 class TileCache {
 public:
     TileCache() = default;
@@ -33,13 +59,8 @@ public:
     TileCache(TileCache&&) = default;
     TileCache& operator=(TileCache&&) = default;
 
-    // Initialise (or reinitialise) the cache. Clears all existing tiles.
     void Init(int width, int height, CanvasPixelFormat format);
-
-    // Free all tile memory.
     void Clear();
-
-    // Resize canvas dimensions, preserving content (top-left aligned).
     void Resize(int newWidth, int newHeight);
 
     // ---- Metadata ----
@@ -52,52 +73,38 @@ public:
     size_t GetTileCount()   const { return m_Tiles.size(); }
     bool IsEmpty()          const { return m_Tiles.empty(); }
 
-    // ---- Tile existence ----
+    // Approximate unique pixel RAM (dedupes shared TileData pointers).
+    size_t EstimateUniquePixelBytes() const;
+
     bool HasTile(int tileX, int tileY) const;
 
-    // ---- Float pixel interface (works for RGBA8 and RGBA32F) ----
-    // Missing tile == fully transparent (0,0,0,0).
     void GetPixelF(int x, int y, float rgba[4]) const;
     void SetPixelF(int x, int y, const float rgba[4]);
 
-    // ---- Fast UINT8 interface (only valid when format == RGBA8) ----
     void GetPixelU8(int x, int y, uint8_t rgba[4]) const;
     void SetPixelU8(int x, int y, const uint8_t rgba[4]);
 
-    // ---- Direct tile data access (for GPU upload / PaintEngine hot path) ----
-    // Returns nullptr if the tile doesn't exist (treat as zeroes).
+    // Read-only pointer (no COW). nullptr if missing.
     const uint8_t* GetTileData(int tileX, int tileY) const;
 
-    // Create tile if needed, mark it dirty, return writable pointer.
+    // Writable pointer: creates tile if needed, COW-clones if shared, marks dirty.
     uint8_t* LockTile(int tileX, int tileY);
 
-    // ---- Bulk operations ----
     void Fill(const float rgba[4]);
     void FillRect(int x0, int y0, int x1, int y1, const float rgba[4]);
 
-    // Copy a region from another TileCache (formats must match).
     void CopyFrom(const TileCache& src, int srcX, int srcY,
                   int dstX, int dstY, int w, int h);
 
-    // Import from raw flat RGBA8 buffer (always valid regardless of document format:
-    // if document is RGBA32F the values are converted to float on import).
     void ImportRGBA8(const uint8_t* data, int srcWidth, int srcHeight,
                      int dstX = 0, int dstY = 0);
-
-    // Import from raw flat RGBA32F float buffer.
-    // For RGBA8 documents: values are clamped to [0,1] and quantised to uint8.
     void ImportRGBA32F(const float* data, int srcWidth, int srcHeight,
                        int dstX = 0, int dstY = 0);
 
-    // Export entire canvas (or clipped) to a flat RGBA8 buffer (width*height*4 bytes).
     void ExportRGBA8(uint8_t* outData, int outWidth, int outHeight) const;
-
-    // Export entire canvas to a flat RGBA32F buffer.
     void ExportRGBA32F(float* outData, int outWidth, int outHeight) const;
 
-    // ---- Dirty tracking (incremental GPU upload) ----
-    // Krita-like idea: only changed tiles hit the GPU; deleted tiles need an
-    // explicit "clear" upload so the texture does not keep stale paint.
+    // ---- Dirty / GPU clear tracking ----
     void MarkDirty(int tileX, int tileY);
     void MarkAllDirty();
     void ClearDirty(int tileX, int tileY);
@@ -105,28 +112,20 @@ public:
     bool IsDirty(int tileX, int tileY) const;
     bool HasPendingGpuWork() const;
 
-    // Calls callback(tileX, tileY, rawData, pitchBytes) for each dirty tile
-    // and for each pending clear (rawData is zero-filled).
-    // pitchBytes = TILE_SIZE * m_BytesPerPixel.
     void ForEachDirtyTile(
         std::function<void(int tx, int ty, const uint8_t* data, int pitch)> cb) const;
 
-    // ---- LRU limit ----
     void SetMaxTilesInRAM(size_t n) { m_MaxTilesInRAM = n; }
 
-    // ---- Undo/Redo snapshots ----
-    // Snapshot a single tile into a vector (empty = tile doesn't exist).
-    std::vector<uint8_t> SnapshotTile(int tileX, int tileY) const;
-
-    // Restore a tile from a snapshot. Pass empty vector to erase the tile
-    // (and queue a GPU clear for that cell).
-    void RestoreTile(int tileX, int tileY, const std::vector<uint8_t>& data);
+    // ---- Shared snapshots (cheap — shares TileData) ----
+    TileSnapshot SnapshotTile(int tileX, int tileY) const;
+    void RestoreTile(int tileX, int tileY, const TileSnapshot& snap);
 
 private:
     struct Tile {
-        std::vector<uint8_t> data;   // TILE_SIZE*TILE_SIZE*m_BytesPerPixel bytes
-        bool     dirty      = false;
-        uint64_t lastAccess = 0;
+        TileDataPtr data;     // non-null while entry exists in m_Tiles
+        bool        dirty = false;
+        uint64_t    lastAccess = 0;
     };
 
     Tile&       GetOrCreateTile(int tileX, int tileY);
@@ -135,6 +134,8 @@ private:
     uint32_t    Key(int tileX, int tileY) const;
     void        EvictLRU();
     void        QueueGpuClear(int tileX, int tileY);
+    void        EnsureWritable(Tile& t);
+    TileDataPtr MakeBlankData() const;
 
     int m_Width          = 0;
     int m_Height         = 0;
@@ -142,11 +143,9 @@ private:
     int m_TilesY         = 0;
     int m_BytesPerPixel  = 4;
     CanvasPixelFormat m_Format = CanvasPixelFormat::RGBA8;
-    size_t   m_MaxTilesInRAM  = 512; // ~128 MB RGBA8 or ~512 MB RGBA32F
+    size_t   m_MaxTilesInRAM  = 512;
     uint64_t m_AccessCounter  = 0;
 
     std::unordered_map<uint32_t, Tile> m_Tiles;
-    // Tiles that were erased from the sparse map but still need a zero upload
-    // so GPU layer textures do not keep pre-undo paint.
     std::unordered_set<uint32_t> m_PendingGpuClears;
 };

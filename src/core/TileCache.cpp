@@ -1,7 +1,7 @@
 #include "TileCache.h"
 #include <cstring>
-#include <cassert>
 #include <limits>
+#include <unordered_set>
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -21,6 +21,21 @@ inline TileCache::Tile* TileCache::FindTile(int tileX, int tileY) {
     return (it != m_Tiles.end()) ? &it->second : nullptr;
 }
 
+TileDataPtr TileCache::MakeBlankData() const {
+    return std::make_shared<TileData>((size_t)TILE_SIZE * TILE_SIZE * m_BytesPerPixel);
+}
+
+void TileCache::EnsureWritable(Tile& t) {
+    if (!t.data) {
+        t.data = MakeBlankData();
+        return;
+    }
+    // COW: if undo history / another cache still holds this blob, clone before write.
+    if (t.data.use_count() > 1) {
+        t.data = std::make_shared<TileData>(*t.data);
+    }
+}
+
 TileCache::Tile& TileCache::GetOrCreateTile(int tileX, int tileY) {
     uint32_t key = Key(tileX, tileY);
     auto it = m_Tiles.find(key);
@@ -29,25 +44,23 @@ TileCache::Tile& TileCache::GetOrCreateTile(int tileX, int tileY) {
         return it->second;
     }
 
-    // LRU eviction before allocating
     if (m_Tiles.size() >= m_MaxTilesInRAM) {
         EvictLRU();
     }
 
     Tile& t = m_Tiles[key];
-    t.data.assign((size_t)TILE_SIZE * TILE_SIZE * m_BytesPerPixel, 0);
+    t.data       = MakeBlankData();
     t.dirty      = false;
     t.lastAccess = ++m_AccessCounter;
+    m_PendingGpuClears.erase(key);
     return t;
 }
 
 void TileCache::EvictLRU() {
     if (m_Tiles.empty()) return;
-    // Find the tile with the smallest lastAccess that is not dirty
-    // (prefer evicting clean tiles to avoid losing unsaved data)
     uint32_t victim = 0;
     uint64_t oldest = std::numeric_limits<uint64_t>::max();
-    bool     foundClean = false;
+    bool foundClean = false;
 
     for (auto& [k, t] : m_Tiles) {
         if (!t.dirty && t.lastAccess < oldest) {
@@ -57,7 +70,6 @@ void TileCache::EvictLRU() {
         }
     }
     if (!foundClean) {
-        // All dirty — fallback: evict oldest regardless (shouldn't normally happen)
         for (auto& [k, t] : m_Tiles) {
             if (t.lastAccess < oldest) {
                 oldest = t.lastAccess;
@@ -65,6 +77,7 @@ void TileCache::EvictLRU() {
             }
         }
     }
+    // Shared TileData may live on in undo history after eviction.
     m_Tiles.erase(victim);
 }
 
@@ -80,8 +93,6 @@ void TileCache::Init(int width, int height, CanvasPixelFormat format) {
     m_TilesX        = (width  + TILE_SIZE - 1) / TILE_SIZE;
     m_TilesY        = (height + TILE_SIZE - 1) / TILE_SIZE;
     m_AccessCounter = 0;
-    // Large documents need to stay resident; otherwise the cache will evict
-    // freshly imported tiles and the image appears truncated.
     m_MaxTilesInRAM = std::max(m_MaxTilesInRAM, (size_t)m_TilesX * (size_t)m_TilesY);
     m_Tiles.clear();
     m_PendingGpuClears.clear();
@@ -113,6 +124,18 @@ bool TileCache::HasTile(int tileX, int tileY) const {
     return m_Tiles.count(Key(tileX, tileY)) > 0;
 }
 
+size_t TileCache::EstimateUniquePixelBytes() const {
+    std::unordered_set<const TileData*> seen;
+    size_t bytes = 0;
+    for (const auto& [k, t] : m_Tiles) {
+        if (!t.data) continue;
+        if (seen.insert(t.data.get()).second) {
+            bytes += t.data->ByteSize();
+        }
+    }
+    return bytes;
+}
+
 // ---- Pixel read/write ----
 
 void TileCache::GetPixelF(int x, int y, float rgba[4]) const {
@@ -121,41 +144,44 @@ void TileCache::GetPixelF(int x, int y, float rgba[4]) const {
         return;
     }
     const Tile* t = FindTile(x / TILE_SIZE, y / TILE_SIZE);
-    if (!t) {
+    if (!t || !t->data) {
         rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0.0f;
         return;
     }
     int    lx  = x % TILE_SIZE;
     int    ly  = y % TILE_SIZE;
     size_t off = ((size_t)ly * TILE_SIZE + lx) * m_BytesPerPixel;
+    const uint8_t* base = t->data->pixels.data();
 
     if (m_Format == CanvasPixelFormat::RGBA8) {
-        const uint8_t* p = t->data.data() + off;
+        const uint8_t* p = base + off;
         rgba[0] = p[0] / 255.0f;
         rgba[1] = p[1] / 255.0f;
         rgba[2] = p[2] / 255.0f;
         rgba[3] = p[3] / 255.0f;
     } else {
-        const float* p = reinterpret_cast<const float*>(t->data.data() + off);
+        const float* p = reinterpret_cast<const float*>(base + off);
         rgba[0] = p[0]; rgba[1] = p[1]; rgba[2] = p[2]; rgba[3] = p[3];
     }
 }
 
 void TileCache::SetPixelF(int x, int y, const float rgba[4]) {
     if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) return;
-    Tile& t  = GetOrCreateTile(x / TILE_SIZE, y / TILE_SIZE);
+    Tile& t = GetOrCreateTile(x / TILE_SIZE, y / TILE_SIZE);
+    EnsureWritable(t);
     int lx   = x % TILE_SIZE;
     int ly   = y % TILE_SIZE;
     size_t off = ((size_t)ly * TILE_SIZE + lx) * m_BytesPerPixel;
+    uint8_t* base = t.data->pixels.data();
 
     if (m_Format == CanvasPixelFormat::RGBA8) {
-        uint8_t* p = t.data.data() + off;
+        uint8_t* p = base + off;
         p[0] = (uint8_t)(std::clamp(rgba[0], 0.0f, 1.0f) * 255.0f + 0.5f);
         p[1] = (uint8_t)(std::clamp(rgba[1], 0.0f, 1.0f) * 255.0f + 0.5f);
         p[2] = (uint8_t)(std::clamp(rgba[2], 0.0f, 1.0f) * 255.0f + 0.5f);
         p[3] = (uint8_t)(std::clamp(rgba[3], 0.0f, 1.0f) * 255.0f + 0.5f);
     } else {
-        float* p = reinterpret_cast<float*>(t.data.data() + off);
+        float* p = reinterpret_cast<float*>(base + off);
         p[0] = rgba[0]; p[1] = rgba[1]; p[2] = rgba[2]; p[3] = rgba[3];
     }
     t.dirty = true;
@@ -166,48 +192,48 @@ void TileCache::GetPixelU8(int x, int y, uint8_t rgba[4]) const {
         rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0; return;
     }
     const Tile* t = FindTile(x / TILE_SIZE, y / TILE_SIZE);
-    if (!t) { rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0; return; }
+    if (!t || !t->data) { rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0; return; }
     size_t off = ((size_t)(y % TILE_SIZE) * TILE_SIZE + (x % TILE_SIZE)) * 4;
-    const uint8_t* p = t->data.data() + off;
+    const uint8_t* p = t->data->pixels.data() + off;
     rgba[0] = p[0]; rgba[1] = p[1]; rgba[2] = p[2]; rgba[3] = p[3];
 }
 
 void TileCache::SetPixelU8(int x, int y, const uint8_t rgba[4]) {
     if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) return;
-    Tile& t    = GetOrCreateTile(x / TILE_SIZE, y / TILE_SIZE);
+    Tile& t = GetOrCreateTile(x / TILE_SIZE, y / TILE_SIZE);
+    EnsureWritable(t);
     size_t off = ((size_t)(y % TILE_SIZE) * TILE_SIZE + (x % TILE_SIZE)) * 4;
-    uint8_t* p = t.data.data() + off;
+    uint8_t* p = t.data->pixels.data() + off;
     p[0] = rgba[0]; p[1] = rgba[1]; p[2] = rgba[2]; p[3] = rgba[3];
     t.dirty = true;
 }
 
-// ---- Direct tile access ----
-
 const uint8_t* TileCache::GetTileData(int tileX, int tileY) const {
     const Tile* t = FindTile(tileX, tileY);
-    return t ? t->data.data() : nullptr;
+    return (t && t->data) ? t->data->pixels.data() : nullptr;
 }
 
 uint8_t* TileCache::LockTile(int tileX, int tileY) {
-    Tile& t  = GetOrCreateTile(tileX, tileY);
-    t.dirty  = true;
-    return t.data.data();
+    Tile& t = GetOrCreateTile(tileX, tileY);
+    EnsureWritable(t);
+    t.dirty = true;
+    m_PendingGpuClears.erase(Key(tileX, tileY));
+    return t.data->pixels.data();
 }
 
-// ---- Bulk ops ----
+// ---- Bulk ops (via LockTile → automatic COW) ----
 
 void TileCache::Fill(const float rgba[4]) {
-    // Fill all existing tiles and any tile that would be needed (skip: only fills existing)
-    // For a proper fill we need to create all tiles — only do so if canvas is small.
-    // Practical usage: Fill is called on new empty layer → no tiles → nothing to do,
-    // transparent (zeroed) is the correct initial state for RGBA unless a non-zero fill.
     bool isTransparent = (rgba[0] == 0.0f && rgba[1] == 0.0f &&
                           rgba[2] == 0.0f && rgba[3] == 0.0f);
     if (isTransparent) {
-        Clear(); // zeroes == empty tile
+        // Full clear: queue GPU clears for every existing tile, then drop them.
+        for (const auto& [k, t] : m_Tiles) {
+            m_PendingGpuClears.insert(k);
+        }
+        m_Tiles.clear();
         return;
     }
-    // Create and fill all tiles
     for (int ty = 0; ty < m_TilesY; ++ty) {
         for (int tx = 0; tx < m_TilesX; ++tx) {
             uint8_t* data = LockTile(tx, ty);
@@ -273,13 +299,45 @@ void TileCache::FillRect(int x0, int y0, int x1, int y1, const float rgba[4]) {
 
 void TileCache::CopyFrom(const TileCache& src, int srcX, int srcY,
                           int dstX, int dstY, int w, int h) {
-    // Clamp to both canvases
     if (w <= 0 || h <= 0) return;
     w = std::min(w, std::min(src.m_Width  - srcX, m_Width  - dstX));
     h = std::min(h, std::min(src.m_Height - srcY, m_Height - dstY));
     if (w <= 0 || h <= 0) return;
 
-    // Row-by-row copy via float interface (handles format mismatch)
+    // Fast path: same format + tile-aligned full tiles → share TileData (true COW share).
+    if (m_Format == src.m_Format &&
+        (srcX % TILE_SIZE) == 0 && (srcY % TILE_SIZE) == 0 &&
+        (dstX % TILE_SIZE) == 0 && (dstY % TILE_SIZE) == 0 &&
+        (w % TILE_SIZE) == 0 && (h % TILE_SIZE) == 0) {
+        int tilesW = w / TILE_SIZE;
+        int tilesH = h / TILE_SIZE;
+        int stx0 = srcX / TILE_SIZE;
+        int sty0 = srcY / TILE_SIZE;
+        int dtx0 = dstX / TILE_SIZE;
+        int dty0 = dstY / TILE_SIZE;
+        for (int ty = 0; ty < tilesH; ++ty) {
+            for (int tx = 0; tx < tilesW; ++tx) {
+                const Tile* st = src.FindTile(stx0 + tx, sty0 + ty);
+                int dtx = dtx0 + tx, dty = dty0 + ty;
+                if (!st || !st->data) {
+                    // Source empty → erase dest + GPU clear
+                    RestoreTile(dtx, dty, TileSnapshot{});
+                    continue;
+                }
+                uint32_t key = Key(dtx, dty);
+                if (m_Tiles.size() >= m_MaxTilesInRAM && !m_Tiles.count(key)) {
+                    EvictLRU();
+                }
+                Tile& dt = m_Tiles[key];
+                dt.data = st->data; // share
+                dt.dirty = true;
+                dt.lastAccess = ++m_AccessCounter;
+                m_PendingGpuClears.erase(key);
+            }
+        }
+        return;
+    }
+
     for (int row = 0; row < h; ++row) {
         int sy = srcY + row;
         int dy = dstY + row;
@@ -290,8 +348,6 @@ void TileCache::CopyFrom(const TileCache& src, int srcX, int srcY,
         }
     }
 }
-
-// ---- Import from raw buffers ----
 
 void TileCache::ImportRGBA8(const uint8_t* data, int srcWidth, int srcHeight,
                              int dstX, int dstY) {
@@ -316,7 +372,7 @@ void TileCache::ImportRGBA8(const uint8_t* data, int srcWidth, int srcHeight,
                     uint8_t* dp = raw + ((size_t)ly * TILE_SIZE + lx) * 4;
                     dp[0]=sp[0]; dp[1]=sp[1]; dp[2]=sp[2]; dp[3]=sp[3];
                 }
-            } else { // RGBA32F: convert uint8 → float
+            } else {
                 float* fp = reinterpret_cast<float*>(raw);
                 for (int lx = lx0; lx <= lx1; ++lx) {
                     int srcCol = (tx*TILE_SIZE + lx) - dstX;
@@ -354,7 +410,7 @@ void TileCache::ImportRGBA32F(const float* data, int srcWidth, int srcHeight,
                     size_t off = ((size_t)ly * TILE_SIZE + lx) * 4;
                     fp[off+0]=sp[0]; fp[off+1]=sp[1]; fp[off+2]=sp[2]; fp[off+3]=sp[3];
                 }
-            } else { // RGBA8: clamp float → uint8
+            } else {
                 for (int lx = lx0; lx <= lx1; ++lx) {
                     int srcCol = (tx*TILE_SIZE + lx) - dstX;
                     const float* sp = data + ((size_t)row * srcWidth + srcCol) * 4;
@@ -369,10 +425,7 @@ void TileCache::ImportRGBA32F(const float* data, int srcWidth, int srcHeight,
     }
 }
 
-// ---- Export ----
-
 void TileCache::ExportRGBA8(uint8_t* outData, int outWidth, int outHeight) const {
-    // Zero-fill output first (empty tiles → transparent)
     std::memset(outData, 0, (size_t)outWidth * outHeight * 4);
 
     int copyW = std::min(m_Width,  outWidth);
@@ -388,13 +441,13 @@ void TileCache::ExportRGBA8(uint8_t* outData, int outWidth, int outHeight) const
             if (x0 >= copyW) break;
             int x1 = std::min(x0 + TILE_SIZE, copyW);
             const Tile* t = FindTile(tx, ty);
-            if (!t) continue;
+            if (!t || !t->data) continue;
 
             if (m_Format == CanvasPixelFormat::RGBA8) {
-                const uint8_t* srcRow = t->data.data() + ((size_t)ly * TILE_SIZE) * 4;
+                const uint8_t* srcRow = t->data->pixels.data() + ((size_t)ly * TILE_SIZE) * 4;
                 std::memcpy(dstRow + ((size_t)x0 * 4), srcRow, (size_t)(x1 - x0) * 4);
             } else {
-                const float* fp = reinterpret_cast<const float*>(t->data.data());
+                const float* fp = reinterpret_cast<const float*>(t->data->pixels.data());
                 for (int cx = x0; cx < x1; ++cx) {
                     int lx = cx - x0;
                     size_t si = ((size_t)ly * TILE_SIZE + lx) * 4;
@@ -425,20 +478,21 @@ void TileCache::ExportRGBA32F(float* outData, int outWidth, int outHeight) const
             if (x0 >= copyW) break;
             int x1 = std::min(x0 + TILE_SIZE, copyW);
             const Tile* t = FindTile(tx, ty);
-            if (!t) continue;
+            if (!t || !t->data) continue;
 
             if (m_Format == CanvasPixelFormat::RGBA32F) {
-                const float* fp = reinterpret_cast<const float*>(t->data.data());
-                std::memcpy(dstRow + ((size_t)x0 * 4), fp + ((size_t)ly * TILE_SIZE) * 4, (size_t)(x1 - x0) * 4 * sizeof(float));
+                const float* fp = reinterpret_cast<const float*>(t->data->pixels.data());
+                std::memcpy(dstRow + ((size_t)x0 * 4), fp + ((size_t)ly * TILE_SIZE) * 4,
+                            (size_t)(x1 - x0) * 4 * sizeof(float));
             } else {
                 for (int cx = x0; cx < x1; ++cx) {
                     int lx = cx - x0;
                     size_t si = ((size_t)ly * TILE_SIZE + lx) * 4;
                     size_t di = ((size_t)cx) * 4;
-                    dstRow[di + 0] = t->data[si + 0] / 255.f;
-                    dstRow[di + 1] = t->data[si + 1] / 255.f;
-                    dstRow[di + 2] = t->data[si + 2] / 255.f;
-                    dstRow[di + 3] = t->data[si + 3] / 255.f;
+                    dstRow[di + 0] = t->data->pixels[si + 0] / 255.f;
+                    dstRow[di + 1] = t->data->pixels[si + 1] / 255.f;
+                    dstRow[di + 2] = t->data->pixels[si + 2] / 255.f;
+                    dstRow[di + 3] = t->data->pixels[si + 3] / 255.f;
                 }
             }
         }
@@ -456,10 +510,8 @@ void TileCache::MarkDirty(int tileX, int tileY) {
     Tile* t = FindTile(tileX, tileY);
     if (t) {
         t->dirty = true;
-        // Restored/real tile supersedes a pending clear for this cell.
         m_PendingGpuClears.erase(Key(tileX, tileY));
     } else {
-        // No CPU tile but GPU may still hold pixels (undo of first stroke).
         QueueGpuClear(tileX, tileY);
     }
 }
@@ -501,16 +553,14 @@ void TileCache::ForEachDirtyTile(
     const size_t tileBytes = (size_t)pitch * TILE_SIZE;
 
     for (const auto& [key, t] : m_Tiles) {
-        if (!t.dirty) continue;
-        // Skip if also listed as clear (should not happen after MarkDirty).
+        if (!t.dirty || !t.data) continue;
         if (m_PendingGpuClears.count(key)) continue;
         int tx = (int)(key % (uint32_t)m_TilesX);
         int ty = (int)(key / (uint32_t)m_TilesX);
-        cb(tx, ty, t.data.data(), pitch);
+        cb(tx, ty, t.data->pixels.data(), pitch);
     }
 
     if (!m_PendingGpuClears.empty()) {
-        // Shared zero slab for GPU clears (transparent tile).
         static thread_local std::vector<uint8_t> zeroTile;
         if (zeroTile.size() < tileBytes) {
             zeroTile.assign(tileBytes, 0);
@@ -518,7 +568,6 @@ void TileCache::ForEachDirtyTile(
             std::fill(zeroTile.begin(), zeroTile.begin() + (std::ptrdiff_t)tileBytes, 0);
         }
         for (uint32_t key : m_PendingGpuClears) {
-            // If a live tile exists for this key, dirty path above handles it.
             if (m_Tiles.count(key)) continue;
             int tx = (int)(key % (uint32_t)m_TilesX);
             int ty = (int)(key / (uint32_t)m_TilesX);
@@ -527,29 +576,31 @@ void TileCache::ForEachDirtyTile(
     }
 }
 
-// ---- Undo/Redo snapshots ----
+// ---- Shared snapshots ----
 
-std::vector<uint8_t> TileCache::SnapshotTile(int tileX, int tileY) const {
+TileSnapshot TileCache::SnapshotTile(int tileX, int tileY) const {
     const Tile* t = FindTile(tileX, tileY);
-    if (!t) return {}; // empty = tile doesn't exist (transparent)
-    return t->data;    // copy
+    if (!t || !t->data) return {};
+    // Share — no deep copy. First write after this will COW-clone.
+    return TileSnapshot{ t->data };
 }
 
-void TileCache::RestoreTile(int tileX, int tileY, const std::vector<uint8_t>& data) {
+void TileCache::RestoreTile(int tileX, int tileY, const TileSnapshot& snap) {
     if (tileX < 0 || tileY < 0 || tileX >= m_TilesX || tileY >= m_TilesY) return;
+    const uint32_t key = Key(tileX, tileY);
 
-    if (data.empty()) {
-        // Sparse erase + force GPU clear so undo of "first paint on empty"
-        // does not leave stale texels on the layer texture.
-        const uint32_t key = Key(tileX, tileY);
+    if (snap.IsEmpty()) {
         m_Tiles.erase(key);
         m_PendingGpuClears.insert(key);
         return;
     }
 
-    // Restoring real pixels cancels any pending clear for this cell.
-    m_PendingGpuClears.erase(Key(tileX, tileY));
-    Tile& t = GetOrCreateTile(tileX, tileY);
-    t.data  = data;
-    t.dirty = true;
+    m_PendingGpuClears.erase(key);
+    if (m_Tiles.size() >= m_MaxTilesInRAM && !m_Tiles.count(key)) {
+        EvictLRU();
+    }
+    Tile& t = m_Tiles[key];
+    t.data       = snap.data; // share restored history blob
+    t.dirty      = true;
+    t.lastAccess = ++m_AccessCounter;
 }

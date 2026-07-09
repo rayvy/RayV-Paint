@@ -1,18 +1,19 @@
 #pragma once
 
+#include "TileCache.h"
 #include <string>
 #include <vector>
 #include <memory>
 #include <unordered_map>
 
+// Tile-level history delta. Snapshots share TileData (COW) — no full copies
+// until the live cache mutates a shared blob.
 struct TileDelta {
-    int layerIdx;
-    int tileX;
-    int tileY;
-    // Raw tile bytes — matches TileCache tile format (RGBA8: 256KB, RGBA32F: 1MB).
-    // Empty vector means the tile didn't exist (was transparent) at that point.
-    std::vector<uint8_t> oldPixels;
-    std::vector<uint8_t> newPixels;
+    int layerIdx = 0;
+    int tileX = 0;
+    int tileY = 0;
+    TileSnapshot oldState; // empty => tile was absent
+    TileSnapshot newState; // empty => tile becomes absent
 };
 
 class Canvas;
@@ -42,7 +43,7 @@ private:
 
 class SelectionCommand : public UndoCommand {
 public:
-    SelectionCommand(const std::string& name, 
+    SelectionCommand(const std::string& name,
                      std::vector<uint8_t> oldMask, bool oldHasSelection,
                      std::vector<uint8_t> newMask, bool newHasSelection);
     std::string GetName() const override { return m_Name; }
@@ -74,16 +75,15 @@ public:
     std::string GetUndoName() const;
     std::string GetRedoName() const;
 
-    // Memory budget (bytes). Oldest history is evicted when exceeded.
-    // Default: 256 MB. Set to 0 to disable limit (use count only).
     void  SetMemoryBudget(size_t bytes) { m_MemoryBudgetBytes = bytes; }
     size_t GetMemoryBudget() const      { return m_MemoryBudgetBytes; }
     size_t GetCurrentMemoryUsage() const{ return m_CurrentMemoryBytes; }
 
 private:
     void EnforceLimits();
+    void RecalcMemory();
 
-    static constexpr size_t kDefaultMemoryBudget = 256ull * 1024 * 1024; // 256 MB
+    static constexpr size_t kDefaultMemoryBudget = 256ull * 1024 * 1024;
 
     std::vector<std::shared_ptr<UndoCommand>> m_UndoStack;
     std::vector<std::shared_ptr<UndoCommand>> m_RedoStack;

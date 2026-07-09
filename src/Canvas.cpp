@@ -651,9 +651,9 @@ void Canvas::ApplyLayerMask(int index) {
         std::vector<TileDelta> deltas;
         for (auto& pair : m_ActiveStrokeDeltas) {
             auto& delta = pair.second;
-            delta.newPixels = layer.tileCache
+            delta.newState = layer.tileCache
                 ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                : std::vector<uint8_t>{};
+                : TileSnapshot{};
             deltas.push_back(std::move(delta));
         }
         m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Apply Mask", index, std::move(deltas)));
@@ -854,8 +854,8 @@ void Canvas::BackupTile(int tileX, int tileY) {
     delta.layerIdx  = m_ActiveLayerIdx;
     delta.tileX     = tileX;
     delta.tileY     = tileY;
-    // Snapshot current tile state (empty vector if tile doesn't exist)
-    delta.oldPixels = layer.tileCache ? layer.tileCache->SnapshotTile(tileX, tileY) : std::vector<uint8_t>{};
+    // Shared snapshot (empty if tile doesn't exist). Write will COW-clone later.
+    delta.oldState = layer.tileCache ? layer.tileCache->SnapshotTile(tileX, tileY) : TileSnapshot{};
 
     m_ActiveStrokeDeltas[key] = std::move(delta);
 }
@@ -1001,10 +1001,10 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
 
             for (auto& pair : m_ActiveStrokeDeltas) {
                 auto& delta = pair.second;
-                // Snapshot the tile AFTER the stroke (newPixels)
-                delta.newPixels = layer.tileCache
+                // Shared snapshot AFTER the stroke (shares live TileData).
+                delta.newState = layer.tileCache
                     ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                    : std::vector<uint8_t>{};
+                    : TileSnapshot{};
                 deltas.push_back(std::move(delta));
             }
 
@@ -2201,9 +2201,9 @@ void Canvas::CommitTransformation(const std::string& actionName) {
 
     for (auto& pair : m_ActiveStrokeDeltas) {
         auto& delta = pair.second;
-        delta.newPixels = layer.tileCache
+        delta.newState = layer.tileCache
             ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-            : std::vector<uint8_t>{};
+            : TileSnapshot{};
         deltas.push_back(std::move(delta));
     }
 
@@ -2885,9 +2885,9 @@ void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const floa
         std::vector<TileDelta> deltas;
         for (auto& pair : m_ActiveStrokeDeltas) {
             auto& delta = pair.second;
-            delta.newPixels = layer.tileCache
+            delta.newState = layer.tileCache
                 ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                : std::vector<uint8_t>{};
+                : TileSnapshot{};
             deltas.push_back(std::move(delta));
         }
         m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Bucket Fill", m_ActiveLayerIdx, std::move(deltas)));
@@ -2955,9 +2955,9 @@ void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColo
         std::vector<TileDelta> deltas;
         for (auto& pair : m_ActiveStrokeDeltas) {
             auto& delta = pair.second;
-            delta.newPixels = layer.tileCache
+            delta.newState = layer.tileCache
                 ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                : std::vector<uint8_t>{};
+                : TileSnapshot{};
             deltas.push_back(std::move(delta));
         }
         m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Gradient", m_ActiveLayerIdx, std::move(deltas)));
