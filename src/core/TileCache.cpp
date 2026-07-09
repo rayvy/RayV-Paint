@@ -84,10 +84,12 @@ void TileCache::Init(int width, int height, CanvasPixelFormat format) {
     // freshly imported tiles and the image appears truncated.
     m_MaxTilesInRAM = std::max(m_MaxTilesInRAM, (size_t)m_TilesX * (size_t)m_TilesY);
     m_Tiles.clear();
+    m_PendingGpuClears.clear();
 }
 
 void TileCache::Clear() {
     m_Tiles.clear();
+    m_PendingGpuClears.clear();
     m_AccessCounter = 0;
 }
 
@@ -445,38 +447,83 @@ void TileCache::ExportRGBA32F(float* outData, int outWidth, int outHeight) const
 
 // ---- Dirty tracking ----
 
+void TileCache::QueueGpuClear(int tileX, int tileY) {
+    if (tileX < 0 || tileY < 0 || tileX >= m_TilesX || tileY >= m_TilesY) return;
+    m_PendingGpuClears.insert(Key(tileX, tileY));
+}
+
 void TileCache::MarkDirty(int tileX, int tileY) {
     Tile* t = FindTile(tileX, tileY);
-    if (t) t->dirty = true;
+    if (t) {
+        t->dirty = true;
+        // Restored/real tile supersedes a pending clear for this cell.
+        m_PendingGpuClears.erase(Key(tileX, tileY));
+    } else {
+        // No CPU tile but GPU may still hold pixels (undo of first stroke).
+        QueueGpuClear(tileX, tileY);
+    }
 }
 
 void TileCache::MarkAllDirty() {
     for (auto& [k, t] : m_Tiles) t.dirty = true;
+    m_PendingGpuClears.clear();
 }
 
 void TileCache::ClearDirty(int tileX, int tileY) {
     Tile* t = FindTile(tileX, tileY);
     if (t) t->dirty = false;
+    m_PendingGpuClears.erase(Key(tileX, tileY));
 }
 
 void TileCache::ClearAllDirty() {
     for (auto& [k, t] : m_Tiles) t.dirty = false;
+    m_PendingGpuClears.clear();
 }
 
 bool TileCache::IsDirty(int tileX, int tileY) const {
+    if (m_PendingGpuClears.count(Key(tileX, tileY))) return true;
     const Tile* t = FindTile(tileX, tileY);
     return t && t->dirty;
+}
+
+bool TileCache::HasPendingGpuWork() const {
+    if (!m_PendingGpuClears.empty()) return true;
+    for (const auto& [k, t] : m_Tiles) {
+        if (t.dirty) return true;
+    }
+    return false;
 }
 
 void TileCache::ForEachDirtyTile(
     std::function<void(int, int, const uint8_t*, int)> cb) const
 {
-    int pitch = TILE_SIZE * m_BytesPerPixel;
-    for (auto& [key, t] : m_Tiles) {
+    const int pitch = TILE_SIZE * m_BytesPerPixel;
+    const size_t tileBytes = (size_t)pitch * TILE_SIZE;
+
+    for (const auto& [key, t] : m_Tiles) {
         if (!t.dirty) continue;
+        // Skip if also listed as clear (should not happen after MarkDirty).
+        if (m_PendingGpuClears.count(key)) continue;
         int tx = (int)(key % (uint32_t)m_TilesX);
         int ty = (int)(key / (uint32_t)m_TilesX);
         cb(tx, ty, t.data.data(), pitch);
+    }
+
+    if (!m_PendingGpuClears.empty()) {
+        // Shared zero slab for GPU clears (transparent tile).
+        static thread_local std::vector<uint8_t> zeroTile;
+        if (zeroTile.size() < tileBytes) {
+            zeroTile.assign(tileBytes, 0);
+        } else {
+            std::fill(zeroTile.begin(), zeroTile.begin() + (std::ptrdiff_t)tileBytes, 0);
+        }
+        for (uint32_t key : m_PendingGpuClears) {
+            // If a live tile exists for this key, dirty path above handles it.
+            if (m_Tiles.count(key)) continue;
+            int tx = (int)(key % (uint32_t)m_TilesX);
+            int ty = (int)(key / (uint32_t)m_TilesX);
+            cb(tx, ty, zeroTile.data(), pitch);
+        }
     }
 }
 
@@ -490,11 +537,19 @@ std::vector<uint8_t> TileCache::SnapshotTile(int tileX, int tileY) const {
 
 void TileCache::RestoreTile(int tileX, int tileY, const std::vector<uint8_t>& data) {
     if (tileX < 0 || tileY < 0 || tileX >= m_TilesX || tileY >= m_TilesY) return;
+
     if (data.empty()) {
-        m_Tiles.erase(Key(tileX, tileY));
+        // Sparse erase + force GPU clear so undo of "first paint on empty"
+        // does not leave stale texels on the layer texture.
+        const uint32_t key = Key(tileX, tileY);
+        m_Tiles.erase(key);
+        m_PendingGpuClears.insert(key);
         return;
     }
-    Tile& t   = GetOrCreateTile(tileX, tileY);
-    t.data    = data;
-    t.dirty   = true;
+
+    // Restoring real pixels cancels any pending clear for this cell.
+    m_PendingGpuClears.erase(Key(tileX, tileY));
+    Tile& t = GetOrCreateTile(tileX, tileY);
+    t.data  = data;
+    t.dirty = true;
 }

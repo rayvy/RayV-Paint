@@ -18,9 +18,20 @@ if not exist "!EXE_PATH!" (
     exit /b 1
 )
 
+set "SUITE=%~1"
+if "%SUITE%"=="" set "SUITE=smoke"
+
+if /I "%SUITE%"=="smoke" goto :smoke
+if /I "%SUITE%"=="16k" goto :16k
+if /I "%SUITE%"=="all" goto :all
+
+echo Unknown suite "%SUITE%". Use: smoke ^| 16k ^| all
+exit /b 1
+
+:smoke
+echo --- Suite: smoke ---
 echo Launching executable in test mode (hidden window)...
 "!EXE_PATH!" --test
-
 set "TEST_RESULT=%ERRORLEVEL%"
 if %TEST_RESULT% neq 0 (
     echo First test failed with code %TEST_RESULT%
@@ -29,12 +40,28 @@ if %TEST_RESULT% neq 0 (
 
 echo Launching executable in headless mode with Python script...
 "!EXE_PATH!" --headless --script test_script.py
-
 set "TEST_RESULT=%ERRORLEVEL%"
 if %TEST_RESULT% neq 0 (
     echo Python script test failed with code %TEST_RESULT%
     exit /b %TEST_RESULT%
 )
 
-echo All tests completed successfully!
+echo Smoke tests completed successfully!
 exit /b 0
+
+:16k
+echo --- Suite: 16k (heavy) ---
+"!EXE_PATH!" --test-16k
+set "TEST_RESULT=%ERRORLEVEL%"
+if %TEST_RESULT% neq 0 (
+    echo 16K test failed with code %TEST_RESULT%
+    exit /b %TEST_RESULT%
+)
+echo 16K suite completed successfully!
+exit /b 0
+
+:all
+call "%~f0" smoke
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+call "%~f0" 16k
+exit /b %ERRORLEVEL%

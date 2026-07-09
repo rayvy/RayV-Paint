@@ -31,6 +31,7 @@
 #include "ConfigManager.h"
 #include "ScriptingEngine.h"
 #include "Canvas.h"
+#include "core/MemoryStats.h"
 #include "core/KeymapManager.h"
 #include "core/ClipboardHelper.h"
 #include "ui/EditorPanels.h"
@@ -202,6 +203,13 @@ void ResetCanvasView() { g_Canvas.ResetView(); }
 bool LoadCanvasImage(const std::string& filepath) {
     return g_Canvas.LoadImageToLayer(g_pd3dDevice, filepath);
 }
+int GetCanvasWidth() { return g_Canvas.GetWidth(); }
+int GetCanvasHeight() { return g_Canvas.GetHeight(); }
+size_t GetActiveLayerTileCount() { return g_Canvas.GetActiveLayerTileCount(); }
+double GetProcessWorkingSetMiB() {
+    auto info = MemoryStats::QueryProcess();
+    return static_cast<double>(info.workingSetBytes) / (1024.0 * 1024.0);
+}
 bool SaveCanvasDDS(const std::string& filepath, int formatChoice) {
     DdsFormat fmt = DdsFormat::RGBA8_UNORM;
     if (formatChoice == 1) fmt = DdsFormat::RGBA32_FLOAT;
@@ -228,10 +236,29 @@ void SetupConsole(bool forceConsole) {
 }
 
 void RedirectIOToConsole() {
-    FILE* fDummy;
-    freopen_s(&fDummy, "CONOUT$", "w", stdout);
-    freopen_s(&fDummy, "CONOUT$", "w", stderr);
-    freopen_s(&fDummy, "CONIN$", "r", stdin);
+    // Only rebind stdio to the console when a console exists and handles are
+    // not already redirected (e.g. `exe > log.txt`). Rebinding over a pipe
+    // breaks Python's sys.stdout init ("can't initialize sys standard streams").
+    auto isConsoleHandle = [](DWORD id) -> bool {
+        HANDLE h = GetStdHandle(id);
+        if (!h || h == INVALID_HANDLE_VALUE) return false;
+        DWORD mode = 0;
+        return GetConsoleMode(h, &mode) != 0;
+    };
+    const bool haveConsoleOut = isConsoleHandle(STD_OUTPUT_HANDLE) || isConsoleHandle(STD_ERROR_HANDLE);
+
+    FILE* fDummy = nullptr;
+    if (haveConsoleOut || GetConsoleWindow() != nullptr) {
+        if (!isConsoleHandle(STD_OUTPUT_HANDLE) && GetConsoleWindow()) {
+            freopen_s(&fDummy, "CONOUT$", "w", stdout);
+        }
+        if (!isConsoleHandle(STD_ERROR_HANDLE) && GetConsoleWindow()) {
+            freopen_s(&fDummy, "CONOUT$", "w", stderr);
+        }
+        if (!isConsoleHandle(STD_INPUT_HANDLE) && GetConsoleWindow()) {
+            freopen_s(&fDummy, "CONIN$", "r", stdin);
+        }
+    }
     std::cout.clear();
     std::cerr.clear();
     std::cin.clear();
@@ -346,14 +373,22 @@ int main(int argc, char* argv[]) {
     bool testMode = false;
     bool headlessMode = false;
     bool forceConsole = false;
+    bool test16kMode = false;
     std::string scriptPath = "";
     std::string configPath = "";
     std::string startupImagePath = "";
+    int processExitCode = 0;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--test") {
             testMode = true;
+        } else if (arg == "--test-16k") {
+            // Heavy large-texture suite (optional path after smoke).
+            test16kMode = true;
+            headlessMode = true;
+            testMode = true;
+            if (scriptPath.empty()) scriptPath = "test_16k.py";
         } else if (arg == "--headless") {
             headlessMode = true;
             testMode = true; // Headless implies auto-testing behavior
@@ -524,7 +559,22 @@ int main(int argc, char* argv[]) {
 
     // Execute script from CLI if provided
     if (!scriptPath.empty()) {
-        ScriptingEngine::Get().RunScript(scriptPath);
+        Logger::Get().InfoTag("test", "Running script: " + scriptPath);
+        MemoryStats::LogSnapshot("before_script");
+        if (!ScriptingEngine::Get().RunScript(scriptPath)) {
+            Logger::Get().ErrorTag("test", "Script failed: " + scriptPath);
+            processExitCode = 2;
+        } else {
+            Logger::Get().InfoTag("test", "Script finished OK: " + scriptPath);
+        }
+        MemoryStats::LogSnapshot("after_script");
+        if (test16kMode) {
+            Logger::Get().InfoTag("test",
+                "16k post-check canvas=" + std::to_string(GetCanvasWidth()) + "x" +
+                std::to_string(GetCanvasHeight()) +
+                " tiles=" + std::to_string(GetActiveLayerTileCount()) +
+                " WS_MiB=" + std::to_string(GetProcessWorkingSetMiB()));
+        }
     }
 
     // Trackers
@@ -1388,10 +1438,14 @@ int main(int argc, char* argv[]) {
 
     ScriptingEngine::Get().Shutdown();
     ThreadPool::Get().Shutdown();
-    Logger::Get().Info("RayVPaint shut down cleanly.");
+    if (processExitCode != 0) {
+        Logger::Get().Error("RayVPaint exiting with code " + std::to_string(processExitCode));
+    } else {
+        Logger::Get().Info("RayVPaint shut down cleanly.");
+    }
     Logger::Get().Shutdown();
 
-    return 0;
+    return processExitCode;
 }
 
 // WinMain entry point for Native WIN32 GUI

@@ -1,10 +1,13 @@
 #include "Canvas.h"
 #include "core/TileCache.h"
 #include "core/Logger.h"
+#include "core/MemoryStats.h"
 #include "core/ImageManager.h"
 #include <opencv2/imgproc.hpp>
 #include "core/ConfigManager.h"
 #include "core/TexconvHelper.h"
+#include <chrono>
+#include <sstream>
 #include <d3dcompiler.h>
 #include <iostream>
 #include <algorithm>
@@ -75,7 +78,33 @@ static float GetSelWeight(const std::vector<uint8_t>& mask, int w, int x, int y,
     if (!hasSel || mask.empty()) return 1.f;
     return SelU82F(mask[(size_t)y * w + x]);
 }
+// Full-document float composites explode on large textures (16K RGBA32F ≈ 4 GiB).
+static constexpr int kMaxFlatCompositePixels = 8192 * 8192;
+
+static bool CanAllocateFlatComposite(int w, int h, const char* context) {
+    const size_t pixels = (size_t)std::max(0, w) * (size_t)std::max(0, h);
+    if (pixels > (size_t)kMaxFlatCompositePixels) {
+        Logger::Get().ErrorTag("mem",
+            std::string(context) + ": refusing full float composite for " +
+            std::to_string(w) + "x" + std::to_string(h) +
+            " (" + MemoryStats::FormatBytes(pixels * 16) +
+            "). Use tiled export / crop, or raise threshold later.");
+        return false;
+    }
+    const size_t est = MemoryStats::EstimateImageBytes(w, h, 16);
+    if (MemoryStats::ExceedsRamBudget(est, 0.40)) {
+        Logger::Get().ErrorTag("mem",
+            std::string(context) + ": estimated " + MemoryStats::FormatBytes(est) +
+            " exceeds 40% of system RAM budget.");
+        return false;
+    }
+    return true;
+}
+
 static std::vector<float> ComposeVisibleLayers(const std::vector<Layer>& layers, int w, int h) {
+    if (!CanAllocateFlatComposite(w, h, "ComposeVisibleLayers")) {
+        return {};
+    }
     std::vector<float> composite((size_t)w * h * 4, 0.f);
     int firstVisibleIdx = -1;
     for (int l = 0; l < (int)layers.size(); ++l) {
@@ -472,6 +501,10 @@ void Canvas::CreateCompositeResources(ID3D11Device* device) {
     ReleaseCompositeResources();
 
     ComputeCompositePreviewSize(m_Width, m_Height, m_CompositeWidth, m_CompositeHeight);
+    Logger::Get().InfoTag("gpu",
+        "CreateCompositeResources proxy=" + std::to_string(m_CompositeWidth) + "x" +
+        std::to_string(m_CompositeHeight) + " (canvas " + std::to_string(m_Width) + "x" +
+        std::to_string(m_Height) + ")");
 
     D3D11_TEXTURE2D_DESC desc = {};
     desc.Width = m_CompositeWidth;
@@ -488,11 +521,20 @@ void Canvas::CreateCompositeResources(ID3D11Device* device) {
     if (SUCCEEDED(hr)) {
         device->CreateRenderTargetView(m_CompositeTexture, nullptr, &m_CompositeRTV);
         device->CreateShaderResourceView(m_CompositeTexture, nullptr, &m_CompositeSRV);
+    } else {
+        std::ostringstream oss;
+        oss << "CreateCompositeResources CreateTexture2D failed hr=0x" << std::hex << (unsigned)hr
+            << " size=" << std::dec << m_CompositeWidth << "x" << m_CompositeHeight;
+        Logger::Get().ErrorTag("gpu", oss.str());
     }
 
-    m_SelectionMask.assign((size_t)m_Width * m_Height, 0);
+    // Do NOT allocate a full-document selection mask here (16K = 256 MiB).
+    // Selection tools allocate lazily when first used.
+    m_SelectionMask.clear();
     m_HasSelection = false;
+    m_SelectionMaskNeedsUpload = false;
     m_CompositeDirty = true;
+    MemoryStats::LogSnapshot("after_CreateCompositeResources");
 }
 
 void Canvas::ReleaseCompositeResources() {
@@ -510,7 +552,18 @@ void Canvas::ReleaseCompositeResources() {
 void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
     if (index < 0 || index >= m_Layers.size()) return;
     Layer& layer = m_Layers[index];
-    
+
+    const size_t maskBytes = MemoryStats::EstimateImageBytes(m_Width, m_Height, 1);
+    if (maskBytes > 64ull * 1024ull * 1024ull) {
+        Logger::Get().WarnTag("mem",
+            "CreateLayerMask: full mask is " + MemoryStats::FormatBytes(maskBytes) +
+            " — large-document masks are still flat; consider tiled masks later.");
+    }
+    if (MemoryStats::ExceedsRamBudget(maskBytes, 0.25)) {
+        Logger::Get().ErrorTag("mem", "CreateLayerMask refused: would exceed RAM budget.");
+        return;
+    }
+
     layer.mask.assign((size_t)m_Width * m_Height, 255);
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
@@ -653,6 +706,21 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
     if (layer.texture) { layer.texture->Release(); layer.texture = nullptr; }
     if (layer.srv)     { layer.srv->Release();     layer.srv     = nullptr; }
 
+    // D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION is typically 16384.
+    constexpr UINT kMaxTexDim = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+    if ((UINT)m_Width > kMaxTexDim || (UINT)m_Height > kMaxTexDim) {
+        Logger::Get().ErrorTag("gpu",
+            "RecreateLayerTexture: canvas " + std::to_string(m_Width) + "x" +
+            std::to_string(m_Height) + " exceeds D3D11 max texture dim " +
+            std::to_string(kMaxTexDim) + ". Need tiled GPU layers (B1b).");
+        return;
+    }
+
+    const size_t estGpu = MemoryStats::EstimateImageBytes(m_Width, m_Height, BytesPerPixel(m_CanvasFormat));
+    Logger::Get().InfoTag("gpu",
+        "RecreateLayerTexture " + std::to_string(m_Width) + "x" + std::to_string(m_Height) +
+        " estVRAM~" + MemoryStats::FormatBytes(estGpu));
+
     D3D11_TEXTURE2D_DESC desc = {};
     desc.Width            = m_Width;
     desc.Height           = m_Height;
@@ -665,10 +733,17 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
 
     HRESULT hr = device->CreateTexture2D(&desc, nullptr, &layer.texture);
     if (FAILED(hr)) {
-        Logger::Get().Error("RecreateLayerTexture: CreateTexture2D failed");
+        std::ostringstream oss;
+        oss << "RecreateLayerTexture: CreateTexture2D failed hr=0x" << std::hex << (unsigned)hr
+            << " size=" << std::dec << m_Width << "x" << m_Height
+            << " format=" << (unsigned)desc.Format
+            << " estVRAM~" << MemoryStats::FormatBytes(estGpu);
+        Logger::Get().ErrorTag("gpu", oss.str());
+        MemoryStats::LogSnapshot("after_CreateTexture2D_fail");
         return;
     }
     device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
+    Logger::Get().InfoTag("gpu", "RecreateLayerTexture OK");
 
     // Upload existing TileCache data if available
     if (layer.tileCache) {
@@ -676,6 +751,7 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
         layer.needsUpload = true;
     }
     layer.needsUpload = false; // will be handled by ComposeLayers dirty loop
+    MemoryStats::LogSnapshot("after_RecreateLayerTexture");
 }
 
 void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
@@ -956,18 +1032,23 @@ void Canvas::ResizeCanvas(ID3D11Device* device, int width, int height) {
     Logger::Get().Info("Resizing canvas from " + std::to_string(oldW) + "x" + std::to_string(oldH) +
                        " to " + std::to_string(m_Width) + "x" + std::to_string(m_Height));
 
-    // Resize selection mask (uint8_t, single-channel)
+    // Resize selection mask only if one was allocated (lazy for large docs).
     {
         std::vector<uint8_t> oldSel = std::move(m_SelectionMask);
-        m_SelectionMask.assign((size_t)m_Width * m_Height, 0);
-        int copyW = std::min(oldW, m_Width);
-        int copyH = std::min(oldH, m_Height);
-        for (int y = 0; y < copyH; ++y) {
-            for (int x = 0; x < copyW; ++x) {
-                uint8_t v = oldSel.empty() ? 0 : oldSel[(size_t)y * oldW + x];
-                m_SelectionMask[(size_t)y * m_Width + x] = v;
-                if (v > 0) m_HasSelection = true;
+        m_HasSelection = false;
+        if (!oldSel.empty()) {
+            m_SelectionMask.assign((size_t)m_Width * m_Height, 0);
+            int copyW = std::min(oldW, m_Width);
+            int copyH = std::min(oldH, m_Height);
+            for (int y = 0; y < copyH; ++y) {
+                for (int x = 0; x < copyW; ++x) {
+                    uint8_t v = oldSel[(size_t)y * oldW + x];
+                    m_SelectionMask[(size_t)y * m_Width + x] = v;
+                    if (v > 0) m_HasSelection = true;
+                }
             }
+        } else {
+            m_SelectionMask.clear();
         }
     }
 
@@ -1043,7 +1124,13 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
         for (size_t i = 0; i < m_Layers.size(); ++i) {
             auto& layer = m_Layers[i];
             if (layer.isGroup) continue;
-            if (!layer.texture) continue;
+            if (!layer.texture) {
+                if (layer.needsUpload || (layer.tileCache && layer.tileCache->GetTileCount() > 0)) {
+                    // Keep retrying texture creation for large docs if first attempt failed.
+                    RecreateLayerTexture(device, layer);
+                }
+                if (!layer.texture) continue;
+            }
 
             // Pick source cache (filtered or raw)
             TileCache* src = nullptr;
@@ -1057,9 +1144,13 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             if (!src) continue;
 
             bool layerHadUploads = false;
-            // Upload only dirty tiles
+            size_t dirtyUploaded = 0;
+            const bool hadPending = src->HasPendingGpuWork() || layerNeedsUpload;
+            auto uploadStart = std::chrono::high_resolution_clock::now();
+            // Upload dirty tiles + pending GPU clears (zero tiles after undo erase).
             src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
                 layerHadUploads = true;
+                ++dirtyUploaded;
                 D3D11_BOX box;
                 box.left   = tx * TILE_SIZE;
                 box.top    = ty * TILE_SIZE;
@@ -1069,10 +1160,21 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 box.back   = 1;
                 UINT pitch = TILE_SIZE * (UINT)src->GetBytesPerPixel();
                 context->UpdateSubresource(layer.texture, 0, &box, data, pitch, 0);
+                if (dirtyUploaded == 1 || (dirtyUploaded % 512) == 0) {
+                    Logger::Get().InfoTag("gpu",
+                        "Upload dirty tiles progress " + std::to_string(dirtyUploaded));
+                }
             });
             src->ClearAllDirty();
             layer.needsUpload = false;
-            if (layerHadUploads || filtersWereDirty || layerNeedsUpload) {
+            if (layerHadUploads && dirtyUploaded > 0) {
+                double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::high_resolution_clock::now() - uploadStart).count();
+                Logger::Get().InfoTag("gpu",
+                    "Uploaded " + std::to_string(dirtyUploaded) + " dirty tiles in " +
+                    std::to_string(ms) + " ms");
+            }
+            if (layerHadUploads || filtersWereDirty || layerNeedsUpload || hadPending) {
                 needsCompositeRebuild = true;
             }
 
@@ -1396,6 +1498,9 @@ bool Canvas::ExtractAndSetICCProfile(const std::string& pngPath) {
 }
 
 bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath) {
+    ScopedTimer loadTimer("LoadImageToLayer " + filepath);
+    MemoryStats::LogSnapshot("before_LoadImageToLayer");
+
     std::string ext;
     size_t dotPos = filepath.find_last_of('.');
     if (dotPos != std::string::npos) {
@@ -1411,7 +1516,17 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     if (ext == "dds") {
         loadedTileCache = std::make_unique<TileCache>();
         if (!DdsHelper::LoadDDSToTileCache(filepath, *loadedTileCache, imgWidth, imgHeight, loadedDdsFormat)) {
+            Logger::Get().ErrorTag("io", "LoadDDSToTileCache failed: " + filepath);
+            MemoryStats::LogSnapshot("after_LoadDDS_fail");
             return false;
+        }
+        MemoryStats::LogSnapshot("after_LoadDDSToTileCache");
+        if (loadedTileCache) {
+            const size_t tiles = loadedTileCache->GetTileCount();
+            const size_t bytes = MemoryStats::EstimateTileBytes(tiles, loadedTileCache->GetBytesPerPixel());
+            Logger::Get().InfoTag("io",
+                "TileCache loaded " + std::to_string(imgWidth) + "x" + std::to_string(imgHeight) +
+                " tiles=" + std::to_string(tiles) + " est=" + MemoryStats::FormatBytes(bytes));
         }
 
         if (loadedDdsFormat == DdsFormat::R8_UNORM || loadedDdsFormat == DdsFormat::R16_FLOAT || loadedDdsFormat == DdsFormat::R32_FLOAT) {
@@ -1419,7 +1534,30 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
             Logger::Get().Info("Single-channel DDS detected. Auto-configured R-only channels.");
         }
     } else {
+        // Non-DDS path still uses a flat decode buffer (stb). Guard huge images.
+        // We only know size after decode for most formats; soft-warn via post check.
         if (!ImageManager::LoadImageFromFile(filepath, loadedU8, imgWidth, imgHeight)) return false;
+        const size_t flat = MemoryStats::EstimateImageBytes(imgWidth, imgHeight, 4);
+        if (flat > 512ull * 1024ull * 1024ull) {
+            Logger::Get().WarnTag("mem",
+                "Non-DDS load used flat buffer " + MemoryStats::FormatBytes(flat) +
+                ". Prefer DDS streaming path for large textures.");
+        }
+    }
+
+    // Preflight: decoded RGBA8 + GPU layer texture estimate.
+    {
+        const size_t cpuEst = MemoryStats::EstimateImageBytes(imgWidth, imgHeight, 4);
+        const size_t gpuEst = cpuEst; // full layer texture
+        const size_t totalEst = cpuEst + gpuEst;
+        Logger::Get().InfoTag("mem",
+            "Preflight open est CPU=" + MemoryStats::FormatBytes(cpuEst) +
+            " GPU=" + MemoryStats::FormatBytes(gpuEst) +
+            " total~" + MemoryStats::FormatBytes(totalEst));
+        if (MemoryStats::ExceedsRamBudget(totalEst, 0.55)) {
+            Logger::Get().WarnTag("mem",
+                "Estimated open cost exceeds 55% of system RAM — proceeding may OOM.");
+        }
     }
 
     std::string lowerPath = filepath;
@@ -1486,11 +1624,18 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     imported.tileCache->MarkAllDirty();
 
     RecreateLayerTexture(device, imported);
+    if (!imported.texture) {
+        Logger::Get().ErrorTag("gpu",
+            "LoadImageToLayer: layer GPU texture missing after RecreateLayerTexture. "
+            "CPU TileCache may still hold pixels, but viewport will be blank.");
+        // Still keep CPU data so headless tests can validate tiles.
+    }
     m_Layers.push_back(std::move(imported));
     m_ActiveLayerIdx = (int)m_Layers.size() - 1;
     m_CompositeDirty = true;
 
     ResetView();
+    MemoryStats::LogSnapshot("after_LoadImageToLayer_success");
     Logger::Get().Info("Successfully imported layer from: " + filepath);
     return true;
 }
@@ -1501,7 +1646,15 @@ bool Canvas::SaveCanvas(const std::string& filepath, DdsFormat ddsFormat) {
         return false;
     }
 
+    if (!CanAllocateFlatComposite(m_Width, m_Height, "SaveCanvas")) {
+        return false;
+    }
+
     std::vector<float> composite = ComposeVisibleLayers(m_Layers, m_Width, m_Height);
+    if (composite.empty()) {
+        Logger::Get().Error("SaveCanvas: composite is empty.");
+        return false;
+    }
 
     DdsImage dds;
     dds.width = m_Width;
@@ -1518,7 +1671,15 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
         return false;
     }
 
+    if (!CanAllocateFlatComposite(m_Width, m_Height, "SaveCanvasStandard")) {
+        return false;
+    }
+
     std::vector<float> composite = ComposeVisibleLayers(m_Layers, m_Width, m_Height);
+    if (composite.empty()) {
+        Logger::Get().Error("SaveCanvasStandard: composite is empty.");
+        return false;
+    }
     return ImageManager::SaveImageToFile(filepath, composite, m_Width, m_Height, iccProfilePath);
 }
 
@@ -1642,6 +1803,10 @@ bool Canvas::Undo() {
     bool res = m_UndoRedoManager.Undo(this);
     if (res) {
         m_IsDocumentModified = true;
+        // Always force composite rebuild after history travel even if a
+        // command forgot to mark dirty (belt-and-suspenders with PaintStrokeCommand).
+        m_CompositeDirty = true;
+        Logger::Get().DebugTag("gpu", "Undo applied — composite marked dirty");
     }
     return res;
 }
@@ -1650,6 +1815,8 @@ bool Canvas::Redo() {
     bool res = m_UndoRedoManager.Redo(this);
     if (res) {
         m_IsDocumentModified = true;
+        m_CompositeDirty = true;
+        Logger::Get().DebugTag("gpu", "Redo applied — composite marked dirty");
     }
     return res;
 }
@@ -2251,11 +2418,11 @@ bool Canvas::SaveProjectAuto() {
 }
 
 void Canvas::ClearSelection() {
-    if (!m_HasSelection) return;
+    if (!m_HasSelection && m_SelectionMask.empty()) return;
     std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
-    m_SelectionMask.assign(m_Width * m_Height, 0);
+    m_SelectionMask.clear();
     m_HasSelection = false;
     m_SelectionMaskNeedsUpload = true;
 
@@ -2317,6 +2484,11 @@ void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
 }
 
 void Canvas::ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
+    if (!CanAllocateFlatComposite(m_Width, m_Height, "ApplyRectSelection")) {
+        // Reuse composite guard threshold; selection is also full-frame today.
+        Logger::Get().ErrorTag("mem", "Selection tools require flat masks; disabled for huge documents.");
+        return;
+    }
     std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 

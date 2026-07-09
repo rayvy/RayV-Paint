@@ -17,6 +17,10 @@ extern void ResetCanvasView();
 extern bool LoadCanvasImage(const std::string& filepath);
 extern bool SaveCanvasDDS(const std::string& filepath, int formatChoice);
 extern bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath);
+extern int GetCanvasWidth();
+extern int GetCanvasHeight();
+extern size_t GetActiveLayerTileCount();
+extern double GetProcessWorkingSetMiB();
 
 // Define embedded module
 PYBIND11_EMBEDDED_MODULE(rayv, m) {
@@ -44,6 +48,10 @@ PYBIND11_EMBEDDED_MODULE(rayv, m) {
     m.def("load_image",         [](const std::string& path) { return LoadCanvasImage(path); });
     m.def("save_dds",           [](const std::string& path, int fmt) { return SaveCanvasDDS(path, fmt); });
     m.def("save_image",         [](const std::string& path, const std::string& iccPath) { return SaveCanvasStandard(path, iccPath); }, py::arg("path"), py::arg("icc_path") = "");
+    m.def("get_canvas_width",   []() { return GetCanvasWidth(); });
+    m.def("get_canvas_height",  []() { return GetCanvasHeight(); });
+    m.def("get_tile_count",     []() { return static_cast<uint64_t>(GetActiveLayerTileCount()); });
+    m.def("get_memory_mb",      []() { return GetProcessWorkingSetMiB(); });
 }
 
 ScriptingEngine& ScriptingEngine::Get() {
@@ -61,8 +69,12 @@ bool ScriptingEngine::Initialize() {
 
     try {
         Logger::Get().Info("Initializing embedded Python interpreter...");
+        // Prefer unbuffered stdio so console redirect races are less likely.
+#ifdef _WIN32
+        _putenv_s("PYTHONUNBUFFERED", "1");
+#endif
         py::initialize_interpreter();
-        
+
         // Print python version
         py::exec("import sys; import rayv; rayv.log_info(f'Python Interpreter Initialized. Version: {sys.version}')");
         m_Initialized = true;
@@ -70,7 +82,17 @@ bool ScriptingEngine::Initialize() {
     }
     catch (const std::exception& e) {
         Logger::Get().Error("Failed to initialize Python scripting engine: " + std::string(e.what()));
-        return false;
+        // Retry once after a brief moment — console freopen races on WIN32.
+        try {
+            Logger::Get().Warn("Retrying Python interpreter initialization...");
+            py::initialize_interpreter();
+            py::exec("import sys; import rayv; rayv.log_info(f'Python Interpreter Initialized (retry). Version: {sys.version}')");
+            m_Initialized = true;
+            return true;
+        } catch (const std::exception& e2) {
+            Logger::Get().Error("Python init retry failed: " + std::string(e2.what()));
+            return false;
+        }
     }
 }
 

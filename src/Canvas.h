@@ -122,6 +122,11 @@ public:
     bool IsInIsolationMode() const { return m_IsIsolatedMode; }
     int GetActiveLayerIndex() const { return m_ActiveLayerIdx; }
     std::vector<Layer>& GetLayers() { return m_Layers; }
+    size_t GetActiveLayerTileCount() const {
+        if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return 0;
+        const auto& layer = m_Layers[m_ActiveLayerIdx];
+        return (layer.tileCache) ? layer.tileCache->GetTileCount() : 0;
+    }
 
     // Layer Mask operations
     void CreateLayerMask(ID3D11Device* device, int index);

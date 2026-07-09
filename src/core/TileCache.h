@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 #include <memory>
 #include <functional>
@@ -95,13 +96,17 @@ public:
     void ExportRGBA32F(float* outData, int outWidth, int outHeight) const;
 
     // ---- Dirty tracking (incremental GPU upload) ----
+    // Krita-like idea: only changed tiles hit the GPU; deleted tiles need an
+    // explicit "clear" upload so the texture does not keep stale paint.
     void MarkDirty(int tileX, int tileY);
     void MarkAllDirty();
     void ClearDirty(int tileX, int tileY);
     void ClearAllDirty();
     bool IsDirty(int tileX, int tileY) const;
+    bool HasPendingGpuWork() const;
 
-    // Calls callback(tileX, tileY, rawData, pitchBytes) for each dirty tile.
+    // Calls callback(tileX, tileY, rawData, pitchBytes) for each dirty tile
+    // and for each pending clear (rawData is zero-filled).
     // pitchBytes = TILE_SIZE * m_BytesPerPixel.
     void ForEachDirtyTile(
         std::function<void(int tx, int ty, const uint8_t* data, int pitch)> cb) const;
@@ -113,7 +118,8 @@ public:
     // Snapshot a single tile into a vector (empty = tile doesn't exist).
     std::vector<uint8_t> SnapshotTile(int tileX, int tileY) const;
 
-    // Restore a tile from a snapshot. Pass empty vector to erase the tile.
+    // Restore a tile from a snapshot. Pass empty vector to erase the tile
+    // (and queue a GPU clear for that cell).
     void RestoreTile(int tileX, int tileY, const std::vector<uint8_t>& data);
 
 private:
@@ -128,6 +134,7 @@ private:
     Tile*       FindTile(int tileX, int tileY);
     uint32_t    Key(int tileX, int tileY) const;
     void        EvictLRU();
+    void        QueueGpuClear(int tileX, int tileY);
 
     int m_Width          = 0;
     int m_Height         = 0;
@@ -139,4 +146,7 @@ private:
     uint64_t m_AccessCounter  = 0;
 
     std::unordered_map<uint32_t, Tile> m_Tiles;
+    // Tiles that were erased from the sparse map but still need a zero upload
+    // so GPU layer textures do not keep pre-undo paint.
+    std::unordered_set<uint32_t> m_PendingGpuClears;
 };

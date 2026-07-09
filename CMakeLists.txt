@@ -94,6 +94,8 @@ set(SOURCES
     src/core/TileCache.h
     src/core/Logger.cpp
     src/core/Logger.h
+    src/core/MemoryStats.cpp
+    src/core/MemoryStats.h
     src/core/ThreadPool.cpp
     src/core/ThreadPool.h
     src/core/ConfigManager.cpp

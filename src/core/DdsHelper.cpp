@@ -1,10 +1,12 @@
 #include "DdsHelper.h"
 #include "TileCache.h"
 #include "Logger.h"
+#include "MemoryStats.h"
 #include <fstream>
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include <chrono>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -380,6 +382,10 @@ bool DdsHelper::LoadDDS(const std::string& filename, DdsImage& outImage) {
 }
 
 bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCache, int& outWidth, int& outHeight, DdsFormat& outFormat) {
+    auto loadStart = std::chrono::high_resolution_clock::now();
+    Logger::Get().InfoTag("io", "LoadDDSToTileCache begin: " + filename);
+    MemoryStats::LogSnapshot("dds_open_start");
+
 #ifdef _WIN32
     std::ifstream file(UTF8ToWString(filename), std::ios::binary);
 #else
@@ -406,6 +412,9 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
 
     outWidth = static_cast<int>(header.dwWidth);
     outHeight = static_cast<int>(header.dwHeight);
+    Logger::Get().InfoTag("io",
+        "DDS header " + std::to_string(outWidth) + "x" + std::to_string(outHeight) +
+        " estRGBA8=" + MemoryStats::FormatBytes(MemoryStats::EstimateImageBytes(outWidth, outHeight, 4)));
     outCache.Init(outWidth, outHeight, CanvasPixelFormat::RGBA8);
 
     bool isDX10 = (header.ddspf.dwFlags & 0x4) && (header.ddspf.dwFourCC == MAKEFOURCC('D', 'X', '1', '0'));
@@ -649,6 +658,7 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             compFormat == CompressionFormat::BC3 || compFormat == CompressionFormat::BC7) {
             const int decodedStride = blocksW * 4 * 4;
             std::vector<uint8_t> decoded((size_t)decodedStride * 4);
+            const int progressStep = std::max(1, blocksH / 20); // ~5% steps
             for (int by = 0; by < blocksH; ++by) {
                 file.read(reinterpret_cast<char*>(compressedRow.data()), (std::streamsize)compressedRow.size());
                 if (!file) {
@@ -675,6 +685,14 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
                     if (y >= outHeight) break;
                     const uint8_t* rowPtr = decoded.data() + (size_t)row * decodedStride;
                     outCache.ImportRGBA8(rowPtr, blocksW * 4, 1, 0, y);
+                }
+
+                if (by == 0 || ((by + 1) % progressStep) == 0 || by + 1 == blocksH) {
+                    int pct = (int)(((by + 1) * 100.0) / blocksH);
+                    Logger::Get().InfoTag("io",
+                        "DDS BC decode " + std::to_string(pct) + "% (" +
+                        std::to_string(by + 1) + "/" + std::to_string(blocksH) +
+                        " block-rows) tiles=" + std::to_string(outCache.GetTileCount()));
                 }
             }
         } else if (compFormat == CompressionFormat::BC4) {
@@ -771,7 +789,16 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
         }
     }
 
-    Logger::Get().Info("DDS texture loaded successfully (" + std::to_string(outWidth) + "x" + std::to_string(outHeight) + "): " + filename);
+    double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - loadStart).count();
+    const size_t tiles = outCache.GetTileCount();
+    const size_t est = MemoryStats::EstimateTileBytes(tiles, outCache.GetBytesPerPixel());
+    Logger::Get().InfoTag("io",
+        "DDS texture loaded successfully (" + std::to_string(outWidth) + "x" +
+        std::to_string(outHeight) + ") tiles=" + std::to_string(tiles) +
+        " est=" + MemoryStats::FormatBytes(est) +
+        " in " + std::to_string(ms) + " ms: " + filename);
+    MemoryStats::LogSnapshot("dds_open_done");
     return true;
 }
 

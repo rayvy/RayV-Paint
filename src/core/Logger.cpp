@@ -31,6 +31,7 @@ void Logger::Shutdown() {
     if (!m_Initialized) return;
 
     if (m_FileStream.is_open()) {
+        m_FileStream.flush();
         m_FileStream.close();
     }
     m_Initialized = false;
@@ -41,7 +42,6 @@ void Logger::Log(LogLevel level, const std::string& message) {
 
     std::lock_guard<std::mutex> lock(m_Mutex);
 
-    // 1. Get timestamp
     auto now = std::chrono::system_clock::now();
     auto time_t_now = std::chrono::system_clock::to_time_t(now);
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
@@ -52,7 +52,6 @@ void Logger::Log(LogLevel level, const std::string& message) {
     std::stringstream timeStr;
     timeStr << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms.count();
 
-    // 2. Map level to prefix
     std::string prefix;
     switch (level) {
         case LogLevel::LogLevel_Debug:   prefix = "[DEBUG]"; break;
@@ -61,28 +60,37 @@ void Logger::Log(LogLevel level, const std::string& message) {
         case LogLevel::LogLevel_Error:   prefix = "[ERROR]"; break;
     }
 
-    // 3. Format message
     std::stringstream formattedMsg;
     formattedMsg << "[" << timeStr.str() << "] " << prefix << " " << message;
     std::string fullLogLine = formattedMsg.str();
 
-    // 4. Output to console
     if (level == LogLevel::LogLevel_Error) {
         std::cerr << fullLogLine << std::endl;
     } else {
         std::cout << fullLogLine << std::endl;
     }
 
-    // 5. Output to file
     if (m_FileStream.is_open()) {
         m_FileStream << fullLogLine << std::endl;
+        // Flush errors immediately so crash-adjacent failures survive.
+        if (level == LogLevel::LogLevel_Error) {
+            m_FileStream.flush();
+        }
     }
 
-    // 6. Output to recent log memory buffer (cap at 1000 lines)
     if (m_RecentLogs.size() >= 1000) {
         m_RecentLogs.erase(m_RecentLogs.begin());
     }
     m_RecentLogs.push_back(fullLogLine);
+}
+
+void Logger::Flush() {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    if (m_FileStream.is_open()) {
+        m_FileStream.flush();
+    }
+    std::cout.flush();
+    std::cerr.flush();
 }
 
 std::vector<std::string> Logger::GetRecentLogs() {

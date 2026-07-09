@@ -18,10 +18,14 @@ void PaintStrokeCommand::Undo(Canvas* canvas) {
     auto& layer = layers[m_LayerIdx];
     if (!layer.tileCache) return;
 
+    // Restore only touched tiles (Krita-style memento granularity).
+    // RestoreTile marks dirty or queues a GPU clear for erased tiles.
     for (const auto& delta : m_Deltas) {
         layer.tileCache->RestoreTile(delta.tileX, delta.tileY, delta.oldPixels);
     }
-    layer.needsUpload = true;
+    layer.needsUpload  = true;
+    layer.filtersDirty = true; // filteredCache is stale after tile restore
+    canvas->MarkCompositeDirty();
 }
 
 void PaintStrokeCommand::Redo(Canvas* canvas) {
@@ -33,7 +37,9 @@ void PaintStrokeCommand::Redo(Canvas* canvas) {
     for (const auto& delta : m_Deltas) {
         layer.tileCache->RestoreTile(delta.tileX, delta.tileY, delta.newPixels);
     }
-    layer.needsUpload = true;
+    layer.needsUpload  = true;
+    layer.filtersDirty = true;
+    canvas->MarkCompositeDirty();
 }
 
 size_t PaintStrokeCommand::GetMemorySize() const {
