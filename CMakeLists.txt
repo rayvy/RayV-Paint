@@ -131,7 +131,7 @@ set(OPENCV_INSTALL_DIR "C:/Users/Rayvy/Documents/GitHub/opencv/install")
 set(OPENCV_LIBS_DIR "${OPENCV_INSTALL_DIR}/x64/vc17/staticlib")
 
 # Create Core executable (WIN32 target ensures it runs without console window by default)
-add_executable(RayVPaint_Core WIN32 ${SOURCES} ${SHADER_FILES})
+add_executable(RayVPaint_Core WIN32 ${SOURCES} ${SHADER_FILES} src/resources/resources.rc)
 set_target_properties(RayVPaint_Core PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin"
 )
@@ -169,8 +169,8 @@ add_custom_command(
 )
 
 # Create Launchers
-add_executable(RayVPaint WIN32 src/launchers/RayVPaint_Launcher.cpp)
-add_executable(RayVPaint_Console src/launchers/RayVPaint_Console_Launcher.cpp)
+add_executable(RayVPaint WIN32 src/launchers/RayVPaint_Launcher.cpp src/resources/resources.rc)
+add_executable(RayVPaint_Console src/launchers/RayVPaint_Console_Launcher.cpp src/resources/resources.rc)
 set_target_properties(RayVPaint RayVPaint_Console PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
 )

@@ -399,7 +399,7 @@ int main(int argc, char* argv[]) {
             forceConsole = true;
         } else if (arg == "--version") {
             SetupConsole(true);
-            std::cout << "RayVPaint - Tech Art Editor - Version 0.2.0" << std::endl;
+            std::cout << "RayV Paint - Version 0.2.0" << std::endl;
             return 0;
         } else if (arg == "--script" && i + 1 < argc) {
             scriptPath = argv[++i];
@@ -477,7 +477,7 @@ int main(int argc, char* argv[]) {
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Using DirectX 11
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "RayVPaint - Tech Art Editor", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "RayV Paint", nullptr, nullptr);
     if (!window) {
         Logger::Get().Error("Failed to create GLFW window");
         glfwTerminate();
@@ -486,6 +486,13 @@ int main(int argc, char* argv[]) {
     log_step("GLFW Window Creation");
 
     HWND hWnd = glfwGetWin32Window(window);
+
+    // Load and set the application icon from resource ID 1 (IDI_ICON1)
+    HICON hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(1));
+    if (hIcon) {
+        SendMessage(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+        SendMessage(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+    }
 
     // Subclass window procedure for high-precision pointer/tablet messages
     g_OriginalWndProc = (WNDPROC)SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)SubclassedWndProc);

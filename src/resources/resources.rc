@@ -1,0 +1,3 @@
+// Resource script for RayVPaint
+// The icon with the lowest ID value is placed first in the file and is used as the application icon by Windows.
+1 ICON "app.ico"
