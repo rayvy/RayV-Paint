@@ -101,73 +101,120 @@ static bool CanAllocateFlatComposite(int w, int h, const char* context) {
     return true;
 }
 
+static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, int h,
+                                      std::vector<uint8_t>& out);
+
+// Legacy float composite used by clipboard / internal helpers.
+// Prefer ComposeVisibleLayersRGBA8 for export (filters + blend modes + lower peak RAM).
 static std::vector<float> ComposeVisibleLayers(const std::vector<Layer>& layers, int w, int h) {
-    if (!CanAllocateFlatComposite(w, h, "ComposeVisibleLayers")) {
-        return {};
+    std::vector<uint8_t> rgba8;
+    if (!ComposeVisibleLayersRGBA8(layers, w, h, rgba8) || rgba8.empty()) {
+        // Fallback empty
+        if (!CanAllocateFlatComposite(w, h, "ComposeVisibleLayers")) return {};
+        return std::vector<float>((size_t)w * h * 4, 0.f);
     }
-    std::vector<float> composite((size_t)w * h * 4, 0.f);
-    int firstVisibleIdx = -1;
-    for (int l = 0; l < (int)layers.size(); ++l) {
-        if (layers[l].visible) { firstVisibleIdx = l; break; }
-    }
-    if (firstVisibleIdx == -1) return composite;
-
-    const auto& baseLayer = layers[firstVisibleIdx];
-    if (LayerHasPixels(baseLayer)) {
-        auto basePx = ExportLayerF(baseLayer, w, h);
-        std::memcpy(composite.data(), basePx.data(), basePx.size() * sizeof(float));
-        if (baseLayer.opacity < 1.f) {
-            for (size_t i = 0; i < (size_t)w * h; ++i) {
-                composite[i * 4 + 3] *= baseLayer.opacity;
-            }
-        }
-    }
-
-    for (int l = firstVisibleIdx + 1; l < (int)layers.size(); ++l) {
-        const auto& layer = layers[l];
-        if (!layer.visible || !LayerHasPixels(layer)) continue;
-        auto layerPx = ExportLayerF(layer, w, h);
-        for (size_t i = 0; i < (size_t)w * h; ++i) {
-            size_t base = i * 4;
-            float srcR = layerPx[base + 0];
-            float srcG = layerPx[base + 1];
-            float srcB = layerPx[base + 2];
-            float srcA = layerPx[base + 3] * layer.opacity;
-            if (srcA <= 0.f) continue;
-            float destR = composite[base + 0];
-            float destG = composite[base + 1];
-            float destB = composite[base + 2];
-            float destA = composite[base + 3];
-            float outA = srcA + destA * (1.f - srcA);
-            if (outA > 0.f) {
-                composite[base + 0] = (srcR * srcA + destR * destA * (1.f - srcA)) / outA;
-                composite[base + 1] = (srcG * srcA + destG * destA * (1.f - srcA)) / outA;
-                composite[base + 2] = (srcB * srcA + destB * destA * (1.f - srcA)) / outA;
-                composite[base + 3] = outA;
-            }
-        }
+    std::vector<float> composite((size_t)w * h * 4);
+    for (size_t i = 0; i < (size_t)w * h * 4; ++i) {
+        composite[i] = rgba8[i] / 255.f;
     }
     return composite;
 }
 
-// Straight-alpha "Normal" over blend in float space, write back as u8.
-static inline void BlendOverU8(uint8_t* dest, float srcR, float srcG, float srcB, float srcA) {
-    if (srcA <= 0.f) return;
-    float destR = dest[0] / 255.f;
-    float destG = dest[1] / 255.f;
-    float destB = dest[2] / 255.f;
-    float destA = dest[3] / 255.f;
-    float outA = srcA + destA * (1.f - srcA);
-    if (outA <= 0.f) return;
-    float inv = 1.f / outA;
-    dest[0] = (uint8_t)(std::clamp((srcR * srcA + destR * destA * (1.f - srcA)) * inv, 0.f, 1.f) * 255.f + 0.5f);
-    dest[1] = (uint8_t)(std::clamp((srcG * srcA + destG * destA * (1.f - srcA)) * inv, 0.f, 1.f) * 255.f + 0.5f);
-    dest[2] = (uint8_t)(std::clamp((srcB * srcA + destB * destA * (1.f - srcA)) * inv, 0.f, 1.f) * 255.f + 0.5f);
-    dest[3] = (uint8_t)(std::clamp(outA, 0.f, 1.f) * 255.f + 0.5f);
+// Match Canvas.hlsl PSLayerBlend RGB blend modes (source s, destination d).
+static void ApplyBlendModeRGB(BlendMode mode,
+                              float sr, float sg, float sb,
+                              float dr, float dg, float db,
+                              float& or_, float& og, float& ob) {
+    or_ = sr; og = sg; ob = sb;
+    switch (mode) {
+    case BlendMode::Multiply:
+        or_ = sr * dr; og = sg * dg; ob = sb * db;
+        break;
+    case BlendMode::Screen:
+        or_ = 1.f - (1.f - sr) * (1.f - dr);
+        og = 1.f - (1.f - sg) * (1.f - dg);
+        ob = 1.f - (1.f - sb) * (1.f - db);
+        break;
+    case BlendMode::Overlay:
+        or_ = (dr < 0.5f) ? 2.f * sr * dr : 1.f - 2.f * (1.f - sr) * (1.f - dr);
+        og = (dg < 0.5f) ? 2.f * sg * dg : 1.f - 2.f * (1.f - sg) * (1.f - dg);
+        ob = (db < 0.5f) ? 2.f * sb * db : 1.f - 2.f * (1.f - sb) * (1.f - db);
+        break;
+    case BlendMode::Add:
+        or_ = std::min(sr + dr, 1.f);
+        og = std::min(sg + dg, 1.f);
+        ob = std::min(sb + db, 1.f);
+        break;
+    case BlendMode::Subtract:
+        or_ = std::max(dr - sr, 0.f);
+        og = std::max(dg - sg, 0.f);
+        ob = std::max(db - sb, 0.f);
+        break;
+    case BlendMode::Darken:
+        or_ = std::min(sr, dr); og = std::min(sg, dg); ob = std::min(sb, db);
+        break;
+    case BlendMode::Lighten:
+        or_ = std::max(sr, dr); og = std::max(sg, dg); ob = std::max(sb, db);
+        break;
+    case BlendMode::HardLight:
+        or_ = (sr < 0.5f) ? 2.f * sr * dr : 1.f - 2.f * (1.f - sr) * (1.f - dr);
+        og = (sg < 0.5f) ? 2.f * sg * dg : 1.f - 2.f * (1.f - sg) * (1.f - dg);
+        ob = (sb < 0.5f) ? 2.f * sb * db : 1.f - 2.f * (1.f - sb) * (1.f - db);
+        break;
+    case BlendMode::SoftLight:
+        or_ = (sr < 0.5f) ? dr - (1.f - 2.f * sr) * dr * (1.f - dr)
+                          : dr + (2.f * sr - 1.f) * (std::sqrt(std::max(dr, 0.f)) - dr);
+        og = (sg < 0.5f) ? dg - (1.f - 2.f * sg) * dg * (1.f - dg)
+                          : dg + (2.f * sg - 1.f) * (std::sqrt(std::max(dg, 0.f)) - dg);
+        ob = (sb < 0.5f) ? db - (1.f - 2.f * sb) * db * (1.f - db)
+                          : db + (2.f * sb - 1.f) * (std::sqrt(std::max(db, 0.f)) - db);
+        break;
+    case BlendMode::Normal:
+    default:
+        break;
+    }
+    or_ = std::clamp(or_, 0.f, 1.f);
+    og = std::clamp(og, 0.f, 1.f);
+    ob = std::clamp(ob, 0.f, 1.f);
 }
 
-// Large-doc export: tile-stream composite into one RGBA8 buffer (no float 4 GiB path).
-// Peak: ~w*h*4 (1 GiB @ 16K) — not strip-PNG yet (stb needs full image for encode).
+// Matches D3D layer blend: SRC_ALPHA / INV_SRC_ALPHA after optional RGB blend mode.
+static inline void BlendLayerPixelU8(uint8_t* dest, float sr, float sg, float sb, float sa, BlendMode mode) {
+    if (sa <= 0.f) return;
+    float dr = dest[0] / 255.f;
+    float dg = dest[1] / 255.f;
+    float db = dest[2] / 255.f;
+    float da = dest[3] / 255.f;
+
+    float br = sr, bg = sg, bb = sb;
+    if (mode != BlendMode::Normal) {
+        ApplyBlendModeRGB(mode, sr, sg, sb, dr, dg, db, br, bg, bb);
+    }
+
+    const float inv = 1.f - sa;
+    dest[0] = (uint8_t)(std::clamp(br * sa + dr * inv, 0.f, 1.f) * 255.f + 0.5f);
+    dest[1] = (uint8_t)(std::clamp(bg * sa + dg * inv, 0.f, 1.f) * 255.f + 0.5f);
+    dest[2] = (uint8_t)(std::clamp(bb * sa + db * inv, 0.f, 1.f) * 255.f + 0.5f);
+    dest[3] = (uint8_t)(std::clamp(sa + da * inv, 0.f, 1.f) * 255.f + 0.5f);
+}
+
+static bool LayerEffectivelyVisible(const std::vector<Layer>& layers, const Layer& layer) {
+    if (layer.isGroup || !layer.visible) return false;
+    if (layer.parentGroupId >= 0 && layer.parentGroupId < (int)layers.size()) {
+        if (!layers[layer.parentGroupId].visible) return false;
+    }
+    return LayerHasPixels(layer);
+}
+
+static const TileCache* LayerExportCache(const Layer& layer) {
+    if (!layer.filters.empty() && layer.filteredCache && !layer.filteredCache->IsEmpty()) {
+        return layer.filteredCache.get();
+    }
+    return layer.tileCache.get();
+}
+
+// Tile-stream composite with non-destructive filters + blend modes (matches viewport).
+// Peak: ~w*h*4 (1 GiB @ 16K). Caller should rebuild filtered caches first.
 static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, int h,
                                       std::vector<uint8_t>& out) {
     const size_t bytes = (size_t)w * (size_t)h * 4ull;
@@ -184,7 +231,7 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
 
     Logger::Get().InfoTag("io",
         "Export composite RGBA8 " + std::to_string(w) + "x" + std::to_string(h) +
-        " est=" + MemoryStats::FormatBytes(bytes));
+        " est=" + MemoryStats::FormatBytes(bytes) + " (filters+blend modes)");
     MemoryStats::LogSnapshot("export_rgba8_alloc");
 
     out.assign(bytes, 0);
@@ -192,14 +239,17 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
     std::vector<const Layer*> vis;
     vis.reserve(layers.size());
     for (const auto& layer : layers) {
-        if (layer.isGroup || !layer.visible || !LayerHasPixels(layer)) continue;
-        vis.push_back(&layer);
+        if (LayerEffectivelyVisible(layers, layer)) vis.push_back(&layer);
     }
     if (vis.empty()) return true;
 
-    // Fast path: single full-opacity layer, no mask → direct tile export.
-    if (vis.size() == 1 && vis[0]->opacity >= 0.999f &&
-        !(vis[0]->hasMask && vis[0]->mask.size() == (size_t)w * h)) {
+    // Fast path: one Normal layer, no FX/mask, full opacity.
+    if (vis.size() == 1 &&
+        vis[0]->blendMode == BlendMode::Normal &&
+        vis[0]->opacity >= 0.999f &&
+        vis[0]->filters.empty() &&
+        !(vis[0]->hasMask && vis[0]->mask.size() == (size_t)w * h) &&
+        vis[0]->tileCache) {
         vis[0]->tileCache->ExportRGBA8(out.data(), w, h);
         MemoryStats::LogSnapshot("export_rgba8_single_layer");
         return true;
@@ -219,42 +269,34 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
             const int th = y1 - y0;
 
             for (const Layer* layer : vis) {
-                const TileCache* cache = layer->tileCache.get();
+                const TileCache* cache = LayerExportCache(*layer);
                 if (!cache) continue;
-                const uint8_t* tile = cache->GetTileData(tx, ty);
-                // Missing tile = transparent contribution from this layer.
 
                 const bool useMask = layer->hasMask && layer->mask.size() == (size_t)w * h;
                 const float opacity = layer->opacity;
+                const BlendMode mode = layer->blendMode;
+                const uint8_t* tile = (cache->GetFormat() == CanvasPixelFormat::RGBA8)
+                    ? cache->GetTileData(tx, ty) : nullptr;
 
-                if (cache->GetFormat() == CanvasPixelFormat::RGBA8) {
-                    if (!tile) continue;
-                    for (int ly = 0; ly < th; ++ly) {
-                        const int y = y0 + ly;
-                        for (int lx = 0; lx < tw; ++lx) {
-                            const int x = x0 + lx;
+                for (int ly = 0; ly < th; ++ly) {
+                    const int y = y0 + ly;
+                    for (int lx = 0; lx < tw; ++lx) {
+                        const int x = x0 + lx;
+                        float sr, sg, sb, sa;
+                        if (tile) {
                             const uint8_t* sp = tile + ((size_t)ly * TILE_SIZE + lx) * 4;
-                            float sa = (sp[3] / 255.f) * opacity;
-                            if (useMask) sa *= layer->mask[(size_t)y * w + x] / 255.f;
-                            if (sa <= 0.f) continue;
-                            uint8_t* dp = out.data() + ((size_t)y * w + x) * 4;
-                            BlendOverU8(dp, sp[0] / 255.f, sp[1] / 255.f, sp[2] / 255.f, sa);
-                        }
-                    }
-                } else {
-                    // Float tiles or sparse: sample via GetPixelF (slower, correct).
-                    for (int ly = 0; ly < th; ++ly) {
-                        const int y = y0 + ly;
-                        for (int lx = 0; lx < tw; ++lx) {
-                            const int x = x0 + lx;
+                            sr = sp[0] / 255.f; sg = sp[1] / 255.f; sb = sp[2] / 255.f;
+                            sa = (sp[3] / 255.f) * opacity;
+                        } else {
                             float rgba[4];
                             cache->GetPixelF(x, y, rgba);
-                            float sa = rgba[3] * opacity;
-                            if (useMask) sa *= layer->mask[(size_t)y * w + x] / 255.f;
-                            if (sa <= 0.f) continue;
-                            uint8_t* dp = out.data() + ((size_t)y * w + x) * 4;
-                            BlendOverU8(dp, rgba[0], rgba[1], rgba[2], sa);
+                            sr = rgba[0]; sg = rgba[1]; sb = rgba[2];
+                            sa = rgba[3] * opacity;
                         }
+                        if (useMask) sa *= layer->mask[(size_t)y * w + x] / 255.f;
+                        if (sa <= 0.f) continue;
+                        uint8_t* dp = out.data() + ((size_t)y * w + x) * 4;
+                        BlendLayerPixelU8(dp, sr, sg, sb, sa, mode);
                     }
                 }
             }
@@ -1818,7 +1860,19 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
     ScopedTimer saveTimer("SaveCanvasStandard " + filepath);
     MemoryStats::LogSnapshot("before_SaveCanvasStandard");
 
-    // Prefer tile-streamed RGBA8 composite — works for 16K without 4 GiB float.
+    // Rebuild non-destructive FX caches so export matches the viewport.
+    for (auto& layer : m_Layers) {
+        if (layer.isGroup) continue;
+        if (!layer.filters.empty()) {
+            layer.filtersDirty = true;
+            RebuildFilteredPixels(layer);
+            Logger::Get().InfoTag("io",
+                "Export: rebuilt filters on layer '" + layer.name +
+                "' (count=" + std::to_string(layer.filters.size()) +
+                ", blend=" + std::to_string((int)layer.blendMode) + ")");
+        }
+    }
+
     std::vector<uint8_t> rgba8;
     if (!ComposeVisibleLayersRGBA8(m_Layers, m_Width, m_Height, rgba8)) {
         Logger::Get().Error("SaveCanvasStandard: RGBA8 composite failed.");
@@ -1827,7 +1881,6 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
 
     const bool ok = ImageManager::SaveRGBA8ToFile(
         filepath, rgba8.data(), m_Width, m_Height, m_Width * 4, iccProfilePath);
-    // Free composite before encode buffer is already written inside SaveRGBA8.
     rgba8.clear();
     rgba8.shrink_to_fit();
     MemoryStats::LogSnapshot("after_SaveCanvasStandard");
