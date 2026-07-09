@@ -1687,21 +1687,46 @@ namespace UI {
                 g_IsLayersHovered = true;
             }
 
-            // Compact header actions
-            float hw = ImGui::GetContentRegionAvail().x;
-            if (ImGui::Button("+L", ImVec2(hw * 0.5f - 4.f, 0))) {
-                canvas.CreateNewLayer(device, "Layer " + std::to_string(canvas.GetLayers().size() + 1));
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add Layer");
-            ImGui::SameLine();
-            if (ImGui::Button("+G", ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
-                canvas.CreateLayerGroup(device, "Group " + std::to_string(canvas.GetLayers().size() + 1));
-            }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add Group");
-
-            ImGui::BeginChild("LayersList", ImVec2(0, 0), true);
             auto& layers = canvas.GetLayers();
+            auto& sel = state.selectedLayers;
+            auto pruneSel = [&]() {
+                sel.erase(std::remove_if(sel.begin(), sel.end(),
+                    [&](int i) { return i < 0 || i >= (int)layers.size(); }), sel.end());
+            };
+            pruneSel();
+            auto isLayerSelected = [&](int i) {
+                return std::find(sel.begin(), sel.end(), i) != sel.end();
+            };
+            auto setSoleSelection = [&](int i) {
+                sel.clear();
+                if (i >= 0) { sel.push_back(i); state.layerSelectAnchor = i; }
+            };
+            auto toggleSelection = [&](int i) {
+                auto it = std::find(sel.begin(), sel.end(), i);
+                if (it != sel.end()) sel.erase(it);
+                else sel.push_back(i);
+                state.layerSelectAnchor = i;
+            };
+            auto rangeSelect = [&](int i) {
+                if (state.layerSelectAnchor < 0) { setSoleSelection(i); return; }
+                // Visual list is high→low; range in index space
+                int a = state.layerSelectAnchor, b = i;
+                if (a > b) std::swap(a, b);
+                sel.clear();
+                for (int k = a; k <= b; ++k) sel.push_back(k);
+            };
+            auto targetsForAction = [&]() -> std::vector<int> {
+                if (!sel.empty()) return sel;
+                int a = canvas.GetActiveLayerIndex();
+                if (a >= 0) return { a };
+                return {};
+            };
+
+            // List fills remaining height minus bottom bar
+            const float barH = 40.f;
+            ImGui::BeginChild("LayersList", ImVec2(0, -barH), true);
             const float thumb = 28.0f;
+            auto& tok = Ui::Tokens();
 
             for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
                 auto& layer = layers[i];
@@ -1749,15 +1774,26 @@ namespace UI {
                         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
                     }
                     if (ImGui::ImageButton("##thumb", (ImTextureID)layer.srv, ImVec2(thumb, thumb), ImVec2(0,0), ImVec2(1,1))) {
-                        if (ImGui::GetIO().KeyCtrl) {
+                        ImGuiIO& io = ImGui::GetIO();
+                        if (io.KeyAlt) {
+                            // Alt+Click thumb: select opaque pixels (was Ctrl — multi-select uses Ctrl)
                             canvas.SelectOpaquePixels(i);
                             canvas.UpdateSelectionMaskTexture(device);
+                        } else if (io.KeyCtrl) {
+                            toggleSelection(i);
+                            canvas.SetActiveLayerIndex(i);
+                            canvas.SetPaintTarget(PaintTarget::LayerContent);
+                        } else if (io.KeyShift) {
+                            rangeSelect(i);
+                            canvas.SetActiveLayerIndex(i);
+                            canvas.SetPaintTarget(PaintTarget::LayerContent);
                         } else {
+                            setSoleSelection(i);
                             canvas.SetActiveLayerIndex(i);
                             canvas.SetPaintTarget(PaintTarget::LayerContent);
                         }
                     }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Content\nCtrl+Click: select opaque");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Content\nClick: select  ·  Ctrl: multi  ·  Shift: range\nAlt+Click: select opaque");
                     if (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg) {
                         ImVec2 tmin = ImGui::GetItemRectMin();
                         ImVec2 tmax = ImGui::GetItemRectMax();
@@ -1834,23 +1870,42 @@ namespace UI {
                     ImGui::SameLine(0, 4);
                 }
 
-                bool isSelected = (canvas.GetActiveLayerIndex() == i);
+                const bool isActive = (canvas.GetActiveLayerIndex() == i);
+                const bool multiSel = isLayerSelected(i);
                 char label[256];
                 if (layer.isGroup) std::snprintf(label, sizeof(label), "[G] %s", layer.name.c_str());
                 else if (layer.type == Layer::Type::VectorSvg) std::snprintf(label, sizeof(label), "[SVG] %s", layer.name.c_str());
                 else if (layer.type == Layer::Type::SmartObject) std::snprintf(label, sizeof(label), "[SO] %s", layer.name.c_str());
                 else std::snprintf(label, sizeof(label), "%s", layer.name.c_str());
 
-                float rightReserve = 150.0f;
+                // Selection fill (multi) behind name
+                float rightReserve = isActive ? 150.0f : 100.0f;
                 float nameW = ImGui::GetContentRegionAvail().x - rightReserve;
                 if (nameW < 40.f) nameW = 40.f;
-                if (ImGui::Selectable(label, isSelected, ImGuiSelectableFlags_None, ImVec2(nameW, thumb))) {
-                    if (ImGui::GetIO().KeyCtrl && !layer.isGroup) {
-                        canvas.SelectOpaquePixels(i);
-                        canvas.UpdateSelectionMaskTexture(device);
+
+                if (multiSel && !isActive) {
+                    ImVec2 p = ImGui::GetCursorScreenPos();
+                    ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + nameW, p.y + thumb),
+                        tok.ColU32(ImVec4(tok.accent.x, tok.accent.y, tok.accent.z, 0.18f)), tok.rSm);
+                }
+
+                if (ImGui::Selectable(label, isActive, ImGuiSelectableFlags_None, ImVec2(nameW, thumb))) {
+                    ImGuiIO& io = ImGui::GetIO();
+                    if (io.KeyShift) {
+                        rangeSelect(i);
+                        canvas.SetActiveLayerIndex(i);
+                    } else if (io.KeyCtrl) {
+                        toggleSelection(i);
+                        canvas.SetActiveLayerIndex(i);
                     } else {
+                        setSoleSelection(i);
                         canvas.SetActiveLayerIndex(i);
                     }
+                }
+                // Active = stronger outline
+                if (isActive) {
+                    ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+                    ImGui::GetWindowDrawList()->AddRect(mn, mx, tok.ColU32(tok.strokeActive), tok.rSm, 0, 1.5f);
                 }
                 if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) {
                     ImGui::SetDragDropPayload("LAYER_INDEX", &i, sizeof(int));
@@ -1924,15 +1979,25 @@ namespace UI {
                         }
                     }
                     ImGui::Separator();
-                    if (layers.size() > 1 && ImGui::MenuItem("Delete Layer")) canvas.DeleteLayer(i);
+                    if (ImGui::MenuItem("Duplicate", "Ctrl+J")) {
+                        canvas.DuplicateLayer(device, i);
+                        setSoleSelection(canvas.GetActiveLayerIndex());
+                    }
+                    if (layers.size() > 1 && ImGui::MenuItem("Delete Layer")) {
+                        canvas.DeleteLayer(i);
+                        pruneSel();
+                    }
                     ImGui::EndPopup();
                 }
 
-                ImGui::SameLine(0, 4);
-                ImGui::SetNextItemWidth(48.f);
-                if (ImGui::SliderFloat("##op", &layer.opacity, 0.f, 1.f, "%.2f"))
-                    canvas.MarkCompositeDirty();
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Opacity");
+                // Opacity only for active layer/group (compact)
+                if (isActive) {
+                    ImGui::SameLine(0, 4);
+                    ImGui::SetNextItemWidth(52.f);
+                    if (ImGui::SliderFloat("##op", &layer.opacity, 0.f, 1.f, "%.2f"))
+                        canvas.MarkCompositeDirty();
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Opacity (active)");
+                }
 
                 ImGui::SameLine(0, 2);
                 static const char* blendNames[] = {
@@ -1991,6 +2056,52 @@ namespace UI {
                 ImGui::PopID();
             }
             ImGui::EndChild();
+
+            // Bottom action bar (fixed icons) — Add / Group / Duplicate / Delete
+            {
+                ImGui::Separator();
+                const float iconSz = 32.f;
+                auto doAdd = [&]() {
+                    canvas.CreateNewLayer(device, "Layer " + std::to_string(layers.size() + 1));
+                    setSoleSelection(canvas.GetActiveLayerIndex());
+                };
+                auto doGroup = [&]() {
+                    canvas.CreateLayerGroup(device, "Group " + std::to_string(layers.size() + 1));
+                    setSoleSelection(canvas.GetActiveLayerIndex());
+                };
+                auto doDup = [&]() {
+                    auto t = targetsForAction();
+                    if (t.empty()) return;
+                    canvas.DuplicateLayers(device, t);
+                    setSoleSelection(canvas.GetActiveLayerIndex());
+                };
+                auto doDel = [&]() {
+                    auto t = targetsForAction();
+                    if (t.empty()) return;
+                    canvas.DeleteLayers(t);
+                    sel.clear();
+                    if (canvas.GetActiveLayerIndex() >= 0)
+                        setSoleSelection(canvas.GetActiveLayerIndex());
+                };
+
+                float gap = 8.f;
+                float total = iconSz * 4 + gap * 3;
+                float startX = std::max(0.f, (ImGui::GetContentRegionAvail().x - total) * 0.5f);
+                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + startX);
+
+                if (Ui::IconButton("##addL", "layer_add", ImVec2(iconSz, iconSz), "Add Layer").clicked)
+                    doAdd();
+                ImGui::SameLine(0, gap);
+                if (Ui::IconButton("##addG", "layer_group_add", ImVec2(iconSz, iconSz), "Add Group").clicked)
+                    doGroup();
+                ImGui::SameLine(0, gap);
+                if (Ui::IconButton("##dup", "layer_duplicate", ImVec2(iconSz, iconSz), "Duplicate (Ctrl+J)").clicked)
+                    doDup();
+                ImGui::SameLine(0, gap);
+                if (Ui::IconButton("##del", "layer_delete", ImVec2(iconSz, iconSz), "Delete selection / active").clicked)
+                    doDel();
+            }
+
             Ui::EndDockPanel();
         }
 

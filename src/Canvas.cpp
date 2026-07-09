@@ -1071,6 +1071,92 @@ void Canvas::DeleteLayer(int index) {
     m_CompositeDirty = true;
 }
 
+int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
+    if (index < 0 || index >= (int)m_Layers.size()) return -1;
+    const Layer& src = m_Layers[index];
+
+    Layer dup;
+    dup.name = src.name + " copy";
+    dup.visible = src.visible;
+    dup.opacity = src.opacity;
+    dup.blendMode = src.blendMode;
+    dup.isGroup = src.isGroup;
+    dup.type = src.type;
+    dup.parentGroupId = src.parentGroupId;
+    dup.groupExpanded = src.groupExpanded;
+    dup.smartSourceBytes = src.smartSourceBytes;
+    dup.smartSourcePath = src.smartSourcePath;
+    dup.smartScale = src.smartScale;
+    dup.filters = src.filters;
+    dup.filtersDirty = true;
+
+    if (!dup.isGroup) {
+        dup.tileCache = std::make_unique<TileCache>();
+        dup.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+        if (src.tileCache && !src.tileCache->IsEmpty()) {
+            auto pixels = ExportLayerF(src, m_Width, m_Height);
+            SetLayerPixelsF(dup, pixels, m_Width, m_Height, m_CanvasFormat);
+        }
+        if (src.hasMask && !src.mask.empty()) {
+            dup.hasMask = true;
+            dup.mask = src.mask;
+            dup.maskNeedsUpload = true;
+        }
+        if (device && m_Width > 0 && m_Height > 0) {
+            if (!m_CompositeTexture) CreateCompositeResources(device);
+            RecreateLayerTexture(device, dup);
+        }
+    }
+
+    int insertAt = index + 1;
+    m_Layers.insert(m_Layers.begin() + insertAt, std::move(dup));
+
+    // Remap parentGroupId for all layers (including the new one)
+    for (int i = 0; i < (int)m_Layers.size(); ++i) {
+        if (m_Layers[i].parentGroupId >= insertAt)
+            m_Layers[i].parentGroupId++;
+    }
+
+    if (device && m_Layers[insertAt].hasMask)
+        UpdateLayerMaskTexture(device, insertAt);
+
+    m_ActiveLayerIdx = insertAt;
+    m_CompositeDirty = true;
+    Logger::Get().Info("Duplicated layer -> " + m_Layers[insertAt].name);
+    return insertAt;
+}
+
+void Canvas::DuplicateLayers(ID3D11Device* device, const std::vector<int>& indices) {
+    if (indices.empty()) return;
+    std::vector<int> sorted = indices;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    // Duplicate from high to low so earlier indices stay valid until we process them...
+    // Actually each insert shifts indices after insertAt. Process low→high and track offset.
+    int offset = 0;
+    int lastNew = -1;
+    for (int idx : sorted) {
+        int src = idx + offset;
+        int neu = DuplicateLayer(device, src);
+        if (neu >= 0) {
+            lastNew = neu;
+            offset++; // one extra layer inserted
+        }
+    }
+    if (lastNew >= 0) m_ActiveLayerIdx = lastNew;
+}
+
+void Canvas::DeleteLayers(const std::vector<int>& indices) {
+    if (indices.empty()) return;
+    std::vector<int> sorted = indices;
+    std::sort(sorted.begin(), sorted.end(), std::greater<int>());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    for (int idx : sorted) {
+        if ((int)m_Layers.size() <= 1) break; // keep at least one
+        DeleteLayer(idx);
+    }
+}
+
 void Canvas::SetActiveLayerIndex(int idx) {
     if (idx >= 0 && idx < m_Layers.size()) {
         m_ActiveLayerIdx = idx;

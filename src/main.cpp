@@ -774,6 +774,19 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("SelectAll")) {
                 g_Canvas.SelectAll();
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("DuplicateLayer")) {
+                if (!uiState.selectedLayers.empty()) {
+                    g_Canvas.DuplicateLayers(g_pd3dDevice, uiState.selectedLayers);
+                    // Refresh selection to new clones is best-effort: leave active as set by core
+                    uiState.selectedLayers.clear();
+                    if (g_Canvas.GetActiveLayerIndex() >= 0)
+                        uiState.selectedLayers.push_back(g_Canvas.GetActiveLayerIndex());
+                } else if (g_Canvas.GetActiveLayerIndex() >= 0) {
+                    int neu = g_Canvas.DuplicateLayer(g_pd3dDevice, g_Canvas.GetActiveLayerIndex());
+                    uiState.selectedLayers.clear();
+                    if (neu >= 0) uiState.selectedLayers.push_back(neu);
+                }
+            }
             if (KeymapManager::Get().ConsumeActionTrigger("CropToSelection")) {
                 if (g_Canvas.HasSelection()) {
                     g_Canvas.CropCanvasToSelection(g_pd3dDevice);

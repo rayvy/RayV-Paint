@@ -167,6 +167,12 @@ public:
     // Layer Management
     void CreateNewLayer(ID3D11Device* device, const std::string& name);
     void DeleteLayer(int index);
+    // Clone layer (or group header) inserted after source. Returns new index, or -1.
+    int  DuplicateLayer(ID3D11Device* device, int index);
+    // Duplicate multiple indices (sorted ascending; each clone placed after original).
+    void DuplicateLayers(ID3D11Device* device, const std::vector<int>& indices);
+    // Delete many (highest index first). Keeps at least one layer if possible.
+    void DeleteLayers(const std::vector<int>& indices);
     void SetActiveLayerIndex(int idx);
     void ToggleLayerIsolation(int layerIdx);
     void MarkCompositeDirty() { m_CompositeDirty = true; m_ChannelPreviewDirty = true; }

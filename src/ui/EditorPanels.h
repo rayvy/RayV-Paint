@@ -92,6 +92,10 @@ namespace UI {
         bool hasCustomBrushTip = false;
         std::string customBrushTipName;
 
+        // Layers multi-select (UI); paint target remains canvas.GetActiveLayerIndex()
+        std::vector<int> selectedLayers;
+        int layerSelectAnchor = -1;
+
         // Image adjustment modals
         bool showBlurModal    = false;
         bool showHSVModal     = false;
