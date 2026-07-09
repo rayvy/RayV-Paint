@@ -435,7 +435,7 @@ namespace UI {
         int sel = displayIdx;
         // ClickAndHold dropdown: short click opens list; hold scrub+release selects
         bool changed = Ui::DropdownIcon(groupId, IconNameForAction(display.actionName), ImVec2(size, size),
-            labels.data(), variantCount, &sel, tip, Ui::DropdownFlags_ClickAndHold);
+            labels.data(), variantCount, &sel, tip, Ui::DropdownFlags_ClickAndHold, isActive);
 
         if (changed && sel >= 0 && sel < variantCount) {
             activeTool = variants[sel].tool;
@@ -456,13 +456,7 @@ namespace UI {
         }
         if (!keybindString.empty())
             DrawKeybindBadge(ImGui::GetItemRectMax(), keybindString, size);
-
-        // Active outline when tool in group selected
-        if (isActive) {
-            ImVec2 mn = ImGui::GetItemRectMin();
-            ImVec2 mx = ImGui::GetItemRectMax();
-            ImGui::GetWindowDrawList()->AddRect(mn, mx, Ui::Tokens().ColU32(Ui::Tokens().strokeActive), Ui::Tokens().rSm, 0, 1.5f);
-        }
+        // Active chrome: soft fill via DropdownIcon(active); outline = floating square
     }
 
     void RenderAll(UIState& state, Canvas& canvas, BrushSettings& brush, ActiveTool& activeTool, ID3D11Device* device, ID3D11DeviceContext* context, GLFWwindow* window) {
@@ -1451,14 +1445,14 @@ namespace UI {
 
             ToolbarBeginLayout(avail, isVertical, kToolbarButtonCount, btnSize, gap, hasSeparator);
 
-            // Capture rects for sliding accent indicator
-            ImVec2 accentTarget(0, 0);
-            ImVec2 accentSize(btnSize, 3.f);
+            // Capture full item rects for floating square accent outline
+            ImVec2 accentMin(0, 0), accentMax(0, 0);
+            bool accentHasTarget = false;
             auto markAccent = [&]() {
                 if (ImGui::GetItemID() != 0) {
-                    ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-                    accentTarget = isVertical ? ImVec2(mn.x, mn.y) : ImVec2(mn.x, mx.y - 3.f);
-                    accentSize = isVertical ? ImVec2(3.f, mx.y - mn.y) : ImVec2(mx.x - mn.x, 3.f);
+                    accentMin = ImGui::GetItemRectMin();
+                    accentMax = ImGui::GetItemRectMax();
+                    accentHasTarget = true;
                 }
             };
 
@@ -1498,24 +1492,29 @@ namespace UI {
             RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             if (activeTool == ActiveTool::Pan) markAccent();
 
-            // Sliding accent bar (ease-out)
+            // Floating square outline — jumps tool-to-tool (EaseOutCubic via exp-smooth)
             {
-                static ImVec2 s_accPos(0, 0);
-                static ImVec2 s_accSz(btnSize, 3.f);
+                static ImVec2 s_accMin(0, 0), s_accMax(0, 0);
                 static bool s_accInit = false;
                 float dt = Ui::DeltaTime();
-                if (!s_accInit && accentTarget.x + accentTarget.y > 0.f) {
-                    s_accPos = accentTarget; s_accSz = accentSize; s_accInit = true;
-                }
-                if (accentTarget.x + accentTarget.y > 0.f) {
-                    float k = 1.f - std::exp(-dt * 14.f); // smooth exp ease
-                    s_accPos.x += (accentTarget.x - s_accPos.x) * k;
-                    s_accPos.y += (accentTarget.y - s_accPos.y) * k;
-                    s_accSz.x += (accentSize.x - s_accSz.x) * k;
-                    s_accSz.y += (accentSize.y - s_accSz.y) * k;
-                    ImGui::GetWindowDrawList()->AddRectFilled(
-                        s_accPos, ImVec2(s_accPos.x + s_accSz.x, s_accPos.y + s_accSz.y),
-                        Ui::Tokens().ColU32(Ui::Tokens().accent), 2.f);
+                if (accentHasTarget) {
+                    if (!s_accInit) {
+                        s_accMin = accentMin; s_accMax = accentMax; s_accInit = true;
+                    } else {
+                        // Smooth exp toward target (~EaseOut feel); rate ~14 → snappy jump
+                        float k = 1.f - std::exp(-dt * 14.f);
+                        s_accMin.x += (accentMin.x - s_accMin.x) * k;
+                        s_accMin.y += (accentMin.y - s_accMin.y) * k;
+                        s_accMax.x += (accentMax.x - s_accMax.x) * k;
+                        s_accMax.y += (accentMax.y - s_accMax.y) * k;
+                    }
+                    // Slight outward pad so outline floats around the item (not glued to edges)
+                    const float pad = 2.5f;
+                    auto& tok = Ui::Tokens();
+                    ImGui::GetWindowDrawList()->AddRect(
+                        ImVec2(s_accMin.x - pad, s_accMin.y - pad),
+                        ImVec2(s_accMax.x + pad, s_accMax.y + pad),
+                        tok.ColU32(tok.strokeActive), tok.rSm, 0, 1.75f);
                 }
             }
             if (isVertical) {

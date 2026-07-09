@@ -1164,11 +1164,21 @@ int main(int argc, char* argv[]) {
 
             bool isShiftHeld = ImGui::GetIO().KeyShift;
 
+            // Eyedropper: live preview sample + commit on LMB
+            static float s_PipettePreview[4] = {0, 0, 0, 1};
+            static bool s_PipetteHasPreview = false;
             if (isHovered && isInsideCanvas && isEyedropperMode && !isPanning && !g_IsCtrlAltRmbDragging) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+                UI::SampleCanvasColor(g_Canvas, canvasX, canvasY, s_PipettePreview);
+                s_PipetteHasPreview = true;
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                    UI::SampleCanvasColor(g_Canvas, canvasX, canvasY, g_Brush.color);
+                    g_Brush.color[0] = s_PipettePreview[0];
+                    g_Brush.color[1] = s_PipettePreview[1];
+                    g_Brush.color[2] = s_PipettePreview[2];
+                    g_Brush.color[3] = s_PipettePreview[3];
                 }
+            } else if (!isEyedropperMode) {
+                s_PipetteHasPreview = false;
             }
 
             if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging && isBrushLikeTool && !isEyedropperMode) {
@@ -1655,6 +1665,66 @@ int main(int argc, char* argv[]) {
                 dl->AddLine(ImVec2(sp.x, sp.y - arm), ImVec2(sp.x, sp.y + arm), colInner, 1.5f);
                 dl->AddCircle(sp, 4.0f, colInner, 12, 1.5f);
                 dl->PopClipRect();
+            }
+
+            // Pipette / eyedropper HUD: sample ring + HEX/RGB chip near cursor
+            if (isEyedropperMode && isHovered && isInsideCanvas && s_PipetteHasPreview) {
+                ImDrawList* dl = ImGui::GetForegroundDrawList();
+                ImVec2 mp = ImGui::GetMousePos();
+                const float r = 18.0f;
+                ImVec2 ringC(mp.x + 28.f, mp.y + 28.f);
+                // Avoid going off viewport edges
+                if (ringC.x + 90.f > imageMin.x + viewportWidth) ringC.x = mp.x - 28.f;
+                if (ringC.y + 70.f > imageMin.y + viewportHeight) ringC.y = mp.y - 28.f;
+
+                auto& tok = Ui::Tokens();
+                float pr = s_PipettePreview[0], pg = s_PipettePreview[1], pb = s_PipettePreview[2], pa = s_PipettePreview[3];
+                int Ri = (int)std::lround(std::clamp(pr, 0.f, 1.f) * 255.f);
+                int Gi = (int)std::lround(std::clamp(pg, 0.f, 1.f) * 255.f);
+                int Bi = (int)std::lround(std::clamp(pb, 0.f, 1.f) * 255.f);
+                ImU32 sampleCol = IM_COL32(Ri, Gi, Bi, 255);
+
+                // Checker under circle for alpha context
+                const float cell = 5.f;
+                for (int cy = -3; cy <= 3; ++cy) {
+                    for (int cx = -3; cx <= 3; ++cx) {
+                        float dx = (cx + 0.5f) * cell, dy = (cy + 0.5f) * cell;
+                        if (dx * dx + dy * dy > (r - 1.f) * (r - 1.f)) continue;
+                        bool dark = ((cx + cy) & 1) != 0;
+                        dl->AddRectFilled(
+                            ImVec2(ringC.x + cx * cell - cell * 0.5f, ringC.y + cy * cell - cell * 0.5f),
+                            ImVec2(ringC.x + cx * cell + cell * 0.5f, ringC.y + cy * cell + cell * 0.5f),
+                            dark ? IM_COL32(90, 90, 90, 255) : IM_COL32(180, 180, 180, 255));
+                    }
+                }
+                dl->AddCircleFilled(ringC, r, IM_COL32(Ri, Gi, Bi, (int)std::lround(std::clamp(pa, 0.f, 1.f) * 255.f)), 32);
+                dl->AddCircle(ringC, r, IM_COL32(0, 0, 0, 200), 32, 2.5f);
+                dl->AddCircle(ringC, r, tok.ColU32(tok.strokeActive), 32, 1.25f);
+
+                // Crosshair at sample point (cursor)
+                const float arm = 6.f;
+                dl->AddLine(ImVec2(mp.x - arm, mp.y), ImVec2(mp.x + arm, mp.y), IM_COL32(0, 0, 0, 180), 2.5f);
+                dl->AddLine(ImVec2(mp.x, mp.y - arm), ImVec2(mp.x, mp.y + arm), IM_COL32(0, 0, 0, 180), 2.5f);
+                dl->AddLine(ImVec2(mp.x - arm, mp.y), ImVec2(mp.x + arm, mp.y), IM_COL32(255, 255, 255, 230), 1.0f);
+                dl->AddLine(ImVec2(mp.x, mp.y - arm), ImVec2(mp.x, mp.y + arm), IM_COL32(255, 255, 255, 230), 1.0f);
+
+                // Info chip: HEX + RGB
+                char hex[16], rgbLine[48];
+                std::snprintf(hex, sizeof(hex), "#%02X%02X%02X", Ri, Gi, Bi);
+                std::snprintf(rgbLine, sizeof(rgbLine), "RGB %d %d %d", Ri, Gi, Bi);
+                ImVec2 chipPos(ringC.x + r + 8.f, ringC.y - 14.f);
+                ImVec2 hexSz = ImGui::CalcTextSize(hex);
+                ImVec2 rgbSz = ImGui::CalcTextSize(rgbLine);
+                float chipW = std::max(hexSz.x, rgbSz.x) + 16.f;
+                float chipH = hexSz.y + rgbSz.y + 14.f;
+                ImVec2 c0 = chipPos;
+                ImVec2 c1(c0.x + chipW, c0.y + chipH);
+                dl->AddRectFilled(c0, c1, tok.ColU32(ImVec4(tok.bgElevated.x, tok.bgElevated.y, tok.bgElevated.z, 0.92f)), tok.rSm);
+                dl->AddRect(c0, c1, tok.ColU32(tok.strokeHairline), tok.rSm, 0, 1.0f);
+                // Color swatch strip
+                dl->AddRectFilled(ImVec2(c0.x + 4.f, c0.y + 4.f), ImVec2(c0.x + 12.f, c1.y - 4.f), sampleCol, 2.f);
+                dl->AddText(ImVec2(c0.x + 16.f, c0.y + 4.f), tok.ColU32(tok.textPrimary), hex);
+                dl->AddText(ImVec2(c0.x + 16.f, c0.y + 4.f + hexSz.y + 2.f), tok.ColU32(tok.textSecondary), rgbLine);
             }
 
             // Draw Smart Select background process progress & cancel option UI

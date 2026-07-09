@@ -53,16 +53,15 @@ static IconButtonResult IconButtonImpl(const char* id, const SvgIcon* icon,
     float side = std::min(size.x, size.y);
     float drawSide = side * sc * 0.72f; // padding inside button
 
-    // Background
-    ImU32 bg = T.ColU32(active ? ImVec4(T.accent.x, T.accent.y, T.accent.z, 0.35f)
+    // Background only — active outline is drawn by the floating toolbar accent square
+    ImU32 bg = T.ColU32(active ? ImVec4(T.accent.x, T.accent.y, T.accent.z, 0.22f)
                                : (res.hovered && enabled ? ImVec4(1, 1, 1, T.isDark ? 0.08f : 0.12f)
                                                          : ImVec4(0, 0, 0, 0)));
     if ((bg >> 24) > 0)
         dl->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg, T.rSm);
 
-    if (active)
-        dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), T.ColU32(T.strokeActive), T.rSm, 0, 1.5f);
-    else if (res.hovered && enabled)
+    // Hover hairline only (no per-item active stroke — floating accent square owns selection chrome)
+    if (!active && res.hovered && enabled)
         dl->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), T.ColU32(T.strokeHairline), T.rSm, 0, 1.0f);
 
     ImU32 tint = T.ColU32(enabled ? (active ? T.iconTint : T.iconTint)

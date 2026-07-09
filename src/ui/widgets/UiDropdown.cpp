@@ -184,11 +184,11 @@ static bool DropdownCore(const char* id, bool triggerDown, bool triggerHovered,
 
 bool DropdownIcon(const char* id, const char* iconLogicalName, ImVec2 triggerSize,
                   const char* const* items, int itemCount, int* selected,
-                  const char* tooltip, DropdownFlags flags) {
+                  const char* tooltip, DropdownFlags flags, bool active) {
     ImGui::PushID(id);
     ImVec2 tmin = ImGui::GetCursorScreenPos();
-    // active ring drawn by caller when tool selected; trigger itself not "active" fill
-    auto r = IconButton("##trig", iconLogicalName, triggerSize, tooltip, true, false);
+    // Soft fill via active; outline owned by floating toolbar accent square
+    auto r = IconButton("##trig", iconLogicalName, triggerSize, tooltip, true, active);
     ImVec2 tmax = ImVec2(tmin.x + triggerSize.x, tmin.y + triggerSize.y);
     // Use held OR IsMouseDown after press on this item — r.held is IsItemActive
     bool triggerDown = r.held || (ImGui::IsItemActive());
