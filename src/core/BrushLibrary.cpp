@@ -61,6 +61,11 @@ BrushPresetParams BrushPresetParams::FromSettings(const BrushSettings& s, const 
     p.pressureRadius = s.pressureRadius;
     p.pressureHardness = s.pressureHardness;
     p.pressureOpacity = s.pressureOpacity;
+    p.rotationDeg = s.rotationDeg;
+    p.pressureRotation = s.pressureRotation;
+    p.scatter = s.scatter;
+    p.angleJitter = s.angleJitter;
+    p.tipSourcePath = s.tipSourcePath;
 
     const BrushTip* t = tip ? tip : s.tip;
     if (!t || t->size <= 0 || t->pixels.empty()) {
@@ -93,6 +98,11 @@ void BrushPresetParams::ApplyToSettings(BrushSettings& s, const BrushTip* ownedT
     s.pressureRadius = pressureRadius;
     s.pressureHardness = pressureHardness;
     s.pressureOpacity = pressureOpacity;
+    s.rotationDeg = rotationDeg;
+    s.pressureRotation = pressureRotation;
+    s.scatter = scatter;
+    s.angleJitter = angleJitter;
+    s.tipSourcePath = tipSourcePath;
 
     if (tipType == TipType::None) {
         s.tip = nullptr;
@@ -310,6 +320,11 @@ static json ParamsToJson(const BrushPresetParams& p) {
     j["pressureRadius"] = p.pressureRadius;
     j["pressureHardness"] = p.pressureHardness;
     j["pressureOpacity"] = p.pressureOpacity;
+    j["rotationDeg"] = p.rotationDeg;
+    j["pressureRotation"] = p.pressureRotation;
+    j["scatter"] = p.scatter;
+    j["angleJitter"] = p.angleJitter;
+    if (!p.tipSourcePath.empty()) j["tipSourcePath"] = p.tipSourcePath;
     return j;
 }
 
@@ -327,6 +342,11 @@ static void ParamsFromJson(BrushPresetParams& p, const json& j) {
     if (j.contains("pressureRadius")) p.pressureRadius = j["pressureRadius"].get<bool>();
     if (j.contains("pressureHardness")) p.pressureHardness = j["pressureHardness"].get<bool>();
     if (j.contains("pressureOpacity")) p.pressureOpacity = j["pressureOpacity"].get<bool>();
+    if (j.contains("rotationDeg")) p.rotationDeg = j["rotationDeg"].get<float>();
+    if (j.contains("pressureRotation")) p.pressureRotation = j["pressureRotation"].get<bool>();
+    if (j.contains("scatter")) p.scatter = j["scatter"].get<float>();
+    if (j.contains("angleJitter")) p.angleJitter = j["angleJitter"].get<float>();
+    if (j.contains("tipSourcePath")) p.tipSourcePath = j["tipSourcePath"].get<std::string>();
 }
 
 bool BrushLibrary::WriteFile(const Entry& e) const {

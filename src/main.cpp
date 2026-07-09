@@ -976,7 +976,9 @@ int main(int argc, char* argv[]) {
             bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser);
             bool isSmudgeTool = (g_ActiveTool == ActiveTool::Smudge);
             bool isPipetteTool = (g_ActiveTool == ActiveTool::Pipette);
-            bool isEyedropperMode = ((isBrushLikeTool || isSmudgeTool) && ImGui::GetIO().KeyAlt) || isPipetteTool;
+            // Alt-sample blocked when Ctrl held (future: Ctrl+Alt+LMB = brush rotation)
+            bool isEyedropperMode = ((isBrushLikeTool || isSmudgeTool) && ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyCtrl)
+                                    || isPipetteTool;
 
             if (g_ActiveTool != g_PrevActiveTool) {
                 EndBrushStrokeIfNeeded();
@@ -1051,82 +1053,121 @@ int main(int argc, char* argv[]) {
 
             float wheelDelta = isHovered ? ImGui::GetIO().MouseWheel : 0.0f;
 
-            // Photoshop-like Brush Resize/Hardness (Ctrl+Alt+RMB) — lock cursor pos, no pan/navigator drift
-            // Declared early so pan/zoom can be gated after this block runs
+            // Photoshop-like Brush Resize/Hardness (Ctrl+Alt+RMB)
+            // CRITICAL: use ABSOLUTE offset from start (not accumulated MouseDelta).
+            // Freezing MousePos made MouseDelta = full travel each frame → explosive size/hardness.
+            // WYSIWYG size: screen circle grows 1:1 with horizontal mouse travel
+            //   r_screen = radius * zoom  ⇒  radius = startR + dx_screen / zoom
+            // Hardness: full 0..1 over a drag equal to the max brush circle radius on screen
+            //   (same visual zone as the ghost max ring).
             static bool g_IsCtrlAltRmbDragging = false;
-            static double g_CtrlAltRmbStartX = 0.0;
-            static double g_CtrlAltRmbStartY = 0.0;
             static ImVec2 g_CtrlAltRmbScreenPos(0, 0);
-            static double g_CtrlAltRmbLastX = 0.0, g_CtrlAltRmbLastY = 0.0;
+            static float g_CtrlAltRmbStartRadius = 10.f;
+            static float g_CtrlAltRmbStartHardness = 0.5f;
+            static double g_CtrlAltRmbGlfwX = 0.0, g_CtrlAltRmbGlfwY = 0.0;
 
-            const bool brushOrEraser = isBrushLikeTool; // Brush or Eraser only
-            if (isHovered && brushOrEraser && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt
-                && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            const bool brushOrEraser = isBrushLikeTool;
+            const float maxBrushR = std::max(10.f, ConfigManager::Get().GetMaxBrushRadius());
+            ImGuiIO& ioRmb = ImGui::GetIO();
+
+            if (!g_IsCtrlAltRmbDragging && brushOrEraser && ioRmb.KeyCtrl && ioRmb.KeyAlt
+                && ImGui::IsMouseClicked(ImGuiMouseButton_Right)
+                && (isHovered || ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))) {
                 g_IsCtrlAltRmbDragging = true;
+                g_CtrlAltRmbScreenPos = ImGui::GetMousePos();
+                g_CtrlAltRmbStartRadius = g_Brush.radius;
+                g_CtrlAltRmbStartHardness = g_Brush.hardness;
                 GLFWwindow* win = glfwGetCurrentContext();
                 if (win) {
-                    glfwGetCursorPos(win, &g_CtrlAltRmbStartX, &g_CtrlAltRmbStartY);
-                    g_CtrlAltRmbLastX = g_CtrlAltRmbStartX;
-                    g_CtrlAltRmbLastY = g_CtrlAltRmbStartY;
-                    g_CtrlAltRmbScreenPos = mousePos;
-                    // DISABLED gives raw deltas and freezes OS cursor (PS-like)
-                    glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+                    glfwGetCursorPos(win, &g_CtrlAltRmbGlfwX, &g_CtrlAltRmbGlfwY);
+                    glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
                 }
             }
+
             if (g_IsCtrlAltRmbDragging) {
                 GLFWwindow* win = glfwGetCurrentContext();
                 if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) || !brushOrEraser) {
                     g_IsCtrlAltRmbDragging = false;
                     if (win) {
+                        glfwSetCursorPos(win, g_CtrlAltRmbGlfwX, g_CtrlAltRmbGlfwY);
                         glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-                        glfwSetCursorPos(win, g_CtrlAltRmbStartX, g_CtrlAltRmbStartY);
                     }
-                    // Prevent residual delta from warping the view
-                    ImGui::GetIO().MouseDelta = ImVec2(0, 0);
+                    ioRmb.MouseDelta = ImVec2(0, 0);
                 } else {
-                    // Prefer raw GLFW delta (stable under DISABLED); fall back to ImGui delta
-                    double cx = 0, cy = 0;
-                    float dx = 0.f, dy = 0.f;
-                    if (win) {
-                        glfwGetCursorPos(win, &cx, &cy);
-                        dx = (float)(cx - g_CtrlAltRmbLastX);
-                        dy = (float)(cy - g_CtrlAltRmbLastY);
-                        g_CtrlAltRmbLastX = cx;
-                        g_CtrlAltRmbLastY = cy;
-                    }
-                    if (std::fabs(dx) < 1e-6f && std::fabs(dy) < 1e-6f) {
-                        dx = ImGui::GetIO().MouseDelta.x;
-                        dy = ImGui::GetIO().MouseDelta.y;
-                    }
-                    g_Brush.radius = std::clamp(g_Brush.radius + dx * 0.5f, 1.0f, 250.0f);
-                    g_Brush.hardness = std::clamp(g_Brush.hardness - dy * 0.01f, 0.0f, 1.0f);
+                    // Absolute screen offset from invoke point (GLFW client coords)
+                    double cx = g_CtrlAltRmbGlfwX, cy = g_CtrlAltRmbGlfwY;
+                    if (win) glfwGetCursorPos(win, &cx, &cy);
+                    float dxScreen = (float)(cx - g_CtrlAltRmbGlfwX);
+                    float dyScreen = (float)(cy - g_CtrlAltRmbGlfwY);
 
-                    // Kill ImGui delta so pan/hover coords stay put
-                    ImGui::GetIO().MouseDelta = ImVec2(0, 0);
-                    ImGui::GetIO().MousePos = g_CtrlAltRmbScreenPos;
+                    const float zoom = std::max(0.001f, g_Canvas.GetZoom());
+                    // Size: 1 screen px of drag ↔ 1 screen px of circle radius change
+                    g_Brush.radius = std::clamp(
+                        g_CtrlAltRmbStartRadius + dxScreen / zoom, 1.0f, maxBrushR);
 
-                    ImGui::SetTooltip("Size: %.1f px\nHardness: %.0f%%", g_Brush.radius, g_Brush.hardness * 100.f);
+                    // Hardness: drag across the max-radius ghost ring (screen px) = 0..1 full range
+                    // Matches visual: travel from center to ghost edge = full hardness swing
+                    float hardSpanScreen = std::max(32.f, maxBrushR * zoom);
+                    g_Brush.hardness = std::clamp(
+                        g_CtrlAltRmbStartHardness - dyScreen / hardSpanScreen, 0.0f, 1.0f);
 
-                    // Preview ring fixed at drag origin (not following cursor)
+                    // Kill ImGui input so pan/paint don't move; do NOT feed fake MousePos
+                    // (that recreated huge deltas next frame).
+                    ioRmb.MouseDelta = ImVec2(0, 0);
+                    ioRmb.WantCaptureMouse = true;
+
+                    ImGui::SetTooltip(
+                        "Size: %.1f / %.0f px  (screen circle = size × zoom)\n"
+                        "Hardness: %.0f%%  (full range = drag max-ring radius)",
+                        g_Brush.radius, maxBrushR, g_Brush.hardness * 100.f);
+
                     ImDrawList* drawList = ImGui::GetForegroundDrawList();
-                    float rScreen = g_Brush.radius * g_Canvas.GetZoom();
+                    const ImVec2 fixed = g_CtrlAltRmbScreenPos;
+                    float rScreen = g_Brush.radius * zoom;
                     float hScreen = rScreen * g_Brush.hardness;
-                    ImVec2 fixed = g_CtrlAltRmbScreenPos;
-                    ImU32 outerColor = IM_COL32(235, 64, 52, 200);
-                    ImU32 solidColor = IM_COL32(235, 64, 52, 90);
-                    ImU32 falloffColor = IM_COL32(235, 64, 52, 35);
-                    if (g_Brush.hardness < 1.0f)
-                        drawList->AddCircleFilled(fixed, rScreen, falloffColor, 64);
-                    if (hScreen > 0.0f)
-                        drawList->AddCircleFilled(fixed, hScreen, solidColor, 64);
-                    drawList->AddCircle(fixed, rScreen, outerColor, 64, 2.0f);
+                    float maxScreen = maxBrushR * zoom;
+                    // Ghost max = hardness/size reference zone
+                    drawList->AddCircle(fixed, maxScreen, IM_COL32(255, 255, 255, 50), 64, 1.0f);
+                    // Soft falloff annulus + hard core
+                    if (g_Brush.hardness < 0.999f && rScreen > hScreen + 0.5f)
+                        drawList->AddCircleFilled(fixed, rScreen, IM_COL32(235, 64, 52, 35), 64);
+                    if (hScreen > 0.5f)
+                        drawList->AddCircleFilled(fixed, hScreen, IM_COL32(235, 64, 52, 110), 64);
+                    drawList->AddCircle(fixed, rScreen, IM_COL32(235, 64, 52, 235), 64, 2.0f);
+                    if (hScreen > 1.f && hScreen < rScreen - 0.5f)
+                        drawList->AddCircle(fixed, hScreen, IM_COL32(255, 200, 120, 200), 64, 1.25f);
                 }
-            }
-            if (g_IsCtrlAltRmbDragging) {
                 isPanning = false;
                 isRotating = false;
                 wheelDelta = 0.f;
                 dragDx = dragDy = 0.f;
+            }
+
+            // RMB single-click (Brush/Eraser, no mod) → brush preset popup
+            static bool s_BrushRmbArmed = false;
+            static ImVec2 s_BrushRmbStart(0, 0);
+            static ImVec2 s_BrushPopupPos(0, 0);
+            static bool s_WantBrushPopup = false;
+            if (isHovered && brushOrEraser && !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt
+                && !g_IsCtrlAltRmbDragging && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                s_BrushRmbArmed = true;
+                s_BrushRmbStart = ImGui::GetMousePos();
+            }
+            if (s_BrushRmbArmed) {
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                    ImVec2 p = ImGui::GetMousePos();
+                    float ddx = p.x - s_BrushRmbStart.x, ddy = p.y - s_BrushRmbStart.y;
+                    if (ddx * ddx + ddy * ddy < 36.f) { // <6px = click, not drag
+                        s_WantBrushPopup = true;
+                        s_BrushPopupPos = s_BrushRmbStart;
+                    }
+                    s_BrushRmbArmed = false;
+                } else {
+                    ImVec2 p = ImGui::GetMousePos();
+                    float ddx = p.x - s_BrushRmbStart.x, ddy = p.y - s_BrushRmbStart.y;
+                    if (ddx * ddx + ddy * ddy > 100.f) // moved too far → cancel
+                        s_BrushRmbArmed = false;
+                }
             }
 
             // Handle custom brush / smudge visualizer and cursor hiding when inside canvas bounds
@@ -1860,6 +1901,9 @@ int main(int argc, char* argv[]) {
             }
 
             g_Canvas.Update(viewportWidth, viewportHeight, isHovered, localMouseX, localMouseY, isPanning, dragDx, dragDy, wheelDelta);
+
+            // Brush preset picker (RMB click on Brush/Eraser)
+            UI::DrawBrushPickerPopup(s_WantBrushPopup, s_BrushPopupPos, g_Brush);
         }
 
         ImGui::End();

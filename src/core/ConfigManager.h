@@ -42,6 +42,10 @@ public:
     int GetMaxUndoMemoryMB() const;
     void SetMaxUndoMemoryMB(int mb);
 
+    // Max brush radius in canvas pixels (Ctrl+Alt+RMB range / clamp).
+    float GetMaxBrushRadius() const;
+    void SetMaxBrushRadius(float radiusPx);
+
 private:
     ConfigManager() = default;
     ~ConfigManager() = default;
@@ -62,4 +66,5 @@ private:
     int m_AutoSaveIntervalMinutes = 10;
     int m_MaxUndoSteps = 50;
     int m_MaxUndoMemoryMB = 512;
+    float m_MaxBrushRadius = 250.0f;
 };

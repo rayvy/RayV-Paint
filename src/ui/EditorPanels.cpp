@@ -15,6 +15,7 @@
 #include "widgets/UiPanel.h"
 #include "widgets/UiPathField.h"
 #include "widgets/UiTooltip.h"
+#include "../core/BrushLibrary.h"
 #include <stb_image.h>
 #include <thread>
 #include <imgui_internal.h>
@@ -196,6 +197,272 @@ namespace UI {
         int cx = std::clamp((int)canvasX, 0, canvas.GetWidth() - 1);
         int cy = std::clamp((int)canvasY, 0, canvas.GetHeight() - 1);
         canvas.SampleCompositePixel(cx, cy, outColor);
+    }
+
+    // Stroke dab preview (rotation/spacing-aware visual; scatter/dynamics drawn as ghost only)
+    static void DrawBrushStrokePreview(ImDrawList* dl, ImVec2 rmin, ImVec2 rmax,
+                                       const BrushSettings& b, ImU32 baseCol) {
+        if (!dl) return;
+        float boxW = rmax.x - rmin.x;
+        float boxH = rmax.y - rmin.y;
+        if (boxW < 4.f || boxH < 4.f) return;
+        float rPx = std::clamp(b.radius * 0.32f, 2.5f, boxH * 0.40f);
+        float y = rmin.y + boxH * 0.5f;
+        float x0 = rmin.x + rPx + 2.f;
+        float x1 = rmax.x - rPx - 2.f;
+        if (x1 <= x0) x1 = x0 + 1.f;
+        float stepPx = std::max(2.f, rPx * 2.f * std::max(0.05f, b.spacing));
+        int steps = std::max(3, (int)((x1 - x0) / stepPx));
+        float rot = b.rotationDeg * (3.14159265f / 180.f);
+        int aBase = (int)((baseCol >> 24) & 0xFF);
+        for (int s = 0; s <= steps; ++s) {
+            float t = (float)s / (float)steps;
+            float x = x0 + (x1 - x0) * t;
+            float yy = y + std::sin(t * 3.14159265f) * (boxH * 0.07f);
+            // scatter placeholder: slight visual noise (not applied in engine yet)
+            if (b.scatter > 0.001f) {
+                x += std::sin(t * 17.f) * rPx * b.scatter * 0.35f;
+                yy += std::cos(t * 13.f) * rPx * b.scatter * 0.35f;
+            }
+            float aMul = b.opacity;
+            int aOuter = (int)(aBase * aMul * 0.22f);
+            int aInner = (int)(aBase * aMul * 0.88f);
+            ImU32 cOuter = (baseCol & 0x00FFFFFF) | ((aOuter & 0xFF) << 24);
+            ImU32 cInner = (baseCol & 0x00FFFFFF) | ((aInner & 0xFF) << 24);
+            // Ellipse rotated for rotation preview
+            float rx = rPx, ry = rPx * (0.55f + 0.45f * b.hardness);
+            if (std::fabs(rot) < 0.01f) {
+                dl->AddCircleFilled(ImVec2(x, yy), rx, cOuter, 18);
+                dl->AddCircleFilled(ImVec2(x, yy), rx * (0.35f + 0.55f * b.hardness), cInner, 14);
+            } else {
+                // approximate rotated ellipse with a few points
+                const int N = 16;
+                ImVec2 pts[N];
+                for (int i = 0; i < N; ++i) {
+                    float a = (float)i / N * 6.2831853f;
+                    float lx = std::cos(a) * rx;
+                    float ly = std::sin(a) * ry;
+                    float c = std::cos(rot), s2 = std::sin(rot);
+                    pts[i] = ImVec2(x + lx * c - ly * s2, yy + lx * s2 + ly * c);
+                }
+                dl->AddConvexPolyFilled(pts, N, cOuter);
+            }
+        }
+    }
+
+    static void DrawTipTextureThumb(ImDrawList* dl, ImVec2 p0, ImVec2 p1, const BrushTip* tip) {
+        dl->AddRectFilled(p0, p1, IM_COL32(24, 24, 26, 255), 4.f);
+        dl->AddRect(p0, p1, IM_COL32(80, 80, 90, 255), 4.f);
+        if (!tip || tip->size <= 0 || tip->pixels.empty()) {
+            // procedural soft circle
+            ImVec2 c((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+            float r = std::min(p1.x - p0.x, p1.y - p0.y) * 0.35f;
+            dl->AddCircleFilled(c, r, IM_COL32(200, 200, 210, 180), 24);
+            return;
+        }
+        // Downsample tip into a small grid
+        const int g = 24;
+        float cw = (p1.x - p0.x) / g, ch = (p1.y - p0.y) / g;
+        int ts = tip->size;
+        for (int y = 0; y < g; ++y) {
+            for (int x = 0; x < g; ++x) {
+                int sx = x * ts / g, sy = y * ts / g;
+                uint8_t v = tip->pixels[(size_t)sy * ts + sx];
+                if (v < 8) continue;
+                dl->AddRectFilled(
+                    ImVec2(p0.x + x * cw, p0.y + y * ch),
+                    ImVec2(p0.x + (x + 1) * cw, p0.y + (y + 1) * ch),
+                    IM_COL32(v, v, v, 255));
+            }
+        }
+    }
+
+    void DrawBrushPickerPopup(bool& openFlag, ImVec2 popupPos, BrushSettings& brush) {
+        auto& lib = BrushLibrary::Get();
+        auto& T = Ui::Tokens();
+        static bool s_popupOpen = false;
+
+        if (openFlag) {
+            ImGui::OpenPopup("##BrushPicker");
+            openFlag = false;
+            s_popupOpen = true;
+        }
+
+        ImGui::SetNextWindowPos(popupPos, ImGuiCond_Appearing);
+        // Wide enough for long stroke previews + inspector
+        ImGui::SetNextWindowSize(ImVec2(780, 480), ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(640, 400), ImVec2(1400, 900));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, T.rMd);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(T.bgElevated.x, T.bgElevated.y, T.bgElevated.z, 0.97f));
+
+        if (ImGui::BeginPopup("##BrushPicker")) {
+            s_popupOpen = true;
+            ImGui::Text("Brush presets");
+            ImGui::SameLine();
+            ImGui::TextDisabled("RMB · Save stores size/opacity/tablet/tip · drag edges to resize");
+            ImGui::Separator();
+
+            // --- Left: list (wider for stroke dab visibility) ---
+            float listW = std::clamp(ImGui::GetContentRegionAvail().x * 0.42f, 300.f, 420.f);
+            ImGui::BeginChild("##brushlist", ImVec2(listW, 0), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            if (ImGui::Button("Create brush", ImVec2(-1, 0))) {
+                std::string id = lib.CreateFromCurrent(brush, "New Brush");
+                if (!id.empty()) {
+                    lib.SetActiveId(id);
+                    const bool er = brush.erase;
+                    lib.ApplyTo(id, brush);
+                    brush.erase = er;
+                }
+            }
+            ImGui::Spacing();
+
+            const std::string& active = lib.GetActiveId();
+            const float rowH = 64.f; // taller rows = longer visible stroke
+            for (const auto& m : lib.List()) {
+                ImGui::PushID(m.id.c_str());
+                bool sel = (m.id == active);
+                BrushPresetParams params;
+                lib.Get(m.id, params);
+                BrushSettings prev;
+                lib.ApplyTo(m.id, prev);
+
+                ImVec4 chip = m.isBuiltin
+                    ? ImVec4(0.25f, 0.55f, 0.95f, 1.f)
+                    : (m.isDirty ? ImVec4(1.0f, 0.55f, 0.15f, 1.f) : ImVec4(0.95f, 0.50f, 0.12f, 1.f));
+
+                ImVec2 row0 = ImGui::GetCursorScreenPos();
+                if (ImGui::Selectable("##row", sel, 0, ImVec2(0, rowH))) {
+                    const bool er = brush.erase;
+                    lib.ApplyTo(m.id, brush);
+                    brush.erase = er;
+                    lib.SetActiveId(m.id);
+                }
+                ImVec2 row1 = ImGui::GetItemRectMax();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->AddRectFilled(ImVec2(row0.x, row0.y + 4), ImVec2(row0.x + 5, row1.y - 4),
+                    ImGui::ColorConvertFloat4ToU32(chip), 2.f);
+                char label[160];
+                std::snprintf(label, sizeof(label), "%s%s", m.displayName.c_str(), m.isDirty ? " *" : "");
+                dl->AddText(ImVec2(row0.x + 12, row0.y + 4), T.ColU32(T.textPrimary), label);
+                // Meta line
+                char metaLine[96];
+                std::snprintf(metaLine, sizeof(metaLine), "r=%.0f  h=%.0f%%  op=%.0f%%  sp=%.2f",
+                    params.radius, params.hardness * 100.f, params.opacity * 100.f, params.spacing);
+                dl->AddText(ImVec2(row0.x + 12, row0.y + 20), T.ColU32(T.textSecondary), metaLine);
+                ImVec2 pmin(row0.x + 12, row0.y + 36);
+                ImVec2 pmax(row1.x - 8, row1.y - 4);
+                dl->AddRectFilled(pmin, pmax, IM_COL32(18, 18, 20, 255), 3.f);
+                DrawBrushStrokePreview(dl, pmin, pmax, prev, IM_COL32(230, 230, 235, 255));
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
+
+            ImGui::SameLine(0, 12);
+
+            // --- Right: inspector / params ---
+            ImGui::BeginChild("##brushside", ImVec2(0, 0), true);
+            {
+                BrushPresetMeta meta;
+                bool has = lib.GetMeta(lib.GetActiveId(), meta);
+                ImGui::TextUnformatted(has ? meta.displayName.c_str() : "(no preset)");
+                if (has) {
+                    ImGui::SameLine();
+                    if (meta.isBuiltin) ImGui::TextColored(ImVec4(0.4f, 0.65f, 1.f, 1.f), "builtin");
+                    else if (meta.isDirty) ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f), "unsaved");
+                    else ImGui::TextColored(ImVec4(1.f, 0.55f, 0.15f, 1.f), "custom");
+                }
+
+                // Large stroke preview
+                ImVec2 prevPos = ImGui::GetCursorScreenPos();
+                float prevW = ImGui::GetContentRegionAvail().x;
+                float prevH = 96.f;
+                ImGui::Dummy(ImVec2(prevW, prevH));
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                ImVec2 p0 = prevPos, p1(prevPos.x + prevW, prevPos.y + prevH);
+                dl->AddRectFilled(p0, p1, IM_COL32(16, 16, 18, 255), 6.f);
+                DrawBrushStrokePreview(dl, ImVec2(p0.x + 10, p0.y + 10), ImVec2(p1.x - 10, p1.y - 10),
+                    brush, IM_COL32(240, 240, 245, 255));
+
+                ImGui::Spacing();
+                ImGui::TextDisabled("Tip texture");
+                ImVec2 t0 = ImGui::GetCursorScreenPos();
+                float th = 80.f;
+                ImGui::Dummy(ImVec2(th, th));
+                DrawTipTextureThumb(dl, t0, ImVec2(t0.x + th, t0.y + th), brush.tip);
+                ImGui::SameLine();
+                ImGui::BeginGroup();
+                if (brush.tip && brush.tip->size > 0)
+                    ImGui::Text("%s  %dx%d", brush.tip->name ? brush.tip->name : "tip",
+                        brush.tip->size, brush.tip->size);
+                else
+                    ImGui::TextDisabled("Procedural soft circle");
+                if (!brush.tipSourcePath.empty())
+                    ImGui::TextWrapped("%s", brush.tipSourcePath.c_str());
+                else if (has && !meta.sourcePath.empty())
+                    ImGui::TextWrapped("%s", meta.sourcePath.c_str());
+                ImGui::EndGroup();
+
+                ImGui::Separator();
+                ImGui::Text("Parameters");
+                float maxR = ConfigManager::Get().GetMaxBrushRadius();
+                ImGui::SliderFloat("Size", &brush.radius, 1.f, maxR, "%.1f px");
+                ImGui::SliderFloat("Hardness", &brush.hardness, 0.f, 1.f, "%.2f");
+                ImGui::SliderFloat("Opacity", &brush.opacity, 0.f, 1.f, "%.2f");
+                ImGui::SliderFloat("Spacing", &brush.spacing, 0.01f, 2.f, "%.2f");
+                ImGui::SliderInt("Stabilization", &brush.stabilization, 1, 50);
+
+                ImGui::Separator();
+                ImGui::Text("Tablet pressure");
+                ImGui::Checkbox("→ Radius", &brush.pressureRadius); ImGui::SameLine();
+                ImGui::Checkbox("→ Hardness", &brush.pressureHardness); ImGui::SameLine();
+                ImGui::Checkbox("→ Opacity", &brush.pressureOpacity);
+
+                ImGui::Separator();
+                ImGui::Text("Rotation / dynamics");
+                ImGui::TextDisabled("(rotation/scatter not in paint engine yet — saved in preset)");
+                ImGui::SliderFloat("Rotation", &brush.rotationDeg, 0.f, 360.f, "%.0f°  [placeholder]");
+                ImGui::Checkbox("Pressure → Rotation [placeholder]", &brush.pressureRotation);
+                ImGui::SliderFloat("Scatter", &brush.scatter, 0.f, 1.f, "%.2f  [placeholder]");
+                ImGui::SliderFloat("Angle jitter", &brush.angleJitter, 0.f, 1.f, "%.2f  [placeholder]");
+
+                ImGui::Separator();
+                ImGui::BeginDisabled(!has || meta.isBuiltin);
+                if (ImGui::Button("Save preset", ImVec2(-1, 0))) {
+                    // Push live brush into staging then disk
+                    if (meta.isDirty || !meta.isBuiltin) {
+                        lib.UpdateStaging(lib.GetActiveId(), brush);
+                        lib.SaveToDisk(lib.GetActiveId());
+                    }
+                }
+                ImGui::EndDisabled();
+                ImGui::BeginDisabled(!has || meta.isBuiltin);
+                if (ImGui::Button("Delete", ImVec2(-1, 0))) {
+                    lib.DeleteCustom(lib.GetActiveId());
+                    lib.SetActiveId("builtin.soft_round");
+                    const bool er = brush.erase;
+                    lib.ApplyTo("builtin.soft_round", brush);
+                    brush.erase = er;
+                }
+                ImGui::EndDisabled();
+            }
+            ImGui::EndChild();
+
+            // Keep dirty staging in sync while popup open
+            if (!lib.GetActiveId().empty()) {
+                BrushPresetMeta meta;
+                if (lib.GetMeta(lib.GetActiveId(), meta) && !meta.isBuiltin)
+                    lib.UpdateStaging(lib.GetActiveId(), brush);
+            }
+
+            ImGui::EndPopup();
+        } else {
+            s_popupOpen = false;
+        }
+
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+        (void)s_popupOpen;
     }
 
     // True if `maybeAncestor` is parent/ancestor of `layerIdx` (cycle guard).
@@ -1113,6 +1380,7 @@ namespace UI {
                 state.autoSaveMins = ConfigManager::Get().GetAutoSaveIntervalMinutes();
                 state.maxUndo = ConfigManager::Get().GetMaxUndoSteps();
                 state.maxUndoMem = ConfigManager::Get().GetMaxUndoMemoryMB();
+                state.maxBrushRadius = ConfigManager::Get().GetMaxBrushRadius();
                 state.settingsInitialized = true;
             }
 
@@ -1137,6 +1405,12 @@ namespace UI {
                     ImGui::Separator();
                     ImGui::InputInt("Default Width", &state.defW, 128, 256);
                     ImGui::InputInt("Default Height", &state.defH, 128, 256);
+
+                    ImGui::Spacing();
+                    ImGui::Text("Brush");
+                    ImGui::Separator();
+                    ImGui::SliderFloat("Max brush radius (px)", &state.maxBrushRadius, 10.f, 1000.f, "%.0f");
+                    ImGui::TextDisabled("Ctrl+Alt+RMB size range; 1 screen px = 1/zoom canvas px (WYSIWYG)");
 
                     ImGui::Spacing();
                     ImGui::Text("Autosave & Backup System");
@@ -1252,6 +1526,7 @@ namespace UI {
                 ConfigManager::Get().SetAutoSaveIntervalMinutes(state.autoSaveMins);
                 ConfigManager::Get().SetMaxUndoSteps(state.maxUndo);
                 ConfigManager::Get().SetMaxUndoMemoryMB(state.maxUndoMem);
+                ConfigManager::Get().SetMaxBrushRadius(state.maxBrushRadius);
                 ConfigManager::Get().Save();
                 
                 KeymapManager::Get().Save();
@@ -1823,20 +2098,21 @@ namespace UI {
                 if (ai >= 0 && ai < (int)layers.size()) {
                     auto& al = layers[ai];
                     ImGui::PushID("##active_hdr");
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.32f);
+                    const float hdrGap = 12.f;
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.30f);
                     if (Ui::SmartSliderFloat("##op_top", &al.opacity, 0.f, 1.f, 1.f, 0.05f, "Op %.2f"))
                         canvas.MarkCompositeDirty();
-                    ImGui::SameLine(0, 6);
+                    ImGui::SameLine(0, hdrGap);
                     static const char* blendNamesTop[] = {
                         "Normal","Multiply","Screen","Overlay","Add","Subtract","Darken","Lighten","HardLight","SoftLight"
                     };
                     int blendIdx = (int)al.blendMode;
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 52.f);
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 48.f - hdrGap);
                     if (UiCombo("##bl_top", &blendIdx, blendNamesTop, IM_ARRAYSIZE(blendNamesTop))) {
                         al.blendMode = (BlendMode)blendIdx;
                         canvas.MarkCompositeDirty();
                     }
-                    ImGui::SameLine(0, 6);
+                    ImGui::SameLine(0, hdrGap);
                     bool hasFxTop = !al.filters.empty();
                     if (hasFxTop) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 0.55f));
                     if (ImGui::Button("Fx##top", ImVec2(40, 0))) {
@@ -1865,11 +2141,13 @@ namespace UI {
             }
 
             // List fills remaining height minus bottom bar
+            // ImGui-safe row: ONE line via SameLine + SetCursorPosY from lineStartY (never SetCursorScreenPos chain)
             const float barH = 40.f;
             ImGui::BeginChild("LayersList", ImVec2(0, -barH), true);
-            const float thumb = 28.0f;       // fixed preview size
-            const float eyeSz = 14.0f;       // ~50% of previous checkbox footprint
-            const float rowPad = 4.0f;
+            const float thumb = 28.0f;
+            const float eyeSz = 22.0f;
+            const float rowPad = 10.0f;
+            const float rowH = thumb + 4.f;
             auto& tok = Ui::Tokens();
 
             for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
@@ -1890,14 +2168,15 @@ namespace UI {
                     depth++;
                 if (depth > 0) ImGui::Indent(12.0f * depth);
 
-                // Row: center items vertically to thumb height
-                float rowY = ImGui::GetCursorPosY();
-                auto centerY = [&](float h) {
-                    ImGui::SetCursorPosY(rowY + (thumb - h) * 0.5f);
+                const float lineY = ImGui::GetCursorPosY();
+                auto alignMid = [&](float h) {
+                    ImGui::SetCursorPosY(lineY + (rowH - h) * 0.5f);
                 };
 
-                // 6.1 Eye visibility (small, centered)
-                centerY(eyeSz);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(1, 1));
+
+                // Eye
+                alignMid(eyeSz);
                 {
                     bool isIsolated = canvas.IsLayerIsolated(i);
                     auto r = Ui::IconButton("##vis", "layer_visible", ImVec2(eyeSz, eyeSz),
@@ -1906,7 +2185,6 @@ namespace UI {
                         if (ImGui::GetIO().KeyAlt) canvas.ToggleLayerIsolation(i);
                         else { layer.visible = !layer.visible; canvas.MarkCompositeDirty(); }
                     }
-                    // Dim when hidden
                     if (!layer.visible && !isIsolated) {
                         ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
                         ImGui::GetWindowDrawList()->AddRectFilled(mn, mx, IM_COL32(0, 0, 0, 120), tok.rSm);
@@ -1915,14 +2193,15 @@ namespace UI {
                 ImGui::SameLine(0, rowPad);
 
                 if (layer.isGroup) {
-                    centerY(ImGui::GetFrameHeight() * 0.75f);
+                    float ah = 18.f;
+                    alignMid(ah);
                     if (ImGui::ArrowButton("##exp", layer.groupExpanded ? ImGuiDir_Down : ImGuiDir_Right))
                         layer.groupExpanded = !layer.groupExpanded;
                     ImGui::SameLine(0, rowPad);
                 }
 
-                // 6.2 Fixed thumb preview
-                centerY(thumb);
+                // Thumb (fixed size)
+                alignMid(thumb);
                 if (!layer.isGroup && layer.srv) {
                     bool isActiveContent = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerContent);
                     if (isActiveContent) {
@@ -1962,7 +2241,6 @@ namespace UI {
                     }
                     ImGui::PopStyleVar();
                     ImGui::PopStyleColor();
-                    ImGui::SameLine(0, rowPad);
                 } else if (layer.isGroup) {
                     ImGui::Button("G##g", ImVec2(thumb, thumb));
                     if (ImGui::BeginDragDropTarget()) {
@@ -1983,12 +2261,14 @@ namespace UI {
                         }
                         ImGui::EndDragDropTarget();
                     }
-                    ImGui::SameLine(0, rowPad);
+                } else {
+                    ImGui::Dummy(ImVec2(thumb, thumb)); // keep column even without srv
                 }
+                ImGui::SameLine(0, rowPad);
 
-                // 6.3 Fixed mask slot (always reserved for non-group)
+                // Mask column — always reserved for non-groups (fixed width)
                 if (!layer.isGroup) {
-                    centerY(thumb);
+                    alignMid(thumb);
                     if (layer.hasMask && layer.maskSRV) {
                         bool isActiveMask = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerMask);
                         if (isActiveMask) {
@@ -2030,12 +2310,14 @@ namespace UI {
                     ImGui::SameLine(0, rowPad);
                 }
 
-                // 6.4 Name zone — vertically centered; double-click / F2 rename
+                ImGui::PopStyleVar(); // FramePadding
+
+                // Name fills rest of row
                 const bool isActive = (canvas.GetActiveLayerIndex() == i);
                 const bool multiSel = isLayerSelected(i);
                 float nameW = ImGui::GetContentRegionAvail().x;
-                if (nameW < 40.f) nameW = 40.f;
-                centerY(thumb);
+                if (nameW < 48.f) nameW = 48.f;
+                alignMid(thumb);
 
                 if (s_RenameIdx == i) {
                     ImGui::SetNextItemWidth(nameW);
@@ -2079,7 +2361,6 @@ namespace UI {
                         ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
                         ImGui::GetWindowDrawList()->AddRect(mn, mx, tok.ColU32(tok.strokeActive), tok.rSm, 0, 1.5f);
                     }
-                    // Double-click name zone only → rename
                     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                         s_RenameIdx = i;
                         std::snprintf(s_RenameBuf, sizeof(s_RenameBuf), "%s", layer.name.c_str());
@@ -2172,9 +2453,8 @@ namespace UI {
                     }
                 }
 
-                // Advance cursor past full row height
-                ImGui::SetCursorPosY(rowY + thumb + 4.f);
-
+                // Next row
+                ImGui::SetCursorPosY(lineY + rowH);
                 if (depth > 0) ImGui::Unindent(12.0f * depth);
                 ImGui::PopID();
             }
@@ -2647,6 +2927,7 @@ namespace UI {
                             s_CustomLoaded = true;
                             state.hasCustomBrushTip = true;
                             state.customBrushTipName = path;
+                            brush.tipSourcePath = path;
                             state.brushTipPreset = 4;
                             brush.tip = &s_CustomTip;
                             canvas.SetCustomBrushTip(side, s_CustomTip.pixels); // also sets id=custom
@@ -2657,7 +2938,8 @@ namespace UI {
                 if (ImGui::IsItemHovered()) Ui::Tooltip("Load grayscale stamp (persisted in .rayp)");
                 ImGui::SameLine();
 
-                MiniSlider("##rad", &brush.radius, 1.f, 250.f, "Radius (px)", 100.f);
+                float maxR = ConfigManager::Get().GetMaxBrushRadius();
+                MiniSlider("##rad", &brush.radius, 1.f, maxR, "Radius (px)", 100.f);
                 ImGui::SameLine();
                 Ui::IconToggle("##pr", "ts_pressure_radius", &brush.pressureRadius, ImVec2(28, 28),
                     "Pressure → Radius (on)", "Pressure → Radius (off)");
@@ -2667,7 +2949,6 @@ namespace UI {
                 Ui::IconToggle("##ph", "ts_pressure_hardness", &brush.pressureHardness, ImVec2(28, 28),
                     "Pressure → Hardness (on)", "Pressure → Hardness (off)");
                 ImGui::SameLine();
-                // Visual opacity (checker + color) — Stage 1 pilot of VisualSlider
                 {
                     float op = brush.opacity;
                     if (Ui::VisualSlider("##opcvis", &op, ImVec2(88, 22), Ui::VisualSliderSkin::OpacityChecker, brush.color, "Opacity"))
@@ -2682,6 +2963,11 @@ namespace UI {
                 ImGui::SetNextItemWidth(60.f);
                 ImGui::SliderInt("##stb", &brush.stabilization, 1, 50);
                 if (ImGui::IsItemHovered()) Ui::Tooltip("Stabilization");
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70.f);
+                ImGui::SliderFloat("##rot", &brush.rotationDeg, 0.f, 360.f, "R %.0f°");
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("Brush rotation — PLACEHOLDER\nNot applied by paint engine yet (saved in presets).\nFuture: Ctrl+Alt+LMB drag to rotate.");
 
                 if (activeTool == ActiveTool::Brush) {
                     ImGui::SameLine();

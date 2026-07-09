@@ -206,6 +206,23 @@ add_custom_command(
     COMMENT "Copying UI SVG icons to output directories"
 )
 
+# Ship default config (etalon from user preferences) for first-run seed
+add_custom_command(
+    TARGET RayVPaint_Core POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:RayVPaint_Core>/defaults"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/src/resources/defaults/config.json"
+        "$<TARGET_FILE_DIR:RayVPaint_Core>/defaults/config.json"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/src/resources/defaults/keymap.json"
+        "$<TARGET_FILE_DIR:RayVPaint_Core>/defaults/keymap.json"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:RayVPaint_Core>/../defaults"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/src/resources/defaults/config.json"
+        "$<TARGET_FILE_DIR:RayVPaint_Core>/../defaults/config.json"
+    COMMENT "Copying default config/keymap etalon"
+)
+
 # Create Launchers
 add_executable(RayVPaint WIN32 src/launchers/RayVPaint_Launcher.cpp src/resources/resources.rc)
 add_executable(RayVPaint_Console src/launchers/RayVPaint_Console_Launcher.cpp src/resources/resources.rc)

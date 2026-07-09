@@ -2,6 +2,7 @@
 #include "Logger.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
+#include <windows.h>
 #include <shlobj.h>
 #include <filesystem>
 #include <cstdlib>
@@ -36,21 +37,60 @@ std::string ConfigManager::GetUserSubdirectory(const std::string& sub) {
     return p.string();
 }
 
+// Seed user config from shipped defaults (next to exe or source tree).
+static bool SeedFromShippedDefaults(const std::string& userPath) {
+    std::vector<std::string> candidates = {
+        "defaults/config.json",
+        "bin/defaults/config.json",
+        "../defaults/config.json",
+        "src/resources/defaults/config.json",
+        "../src/resources/defaults/config.json",
+        "../../src/resources/defaults/config.json",
+    };
+#ifdef _WIN32
+    wchar_t exeBuf[MAX_PATH];
+    if (GetModuleFileNameW(nullptr, exeBuf, MAX_PATH)) {
+        std::filesystem::path exeDir = std::filesystem::path(exeBuf).parent_path();
+        candidates.insert(candidates.begin(), (exeDir / "defaults" / "config.json").string());
+        candidates.insert(candidates.begin(), (exeDir / ".." / "defaults" / "config.json").string());
+    }
+#endif
+    for (const auto& c : candidates) {
+        std::error_code ec;
+        if (!std::filesystem::exists(std::filesystem::u8path(c), ec)) continue;
+        try {
+            std::filesystem::create_directories(std::filesystem::path(userPath).parent_path(), ec);
+            std::filesystem::copy_file(c, userPath, std::filesystem::copy_options::overwrite_existing, ec);
+            if (!ec) {
+                Logger::Get().Info("Seeded default config from " + c + " → " + userPath);
+                return true;
+            }
+        } catch (...) {}
+    }
+    return false;
+}
+
 bool ConfigManager::Load(const std::string& configFilePath) {
     std::string path = configFilePath;
     if (path.empty()) {
         path = GetUserSubdirectory("user") + "/config.json";
     }
 
+    {
+        std::ifstream probe(path);
+        if (!probe.is_open()) {
+            Logger::Get().Warn("Could not open config file: " + path + ". Seeding shipped defaults.");
+            if (!SeedFromShippedDefaults(path)) {
+                Save(path); // code defaults as last resort
+            }
+        }
+    }
+
     std::unique_lock<std::mutex> lock(m_Mutex);
-    
     std::ifstream file(path);
     if (!file.is_open()) {
-        Logger::Get().Warn("Could not open config file: " + path + ". Creating default config.");
-        // We will save default settings immediately
-        lock.unlock(); // Release lock before calling Save to avoid deadlock
-        Save(path);
-        return true;
+        Logger::Get().Error("Config still missing after seed: " + path);
+        return false;
     }
 
     try {
@@ -67,6 +107,7 @@ bool ConfigManager::Load(const std::string& configFilePath) {
         if (j.contains("autosave_interval_minutes")) m_AutoSaveIntervalMinutes = j["autosave_interval_minutes"].get<int>();
         if (j.contains("max_undo_steps")) m_MaxUndoSteps = j["max_undo_steps"].get<int>();
         if (j.contains("max_undo_memory_mb")) m_MaxUndoMemoryMB = j["max_undo_memory_mb"].get<int>();
+        if (j.contains("max_brush_radius")) m_MaxBrushRadius = j["max_brush_radius"].get<float>();
 
         Logger::Get().Info("Configuration loaded successfully from " + path);
         return true;
@@ -97,6 +138,7 @@ bool ConfigManager::Save(const std::string& configFilePath) {
         j["autosave_interval_minutes"] = m_AutoSaveIntervalMinutes;
         j["max_undo_steps"] = m_MaxUndoSteps;
         j["max_undo_memory_mb"] = m_MaxUndoMemoryMB;
+        j["max_brush_radius"] = m_MaxBrushRadius;
 
         std::ofstream file(path);
         if (!file.is_open()) {
@@ -218,4 +260,16 @@ int ConfigManager::GetMaxUndoMemoryMB() const {
 void ConfigManager::SetMaxUndoMemoryMB(int mb) {
     std::lock_guard<std::mutex> lock(m_Mutex);
     m_MaxUndoMemoryMB = mb;
+}
+
+float ConfigManager::GetMaxBrushRadius() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_MaxBrushRadius;
+}
+
+void ConfigManager::SetMaxBrushRadius(float radiusPx) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    if (radiusPx < 1.f) radiusPx = 1.f;
+    if (radiusPx > 2000.f) radiusPx = 2000.f;
+    m_MaxBrushRadius = radiusPx;
 }

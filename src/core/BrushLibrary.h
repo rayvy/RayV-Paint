@@ -20,6 +20,7 @@ struct BrushPresetMeta {
 };
 
 // Serializable paint snapshot (FG color intentionally NOT stored — like Photoshop brushes).
+// Includes tablet toggles, spacing, rotation/scatter placeholders for future engine work.
 struct BrushPresetParams {
     float radius = 10.0f;
     float hardness = 0.5f;
@@ -29,6 +30,13 @@ struct BrushPresetParams {
     bool  erase = false;
     bool  writeR = true, writeG = true, writeB = true, writeA = false;
     bool  pressureRadius = false, pressureHardness = false, pressureOpacity = false;
+
+    // Placeholders (saved in .rvbrush; engine may ignore until implemented)
+    float rotationDeg = 0.f;
+    bool  pressureRotation = false;
+    float scatter = 0.f;
+    float angleJitter = 0.f;
+    std::string tipSourcePath;
 
     // Tip: one of none / builtin_id / embedded grayscale
     enum class TipType : uint8_t { None = 0, Builtin = 1, Embedded = 2 };

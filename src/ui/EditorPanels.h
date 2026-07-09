@@ -37,6 +37,9 @@ namespace UI {
     ActiveTool CycleWandTool(ActiveTool current);
     void SampleCanvasColor(Canvas& canvas, float canvasX, float canvasY, float outColor[4]);
 
+    // Brush preset popup (RMB in viewport). Call every frame; open via openFlag/pos.
+    void DrawBrushPickerPopup(bool& openFlag, ImVec2 popupPos, BrushSettings& brush);
+
     struct UIState {
         // Window visibility flags
         bool showConsole = true;
@@ -84,6 +87,7 @@ namespace UI {
         int autoSaveMins = 5;
         int maxUndo = 100;
         int maxUndoMem = 512;
+        float maxBrushRadius = 250.f;
 
         // Per-tool settings
         float magicWandTolerance = 0.15f;

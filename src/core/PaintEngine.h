@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <cstdint>
+#include <string>
 
 // Optional grayscale tip stamp (row-major, tipSize x tipSize, 0=transparent 255=solid).
 // When tipPixels is null/empty, procedural soft circle is used (legacy path).
@@ -28,6 +29,13 @@ struct BrushSettings {
     bool pressureRadius   = false;
     bool pressureHardness = false;
     bool pressureOpacity  = false;
+
+    // --- Stored in presets; paint engine may not implement yet ---
+    float rotationDeg = 0.f;       // brush tip rotation (placeholder for engine)
+    bool  pressureRotation = false;
+    float scatter = 0.f;           // 0..1 positional scatter (placeholder)
+    float angleJitter = 0.f;       // 0..1 form/angle dynamics (placeholder)
+    std::string tipSourcePath;     // display path of custom texture if known
 
     // Optional custom tip (null = procedural circle, no regression)
     const BrushTip* tip = nullptr;
