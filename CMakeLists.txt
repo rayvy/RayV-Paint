@@ -134,6 +134,8 @@ set(SOURCES
     src/ui/widgets/UiDropdown.h
     src/ui/widgets/UiVisualSlider.cpp
     src/ui/widgets/UiVisualSlider.h
+    src/ui/widgets/UiPanel.cpp
+    src/ui/widgets/UiPanel.h
 )
 
 # Shaders

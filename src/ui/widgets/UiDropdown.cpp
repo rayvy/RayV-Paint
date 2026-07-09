@@ -4,6 +4,7 @@
 #include "../style/UiTokens.h"
 #include <cmath>
 #include <algorithm>
+#include <cstdio>
 
 namespace Ui {
 
@@ -199,11 +200,22 @@ bool DropdownChip(const char* id, const char* previewLabel,
                   const char* const* items, int itemCount, int* selected,
                   DropdownFlags flags) {
     ImGui::PushID(id);
-    bool held = false;
-    ImGui::Button(previewLabel ? previewLabel : "…");
-    held = ImGui::IsItemActive();
+    auto& T = Tokens();
+    // Elevated chip trigger
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(T.bgElevated.x, T.bgElevated.y, T.bgElevated.z, 0.85f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(T.accent.x, T.accent.y, T.accent.z, 0.35f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(T.accent.x, T.accent.y, T.accent.z, 0.50f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, T.rSm);
+    char buf[256];
+    std::snprintf(buf, sizeof(buf), "%s  ▾", previewLabel ? previewLabel : "…");
+    ImGui::Button(buf);
+    bool held = ImGui::IsItemActive();
     ImVec2 tmin = ImGui::GetItemRectMin();
     ImVec2 tmax = ImGui::GetItemRectMax();
+    // Outline
+    ImGui::GetWindowDrawList()->AddRect(tmin, tmax, T.ColU32(T.strokeHairline), T.rSm, 0, 1.0f);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(3);
     bool changed = DropdownCore(id, held, ImGui::IsItemHovered(), tmin, tmax, items, itemCount, selected, flags);
     ImGui::PopID();
     return changed;

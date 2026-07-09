@@ -5292,20 +5292,31 @@ void Canvas::RebuildChannelPreviews(ID3D11Device* device) {
     m_ChannelPreviewW = w;
     m_ChannelPreviewH = h;
 
+    // RGBA8 grayscale (R=G=B=channel, A=255) so ImGui/DX11 samples as visible gray,
+    // not R8 which returns (r,0,0,1) and looks black/near-black when tinted.
     for (int c = 0; c < 4; ++c) {
+        std::vector<uint8_t> rgba((size_t)w * h * 4);
+        for (int i = 0; i < w * h; ++i) {
+            uint8_t v = ch[c][(size_t)i];
+            rgba[(size_t)i * 4 + 0] = v;
+            rgba[(size_t)i * 4 + 1] = v;
+            rgba[(size_t)i * 4 + 2] = v;
+            rgba[(size_t)i * 4 + 3] = 255;
+        }
+
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = w;
         td.Height = h;
         td.MipLevels = 1;
         td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_R8_UNORM;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
 
         D3D11_SUBRESOURCE_DATA init = {};
-        init.pSysMem = ch[c].data();
-        init.SysMemPitch = w;
+        init.pSysMem = rgba.data();
+        init.SysMemPitch = w * 4;
 
         if (SUCCEEDED(device->CreateTexture2D(&td, &init, &m_ChannelPreviewTex[c])) && m_ChannelPreviewTex[c]) {
             device->CreateShaderResourceView(m_ChannelPreviewTex[c], nullptr, &m_ChannelPreviewSRV[c]);

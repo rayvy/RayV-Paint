@@ -372,15 +372,16 @@ void ApplyTheme(const std::string& themeName) {
         colors[ImGuiCol_HeaderHovered]      = ImVec4(0.26f, 0.38f, 0.70f, 0.70f);
         colors[ImGuiCol_HeaderActive]       = ImVec4(0.26f, 0.38f, 0.70f, 1.00f);
         colors[ImGuiCol_TabActive]          = ImVec4(0.88f, 0.88f, 0.92f, 1.00f);
-    } else { // "Dark" - Charcoal Figma/Adobe Premium Palette
+    } else { // "Dark" - elevated Apple-like charcoal
         ImGui::StyleColorsDark();
         ImVec4* colors = style.Colors;
+        const auto& T = Ui::Tokens();
         
-        // Window & Child Panels
-        colors[ImGuiCol_WindowBg]               = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
-        colors[ImGuiCol_ChildBg]                = ImVec4(0.12f, 0.12f, 0.13f, 1.00f);
-        colors[ImGuiCol_PopupBg]                = ImVec4(0.07f, 0.07f, 0.08f, 0.98f);
-        colors[ImGuiCol_Border]                 = ImVec4(0.18f, 0.18f, 0.20f, 1.00f);
+        // Window & Child — slight transparency on popups for glass feel
+        colors[ImGuiCol_WindowBg]               = T.bgWindow;
+        colors[ImGuiCol_ChildBg]                = ImVec4(0.12f, 0.12f, 0.14f, 0.92f);
+        colors[ImGuiCol_PopupBg]                = ImVec4(T.bgElevated.x, T.bgElevated.y, T.bgElevated.z, 0.94f);
+        colors[ImGuiCol_Border]                 = T.strokeHairline;
         
         // Input Fields & Frames
         colors[ImGuiCol_FrameBg]                = ImVec4(0.15f, 0.15f, 0.17f, 1.00f);
