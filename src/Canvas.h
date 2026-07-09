@@ -193,6 +193,8 @@ public:
     void SelectOpaquePixels(int layerIdx = -1); // alpha-as-mask; -1 = active layer
     void InvertSelection();
     void InvertAlpha();
+    // Invert RGB (keeps alpha). Respects selection; uses existing mutation/undo path.
+    void InvertColors();
     void ApplyBlur(float radius);
     void ApplyHSV(float dH, float dS, float dV);
     // lutRGB: 256 floats [0..1]; lutAlpha optional 256 floats (empty = leave A unchanged)

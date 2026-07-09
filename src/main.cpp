@@ -789,6 +789,12 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("InvertSelection")) {
                 g_Canvas.InvertSelection();
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("InvertColors")) {
+                g_Canvas.InvertColors();
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("InvertAlpha")) {
+                g_Canvas.InvertAlpha();
+            }
             if (KeymapManager::Get().ConsumeActionTrigger("AdjustHSV")) {
                 uiState.showHSVModal = true;
             }
@@ -929,9 +935,11 @@ int main(int argc, char* argv[]) {
             bool isInsideCanvas = (canvasX >= 0.0f && canvasX < (float)g_Canvas.GetWidth() &&
                                    canvasY >= 0.0f && canvasY < (float)g_Canvas.GetHeight());
 
-            bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser || g_ActiveTool == ActiveTool::Smudge);
+            // Smudge is NOT brush-like: must not paint with brush.color / accent color.
+            bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser);
+            bool isSmudgeTool = (g_ActiveTool == ActiveTool::Smudge);
             bool isPipetteTool = (g_ActiveTool == ActiveTool::Pipette);
-            bool isEyedropperMode = (isBrushLikeTool && ImGui::GetIO().KeyAlt) || isPipetteTool;
+            bool isEyedropperMode = ((isBrushLikeTool || isSmudgeTool) && ImGui::GetIO().KeyAlt) || isPipetteTool;
 
             if (g_ActiveTool != g_PrevActiveTool) {
                 EndBrushStrokeIfNeeded();
@@ -1054,13 +1062,13 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Handle custom brush visualizer and cursor hiding when inside canvas bounds
-            if (isHovered && isInsideCanvas && !g_IsCtrlAltRmbDragging && isBrushLikeTool && !isEyedropperMode) {
+            // Handle custom brush / smudge visualizer and cursor hiding when inside canvas bounds
+            if (isHovered && isInsideCanvas && !g_IsCtrlAltRmbDragging && (isBrushLikeTool || isSmudgeTool) && !isEyedropperMode) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
                 // Draw custom outline circle at mouse position
                 ImDrawList* drawList = ImGui::GetForegroundDrawList();
-                float cursorRadius = (g_ActiveTool == ActiveTool::Smudge) ? uiState.smudge.radius : g_Brush.radius;
+                float cursorRadius = isSmudgeTool ? uiState.smudge.radius : g_Brush.radius;
                 float screenRadius = cursorRadius * g_Canvas.GetZoom();
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(0, 0, 0, 255), 32, 1.5f);
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(255, 255, 255, 255), 32, 1.0f);
@@ -1265,21 +1273,22 @@ int main(int argc, char* argv[]) {
                 std::swap(g_Brush.color[3], g_SecondaryColor[3]);
             }
 
-            // Selection tools, pipette, bucket fill, gradient interaction
-            bool isSelectionTool = (g_ActiveTool == ActiveTool::RectSelect || 
-                                    g_ActiveTool == ActiveTool::EllipseSelect || 
-                                    g_ActiveTool == ActiveTool::LassoSelect || 
-                                    g_ActiveTool == ActiveTool::MagicWand ||
-                                    g_ActiveTool == ActiveTool::SmartSelect ||
-                                    g_ActiveTool == ActiveTool::QuickSelect);
+            // Drag-based selection tools only (Magic Wand is click-once, not drag).
+            bool isDragSelectionTool = (g_ActiveTool == ActiveTool::RectSelect ||
+                                        g_ActiveTool == ActiveTool::EllipseSelect ||
+                                        g_ActiveTool == ActiveTool::LassoSelect ||
+                                        g_ActiveTool == ActiveTool::SmartSelect ||
+                                        g_ActiveTool == ActiveTool::QuickSelect);
 
             if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging) {
-                // Magic Wand
+                // Magic Wand (click sets sticky seed + selection; not a drag tool)
                 if (g_ActiveTool == ActiveTool::MagicWand) {
-                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && isInsideCanvas) {
                         bool add = ImGui::GetIO().KeyShift;
                         bool subtract = ImGui::GetIO().KeyAlt;
-                        g_Canvas.ApplyMagicWandSelection(g_pd3dDevice, (int)canvasX, (int)canvasY, uiState.magicWandTolerance, add, subtract, uiState.magicWandContiguous);
+                        int sx = std::clamp((int)std::floor(canvasX), 0, g_Canvas.GetWidth() - 1);
+                        int sy = std::clamp((int)std::floor(canvasY), 0, g_Canvas.GetHeight() - 1);
+                        g_Canvas.ApplyMagicWandSelection(g_pd3dDevice, sx, sy, uiState.magicWandTolerance, add, subtract, uiState.magicWandContiguous);
                     }
                 }
                 // Bucket Fill
@@ -1358,7 +1367,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 // Drag-based selections
-                else if (isSelectionTool) {
+                else if (isDragSelectionTool) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                         g_IsSelectionDragging = true;
                         g_SelectionDragStartX = canvasX;

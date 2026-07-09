@@ -2,6 +2,7 @@
 #include "../core/ConfigManager.h"
 #include "../core/Logger.h"
 #include "../core/KeymapManager.h"
+#include "../core/ImageManager.h"
 #include "../scripting/ScriptingEngine.h"
 #include "../core/ThreadPool.h"
 #include <thread>
@@ -1010,7 +1011,9 @@ namespace UI {
             // ---- Image Menu ----
             if (ImGui::BeginMenu("Image")) {
                 bool hasLayer = canvas.GetActiveLayerIndex() != -1;
-                if (ImGui::MenuItem("Invert Alpha", nullptr, false, hasLayer))
+                if (ImGui::MenuItem("Invert Colors", KeymapManager::Get().GetActionShortcutString("InvertColors").c_str(), false, hasLayer))
+                    canvas.InvertColors();
+                if (ImGui::MenuItem("Invert Alpha", KeymapManager::Get().GetActionShortcutString("InvertAlpha").c_str(), false, hasLayer))
                     canvas.InvertAlpha();
                 ImGui::Separator();
                 if (ImGui::MenuItem("Blur...", nullptr, false, hasLayer))
@@ -1836,18 +1839,25 @@ namespace UI {
             }
             ImGui::Begin("Toolbar", &state.showToolbar, ImGuiWindowFlags_NoCollapse);
 
-            // Docked: keep toolbar strip thin so icons stay proportional
+            // Docked toolbar: Dear ImGui ignores SetNextWindowSizeConstraints on docked
+            // windows — size is owned by the DockNode. Clamp SizeRef every frame so the
+            // strip stays thin while docked (floating still uses constraints above).
             if (ImGuiWindow* tw = ImGui::GetCurrentWindow()) {
-                if (tw->DockNode && !tw->DockNode->IsFloatingNode()) {
+                if (tw->DockNode && !tw->DockNode->IsFloatingNode() && tw->DockNode->HostWindow) {
                     ImGuiDockNode* node = tw->DockNode;
-                    if (isVertical) {
-                        float w = std::clamp(node->Size.x, 16.0f, 64.0f);
-                        if (std::fabs(node->Size.x - w) > 0.5f)
-                            ImGui::DockBuilderSetNodeSize(node->ID, ImVec2(w, node->Size.y));
-                    } else {
-                        float h = std::clamp(node->Size.y, 16.0f, 64.0f);
-                        if (std::fabs(node->Size.y - h) > 0.5f)
-                            ImGui::DockBuilderSetNodeSize(node->ID, ImVec2(node->Size.x, h));
+                    // Only constrain leaf nodes that host this toolbar (not the whole dockspace)
+                    if (!node->IsSplitNode()) {
+                        if (isVertical) {
+                            float w = std::clamp(node->SizeRef.x > 1.f ? node->SizeRef.x : node->Size.x, 36.0f, 64.0f);
+                            node->SizeRef.x = w;
+                            if (std::fabs(node->Size.x - w) > 1.0f)
+                                ImGui::DockBuilderSetNodeSize(node->ID, ImVec2(w, node->Size.y));
+                        } else {
+                            float h = std::clamp(node->SizeRef.y > 1.f ? node->SizeRef.y : node->Size.y, 36.0f, 64.0f);
+                            node->SizeRef.y = h;
+                            if (std::fabs(node->Size.y - h) > 1.0f)
+                                ImGui::DockBuilderSetNodeSize(node->ID, ImVec2(node->Size.x, h));
+                        }
                     }
                 }
             }
@@ -2035,18 +2045,13 @@ namespace UI {
 
             ImGui::NewLine();
             ImGui::Separator();
-            ImGui::Text("Export Settings:");
-            
+            ImGui::Text("Project Output Format (DDS ↔ PNG):");
+            ImGui::TextDisabled("Sets default Quick Export target for this project.");
+
             char propExportPath[512] = "";
             std::strncpy(propExportPath, canvas.GetExportPath().c_str(), sizeof(propExportPath));
-            ImGui::InputText("Export Path", propExportPath, IM_ARRAYSIZE(propExportPath));
-            ImGui::SameLine();
-            if (ImGui::Button("...##propExportPath")) {
-                if (ShowSaveFileWin32(propExportPath, IM_ARRAYSIZE(propExportPath), "DDS Files (*.dds)\0*.dds\0PNG Files (*.png)\0*.png\0All Files (*.*)\0*.*\0")) {
-                    canvas.SetExportPath(propExportPath);
-                }
-            }
-            
+
+            // Derive current format family from path extension (default PNG)
             std::string pathStr = propExportPath;
             size_t dot = pathStr.find_last_of('.');
             std::string ext = "";
@@ -2054,7 +2059,48 @@ namespace UI {
                 ext = pathStr.substr(dot + 1);
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             }
-            
+            int outFmt = (ext == "dds") ? 1 : 0; // 0=PNG, 1=DDS
+            const char* outFmtNames[] = { "PNG / Standard image", "DDS (compressed)" };
+            if (ImGui::Combo("Output Type", &outFmt, outFmtNames, IM_ARRAYSIZE(outFmtNames))) {
+                // Switch extension on the export path
+                std::string base = propExportPath;
+                size_t d = base.find_last_of('.');
+                if (d != std::string::npos) base = base.substr(0, d);
+                if (base.empty()) base = "export";
+                base += (outFmt == 1) ? ".dds" : ".png";
+                std::strncpy(propExportPath, base.c_str(), sizeof(propExportPath) - 1);
+                propExportPath[sizeof(propExportPath) - 1] = '\0';
+                canvas.SetExportPath(propExportPath);
+                ext = (outFmt == 1) ? "dds" : "png";
+            }
+
+            ImGui::InputText("Export Path", propExportPath, IM_ARRAYSIZE(propExportPath));
+            ImGui::SameLine();
+            if (ImGui::Button("...##propExportPath")) {
+                if (ShowSaveFileWin32(propExportPath, IM_ARRAYSIZE(propExportPath),
+                    "PNG (*.png)\0*.png\0DDS (*.dds)\0*.dds\0All Files (*.*)\0*.*\0")) {
+                    canvas.SetExportPath(propExportPath);
+                    pathStr = propExportPath;
+                    dot = pathStr.find_last_of('.');
+                    ext.clear();
+                    if (dot != std::string::npos) {
+                        ext = pathStr.substr(dot + 1);
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    }
+                }
+            } else if (std::string(propExportPath) != canvas.GetExportPath()) {
+                canvas.SetExportPath(propExportPath);
+            }
+
+            // Re-read ext after edits
+            pathStr = canvas.GetExportPath();
+            dot = pathStr.find_last_of('.');
+            ext.clear();
+            if (dot != std::string::npos) {
+                ext = pathStr.substr(dot + 1);
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            }
+
             if (ext == "dds") {
                 const char* formats[] = { "BC7_UNORM_SRGB", "BC7_UNORM", "BC3_UNORM", "BC1_UNORM", "RGBA8_UNORM", "RGBA16_FLOAT" };
                 int currentFormatIdx = 0;
@@ -2065,12 +2111,8 @@ namespace UI {
                 if (ImGui::Combo("DDS Preset", &currentFormatIdx, formats, IM_ARRAYSIZE(formats))) {
                     canvas.SetExportFormat(formats[currentFormatIdx]);
                 }
-                
                 bool mips = canvas.GetExportGenerateMipMaps();
-                if (ImGui::Checkbox("Mipmaps", &mips)) {
-                    canvas.SetExportGenerateMipMaps(mips);
-                }
-                
+                if (ImGui::Checkbox("Mipmaps", &mips)) canvas.SetExportGenerateMipMaps(mips);
                 if (mips) {
                     const char* filters[] = { "Point", "Box", "Linear", "Cubic" };
                     int currentFilterIdx = 3;
@@ -2078,13 +2120,18 @@ namespace UI {
                     for (int i = 0; i < IM_ARRAYSIZE(filters); ++i) {
                         if (currentFilter == filters[i]) currentFilterIdx = i;
                     }
-                    if (ImGui::Combo("Filter", &currentFilterIdx, filters, IM_ARRAYSIZE(filters))) {
+                    if (ImGui::Combo("Mip Filter", &currentFilterIdx, filters, IM_ARRAYSIZE(filters))) {
                         canvas.SetExportMipFilter(filters[currentFilterIdx]);
                     }
                 }
-            } else if (ext == "png") {
+            } else {
                 DrawIccPresetCombo(canvas, "ICC Profile");
             }
+
+            if (ImGui::Button("Quick Export (project format)", ImVec2(-1, 0))) {
+                state.openQuickExportTrigger = true;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Export using the path/format above (same as Ctrl+E)");
 
             ImGui::End();
         }
@@ -2095,449 +2142,310 @@ namespace UI {
                 g_IsLayersHovered = true;
             }
 
-            // Add Layer and Add Group buttons
-            if (ImGui::Button("Add Layer", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - 4, 25))) {
-                std::string lName = "Layer " + std::to_string(canvas.GetLayers().size() + 1);
-                canvas.CreateNewLayer(device, lName);
+            // Compact header actions
+            float hw = ImGui::GetContentRegionAvail().x;
+            if (ImGui::Button("+L", ImVec2(hw * 0.5f - 4.f, 0))) {
+                canvas.CreateNewLayer(device, "Layer " + std::to_string(canvas.GetLayers().size() + 1));
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add Layer");
             ImGui::SameLine();
-            if (ImGui::Button("Add Group", ImVec2(ImGui::GetContentRegionAvail().x, 25))) {
-                std::string gName = "Group " + std::to_string(canvas.GetLayers().size() + 1);
-                canvas.CreateLayerGroup(device, gName);
+            if (ImGui::Button("+G", ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+                canvas.CreateLayerGroup(device, "Group " + std::to_string(canvas.GetLayers().size() + 1));
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add Group");
 
             ImGui::BeginChild("LayersList", ImVec2(0, 0), true);
-                    auto& layers = canvas.GetLayers();
-                    for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
-                        auto& layer = layers[i];
-                        
-                        // Collapse/expand visibility check recursively
-                        bool parentCollapsed = false;
-                        int currParentId = layer.parentGroupId;
-                        while (currParentId >= 0 && currParentId < (int)layers.size()) {
-                            if (!layers[currParentId].groupExpanded) {
-                                parentCollapsed = true;
-                                break;
+            auto& layers = canvas.GetLayers();
+            const float thumb = 28.0f;
+
+            for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
+                auto& layer = layers[i];
+
+                bool parentCollapsed = false;
+                int currParentId = layer.parentGroupId;
+                while (currParentId >= 0 && currParentId < (int)layers.size()) {
+                    if (!layers[currParentId].groupExpanded) { parentCollapsed = true; break; }
+                    currParentId = layers[currParentId].parentGroupId;
+                }
+                if (parentCollapsed) continue;
+
+                ImGui::PushID(i);
+
+                int depth = 0;
+                for (int pId = layer.parentGroupId; pId >= 0 && pId < (int)layers.size(); pId = layers[pId].parentGroupId)
+                    depth++;
+                if (depth > 0) ImGui::Indent(12.0f * depth);
+
+                // Visibility
+                bool isIsolated = canvas.IsLayerIsolated(i);
+                if (isIsolated) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
+                bool vis = layer.visible;
+                if (ImGui::Checkbox("##vis", &vis)) {
+                    if (ImGui::GetIO().KeyAlt) canvas.ToggleLayerIsolation(i);
+                    else { layer.visible = vis; canvas.MarkCompositeDirty(); }
+                }
+                if (isIsolated) ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Visibility\nAlt+Click: Isolate");
+                ImGui::SameLine(0, 4);
+
+                if (layer.isGroup) {
+                    if (ImGui::ArrowButton("##exp", layer.groupExpanded ? ImGuiDir_Down : ImGuiDir_Right))
+                        layer.groupExpanded = !layer.groupExpanded;
+                    ImGui::SameLine(0, 2);
+                }
+
+                if (!layer.isGroup && layer.srv) {
+                    bool isActiveContent = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerContent);
+                    if (isActiveContent) {
+                        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
+                        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+                        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                    }
+                    if (ImGui::ImageButton("##thumb", (ImTextureID)layer.srv, ImVec2(thumb, thumb), ImVec2(0,0), ImVec2(1,1))) {
+                        if (ImGui::GetIO().KeyCtrl) {
+                            canvas.SelectOpaquePixels(i);
+                            canvas.UpdateSelectionMaskTexture(device);
+                        } else {
+                            canvas.SetActiveLayerIndex(i);
+                            canvas.SetPaintTarget(PaintTarget::LayerContent);
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Content\nCtrl+Click: select opaque");
+                    if (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg) {
+                        ImVec2 tmin = ImGui::GetItemRectMin();
+                        ImVec2 tmax = ImGui::GetItemRectMax();
+                        const char* badge = (layer.type == Layer::Type::VectorSvg) ? "V" : "S";
+                        ImGui::GetWindowDrawList()->AddRectFilled(
+                            ImVec2(tmax.x - 10, tmin.y), ImVec2(tmax.x, tmin.y + 10), IM_COL32(40,120,220,230), 2.f);
+                        ImGui::GetWindowDrawList()->AddText(ImVec2(tmax.x - 8, tmin.y - 1), IM_COL32(255,255,255,255), badge);
+                    }
+                    ImGui::PopStyleVar();
+                    ImGui::PopStyleColor();
+                    ImGui::SameLine(0, 2);
+                } else if (layer.isGroup) {
+                    ImGui::Button("G##g", ImVec2(thumb, thumb));
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
+                                "LAYER_INDEX",
+                                ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
+                            int draggedIdx = *(const int*)payload->Data;
+                            bool ok = draggedIdx >= 0 && draggedIdx < (int)layers.size() &&
+                                      draggedIdx != i && !layers[draggedIdx].isGroup &&
+                                      !IsGroupAncestorOf(layers, draggedIdx, i);
+                            if (ok) {
+                                DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), true);
+                                if (payload->IsDelivery()) {
+                                    canvas.SetActiveLayerIndex(canvas.MoveLayerIntoGroup(draggedIdx, i));
+                                    canvas.MarkCompositeDirty();
+                                }
                             }
-                            currParentId = layers[currParentId].parentGroupId;
                         }
-                        if (parentCollapsed) {
-                            continue;
-                        }
+                        ImGui::EndDragDropTarget();
+                    }
+                    ImGui::SameLine(0, 2);
+                }
 
-                        ImGui::PushID(i);
-                        
-                        // Indent child layers based on recursion depth
-                        int depth = 0;
-                        int pId = layer.parentGroupId;
-                        while (pId >= 0 && pId < (int)layers.size()) {
-                            depth++;
-                            pId = layers[pId].parentGroupId;
+                // Mask: smart +M (selection -> from selection, else blank)
+                if (!layer.isGroup) {
+                    if (layer.hasMask && layer.maskSRV) {
+                        bool isActiveMask = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerMask);
+                        if (isActiveMask) {
+                            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
+                            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
+                        } else {
+                            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+                            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
                         }
+                        if (ImGui::ImageButton("##mask", (ImTextureID)layer.maskSRV, ImVec2(thumb, thumb), ImVec2(0,0), ImVec2(1,1))) {
+                            canvas.SetActiveLayerIndex(i);
+                            canvas.SetPaintTarget(PaintTarget::LayerMask);
+                        }
+                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Layer Mask\nRight-click: Apply / Delete");
+                        if (ImGui::BeginPopupContextItem("##maskctx")) {
+                            if (ImGui::MenuItem("Apply Mask")) canvas.ApplyLayerMask(i);
+                            if (ImGui::MenuItem("Delete Mask")) canvas.DeleteLayerMask(i);
+                            ImGui::EndPopup();
+                        }
+                        ImGui::PopStyleVar();
+                        ImGui::PopStyleColor();
+                    } else {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 0.55f));
+                        if (ImGui::Button("+M##addm", ImVec2(thumb, thumb))) {
+                            if (canvas.HasSelection())
+                                canvas.CreateLayerMaskFromSelection(device, i);
+                            else
+                                canvas.CreateLayerMask(device, i);
+                            canvas.SetPaintTarget(PaintTarget::LayerMask);
+                        }
+                        ImGui::PopStyleColor();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(canvas.HasSelection()
+                                ? "Add Layer Mask from Selection"
+                                : "Add Layer Mask");
+                        }
+                    }
+                    ImGui::SameLine(0, 4);
+                }
 
-                        bool indented = false;
-                        if (depth > 0) {
-                            ImGui::Indent(20.0f * depth);
-                            indented = true;
-                        }
+                bool isSelected = (canvas.GetActiveLayerIndex() == i);
+                char label[256];
+                if (layer.isGroup) std::snprintf(label, sizeof(label), "[G] %s", layer.name.c_str());
+                else if (layer.type == Layer::Type::VectorSvg) std::snprintf(label, sizeof(label), "[SVG] %s", layer.name.c_str());
+                else if (layer.type == Layer::Type::SmartObject) std::snprintf(label, sizeof(label), "[SO] %s", layer.name.c_str());
+                else std::snprintf(label, sizeof(label), "%s", layer.name.c_str());
 
-                        bool isIsolated = canvas.IsLayerIsolated(i);
-                        if (isIsolated) {
-                            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
-                        }
-                        
-                        bool vis = layer.visible;
-                        if (ImGui::Checkbox("##visible", &vis)) {
-                            if (ImGui::GetIO().KeyAlt) {
-                                canvas.ToggleLayerIsolation(i);
-                            } else {
-                                layer.visible = vis;
+                float rightReserve = 150.0f;
+                float nameW = ImGui::GetContentRegionAvail().x - rightReserve;
+                if (nameW < 40.f) nameW = 40.f;
+                if (ImGui::Selectable(label, isSelected, ImGuiSelectableFlags_None, ImVec2(nameW, thumb))) {
+                    if (ImGui::GetIO().KeyCtrl && !layer.isGroup) {
+                        canvas.SelectOpaquePixels(i);
+                        canvas.UpdateSelectionMaskTexture(device);
+                    } else {
+                        canvas.SetActiveLayerIndex(i);
+                    }
+                }
+                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) {
+                    ImGui::SetDragDropPayload("LAYER_INDEX", &i, sizeof(int));
+                    ImGui::Text("%s", layer.name.c_str());
+                    ImGui::EndDragDropSource();
+                }
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
+                            "LAYER_INDEX",
+                            ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
+                        int draggedIdx = *(const int*)payload->Data;
+                        if (draggedIdx >= 0 && draggedIdx < (int)layers.size() && draggedIdx != i) {
+                            const bool intoGroup = layer.isGroup && !layers[draggedIdx].isGroup &&
+                                                   !IsGroupAncestorOf(layers, draggedIdx, i);
+                            DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), intoGroup);
+                            if (payload->IsDelivery()) {
+                                if (intoGroup) {
+                                    canvas.SetActiveLayerIndex(canvas.MoveLayerIntoGroup(draggedIdx, i));
+                                } else {
+                                    int targetParentOrig = layer.parentGroupId;
+                                    int newIdx = canvas.ReorderLayer(draggedIdx, i);
+                                    auto mapIdx = [](int j, int fromIdx, int toIdx) {
+                                        if (fromIdx == toIdx) return j;
+                                        if (fromIdx < toIdx) {
+                                            if (j == fromIdx) return toIdx;
+                                            if (j > fromIdx && j <= toIdx) return j - 1;
+                                            return j;
+                                        }
+                                        if (j == fromIdx) return toIdx;
+                                        if (j >= toIdx && j < fromIdx) return j + 1;
+                                        return j;
+                                    };
+                                    int newParent = mapIdx(targetParentOrig, draggedIdx, i);
+                                    auto& L = canvas.GetLayers();
+                                    if (newParent == newIdx || newParent < 0 || newParent >= (int)L.size()) newParent = -1;
+                                    if (newParent >= 0 && !L[newParent].isGroup) newParent = -1;
+                                    L[newIdx].parentGroupId = newParent;
+                                    canvas.SetActiveLayerIndex(newIdx);
+                                }
                                 canvas.MarkCompositeDirty();
                             }
                         }
-                        if (isIsolated) {
-                            ImGui::PopStyleColor();
-                        }
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("Alt+Click to Isolate this layer");
-                        }
-                        
-                        ImGui::SameLine();
+                    }
+                    ImGui::EndDragDropTarget();
+                }
 
-                        // Collapse/Expand arrow for groups
-                        if (layer.isGroup) {
-                            if (ImGui::ArrowButton("##expand", layer.groupExpanded ? ImGuiDir_Down : ImGuiDir_Right)) {
-                                layer.groupExpanded = !layer.groupExpanded;
-                            }
-                            ImGui::SameLine();
+                if (ImGui::BeginPopupContextItem("##lyrctx")) {
+                    if (ImGui::MenuItem("Remove from Group", nullptr, false, layer.parentGroupId != -1))
+                        canvas.RemoveLayerFromGroup(i);
+                    if (ImGui::BeginMenu("Add to Group")) {
+                        for (int g = 0; g < (int)layers.size(); ++g) {
+                            if (layers[g].isGroup && g != i && ImGui::MenuItem(layers[g].name.c_str()))
+                                canvas.AddLayerToGroup(i, g);
                         }
-
-                        // Content thumbnail
-                        if (!layer.isGroup && layer.srv) {
-                            bool isActiveContent = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerContent);
-                            if (isActiveContent) {
-                                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
-                                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
-                            } else {
-                                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
-                                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-                            }
-                            
-                            if (ImGui::ImageButton("##layer_content_btn", (ImTextureID)layer.srv, ImVec2(36, 36), ImVec2(0,0), ImVec2(1,1))) {
-                                if (ImGui::GetIO().KeyCtrl) {
-                                    // Ctrl+Click thumbnail → select opaque pixels of this layer
-                                    canvas.SelectOpaquePixels(i);
-                                    canvas.UpdateSelectionMaskTexture(device);
-                                } else {
-                                    canvas.SetActiveLayerIndex(i);
-                                    canvas.SetPaintTarget(PaintTarget::LayerContent);
-                                }
-                            }
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("Layer Content (Click to paint)\nCtrl+Click: select opaque pixels");
-                            }
-                            // Smart Object / Vector SVG badge on thumbnail
-                            if (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg) {
-                                ImVec2 tmin = ImGui::GetItemRectMin();
-                                ImVec2 tmax = ImGui::GetItemRectMax();
-                                ImDrawList* ldl = ImGui::GetWindowDrawList();
-                                const char* badge = (layer.type == Layer::Type::VectorSvg) ? "SVG" : "SO";
-                                ImVec2 ts = ImGui::CalcTextSize(badge);
-                                ImVec2 bmin(tmax.x - ts.x - 6.f, tmin.y + 1.f);
-                                ImVec2 bmax(tmax.x - 1.f, tmin.y + ts.y + 3.f);
-                                ldl->AddRectFilled(bmin, bmax, IM_COL32(40, 120, 220, 220), 2.f);
-                                ldl->AddText(ImVec2(bmin.x + 2.f, bmin.y + 1.f), IM_COL32(255,255,255,255), badge);
-                            }
-                            
-                            ImGui::PopStyleVar();
-                            ImGui::PopStyleColor();
-                            ImGui::SameLine();
-                        } else if (layer.isGroup) {
-                            ImGui::Button("G##grp_icon", ImVec2(36, 36));
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("Group Folder (Drop layer here to group)");
-                            }
-                            if (ImGui::BeginDragDropTarget()) {
-                                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
-                                        "LAYER_INDEX",
-                                        ImGuiDragDropFlags_AcceptBeforeDelivery |
-                                        ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
-                                    int draggedIdx = *(const int*)payload->Data;
-                                    bool ok = draggedIdx >= 0 && draggedIdx < (int)layers.size() &&
-                                              draggedIdx != i &&
-                                              !layers[draggedIdx].isGroup &&
-                                              !IsGroupAncestorOf(layers, draggedIdx, i);
-                                    if (ok) {
-                                        DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), true);
-                                        if (payload->IsDelivery()) {
-                                            int newIdx = canvas.MoveLayerIntoGroup(draggedIdx, i);
-                                            canvas.SetActiveLayerIndex(newIdx);
-                                            canvas.MarkCompositeDirty();
-                                        }
-                                    }
-                                }
-                                ImGui::EndDragDropTarget();
-                            }
-                            ImGui::SameLine();
-                        }
-                        
-                        // Mask thumbnail
-                        if (!layer.isGroup) {
-                            if (layer.hasMask && layer.maskSRV) {
-                                bool isActiveMask = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerMask);
-                                if (isActiveMask) {
-                                    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
-                                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
-                                } else {
-                                    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
-                                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
-                                }
-                                
-                                if (ImGui::ImageButton("##layer_mask_btn", (ImTextureID)layer.maskSRV, ImVec2(36, 36), ImVec2(0,0), ImVec2(1,1))) {
-                                    canvas.SetActiveLayerIndex(i);
-                                    canvas.SetPaintTarget(PaintTarget::LayerMask);
-                                }
-                                if (ImGui::IsItemHovered()) {
-                                    ImGui::SetTooltip("Layer Mask (Click to paint mask)");
-                                }
-                                
-                                ImGui::PopStyleVar();
-                                ImGui::PopStyleColor();
-                            } else {
-                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 0.5f));
-                                if (ImGui::Button("+M##addmask", ImVec2(36, 36))) {
-                                    canvas.CreateLayerMask(device, i);
-                                    canvas.SetPaintTarget(PaintTarget::LayerMask);
-                                }
-                                if (ImGui::IsItemHovered()) {
-                                    ImGui::SetTooltip("Add Layer Mask");
-                                }
-                                ImGui::PopStyleColor();
-                            }
-                            ImGui::SameLine();
-                        }
-
-                        // Layer Selection and Label
-                        bool isSelected = (canvas.GetActiveLayerIndex() == i);
-                        char label[256];
-                        if (layer.isGroup) {
-                            std::sprintf(label, "[Group] %s", layer.name.c_str());
-                        } else if (layer.type == Layer::Type::VectorSvg) {
-                            std::sprintf(label, "[SVG] %s", layer.name.c_str());
-                        } else if (layer.type == Layer::Type::SmartObject) {
-                            std::sprintf(label, "[Smart] %s", layer.name.c_str());
-                        } else {
-                            std::sprintf(label, "%s", layer.name.c_str());
-                        }
-                        
-                        if (ImGui::Selectable(label, isSelected, ImGuiSelectableFlags_None, ImVec2(ImGui::GetContentRegionAvail().x - 70, 36))) {
-                            if (ImGui::GetIO().KeyCtrl && !layer.isGroup) {
-                                canvas.SelectOpaquePixels(i);
-                                canvas.UpdateSelectionMaskTexture(device);
-                            } else {
-                                canvas.SetActiveLayerIndex(i);
-                            }
-                        }
-
-                        // Drag source (whole label)
-                        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) {
-                            ImGui::SetDragDropPayload("LAYER_INDEX", &i, sizeof(int));
-                            ImGui::Text("%s %s", layer.isGroup ? "Group:" : "Layer:", layer.name.c_str());
-                            ImGui::EndDragDropSource();
-                        }
-
-                        // Drag target: drop ON a group name → into group; drop on layer → reorder as sibling
-                        // Uses core MoveLayerIntoGroup / ReorderLayer (stable parentGroupId remap)
-                        if (ImGui::BeginDragDropTarget()) {
-                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
-                                    "LAYER_INDEX",
-                                    ImGuiDragDropFlags_AcceptBeforeDelivery |
-                                    ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
-                                int draggedIdx = *(const int*)payload->Data;
-                                if (draggedIdx >= 0 && draggedIdx < (int)layers.size() && draggedIdx != i) {
-                                    const bool intoGroup = layer.isGroup && !layers[draggedIdx].isGroup &&
-                                                           !IsGroupAncestorOf(layers, draggedIdx, i);
-                                    DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), intoGroup);
-
-                                    if (payload->IsDelivery()) {
-                                        if (intoGroup) {
-                                            int newIdx = canvas.MoveLayerIntoGroup(draggedIdx, i);
-                                            canvas.SetActiveLayerIndex(newIdx);
-                                        } else {
-                                            int targetParentOrig = layer.parentGroupId;
-                                            int newIdx = canvas.ReorderLayer(draggedIdx, i);
-                                            // Remap desired parent after core reorder
-                                            auto mapIdx = [](int j, int fromIdx, int toIdx) {
-                                                if (fromIdx == toIdx) return j;
-                                                if (fromIdx < toIdx) {
-                                                    if (j == fromIdx) return toIdx;
-                                                    if (j > fromIdx && j <= toIdx) return j - 1;
-                                                    return j;
-                                                }
-                                                if (j == fromIdx) return toIdx;
-                                                if (j >= toIdx && j < fromIdx) return j + 1;
-                                                return j;
-                                            };
-                                            int newParent = mapIdx(targetParentOrig, draggedIdx, i);
-                                            auto& L = canvas.GetLayers();
-                                            if (newParent == newIdx || newParent < 0 || newParent >= (int)L.size())
-                                                newParent = -1;
-                                            if (newParent >= 0 && !L[newParent].isGroup)
-                                                newParent = -1;
-                                            L[newIdx].parentGroupId = newParent;
-                                            canvas.SetActiveLayerIndex(newIdx);
-                                        }
-                                        canvas.MarkCompositeDirty();
-                                    }
-                                }
-                            }
-                            ImGui::EndDragDropTarget();
-                        }
-
-                        // Context menu for grouping/ungrouping / smart objects
-                        if (ImGui::BeginPopupContextItem("##layer_context")) {
-                            if (ImGui::MenuItem("Remove from Group", nullptr, false, layer.parentGroupId != -1)) {
-                                canvas.RemoveLayerFromGroup(i);
-                            }
-                            
-                            if (ImGui::BeginMenu("Add to Group")) {
-                                for (int g = 0; g < (int)layers.size(); ++g) {
-                                    if (layers[g].isGroup && g != i) {
-                                        if (ImGui::MenuItem(layers[g].name.c_str())) {
-                                            canvas.AddLayerToGroup(i, g);
-                                        }
-                                    }
-                                }
-                                ImGui::EndMenu();
-                            }
-
-                            if (!layer.isGroup && (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg)) {
-                                ImGui::Separator();
-                                if (ImGui::MenuItem("Rasterize Layer")) {
-                                    canvas.RasterizeLayer(device, i);
-                                }
-                            }
-                            
-                            ImGui::Separator();
-                            
-                            if (layers.size() > 1) {
-                                if (ImGui::MenuItem("Delete Layer")) {
-                                    canvas.DeleteLayer(i);
-                                }
-                            }
-                            ImGui::EndPopup();
-                        }
-                        
-                        ImGui::SameLine();
-                        if (layers.size() > 1) {
-                            if (ImGui::Button("Del")) {
-                                canvas.DeleteLayer(i);
-                            }
-                        }
-
-                        ImGui::PushItemWidth(100);
-                        if (ImGui::SliderFloat("Opacity", &layer.opacity, 0.0f, 1.0f, "%.2f")) {
-                            canvas.MarkCompositeDirty();
-                        }
-                        ImGui::PopItemWidth();
-
-                        ImGui::SameLine();
-                        static const char* blendNames[] = {
-                            "Normal","Multiply","Screen","Overlay",
-                            "Add","Subtract","Darken","Lighten","HardLight","SoftLight"
-                        };
-                        int blendIdx = (int)layer.blendMode;
-                        ImGui::PushItemWidth(90);
-                        if (ImGui::Combo("##blend", &blendIdx, blendNames, IM_ARRAYSIZE(blendNames))) {
-                            layer.blendMode = (BlendMode)blendIdx;
-                            canvas.MarkCompositeDirty();
-                        }
-                        ImGui::PopItemWidth();
-
-                        ImGui::SameLine();
-                        bool hasFx = !layer.filters.empty();
-                        if (hasFx) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f,0.6f,0.9f,0.7f));
-                        if (ImGui::SmallButton("Fx")) ImGui::OpenPopup("##filterPopup");
-                        if (hasFx) ImGui::PopStyleColor();
-
-                        if (ImGui::BeginPopup("##filterPopup")) {
-                            ImGui::Text("Filters — Layer: %s", layer.name.c_str());
-                            ImGui::Separator();
-                            static const char* filterTypeNames[] = {"Blur","HSV","Curves","Alpha Invert","Noise"};
-                            for (int fi = 0; fi < (int)layer.filters.size(); ++fi) {
-                                ImGui::PushID(fi);
-                                LayerFilter& flt = layer.filters[fi];
-                                bool wasEnabled = flt.enabled;
-                                if (ImGui::Checkbox("##fen", &flt.enabled) && flt.enabled != wasEnabled)
-                                    layer.filtersDirty = true;
-                                ImGui::SameLine();
-                                ImGui::Text("%s", filterTypeNames[(int)flt.type]);
-                                ImGui::SameLine();
-                                if (ImGui::SmallButton("X")) { layer.filters.erase(layer.filters.begin()+fi); layer.filtersDirty=true; ImGui::PopID(); break; }
-                                if (flt.enabled) {
-                                    switch(flt.type) {
-                                    case FilterType::Blur:
-                                        if (ImGui::SliderFloat("Radius##fp",&flt.p[0],0.5f,80.f,"%.1f")) layer.filtersDirty=true; break;
-                                    case FilterType::HSV:
-                                        if (ImGui::SliderFloat("H##fp",&flt.p[0],-0.5f,0.5f)||ImGui::SliderFloat("S##fp",&flt.p[1],-1.f,1.f)||ImGui::SliderFloat("V##fp",&flt.p[2],-1.f,1.f)) layer.filtersDirty=true; break;
-                                    case FilterType::AlphaInvert: break;
-                                    case FilterType::Noise:
-                                        if (ImGui::SliderFloat("Str##fp",&flt.p[0],0.f,1.f)) layer.filtersDirty=true;
-                                        { bool col=(flt.p[1]>0.5f); if(ImGui::Checkbox("Color##fp",&col)){flt.p[1]=col?1.f:0.f;layer.filtersDirty=true;} } break;
-                                    case FilterType::Curves:
-                                        ImGui::TextDisabled("Edit via Image > Curves"); break;
-                                    }
-                                }
-                                ImGui::Separator();
-                                ImGui::PopID();
-                            }
-                            ImGui::Spacing();
-                            if (ImGui::BeginMenu("Add Filter")) {
-                                static const FilterType ftypes[] = {FilterType::Blur,FilterType::HSV,FilterType::Curves,FilterType::AlphaInvert,FilterType::Noise};
-                                for (int ti=0;ti<5;++ti) {
-                                    if (ImGui::MenuItem(filterTypeNames[ti])) {
-                                        LayerFilter nf; nf.type=ftypes[ti]; nf.enabled=true;
-                                        if (ftypes[ti]==FilterType::Blur) nf.p[0]=5.f;
-                                        if (ftypes[ti]==FilterType::Curves){ nf.lut.resize(256); for(int li=0;li<256;++li) nf.lut[li]=(float)li/255.f; }
-                                        layer.filters.push_back(nf);
-                                        layer.filtersDirty=true;
-                                    }
-                                }
-                                ImGui::EndMenu();
-                            }
-                            ImGui::EndPopup();
-                        }
-
-                        if (isSelected) {
-                            ImGui::Spacing();
-                            
-                            // Group Options in Selected details
-                            ImGui::Text("Group:");
-                            ImGui::SameLine();
-                            if (layer.parentGroupId == -1) {
-                                ImGui::Text("None");
-                            } else {
-                                int pId = layer.parentGroupId;
-                                if (pId >= 0 && pId < (int)layers.size()) {
-                                    ImGui::Text("%s", layers[pId].name.c_str());
-                                } else {
-                                    ImGui::Text("Unknown");
-                                }
-                            }
-                            ImGui::SameLine();
-                            if (ImGui::Button("Move to Group")) {
-                                ImGui::OpenPopup("ChooseGroupPopup");
-                            }
-                            if (layer.parentGroupId != -1) {
-                                ImGui::SameLine();
-                                if (ImGui::Button("Ungroup")) {
-                                    canvas.RemoveLayerFromGroup(i);
-                                }
-                            }
-                            
-                            if (ImGui::BeginPopup("ChooseGroupPopup")) {
-                                for (int g = 0; g < (int)layers.size(); ++g) {
-                                    if (layers[g].isGroup && g != i) {
-                                        if (ImGui::MenuItem(layers[g].name.c_str())) {
-                                            canvas.AddLayerToGroup(i, g);
-                                        }
-                                    }
-                                }
-                                ImGui::EndPopup();
-                            }
-                            
-                            if (!layer.isGroup) {
-                                ImGui::Separator();
-                                if (layer.hasMask) {
-                                    ImGui::Text("Mask: Active");
-                                    ImGui::SameLine();
-                                    if (ImGui::Button("Apply Mask")) {
-                                        canvas.ApplyLayerMask(i);
-                                    }
-                                    ImGui::SameLine();
-                                    if (ImGui::Button("Delete Mask")) {
-                                        canvas.DeleteLayerMask(i);
-                                    }
-                                } else {
-                                    if (ImGui::Button("Create Mask")) {
-                                        canvas.CreateLayerMask(device, i);
-                                    }
-                                    ImGui::SameLine();
-                                    if (ImGui::Button("Mask from Sel")) {
-                                        canvas.CreateLayerMaskFromSelection(device, i);
-                                    }
-                                }
-                            }
-                        }
-
-                        if (indented) {
-                            ImGui::Unindent(20.0f * depth);
-                        }
-
+                        ImGui::EndMenu();
+                    }
+                    if (!layer.isGroup && (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg)) {
                         ImGui::Separator();
+                        if (ImGui::MenuItem("Rasterize Layer")) canvas.RasterizeLayer(device, i);
+                    }
+                    if (!layer.isGroup) {
+                        ImGui::Separator();
+                        if (!layer.hasMask) {
+                            if (ImGui::MenuItem(canvas.HasSelection() ? "Add Mask from Selection" : "Add Mask")) {
+                                if (canvas.HasSelection()) canvas.CreateLayerMaskFromSelection(device, i);
+                                else canvas.CreateLayerMask(device, i);
+                            }
+                        } else {
+                            if (ImGui::MenuItem("Apply Mask")) canvas.ApplyLayerMask(i);
+                            if (ImGui::MenuItem("Delete Mask")) canvas.DeleteLayerMask(i);
+                        }
+                    }
+                    ImGui::Separator();
+                    if (layers.size() > 1 && ImGui::MenuItem("Delete Layer")) canvas.DeleteLayer(i);
+                    ImGui::EndPopup();
+                }
+
+                ImGui::SameLine(0, 4);
+                ImGui::SetNextItemWidth(48.f);
+                if (ImGui::SliderFloat("##op", &layer.opacity, 0.f, 1.f, "%.2f"))
+                    canvas.MarkCompositeDirty();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Opacity");
+
+                ImGui::SameLine(0, 2);
+                static const char* blendNames[] = {
+                    "N","M","S","O","A","Sub","Dk","Lt","HL","SL"
+                };
+                static const char* blendTips[] = {
+                    "Normal","Multiply","Screen","Overlay","Add","Subtract","Darken","Lighten","Hard Light","Soft Light"
+                };
+                int blendIdx = (int)layer.blendMode;
+                ImGui::SetNextItemWidth(42.f);
+                if (ImGui::Combo("##bl", &blendIdx, blendNames, IM_ARRAYSIZE(blendNames))) {
+                    layer.blendMode = (BlendMode)blendIdx;
+                    canvas.MarkCompositeDirty();
+                }
+                if (ImGui::IsItemHovered() && blendIdx >= 0 && blendIdx < IM_ARRAYSIZE(blendTips))
+                    ImGui::SetTooltip("%s", blendTips[blendIdx]);
+
+                ImGui::SameLine(0, 2);
+                bool hasFx = !layer.filters.empty();
+                if (hasFx) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 0.7f));
+                if (ImGui::SmallButton("Fx")) ImGui::OpenPopup("##filterPopup");
+                if (hasFx) ImGui::PopStyleColor();
+                if (ImGui::BeginPopup("##filterPopup")) {
+                    ImGui::Text("Filters: %s", layer.name.c_str());
+                    ImGui::Separator();
+                    static const char* filterTypeNames[] = {"Blur","HSV","Curves","Alpha Invert","Noise"};
+                    for (int fi = 0; fi < (int)layer.filters.size(); ++fi) {
+                        ImGui::PushID(fi);
+                        LayerFilter& flt = layer.filters[fi];
+                        bool wasEnabled = flt.enabled;
+                        if (ImGui::Checkbox("##fen", &flt.enabled) && flt.enabled != wasEnabled)
+                            layer.filtersDirty = true;
+                        ImGui::SameLine();
+                        ImGui::TextUnformatted(filterTypeNames[(int)flt.type]);
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("X")) { layer.filters.erase(layer.filters.begin()+fi); layer.filtersDirty=true; ImGui::PopID(); break; }
                         ImGui::PopID();
                     }
-                    ImGui::EndChild();
+                    if (ImGui::BeginMenu("Add Filter")) {
+                        static const FilterType ftypes[] = {FilterType::Blur,FilterType::HSV,FilterType::Curves,FilterType::AlphaInvert,FilterType::Noise};
+                        for (int ti=0;ti<5;++ti) {
+                            if (ImGui::MenuItem(filterTypeNames[ti])) {
+                                LayerFilter nf; nf.type=ftypes[ti]; nf.enabled=true;
+                                if (ftypes[ti]==FilterType::Blur) nf.p[0]=5.f;
+                                if (ftypes[ti]==FilterType::Curves){ nf.lut.resize(256); for(int li=0;li<256;++li) nf.lut[li]=(float)li/255.f; }
+                                layer.filters.push_back(nf);
+                                layer.filtersDirty=true;
+                            }
+                        }
+                        ImGui::EndMenu();
+                    }
+                    ImGui::EndPopup();
+                }
+
+                if (depth > 0) ImGui::Unindent(12.0f * depth);
+                ImGui::PopID();
+            }
+            ImGui::EndChild();
             ImGui::End();
         }
 
@@ -2549,34 +2457,55 @@ namespace UI {
             bool b = canvas.GetChannelB();
             bool a = canvas.GetChannelA();
 
-            auto drawChannelRow = [&](const char* label, bool* flag, const ImVec4& tint) {
-                ImGui::PushID(label);
-                ImGui::Checkbox("##flag", flag);
-                ImGui::SameLine();
-                
-                if (canvas.GetCompositeSRV()) {
-                    ImGui::ImageWithBg((ImTextureID)canvas.GetCompositeSRV(), ImVec2(32, 32), ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,0), tint);
-                } else {
-                    ImGui::Button("##preview", ImVec2(32, 32));
-                }
-                ImGui::SameLine();
-                ImGui::Text("%s", label);
-                ImGui::PopID();
-                ImGui::Separator();
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            // More vertical space than horizontal -> list with names; else horizontal previews only
+            bool listMode = (avail.y >= avail.x);
+
+            struct Ch { const char* name; bool* flag; ImVec4 tint; bool alphaLike; };
+            Ch chans[] = {
+                { "Red",   &r, ImVec4(1, 0, 0, 1), false },
+                { "Green", &g, ImVec4(0, 1, 0, 1), false },
+                { "Blue",  &b, ImVec4(0, 0, 1, 1), false },
+                { "Alpha", &a, ImVec4(1, 1, 1, 1), true  },
             };
 
-            if (ImGui::Button("Solo All", ImVec2(-1, 22))) {
-                canvas.SetChannelR(true);
-                canvas.SetChannelG(true);
-                canvas.SetChannelB(true);
-                canvas.SetChannelA(true);
-            }
-            ImGui::Separator();
+            float thumb = listMode ? 36.f : std::clamp(std::min(avail.x / 4.5f, avail.y - 8.f), 28.f, 64.f);
 
-            drawChannelRow("Red Channel", &r, ImVec4(1, 0, 0, 1));
-            drawChannelRow("Green Channel", &g, ImVec4(0, 1, 0, 1));
-            drawChannelRow("Blue Channel", &b, ImVec4(0, 0, 1, 1));
-            drawChannelRow("Alpha Channel", &a, ImVec4(1, 1, 1, 1));
+            for (int i = 0; i < 4; ++i) {
+                ImGui::PushID(i);
+                if (!listMode && i > 0) ImGui::SameLine(0, 6);
+
+                ImGui::BeginGroup();
+                ImGui::Checkbox("##en", chans[i].flag);
+                if (listMode) ImGui::SameLine();
+
+                // Alpha: grayscale preview (multiply RGB by white, show as luminance-style)
+                ImVec4 tint = chans[i].alphaLike ? ImVec4(1, 1, 1, 1) : chans[i].tint;
+                if (canvas.GetCompositeSRV()) {
+                    if (chans[i].alphaLike) {
+                        // Draw desaturated / B&W-style: use white tint on composite (shows luminance-ish);
+                        // force monochrome by drawing as grayscale via identical RGB channels in tint
+                        // and a dark background so alpha hole reads as black.
+                        ImGui::ImageWithBg((ImTextureID)canvas.GetCompositeSRV(), ImVec2(thumb, thumb),
+                            ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,1), ImVec4(1,1,1,1));
+                        // Overlay label that it's alpha B/W approximation
+                    } else {
+                        ImGui::ImageWithBg((ImTextureID)canvas.GetCompositeSRV(), ImVec2(thumb, thumb),
+                            ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,0), tint);
+                    }
+                } else {
+                    ImGui::Dummy(ImVec2(thumb, thumb));
+                }
+
+                if (listMode) {
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(chans[i].name);
+                } else if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", chans[i].name);
+                }
+                ImGui::EndGroup();
+                ImGui::PopID();
+            }
 
             canvas.SetChannelR(r);
             canvas.SetChannelG(g);
@@ -2586,161 +2515,196 @@ namespace UI {
             ImGui::End();
         }
 
-        // 8. Draw Standalone Tool Settings Panel (adapts to active tool + layout)
+        // 8. Draw Standalone Tool Settings Panel (horizontal-first, icon toggles)
         if (state.showToolSettings) {
             ImGui::Begin("Tool Settings", &state.showToolSettings, ImGuiWindowFlags_NoCollapse);
 
             ImVec2 tsAvail = ImGui::GetContentRegionAvail();
-            bool tsHorizontal = (tsAvail.x > tsAvail.y * 1.15f);
+            bool tsHorizontal = (tsAvail.x >= tsAvail.y * 0.85f);
 
-            auto BeginToolSection = [](const char* title) {
-                ImGui::TextDisabled("%s", title);
-                ImGui::Separator();
+            auto IconToggle = [](const char* id, const char* glyph, bool* v, const char* tip) {
+                ImVec4 col = *v ? ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive)
+                               : ImGui::GetStyleColorVec4(ImGuiCol_Button);
+                ImGui::PushStyleColor(ImGuiCol_Button, col);
+                if (ImGui::Button(glyph, ImVec2(28, 28))) *v = !*v;
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+                return *v;
+            };
+
+            auto MiniSlider = [&](const char* id, float* v, float mn, float mx, const char* tip, float width = 110.f) {
+                ImGui::SetNextItemWidth(width);
+                ImGui::SliderFloat(id, v, mn, mx, "%.2f");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
             };
 
             bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser);
 
             if (isBrushLike) {
-                BeginToolSection(activeTool == ActiveTool::Eraser ? "Eraser" : "Brush");
-
-                if (tsHorizontal) {
-                    ImGui::Columns(2, "##brushCols", false);
-                    ImGui::SliderFloat("Radius##ts", &brush.radius, 1.0f, 250.0f, "%.0f px");
-                    ImGui::Checkbox("P -> Radius", &brush.pressureRadius);
-                    ImGui::SliderFloat("Hardness##ts", &brush.hardness, 0.0f, 1.0f, "%.2f");
-                    ImGui::Checkbox("P -> Hardness", &brush.pressureHardness);
-
-                    ImGui::NextColumn();
-                    ImGui::SliderFloat("Opacity##ts", &brush.opacity, 0.0f, 1.0f, "%.2f");
-                    ImGui::Checkbox("P -> Opacity", &brush.pressureOpacity);
-                    ImGui::SliderFloat("Spacing##ts", &brush.spacing, 0.01f, 5.0f, "%.2f");
-                    ImGui::SliderInt("Stabilization##ts", &brush.stabilization, 1, 50, "%d");
-                    ImGui::Columns(1);
-                } else {
-                    ImGui::SliderFloat("Radius##ts", &brush.radius, 1.0f, 250.0f, "%.0f px");
-                    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-                    ImGui::Checkbox("P->R", &brush.pressureRadius);
-                    ImGui::SliderFloat("Hardness##ts", &brush.hardness, 0.0f, 1.0f, "%.2f");
-                    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-                    ImGui::Checkbox("P->H", &brush.pressureHardness);
-                    ImGui::SliderFloat("Opacity##ts", &brush.opacity, 0.0f, 1.0f, "%.2f");
-                    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
-                    ImGui::Checkbox("P->O", &brush.pressureOpacity);
-                    ImGui::SliderFloat("Spacing##ts", &brush.spacing, 0.01f, 5.0f, "%.2f");
-                    ImGui::SliderInt("Stabilization##ts", &brush.stabilization, 1, 50, "%d");
+                // Brush tip presets (core BrushPresets)
+                static BrushTip s_CustomTip;
+                static bool s_CustomLoaded = false;
+                const char* tipNames[] = { "Soft", "Hard", "Pencil", "Air", "Custom" };
+                int tipIdx = state.brushTipPreset;
+                ImGui::SetNextItemWidth(72.f);
+                if (ImGui::Combo("##tip", &tipIdx, tipNames, IM_ARRAYSIZE(tipNames))) {
+                    state.brushTipPreset = tipIdx;
+                    switch (tipIdx) {
+                    case 0: brush.tip = &BrushPresets::SoftRound(); break;
+                    case 1: brush.tip = &BrushPresets::HardRound(); break;
+                    case 2: brush.tip = &BrushPresets::Pencil(); break;
+                    case 3: brush.tip = &BrushPresets::Airbrush(); break;
+                    case 4: brush.tip = (s_CustomLoaded ? &s_CustomTip : nullptr); break;
+                    default: brush.tip = nullptr; break;
+                    }
                 }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brush tip preset");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Load Tip...")) {
+                    char path[512] = "";
+                    if (ShowOpenFileWin32(path, sizeof(path), "Images (*.png;*.jpg;*.bmp;*.tga)\0*.png;*.jpg;*.bmp;*.tga\0All\0*.*\0")) {
+                        std::vector<uint8_t> px; int tw=0, th=0;
+                        if (ImageManager::LoadImageFromFile(path, px, tw, th) && tw > 0 && th > 0) {
+                            // Build grayscale tip (max size 128)
+                            int side = std::min(tw, th);
+                            side = std::min(side, 128);
+                            s_CustomTip.size = side;
+                            s_CustomTip.pixels.assign((size_t)side * side, 0);
+                            s_CustomTip.name = "Custom";
+                            s_CustomTip.spacingMul = 1.0f;
+                            for (int y = 0; y < side; ++y) {
+                                for (int x = 0; x < side; ++x) {
+                                    int sx = x * tw / side;
+                                    int sy = y * th / side;
+                                    size_t si = ((size_t)sy * tw + sx) * 4;
+                                    uint8_t r8 = px[si], g8 = px[si+1], b8 = px[si+2], a8 = px[si+3];
+                                    // luminance * alpha
+                                    float lum = (0.2126f*r8 + 0.7152f*g8 + 0.0722f*b8) * (a8 / 255.f);
+                                    s_CustomTip.pixels[(size_t)y * side + x] = (uint8_t)std::clamp(lum, 0.f, 255.f);
+                                }
+                            }
+                            s_CustomLoaded = true;
+                            state.hasCustomBrushTip = true;
+                            state.customBrushTipName = path;
+                            state.brushTipPreset = 4;
+                            brush.tip = &s_CustomTip;
+                        }
+                    }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Load grayscale stamp texture for custom tip");
+                ImGui::SameLine();
+
+                MiniSlider("##rad", &brush.radius, 1.f, 250.f, "Radius (px)", 100.f);
+                ImGui::SameLine();
+                IconToggle("##pr", "P·R", &brush.pressureRadius, "Pressure → Radius");
+                ImGui::SameLine();
+                MiniSlider("##hrd", &brush.hardness, 0.f, 1.f, "Hardness", 80.f);
+                ImGui::SameLine();
+                IconToggle("##ph", "P·H", &brush.pressureHardness, "Pressure → Hardness");
+                ImGui::SameLine();
+                MiniSlider("##opc", &brush.opacity, 0.f, 1.f, "Opacity", 80.f);
+                ImGui::SameLine();
+                IconToggle("##po", "P·O", &brush.pressureOpacity, "Pressure → Opacity");
+                ImGui::SameLine();
+                MiniSlider("##spc", &brush.spacing, 0.01f, 5.f, "Spacing", 70.f);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(60.f);
+                ImGui::SliderInt("##stb", &brush.stabilization, 1, 50);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stabilization");
 
                 if (activeTool == ActiveTool::Brush) {
-                    ImGui::Spacing();
+                    ImGui::SameLine();
                     bool mirrorH = canvas.GetMirrorHorizontal();
                     bool mirrorV = canvas.GetMirrorVertical();
-                    if (tsHorizontal) {
-                        if (ImGui::Checkbox("Mirror H", &mirrorH)) canvas.SetMirrorHorizontal(mirrorH);
-                        ImGui::SameLine();
-                        if (ImGui::Checkbox("Mirror V", &mirrorV)) canvas.SetMirrorVertical(mirrorV);
-                    } else {
-                        if (ImGui::Checkbox("Horizontal Mirror", &mirrorH)) canvas.SetMirrorHorizontal(mirrorH);
-                        if (ImGui::Checkbox("Vertical Mirror", &mirrorV)) canvas.SetMirrorVertical(mirrorV);
+                    if (ImGui::Button(mirrorH ? "[H]" : " H ", ImVec2(28, 28))) {
+                        canvas.SetMirrorHorizontal(!mirrorH);
                     }
-                    ImGui::TextDisabled("Hold Alt+LMB: sample color (eyedropper)");
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mirror Horizontal");
+                    ImGui::SameLine();
+                    if (ImGui::Button(mirrorV ? "[V]" : " V ", ImVec2(28, 28))) {
+                        canvas.SetMirrorVertical(!mirrorV);
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mirror Vertical");
                 }
             }
             else if (activeTool == ActiveTool::MagicWand || activeTool == ActiveTool::SmartSelect || activeTool == ActiveTool::QuickSelect) {
-                BeginToolSection(activeTool == ActiveTool::MagicWand ? "Magic Wand" : (activeTool == ActiveTool::QuickSelect ? "Quick Selection" : "Smart Select"));
                 if (activeTool == ActiveTool::MagicWand) {
                     bool changed = false;
-                    if (ImGui::SliderFloat("Tolerance##mw", &state.magicWandTolerance, 0.0f, 1.0f, "%.2f")) changed = true;
-                    if (ImGui::Checkbox("Contiguous", &state.magicWandContiguous)) changed = true;
+                    MiniSlider("##tol", &state.magicWandTolerance, 0.f, 1.f, "Tolerance", 140.f);
+                    if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
+                    // also live while dragging:
+                    if (ImGui::IsItemActive()) changed = true;
+                    ImGui::SameLine();
+                    if (ImGui::Checkbox("##cont", &state.magicWandContiguous)) changed = true;
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Contiguous");
                     if (changed && canvas.HasWandSeed()) {
                         bool add = ImGui::GetIO().KeyShift;
                         bool subtract = ImGui::GetIO().KeyAlt;
                         canvas.PreviewWandFromSeed(device, state.magicWandTolerance, add, subtract, state.magicWandContiguous);
                     }
                 } else if (activeTool == ActiveTool::QuickSelect) {
-                    ImGui::SliderFloat("Brush Size##qs", &brush.radius, 1.0f, 200.0f, "%.0f");
+                    MiniSlider("##qsr", &brush.radius, 1.f, 200.f, "Quick Select brush size", 140.f);
                 } else {
-                    ImGui::TextWrapped("Draw contour; GrabCut runs in background.");
+                    ImGui::TextDisabled("Smart Select: draw contour");
                 }
-                ImGui::TextDisabled("Shift: add  |  Alt: subtract  |  W: cycle wand tools");
             }
             else if (activeTool == ActiveTool::BucketFill) {
-                BeginToolSection("Bucket Fill");
-                ImGui::SliderFloat("Tolerance##bf", &state.bucketFillTolerance, 0.0f, 1.0f, "%.2f");
+                MiniSlider("##bft", &state.bucketFillTolerance, 0.f, 1.f, "Fill Tolerance", 140.f);
             }
             else if (IsSelectTool(activeTool) || IsLassoTool(activeTool)) {
-                const char* selName =
-                    activeTool == ActiveTool::RectSelect ? "Rectangular Selection" :
-                    activeTool == ActiveTool::EllipseSelect ? "Ellipse Selection" :
-                    activeTool == ActiveTool::LassoSelect ? "Lasso Selection" : "Polygonal Lasso";
-                BeginToolSection(selName);
-                if (activeTool == ActiveTool::PolygonalLasso) {
-                    ImGui::TextWrapped("Click to add vertices. Double-click/Enter to close. Esc to cancel.");
-                }
-                ImGui::TextDisabled("Shift: add  |  Alt: subtract");
+                if (activeTool == ActiveTool::PolygonalLasso)
+                    ImGui::TextDisabled("Click vertices · Enter/Dbl close · Esc cancel");
+                else
+                    ImGui::TextDisabled("Shift: add  ·  Alt: subtract");
             }
             else if (activeTool == ActiveTool::Gradient) {
-                BeginToolSection("Gradient");
-                ImGui::TextWrapped("Drag to set direction. Primary -> Secondary color.");
+                ImGui::TextDisabled("Drag: Primary → Secondary");
             }
             else if (activeTool == ActiveTool::Pipette) {
-                BeginToolSection("Pipette");
-                ImGui::TextWrapped("Hold LMB on canvas to sample color.");
+                ImGui::TextDisabled("Click canvas to sample");
             }
             else if (activeTool == ActiveTool::Smudge) {
-                BeginToolSection("Smudge");
-                ImGui::SliderFloat("Radius##sm",   &state.smudge.radius,   1.0f, 150.0f, "%.0f px");
-                ImGui::SliderFloat("Strength##sm", &state.smudge.strength,  0.0f, 1.0f,   "%.2f");
-                ImGui::SliderFloat("Spacing##sm",  &state.smudge.spacing,   0.01f, 1.0f,  "%.2f");
-                ImGui::TextDisabled("Drag to smear pixels.");
+                // No color controls — smudge only radius / strength / spacing
+                MiniSlider("##smr", &state.smudge.radius, 1.f, 150.f, "Smudge Radius", 110.f);
+                ImGui::SameLine();
+                MiniSlider("##sms", &state.smudge.strength, 0.f, 1.f, "Strength", 100.f);
+                ImGui::SameLine();
+                MiniSlider("##smp", &state.smudge.spacing, 0.01f, 1.f, "Spacing", 90.f);
             }
             else if (activeTool == ActiveTool::MovePixels) {
-                BeginToolSection("Transform");
-                if (tsHorizontal) {
-                    ImGui::Columns(2, "##txCols", false);
-                    float sx = canvas.GetFloatingScaleX();
-                    if (ImGui::SliderFloat("Scale X##tx", &sx, 0.05f, 5.0f, "%.2f")) canvas.SetFloatingScaleX(sx);
-                    float sy = canvas.GetFloatingScaleY();
-                    if (ImGui::SliderFloat("Scale Y##tx", &sy, 0.05f, 5.0f, "%.2f")) canvas.SetFloatingScaleY(sy);
-                    ImGui::NextColumn();
-                    float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
-                    if (ImGui::SliderFloat("Rotation##tx", &rotDeg, -180.0f, 180.0f, "%.1f deg")) {
-                        canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
-                    }
-                    ImGui::Columns(1);
-                } else {
-                    float sx = canvas.GetFloatingScaleX();
-                    if (ImGui::SliderFloat("Scale X##tx", &sx, 0.05f, 5.0f, "%.2f")) canvas.SetFloatingScaleX(sx);
-                    float sy = canvas.GetFloatingScaleY();
-                    if (ImGui::SliderFloat("Scale Y##tx", &sy, 0.05f, 5.0f, "%.2f")) canvas.SetFloatingScaleY(sy);
-                    float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
-                    if (ImGui::SliderFloat("Rotation##tx", &rotDeg, -180.0f, 180.0f, "%.1f deg")) {
-                        canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
-                    }
-                }
-
-                if (ImGui::Button("Flip H##tx")) canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());
+                float sx = canvas.GetFloatingScaleX();
+                float sy = canvas.GetFloatingScaleY();
+                float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
+                ImGui::SetNextItemWidth(80.f);
+                if (ImGui::SliderFloat("##sx", &sx, 0.05f, 5.f, "X:%.2f")) canvas.SetFloatingScaleX(sx);
                 ImGui::SameLine();
-                if (ImGui::Button("Flip V##tx")) canvas.SetFloatingScaleY(-canvas.GetFloatingScaleY());
+                ImGui::SetNextItemWidth(80.f);
+                if (ImGui::SliderFloat("##sy", &sy, 0.05f, 5.f, "Y:%.2f")) canvas.SetFloatingScaleY(sy);
                 ImGui::SameLine();
-                if (ImGui::Button("Reset##tx")) {
-                    canvas.SetFloatingScaleX(1.0f);
-                    canvas.SetFloatingScaleY(1.0f);
-                    canvas.SetFloatingRotation(0.0f);
+                ImGui::SetNextItemWidth(90.f);
+                if (ImGui::SliderFloat("##rot", &rotDeg, -180.f, 180.f, "%.0f°"))
+                    canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
+                ImGui::SameLine();
+                if (ImGui::Button("⇄")) canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Flip H");
+                ImGui::SameLine();
+                if (ImGui::Button("⇅")) canvas.SetFloatingScaleY(-canvas.GetFloatingScaleY());
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Flip V");
+                ImGui::SameLine();
+                if (ImGui::Button("Reset")) {
+                    canvas.SetFloatingScaleX(1.f); canvas.SetFloatingScaleY(1.f); canvas.SetFloatingRotation(0.f);
                 }
-
+                ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.18f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.72f, 0.25f, 1.0f));
-                if (ImGui::Button("Commit##tx", ImVec2(tsHorizontal ? 120.0f : -1.0f, 0))) state.commitTransform = true;
-                ImGui::PopStyleColor(2);
+                if (ImGui::Button("OK")) state.commitTransform = true;
+                ImGui::PopStyleColor();
                 ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.18f, 1.0f));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.72f, 0.25f, 0.25f, 1.0f));
-                if (ImGui::Button("Cancel##tx", ImVec2(tsHorizontal ? 120.0f : -1.0f, 0))) state.cancelTransform = true;
-                ImGui::PopStyleColor(2);
+                if (ImGui::Button("✕")) state.cancelTransform = true;
+                ImGui::PopStyleColor();
             }
             else {
-                BeginToolSection("Pan / Hand");
-                ImGui::TextWrapped("Middle-click drag or Hand tool to pan.");
+                ImGui::TextDisabled("Hand: pan · RMB/Shift: rotate");
             }
 
             ImGui::End();
@@ -2773,28 +2737,92 @@ namespace UI {
             ImGui::End();
         }
 
-        // 10. Draw Colors Panel
+        // 10. Draw Colors Panel — SV square + Hue / Alpha sliders (adaptive)
         if (state.showColors) {
             ImGui::Begin("Colors", &state.showColors);
-            
-            ImGuiColorEditFlags flags = ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_AlphaPreview;
-            ImGui::ColorPicker4("##color_picker", brush.color, flags);
+
+            ImVec2 avail = ImGui::GetContentRegionAvail();
+            bool wide = avail.x > avail.y * 1.1f;
+
+            float h, s, v;
+            ImGui::ColorConvertRGBtoHSV(brush.color[0], brush.color[1], brush.color[2], h, s, v);
+
+            // SV square size
+            float sq = wide ? std::min(avail.y - 8.f, avail.x * 0.55f) : std::min(avail.x - 8.f, 180.f);
+            sq = std::clamp(sq, 80.f, 220.f);
+
+            ImVec2 sqPos = ImGui::GetCursorScreenPos();
+            ImGui::InvisibleButton("##svsq", ImVec2(sq, sq));
+            bool svActive = ImGui::IsItemActive();
+            bool svHovered = ImGui::IsItemHovered();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+
+            // Draw SV square for current Hue
+            const int steps = 32;
+            for (int yi = 0; yi < steps; ++yi) {
+                for (int xi = 0; xi < steps; ++xi) {
+                    float ss = (xi + 0.5f) / steps;
+                    float vv = 1.f - (yi + 0.5f) / steps;
+                    float rr, gg, bb;
+                    ImGui::ColorConvertHSVtoRGB(h, ss, vv, rr, gg, bb);
+                    ImU32 col = IM_COL32((int)(rr*255),(int)(gg*255),(int)(bb*255),255);
+                    float x0 = sqPos.x + xi * (sq / steps);
+                    float y0 = sqPos.y + yi * (sq / steps);
+                    float x1 = sqPos.x + (xi + 1) * (sq / steps);
+                    float y1 = sqPos.y + (yi + 1) * (sq / steps);
+                    dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), col);
+                }
+            }
+            dl->AddRect(sqPos, ImVec2(sqPos.x + sq, sqPos.y + sq), IM_COL32(120,120,120,255));
+            // Cursor
+            ImVec2 cur(sqPos.x + s * sq, sqPos.y + (1.f - v) * sq);
+            dl->AddCircle(cur, 5.f, IM_COL32(0,0,0,200), 16, 2.f);
+            dl->AddCircle(cur, 5.f, IM_COL32(255,255,255,220), 16, 1.f);
+
+            if (svActive || (svHovered && ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
+                ImVec2 mp = ImGui::GetIO().MousePos;
+                s = std::clamp((mp.x - sqPos.x) / sq, 0.f, 1.f);
+                v = std::clamp(1.f - (mp.y - sqPos.y) / sq, 0.f, 1.f);
+                ImGui::ColorConvertHSVtoRGB(h, s, v, brush.color[0], brush.color[1], brush.color[2]);
+            }
+
+            if (wide) {
+                ImGui::SameLine();
+                ImGui::BeginGroup();
+            }
+
+            // Hue slider 0..1
+            ImGui::SetNextItemWidth(wide ? std::max(80.f, avail.x - sq - 24.f) : sq);
+            if (ImGui::SliderFloat("##hue", &h, 0.f, 1.f, "H %.2f")) {
+                ImGui::ColorConvertHSVtoRGB(h, s, v, brush.color[0], brush.color[1], brush.color[2]);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hue");
+
+            ImGui::SetNextItemWidth(wide ? std::max(80.f, avail.x - sq - 24.f) : sq);
+            ImGui::SliderFloat("##alpha", &brush.color[3], 0.f, 1.f, "A %.2f");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Alpha");
+
+            // Primary / Secondary swatches
+            ImGui::ColorButton("##pri", ImVec4(brush.color[0], brush.color[1], brush.color[2], brush.color[3]),
+                ImGuiColorEditFlags_AlphaPreview, ImVec2(28, 28));
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Primary");
+
+            if (wide) ImGui::EndGroup();
 
             ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
-
-            ImGui::Text("Quick Palette:");
+            // Compact palette
             static const ImVec4 paletteColors[] = {
-                ImVec4(0, 0, 0, 1), ImVec4(1, 1, 1, 1), ImVec4(0.5f, 0.5f, 0.5f, 1), ImVec4(0.75f, 0.75f, 0.75f, 1),
-                ImVec4(1, 0, 0, 1), ImVec4(1, 1, 0, 1), ImVec4(0, 1, 0, 1), ImVec4(0, 1, 1, 1),
-                ImVec4(0, 0, 1, 1), ImVec4(1, 0, 1, 1), ImVec4(0.5f, 0, 0, 1), ImVec4(0.5f, 0.5f, 0, 1),
-                ImVec4(0, 0.5f, 0, 1), ImVec4(0, 0.5f, 0.5f, 1), ImVec4(0, 0, 0.5f, 1), ImVec4(0.5f, 0, 0.5f, 1)
+                ImVec4(0,0,0,1), ImVec4(1,1,1,1), ImVec4(0.5f,0.5f,0.5f,1), ImVec4(0.75f,0.75f,0.75f,1),
+                ImVec4(1,0,0,1), ImVec4(1,1,0,1), ImVec4(0,1,0,1), ImVec4(0,1,1,1),
+                ImVec4(0,0,1,1), ImVec4(1,0,1,1), ImVec4(0.5f,0,0,1), ImVec4(0.5f,0.5f,0,1),
+                ImVec4(0,0.5f,0,1), ImVec4(0,0.5f,0.5f,1), ImVec4(0,0,0.5f,1), ImVec4(0.5f,0,0.5f,1)
             };
+            float cell = 18.f;
+            int perRow = std::max(4, (int)(ImGui::GetContentRegionAvail().x / (cell + 4.f)));
             for (int i = 0; i < IM_ARRAYSIZE(paletteColors); ++i) {
                 ImGui::PushID(i);
-                if (i > 0 && i % 8 != 0) ImGui::SameLine();
-                if (ImGui::ColorButton("##palette_color", paletteColors[i], ImGuiColorEditFlags_NoTooltip, ImVec2(22, 22))) {
+                if (i > 0 && (i % perRow) != 0) ImGui::SameLine(0, 3);
+                if (ImGui::ColorButton("##pal", paletteColors[i], ImGuiColorEditFlags_NoTooltip, ImVec2(cell, cell))) {
                     brush.color[0] = paletteColors[i].x;
                     brush.color[1] = paletteColors[i].y;
                     brush.color[2] = paletteColors[i].z;

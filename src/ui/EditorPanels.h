@@ -87,6 +87,11 @@ namespace UI {
         // Smudge tool settings
         SmudgeSettings smudge;
 
+        // Brush tip preset: 0=Soft, 1=Hard, 2=Pencil, 3=Airbrush, 4=Custom (or procedural null)
+        int brushTipPreset = 0;
+        bool hasCustomBrushTip = false;
+        std::string customBrushTipName;
+
         // Image adjustment modals
         bool showBlurModal    = false;
         bool showHSVModal     = false;

@@ -3340,7 +3340,9 @@ void Canvas::ApplyMagicWandSelection(ID3D11Device* device, int startX, int start
     m_WandSeedX = startX;
     m_WandSeedY = startY;
     m_WandSeedValid = true;
-    EnsureWandSourceCache(); // capture sample surface at click time
+    // Always re-sample layer at click time (cache can be stale after paint/edits).
+    InvalidateWandSourceCache();
+    EnsureWandSourceCache();
     RunMagicWand(device, startX, startY, tolerance, add, subtract, contiguous, true);
 }
 
@@ -4297,6 +4299,27 @@ void Canvas::InvertAlpha() {
     SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
     CommitActiveLayerMutation("Invert Alpha");
     Logger::Get().Info("InvertAlpha");
+}
+
+void Canvas::InvertColors() {
+    if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
+    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (layer.isGroup) return;
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    BackupAllActiveLayerTiles();
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
+    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
+        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
+        if (sel<0.5f) continue;
+        size_t idx=((size_t)y*m_Width+x)*4;
+        // Invert RGB; leave alpha unchanged
+        pixels[idx+0]=1.f-pixels[idx+0];
+        pixels[idx+1]=1.f-pixels[idx+1];
+        pixels[idx+2]=1.f-pixels[idx+2];
+    }
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
+    CommitActiveLayerMutation("Invert Colors");
+    Logger::Get().Info("InvertColors");
 }
 
 void Canvas::ApplyBlur(float radius) {
