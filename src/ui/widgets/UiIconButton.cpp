@@ -1,4 +1,5 @@
 #include "UiIconButton.h"
+#include "UiTooltip.h"
 #include "../style/UiMotion.h"
 #include <cmath>
 #include <algorithm>
@@ -75,8 +76,9 @@ static IconButtonResult IconButtonImpl(const char* id, const SvgIcon* icon,
                           ImVec2(c.x, c.y + h), ImVec2(c.x - h, c.y), tint);
     }
 
-    if (tooltip && res.hovered)
-        ImGui::SetTooltip("%s", tooltip);
+    // Delayed kit tooltip (HoverDelayNormal); skip while pressed
+    if (tooltip && res.hovered && !down)
+        Tooltip(tooltip);
 
     ImGui::PopID();
     return res;

@@ -1,4 +1,5 @@
 #include "UiPathField.h"
+#include "UiTooltip.h"
 #include "../style/UiTokens.h"
 #include "../style/UiMotion.h"
 #include <cstring>
@@ -43,10 +44,7 @@ bool PathField(const char* id, const char* label, char* pathBuf, size_t pathBufS
     }
     ImGui::PopStyleVar();
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Browse…");
-
-    if (tooltip && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("%s", tooltip);
+        Tooltip(tooltip && tooltip[0] ? tooltip : "Browse…");
 
     ImGui::PopID();
     return changed;

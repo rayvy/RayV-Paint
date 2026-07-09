@@ -403,26 +403,39 @@ src/resources/icons/
 
 ---
 
-# Icons inventory (placeholders → replace by hand)
+# Icons inventory
 
-Канон: `src/resources/icons/`. Dev fallback: `testfield/svg/`.
+Канон: `src/resources/icons/` (POST_BUILD → next-to-exe `icons/`). Dev fallback: `testfield/svg/`.  
+Regen geometric set: `python scripts/gen_ui_icons.py` (path-only SVGs for kit rasterizer).
 
-### Tools
-`tool_brush`, `tool_eraser`, `tool_fill`, `tool_gradient`, `tool_smudge`, `tool_pipette`,  
-`tool_pan`, `tool_transform`, `tool_select_rect`, `tool_select_ellipse`,  
-`tool_lasso`, `tool_lasso_poly`, `tool_wand`, `tool_quick_select`, `tool_smart_select`
+| Logical name | File | Art status | Intended final art |
+|--------------|------|------------|--------------------|
+| tool_brush | tool_brush.svg (+brush.svg) | **hand SVG** | keep / refine |
+| tool_eraser | tool_eraser.svg (+eraser.svg) | **hand SVG** | keep / refine |
+| tool_fill | tool_fill.svg (+fill_bucket.svg) | **hand SVG** | keep / refine |
+| tool_gradient | tool_gradient.svg | geometric | linear gradient well |
+| tool_smudge | tool_smudge.svg | geometric | finger / smudge tip |
+| tool_pipette | tool_pipette.svg | geometric | eyedropper |
+| tool_pan | tool_pan.svg | geometric | open hand |
+| tool_transform | tool_transform.svg | geometric | move/scale handles |
+| tool_select_rect | tool_select_rect.svg | geometric | marquee rect |
+| tool_select_ellipse | tool_select_ellipse.svg | geometric | marquee ellipse |
+| tool_lasso | tool_lasso.svg | geometric | freehand lasso |
+| tool_lasso_poly | tool_lasso_poly.svg | geometric | polygonal lasso |
+| tool_wand | tool_wand.svg | geometric | magic wand |
+| tool_quick_select | tool_quick_select.svg | geometric | brush+marquee |
+| tool_smart_select | tool_smart_select.svg | geometric | smart contour |
+| tool_reset | tool_reset.svg | geometric | view reset / home |
+| layer_add | layer_add.svg | geometric | + layer |
+| layer_group_add | layer_group_add.svg | geometric | folder + |
+| layer_duplicate | layer_duplicate.svg | geometric | copy layers |
+| layer_delete | layer_delete.svg | geometric | trash |
+| ts_pressure_* | ts_pressure_*.svg | geometric | tablet pressure glyphs |
+| ts_mirror_h/v | ts_mirror_*.svg | geometric | mirror axes |
+| placeholder | placeholder.svg | diamond | missing-icon fallback |
+| layer_mask_add / layer_fx / layer_visible / layer_blend | — | **not used yet** | optional when chrome migrates |
 
-### Layers / FX
-`layer_add`, `layer_group_add`, `layer_duplicate`, `layer_delete`, `layer_mask_add`,  
-`layer_fx`, `layer_visible`, `layer_blend` (opt)
-
-### Tool settings
-`ts_pressure_radius`, `ts_pressure_hardness`, `ts_pressure_opacity`, `ts_mirror_h`, `ts_mirror_v`
-
-### Misc
-`placeholder.svg` (required)
-
-Agent: missing file → copy placeholder with target name; report table «filename → intended art».
+Replace geometric rows by hand anytime; keep `viewBox` + filled `<path d>` only (no stroke-only, no arc `A`).
 
 ---
 
@@ -493,3 +506,4 @@ ICC / wand / transform / masks — уже в contract; UI only calls.
 |-----|--------|
 | 1 | Initial Stage 1 + 2 outline |
 | 2 | Full phased roadmap; Stage 1.5; gates; dual-mode dropdown; PS minimalism; agent limits + manual QA |
+| 3 | Stage 2d: floating toolbar square accent, pipette HUD, geometric SVG pass, delayed tooltips on IconButton |

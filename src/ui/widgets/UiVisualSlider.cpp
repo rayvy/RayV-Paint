@@ -1,8 +1,10 @@
 #include "UiVisualSlider.h"
+#include "UiTooltip.h"
 #include "../style/UiTokens.h"
 #include "../style/UiMotion.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace Ui {
 
@@ -96,8 +98,11 @@ bool VisualSlider(const char* id, float* value, ImVec2 size,
     dl->AddCircleFilled(ImVec2(tx, pos.y + size.y * 0.5f), th * 0.65f, IM_COL32(255, 255, 255, 240));
     dl->AddCircle(ImVec2(tx, pos.y + size.y * 0.5f), th * 0.65f, T.ColU32(T.strokeActive), 16, 1.5f);
 
-    if (tooltip && hovered)
-        ImGui::SetTooltip("%s: %.2f\nBackspace: default  ·  Ctrl: snap", tooltip, *value);
+    if (tooltip && hovered) {
+        char buf[192];
+        std::snprintf(buf, sizeof(buf), "%s: %.2f\nBackspace: default  ·  Ctrl: snap", tooltip, *value);
+        Tooltip(buf);
+    }
 
     ImGui::PopID();
     return changed;
@@ -119,7 +124,7 @@ bool SmartSliderFloat(const char* label, float* v, float vMin, float vMax,
             *v = defaultValue;
             changed = true;
         }
-        ImGui::SetTooltip("Backspace: default  ·  Ctrl: snap");
+        Tooltip("Backspace: default  ·  Ctrl: snap");
     }
     return changed;
 }

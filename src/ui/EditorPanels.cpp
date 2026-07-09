@@ -1714,7 +1714,7 @@ namespace UI {
             if (ImGui::Button("Quick Export (project format)", ImVec2(-1, 0))) {
                 state.openQuickExportTrigger = true;
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Export using the path/format above (same as Ctrl+E)");
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Export using the path/format above (same as Ctrl+E)");
 
             Ui::EndDockPanel();
         }
@@ -1818,7 +1818,7 @@ namespace UI {
                     else { layer.visible = vis; canvas.MarkCompositeDirty(); }
                 }
                 if (isIsolated) ImGui::PopStyleColor();
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Visibility\nAlt+Click: Isolate");
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Visibility\nAlt+Click: Isolate");
                 ImGui::SameLine(0, 4);
 
                 if (layer.isGroup) {
@@ -1856,7 +1856,7 @@ namespace UI {
                             canvas.SetPaintTarget(PaintTarget::LayerContent);
                         }
                     }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Content\nClick: select  ·  Ctrl: multi  ·  Shift: range\nAlt+Click: select opaque");
+                    if (ImGui::IsItemHovered()) Ui::Tooltip("Content\nClick: select  ·  Ctrl: multi  ·  Shift: range\nAlt+Click: select opaque");
                     if (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg) {
                         ImVec2 tmin = ImGui::GetItemRectMin();
                         ImVec2 tmax = ImGui::GetItemRectMax();
@@ -1906,7 +1906,7 @@ namespace UI {
                             canvas.SetActiveLayerIndex(i);
                             canvas.SetPaintTarget(PaintTarget::LayerMask);
                         }
-                        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Layer Mask\nRight-click: Apply / Delete");
+                        if (ImGui::IsItemHovered()) Ui::Tooltip("Layer Mask\nRight-click: Apply / Delete");
                         if (ImGui::BeginPopupContextItem("##maskctx")) {
                             if (ImGui::MenuItem("Apply Mask")) canvas.ApplyLayerMask(i);
                             if (ImGui::MenuItem("Delete Mask")) canvas.DeleteLayerMask(i);
@@ -1925,7 +1925,7 @@ namespace UI {
                         }
                         ImGui::PopStyleColor();
                         if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip(canvas.HasSelection()
+                            Ui::Tooltip(canvas.HasSelection()
                                 ? "Add Layer Mask from Selection"
                                 : "Add Layer Mask");
                         }
@@ -2064,8 +2064,8 @@ namespace UI {
                     state.layerEffectsFocusIdx = layer.filters.empty() ? -1 : 0;
                 }
                 if (hasFx) ImGui::PopStyleColor();
-                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
-                    ImGui::SetTooltip("Layer Effects…");
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("Layer Effects…");
 
                 if (depth > 0) ImGui::Unindent(12.0f * depth);
                 ImGui::PopID();
@@ -2421,7 +2421,11 @@ namespace UI {
                     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (thumb - ImGui::GetTextLineHeight()) * 0.5f);
                     ImGui::TextUnformatted(chans[i].name);
                 } else if (hovered) {
-                    ImGui::SetTooltip("%s — click to toggle", chans[i].name);
+                    {
+                        char tipBuf[96];
+                        std::snprintf(tipBuf, sizeof(tipBuf), "%s — click to toggle", chans[i].name);
+                        Ui::Tooltip(tipBuf);
+                    }
                 }
                 ImGui::EndGroup();
                 ImGui::PopID();
@@ -2455,7 +2459,7 @@ namespace UI {
             auto MiniSlider = [&](const char* id, float* v, float mn, float mx, const char* tip, float width = 110.f) {
                 ImGui::SetNextItemWidth(width);
                 ImGui::SliderFloat(id, v, mn, mx, "%.2f");
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+                if (ImGui::IsItemHovered()) Ui::Tooltip(tip);
             };
 
             bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser);
@@ -2510,7 +2514,7 @@ namespace UI {
                         ApplyTipId(tipIds[tipIdx]);
                     }
                 }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brush tip (saved in project)");
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Brush tip (saved in project)");
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Load Tip...")) {
                     char path[512] = "";
@@ -2542,7 +2546,7 @@ namespace UI {
                         }
                     }
                 }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Load grayscale stamp (persisted in .rayp)");
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Load grayscale stamp (persisted in .rayp)");
                 ImGui::SameLine();
 
                 MiniSlider("##rad", &brush.radius, 1.f, 250.f, "Radius (px)", 100.f);
@@ -2569,7 +2573,7 @@ namespace UI {
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(60.f);
                 ImGui::SliderInt("##stb", &brush.stabilization, 1, 50);
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stabilization");
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Stabilization");
 
                 if (activeTool == ActiveTool::Brush) {
                     ImGui::SameLine();
@@ -2591,7 +2595,7 @@ namespace UI {
                     if (ImGui::IsItemActive()) changed = true;
                     ImGui::SameLine();
                     if (ImGui::Checkbox("##cont", &state.magicWandContiguous)) changed = true;
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Contiguous");
+                    if (ImGui::IsItemHovered()) Ui::Tooltip("Contiguous");
                     if (changed && canvas.HasWandSeed()) {
                         bool add = ImGui::GetIO().KeyShift;
                         bool subtract = ImGui::GetIO().KeyAlt;
@@ -2616,7 +2620,7 @@ namespace UI {
                 ImGui::TextDisabled("Drag: Primary → Secondary");
             }
             else if (activeTool == ActiveTool::Pipette) {
-                ImGui::TextDisabled("Click canvas to sample");
+                ImGui::TextDisabled("Hover: live sample HUD  ·  Click: set primary color  ·  Alt+brush also samples");
             }
             else if (activeTool == ActiveTool::Smudge) {
                 // No color controls — smudge only radius / strength / spacing
@@ -2641,10 +2645,10 @@ namespace UI {
                     canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
                 ImGui::SameLine();
                 if (ImGui::Button("⇄")) canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Flip H");
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Flip H");
                 ImGui::SameLine();
                 if (ImGui::Button("⇅")) canvas.SetFloatingScaleY(-canvas.GetFloatingScaleY());
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Flip V");
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Flip V");
                 ImGui::SameLine();
                 if (ImGui::Button("Reset")) {
                     canvas.SetFloatingScaleX(1.f); canvas.SetFloatingScaleY(1.f); canvas.SetFloatingRotation(0.f);
@@ -2758,7 +2762,7 @@ namespace UI {
             ImGui::Spacing();
             ImGui::ColorButton("##pri", ImVec4(brush.color[0], brush.color[1], brush.color[2], brush.color[3]),
                 ImGuiColorEditFlags_AlphaPreview, ImVec2(36, 36));
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Primary color");
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Primary color");
 
             ImGui::Spacing();
             // Compact palette
