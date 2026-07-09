@@ -106,6 +106,8 @@ set(SOURCES
     src/core/TexconvHelper.h
     src/core/ImageManager.cpp
     src/core/ImageManager.h
+    src/core/IccProfiles.cpp
+    src/core/IccProfiles.h
     src/core/PaintEngine.cpp
     src/core/PaintEngine.h
     src/core/UndoRedoManager.cpp

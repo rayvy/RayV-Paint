@@ -3,6 +3,8 @@
 #include "core/Logger.h"
 #include "core/MemoryStats.h"
 #include "core/ImageManager.h"
+#include "core/IccProfiles.h"
+#include "core/PathUtil.h"
 #include <opencv2/imgproc.hpp>
 #include "core/ConfigManager.h"
 #include "core/TexconvHelper.h"
@@ -725,6 +727,7 @@ void Canvas::ReleaseCompositeResources() {
     if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
     if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
     if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
+    ReleaseChannelPreviewResources();
 }
 
 void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
@@ -2397,7 +2400,7 @@ static json LayerToJson(const Layer& layer) {
     j["layer_type"] = LayerTypeToString(layer.isGroup ? Layer::Type::Group : layer.type);
     j["smart_source_path"] = layer.smartSourcePath;
     j["smart_scale"] = layer.smartScale;
-    // smart source bytes stored as separate blob when non-empty (index in blobs array via meta)
+    j["has_smart_source"] = !layer.smartSourceBytes.empty();
     j["has_mask"] = layer.hasMask && !layer.mask.empty();
 
     json filters = json::array();
@@ -2524,6 +2527,13 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         metadata["export_generate_mip_maps"] = m_ExportGenerateMipMaps;
         metadata["export_mip_filter"] = m_ExportMipFilter;
         metadata["export_png_color_space"] = m_ExportPngColorSpace;
+        metadata["export_icc_preset"] = IccPresetName(m_ExportIccPreset);
+        metadata["brush_tip_id"] = m_BrushTipId;
+        if (m_BrushTipId == "custom" && m_CustomBrushTipSize > 0 && !m_CustomBrushTipPixels.empty()) {
+            metadata["brush_tip_custom_size"] = m_CustomBrushTipSize;
+            // store as array of ints (json-friendly)
+            metadata["brush_tip_custom_pixels"] = m_CustomBrushTipPixels;
+        }
 
         json layersArray = json::array();
         for (const auto& layer : m_Layers) {
@@ -2563,6 +2573,13 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
             if (layer.hasMask && !layer.mask.empty()) {
                 if (!WriteZlibBlob(out, layer.mask.data(), layer.mask.size())) {
                     Logger::Get().Error("Failed to compress mask for " + layer.name);
+                    return false;
+                }
+            }
+            // smart object / SVG source bytes (after mask)
+            if (!layer.smartSourceBytes.empty()) {
+                if (!WriteZlibBlob(out, layer.smartSourceBytes.data(), layer.smartSourceBytes.size())) {
+                    Logger::Get().Error("Failed to compress smart source for " + layer.name);
                     return false;
                 }
             }
@@ -2648,6 +2665,18 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
         if (metadata.contains("export_generate_mip_maps")) m_ExportGenerateMipMaps = metadata["export_generate_mip_maps"].get<bool>();
         if (metadata.contains("export_mip_filter")) m_ExportMipFilter = metadata["export_mip_filter"].get<std::string>();
         if (metadata.contains("export_png_color_space")) m_ExportPngColorSpace = metadata["export_png_color_space"].get<std::string>();
+        if (metadata.contains("export_icc_preset")) {
+            m_ExportIccPreset = IccPresetFromName(metadata["export_icc_preset"].get<std::string>());
+            m_ExportPngColorSpace = IccPresetName(m_ExportIccPreset);
+        } else if (!m_ExportPngColorSpace.empty()) {
+            // Migrate legacy free-text / name into preset enum
+            m_ExportIccPreset = IccPresetFromName(m_ExportPngColorSpace);
+        }
+        if (metadata.contains("brush_tip_id")) m_BrushTipId = metadata["brush_tip_id"].get<std::string>();
+        if (metadata.contains("brush_tip_custom_size") && metadata.contains("brush_tip_custom_pixels")) {
+            m_CustomBrushTipSize = metadata["brush_tip_custom_size"].get<int>();
+            m_CustomBrushTipPixels = metadata["brush_tip_custom_pixels"].get<std::vector<uint8_t>>();
+        }
 
         CreateCompositeResources(device);
         if (progress) progress(0.15f, "metadata");
@@ -2695,6 +2724,17 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
                 layer.maskNeedsUpload = true;
             } else if (version < 2) {
                 layer.hasMask = false;
+            }
+
+            // smart source bytes (SVG / smart object payload)
+            bool hasSmart = layersArray[idx].value("has_smart_source", false);
+            if (version >= 2 && hasSmart) {
+                std::vector<uint8_t> smartBytes;
+                if (!ReadZlibBlob(in, smartBytes)) {
+                    Logger::Get().Error("Failed to decompress smart source for " + layer.name);
+                    return false;
+                }
+                layer.smartSourceBytes = std::move(smartBytes);
             }
 
             m_Layers.push_back(std::move(layer));
@@ -2791,6 +2831,8 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
     exportMeta["export_generate_mip_maps"] = m_ExportGenerateMipMaps;
     exportMeta["export_mip_filter"] = m_ExportMipFilter;
     exportMeta["export_png_color_space"] = m_ExportPngColorSpace;
+    exportMeta["export_icc_preset"] = IccPresetName(m_ExportIccPreset);
+    exportMeta["brush_tip_id"] = m_BrushTipId;
 
     std::vector<RaypLayerSnapshot> layers;
     layers.reserve(m_Layers.size());
@@ -4765,6 +4807,13 @@ void Canvas::StrokeQuickSelect(const std::vector<std::pair<int, int>>& points, f
     }
 }
 
+void Canvas::CancelQuickSelectStroke() {
+    m_QuickSelectMask.clear();
+    m_QuickSelectSampleCount = 0;
+    m_QuickSelectLabMean[0] = m_QuickSelectLabMean[1] = m_QuickSelectLabMean[2] = 0.f;
+    // Keep edge cache (layer unchanged).
+}
+
 void Canvas::EndQuickSelectStroke(ID3D11Device* device, bool add, bool subtract) {
     if (m_QuickSelectMask.size() != (size_t)m_Width * m_Height) return;
 
@@ -5101,13 +5150,20 @@ bool Canvas::EditCanvas(ID3D11Device* device, CanvasEditMode mode, int newW, int
 // ICC presets
 // ---------------------------------------------------------------------------
 const char* Canvas::IccPresetName(IccPreset p) {
-    switch (p) {
-    case IccPreset::None: return "None";
-    case IccPreset::sRGB: return "sRGB";
-    case IccPreset::DisplayP3: return "Display P3";
-    case IccPreset::AdobeRGB: return "Adobe RGB";
-    }
-    return "sRGB";
+    return IccProfiles::Name(static_cast<IccProfiles::Preset>(p));
+}
+
+Canvas::IccPreset Canvas::IccPresetFromName(const std::string& name) {
+    if (name == "None" || name == "none") return IccPreset::None;
+    if (name == "Display P3" || name == "DisplayP3" || name == "P3") return IccPreset::DisplayP3;
+    if (name == "Adobe RGB" || name == "AdobeRGB") return IccPreset::AdobeRGB;
+    if (name == "sRGB" || name == "srgb") return IccPreset::sRGB;
+    // Legacy free-text path → treat as sRGB default (UI no longer exposes path)
+    return IccPreset::sRGB;
+}
+
+const std::vector<uint8_t>& Canvas::GetIccPresetBytes(IccPreset p) {
+    return IccProfiles::GetProfileBytes(static_cast<IccProfiles::Preset>(p));
 }
 
 void Canvas::SetExportIccPreset(IccPreset p) {
@@ -5115,19 +5171,158 @@ void Canvas::SetExportIccPreset(IccPreset p) {
     m_ExportPngColorSpace = IccPresetName(p);
 }
 
+void Canvas::SetCustomBrushTip(int size, const std::vector<uint8_t>& pixels) {
+    if (size <= 0 || (int)pixels.size() < size * size) {
+        m_CustomBrushTipSize = 0;
+        m_CustomBrushTipPixels.clear();
+        return;
+    }
+    m_CustomBrushTipSize = size;
+    m_CustomBrushTipPixels = pixels;
+    m_BrushTipId = "custom";
+}
+
+bool Canvas::GetCustomBrushTip(int& outSize, std::vector<uint8_t>& outPixels) const {
+    if (m_CustomBrushTipSize <= 0 || m_CustomBrushTipPixels.empty()) return false;
+    outSize = m_CustomBrushTipSize;
+    outPixels = m_CustomBrushTipPixels;
+    return true;
+}
+
 bool Canvas::SaveCanvasStandard(const std::string& filepath, IccPreset preset) {
-    // Map preset to empty (sRGB/none default write) or leave path empty —
-    // embedded named profile injection handled inside ImageManager when path empty + tag.
     m_ExportIccPreset = preset;
     m_ExportPngColorSpace = IccPresetName(preset);
-    std::string iccPath;
-    if (preset == IccPreset::None || preset == IccPreset::sRGB) {
-        iccPath = ""; // STB default sRGB-ish; None skips inject
-    } else {
-        // Prefer sidecar next to exe if present: icc/DisplayP3.icc etc.
-        iccPath = std::string("icc/") + (preset == IccPreset::DisplayP3 ? "DisplayP3.icc" : "AdobeRGB.icc");
+
+    if (m_Layers.empty()) {
+        Logger::Get().Error("SaveCanvasStandard: no layers.");
+        return false;
     }
-    return SaveCanvasStandard(filepath, iccPath);
+    ScopedTimer saveTimer("SaveCanvasStandard " + filepath);
+    MemoryStats::LogSnapshot("before_SaveCanvasStandard");
+
+    // Ensure filters rebuilt before export
+    for (auto& layer : m_Layers) {
+        if (layer.isGroup) continue;
+        if (!layer.filters.empty() && layer.filtersDirty)
+            RebuildFilteredPixels(layer);
+    }
+
+    std::vector<uint8_t> rgba8;
+    if (!ComposeVisibleLayersRGBA8(m_Layers, m_Width, m_Height, rgba8)) {
+        Logger::Get().Error("SaveCanvasStandard: RGBA8 composite failed.");
+        return false;
+    }
+
+    bool ok = false;
+    if (preset == IccPreset::None) {
+        ok = ImageManager::SaveRGBA8ToFile(filepath, rgba8.data(), m_Width, m_Height, m_Width * 4, std::string());
+    } else {
+        const auto& icc = GetIccPresetBytes(preset);
+        ok = ImageManager::SaveRGBA8ToFile(
+            filepath, rgba8.data(), m_Width, m_Height, m_Width * 4,
+            icc.data(), icc.size(), IccPresetName(preset));
+    }
+    MemoryStats::LogSnapshot("after_SaveCanvasStandard");
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+// Channel preview thumbs (proxy composite → grayscale R/G/B/A)
+// ---------------------------------------------------------------------------
+void Canvas::ReleaseChannelPreviewResources() {
+    for (int i = 0; i < 4; ++i) {
+        if (m_ChannelPreviewSRV[i]) { m_ChannelPreviewSRV[i]->Release(); m_ChannelPreviewSRV[i] = nullptr; }
+        if (m_ChannelPreviewTex[i]) { m_ChannelPreviewTex[i]->Release(); m_ChannelPreviewTex[i] = nullptr; }
+    }
+    m_ChannelPreviewW = m_ChannelPreviewH = 0;
+    m_ChannelPreviewDirty = true;
+}
+
+void Canvas::RebuildChannelPreviews(ID3D11Device* device) {
+    if (!device || m_CompositeWidth <= 0 || m_CompositeHeight <= 0 || !m_CompositeTexture)
+        return;
+
+    // Read back composite proxy (small — not full doc)
+    D3D11_TEXTURE2D_DESC desc = {};
+    m_CompositeTexture->GetDesc(&desc);
+
+    D3D11_TEXTURE2D_DESC stagingDesc = desc;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
+
+    ID3D11Texture2D* staging = nullptr;
+    if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)) || !staging)
+        return;
+
+    ID3D11DeviceContext* ctx = nullptr;
+    device->GetImmediateContext(&ctx);
+    if (!ctx) { staging->Release(); return; }
+    ctx->CopyResource(staging, m_CompositeTexture);
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+        staging->Release();
+        ctx->Release();
+        return;
+    }
+
+    const int w = (int)desc.Width;
+    const int h = (int)desc.Height;
+    std::vector<uint8_t> ch[4];
+    for (int c = 0; c < 4; ++c) ch[c].assign((size_t)w * h, 0);
+
+    // Assume RGBA8 composite
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch;
+        for (int x = 0; x < w; ++x) {
+            size_t di = (size_t)y * w + x;
+            ch[0][di] = row[x * 4 + 0];
+            ch[1][di] = row[x * 4 + 1];
+            ch[2][di] = row[x * 4 + 2];
+            ch[3][di] = row[x * 4 + 3];
+        }
+    }
+    ctx->Unmap(staging, 0);
+    staging->Release();
+    ctx->Release();
+
+    ReleaseChannelPreviewResources();
+    m_ChannelPreviewW = w;
+    m_ChannelPreviewH = h;
+
+    for (int c = 0; c < 4; ++c) {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        D3D11_SUBRESOURCE_DATA init = {};
+        init.pSysMem = ch[c].data();
+        init.SysMemPitch = w;
+
+        if (SUCCEEDED(device->CreateTexture2D(&td, &init, &m_ChannelPreviewTex[c])) && m_ChannelPreviewTex[c]) {
+            device->CreateShaderResourceView(m_ChannelPreviewTex[c], nullptr, &m_ChannelPreviewSRV[c]);
+        }
+    }
+    m_ChannelPreviewDirty = false;
+}
+
+ID3D11ShaderResourceView* Canvas::GetChannelPreviewSRV(ID3D11Device* device, ChannelPreview ch) {
+    if (!device) return nullptr;
+    if (m_ChannelPreviewDirty || !m_ChannelPreviewSRV[(int)ch] ||
+        m_ChannelPreviewW != m_CompositeWidth || m_ChannelPreviewH != m_CompositeHeight) {
+        RebuildChannelPreviews(device);
+    }
+    int idx = (int)ch;
+    if (idx < 0 || idx > 3) return nullptr;
+    return m_ChannelPreviewSRV[idx];
 }
 
 // ---------------------------------------------------------------------------

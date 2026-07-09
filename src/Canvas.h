@@ -147,8 +147,18 @@ public:
 
     enum class IccPreset : uint8_t { None = 0, sRGB = 1, DisplayP3 = 2, AdobeRGB = 3 };
     static const char* IccPresetName(IccPreset p);
+    static IccPreset IccPresetFromName(const std::string& name);
     void SetExportIccPreset(IccPreset p);
     IccPreset GetExportIccPreset() const { return m_ExportIccPreset; }
+    // Embedded ICC bytes for current preset (empty for None). For UI diagnostics / export.
+    static const std::vector<uint8_t>& GetIccPresetBytes(IccPreset p);
+
+    // Project brush tip preference (persisted in .rayp). UI maps id → BrushPresets / custom.
+    // ids: "procedural" | "soft_round" | "hard_round" | "pencil" | "airbrush" | "custom"
+    void SetBrushTipId(const std::string& id) { m_BrushTipId = id; }
+    const std::string& GetBrushTipId() const { return m_BrushTipId; }
+    void SetCustomBrushTip(int size, const std::vector<uint8_t>& pixels);
+    bool GetCustomBrushTip(int& outSize, std::vector<uint8_t>& outPixels) const;
 
     // Layer types / smart objects (Layer::Type)
     bool ImportSvgAsSmartObject(ID3D11Device* device, const std::string& filepath);
@@ -159,7 +169,7 @@ public:
     void DeleteLayer(int index);
     void SetActiveLayerIndex(int idx);
     void ToggleLayerIsolation(int layerIdx);
-    void MarkCompositeDirty() { m_CompositeDirty = true; }
+    void MarkCompositeDirty() { m_CompositeDirty = true; m_ChannelPreviewDirty = true; }
     bool IsLayerIsolated(int layerIdx) const { return m_IsIsolatedMode && m_IsolatedLayerIdx == layerIdx; }
     bool IsInIsolationMode() const { return m_IsIsolatedMode; }
     int GetActiveLayerIndex() const { return m_ActiveLayerIdx; }
@@ -233,6 +243,9 @@ public:
     void BeginQuickSelectStroke();
     void StrokeQuickSelect(const std::vector<std::pair<int, int>>& points, float radius, bool subtract);
     void EndQuickSelectStroke(ID3D11Device* device, bool add, bool subtract);
+    // Abort in-progress quick-select stroke without modifying document selection / undo.
+    void CancelQuickSelectStroke();
+    bool IsQuickSelectStrokeActive() const { return !m_QuickSelectMask.empty(); }
     bool IsSmartSelectInProgress() const { return m_SmartSelectInProgress.load(); }
     void CancelSmartSelect() { m_SmartSelectCancelled.store(true); }
     void ApplyBucketFill(int startX, int startY, float tolerance, const float color[4], bool contiguous);
@@ -272,6 +285,11 @@ public:
     void SetChannelA(bool a) { m_ChannelA = a; }
 
     ID3D11ShaderResourceView* GetCompositeSRV() const { return m_CompositeSRV; }
+
+    // Channel preview thumbs (R/G/B/A as grayscale). Built from composite proxy; not full-doc.
+    // Returns nullptr if device/composite unavailable. Caller does not own the SRV.
+    enum class ChannelPreview : uint8_t { R = 0, G = 1, B = 2, A = 3 };
+    ID3D11ShaderResourceView* GetChannelPreviewSRV(ID3D11Device* device, ChannelPreview ch);
 
     // File Import / Export
     // Routes by extension: .rayp → LoadCanvasRayp, else LoadImageToLayer.
@@ -486,6 +504,17 @@ private:
     std::string m_ExportMipFilter = "Bicubic";
     std::string m_ExportPngColorSpace = "sRGB";
     IccPreset m_ExportIccPreset = IccPreset::sRGB;
+    std::string m_BrushTipId = "procedural";
+    int m_CustomBrushTipSize = 0;
+    std::vector<uint8_t> m_CustomBrushTipPixels;
+
+    // Channel preview GPU thumbs (proxy size, R8)
+    ID3D11Texture2D* m_ChannelPreviewTex[4] = {};
+    ID3D11ShaderResourceView* m_ChannelPreviewSRV[4] = {};
+    int m_ChannelPreviewW = 0, m_ChannelPreviewH = 0;
+    bool m_ChannelPreviewDirty = true;
+    void ReleaseChannelPreviewResources();
+    void RebuildChannelPreviews(ID3D11Device* device);
 
     float m_RotationAngle = 0.0f;
     bool m_MirrorHorizontal = false;

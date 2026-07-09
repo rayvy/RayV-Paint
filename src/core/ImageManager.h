@@ -13,8 +13,14 @@ public:
     static bool SaveImageToFile(const std::string& filepath, const std::vector<float>& pixels, int width, int height, const std::string& iccProfilePath = "");
 
     // Save pre-quantised RGBA8 (preferred for large docs — no float intermediate).
+    // iccProfilePath: legacy optional file path for iCCP (empty = no inject).
     static bool SaveRGBA8ToFile(const std::string& filepath, const uint8_t* rgba, int width, int height,
                                 int rowStrideBytes = 0, const std::string& iccProfilePath = "");
+
+    // Preferred: inject embedded ICC bytes (from IccProfiles presets). iccBytes empty = skip.
+    static bool SaveRGBA8ToFile(const std::string& filepath, const uint8_t* rgba, int width, int height,
+                                int rowStrideBytes, const uint8_t* iccBytes, size_t iccSize,
+                                const char* iccProfileName);
 
     // Converts float RGBA pixels to an 8-bit 3-channel RGB cv::Mat
     static cv::Mat PixelsToMat8UC3(const std::vector<float>& pixels, int width, int height);

@@ -7,10 +7,11 @@ Copy below the line after **Part 1 core is merged**.
 You are the **UI/Tools agent** for RayV-Paint (C++ / ImGui / DX11).
 
 ## Authority
-1. `plans/SPLIT_PLAN.md` — Part 2 section + item mapping  
-2. `plans/core_architecture_handoff.md`  
-3. `src/Canvas.h` — **only** call public APIs added/stabilized in Part 1  
-4. `src/ui/EditorPanels.*`, `src/main.cpp`, `src/core/KeymapManager.*`
+1. **`plans/CORE_UI_CONTRACT.md`** — frozen API table (read first)  
+2. `plans/SPLIT_PLAN.md` — Part 2 section + item mapping  
+3. `plans/PART1_STATUS.md` / `plans/core_architecture_handoff.md`  
+4. `src/Canvas.h` — **only** call public APIs  
+5. `src/ui/EditorPanels.*`, `src/main.cpp`, `src/core/KeymapManager.*`
 
 ## You must NOT
 - Rewrite `TileCache`, COW undo budget, export composite/HLSL blend parity  
