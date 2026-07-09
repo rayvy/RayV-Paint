@@ -21,7 +21,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         target.c_str(),
         const_cast<wchar_t*>(GetCommandLineW()),
         NULL, NULL, FALSE, 0, NULL, 
-        dir.c_str(), // Set working directory to the parent directory where configs/logs will live if needed, or launcher dir
+        NULL, // Inherit calling process's working directory
         &si, &pi)) {
         // Wait for the subprocess to complete to return the correct exit code
         WaitForSingleObject(pi.hProcess, INFINITE);

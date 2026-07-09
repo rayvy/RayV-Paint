@@ -24,7 +24,7 @@ int main() {
         target.c_str(),
         const_cast<wchar_t*>(cmd.c_str()),
         NULL, NULL, FALSE, 0, NULL,
-        dir.c_str(), // Set working directory to the parent directory
+        NULL, // Inherit calling process's working directory
         &si, &pi)) {
         // Wait for the subprocess to complete
         WaitForSingleObject(pi.hProcess, INFINITE);

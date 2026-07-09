@@ -1048,6 +1048,15 @@ void Canvas::DeleteLayer(int index) {
     if (m_Layers[index].maskTexture) m_Layers[index].maskTexture->Release();
     if (m_Layers[index].maskSRV) m_Layers[index].maskSRV->Release();
     
+    // Adjust parentGroupId references for remaining layers
+    for (auto& l : m_Layers) {
+        if (l.parentGroupId == index) {
+            l.parentGroupId = -1;
+        } else if (l.parentGroupId > index) {
+            l.parentGroupId--;
+        }
+    }
+
     m_Layers.erase(m_Layers.begin() + index);
 
     if (m_Layers.empty()) {

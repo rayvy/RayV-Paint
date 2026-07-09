@@ -2,6 +2,8 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include <string>
 #include <vector>
+#include <atomic>
+#include <mutex>
 #include <d3d11.h>
 #include <imgui.h>
 #include "../Canvas.h"
@@ -14,6 +16,19 @@ enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSele
 
 namespace UI {
 
+    struct DocumentLoadingState {
+        std::atomic<bool> isLoading{false};
+        std::atomic<float> progress{0.0f};
+        std::mutex mutex;
+        std::string stage;
+        std::string filepath;
+        bool success = false;
+        std::atomic<bool> completed{false};
+    };
+    extern DocumentLoadingState g_LoadingState;
+
+    void TriggerBackgroundOpenDocument(const std::string& filepath, ID3D11Device* device, Canvas& canvas);
+
     bool IsSelectTool(ActiveTool tool);
     bool IsWandTool(ActiveTool tool);
     ActiveTool CycleSelectTool(ActiveTool current);
@@ -25,6 +40,7 @@ namespace UI {
         bool showConsole = true;
         bool showProperties = true;
         bool showLayers = true;
+        bool showChannels = true;
         bool showToolbar = true;
         bool showColors = true;
         bool showToolSettings = true;

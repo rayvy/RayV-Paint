@@ -200,6 +200,18 @@ public:
     void SetFloatingScaleY(float sy) { m_FloatingScaleY = sy; }
     void SetFloatingRotation(float rot) { m_FloatingRotation = rot; }
 
+    // Channel solo controls
+    bool GetChannelR() const { return m_ChannelR; }
+    bool GetChannelG() const { return m_ChannelG; }
+    bool GetChannelB() const { return m_ChannelB; }
+    bool GetChannelA() const { return m_ChannelA; }
+    void SetChannelR(bool r) { m_ChannelR = r; }
+    void SetChannelG(bool g) { m_ChannelG = g; }
+    void SetChannelB(bool b) { m_ChannelB = b; }
+    void SetChannelA(bool a) { m_ChannelA = a; }
+
+    ID3D11ShaderResourceView* GetCompositeSRV() const { return m_CompositeSRV; }
+
     // File Import / Export
     // Routes by extension: .rayp → LoadCanvasRayp, else LoadImageToLayer.
     // progress: optional; called on main/worker thread — UI should marshal to UI thread if needed.
@@ -218,17 +230,6 @@ public:
     void FlipCanvasHorizontal(ID3D11Device* device);
     void FlipCanvasVertical(ID3D11Device* device);
     void CommitTransformation(const std::string& actionName);
-
-
-
-    bool GetChannelR() const { return m_ChannelR; }
-    void SetChannelR(bool v) { m_ChannelR = v; }
-    bool GetChannelG() const { return m_ChannelG; }
-    void SetChannelG(bool v) { m_ChannelG = v; }
-    bool GetChannelB() const { return m_ChannelB; }
-    void SetChannelB(bool v) { m_ChannelB = v; }
-    bool GetChannelA() const { return m_ChannelA; }
-    void SetChannelA(bool v) { m_ChannelA = v; }
 
     bool Undo();
     bool Redo();

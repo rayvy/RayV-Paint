@@ -154,32 +154,19 @@ static void CustomDropCallback(GLFWwindow* window, int count, const char** paths
 
     // .rayp is always a full project document — never import as a flat image layer.
     if (ext == "rayp") {
-        if (g_Canvas.OpenDocument(g_pd3dDevice, path)) {
-            Logger::Get().Info("Successfully loaded project from drop: " + path);
-        } else {
-            Logger::Get().Error("Failed to load project from drop: " + path);
-        }
+        UI::TriggerBackgroundOpenDocument(path, g_pd3dDevice, g_Canvas);
         return;
     }
 
     if (g_IsViewportHovered || g_IsLayersHovered) {
-        if (g_Canvas.LoadImageToLayer(g_pd3dDevice, path)) {
-            Logger::Get().Info("Dropped file imported as layer: " + path);
-        } else {
-            Logger::Get().Error("Failed to import dropped file as layer: " + path);
-        }
+        UI::TriggerBackgroundOpenDocument(path, g_pd3dDevice, g_Canvas);
     } else {
         g_Canvas.ClearUndoHistory();
         g_Canvas.GetLayers().clear();
         g_Canvas.SetActiveLayerIndex(-1);
         g_Canvas.SetCurrentProjectFilePath("");
 
-        if (g_Canvas.OpenDocument(g_pd3dDevice, path)) {
-            Logger::Get().Info("Dropped file opened as new project: " + path);
-        } else {
-            Logger::Get().Error("Failed to open dropped file as new project: " + path);
-            g_Canvas.CreateNewLayer(g_pd3dDevice, "Background");
-        }
+        UI::TriggerBackgroundOpenDocument(path, g_pd3dDevice, g_Canvas);
     }
 }
 
@@ -559,8 +546,12 @@ int main(int argc, char* argv[]) {
 
     // Load startup document if specified on CLI (image or .rayp project)
     if (!startupImagePath.empty()) {
-        if (!g_Canvas.OpenDocument(g_pd3dDevice, startupImagePath)) {
-            Logger::Get().Error("Failed to open startup document: " + startupImagePath);
+        if (!scriptPath.empty()) {
+            if (!g_Canvas.OpenDocument(g_pd3dDevice, startupImagePath)) {
+                Logger::Get().Error("Failed to open startup document: " + startupImagePath);
+            }
+        } else {
+            UI::TriggerBackgroundOpenDocument(startupImagePath, g_pd3dDevice, g_Canvas);
         }
     }
 
@@ -605,6 +596,17 @@ int main(int argc, char* argv[]) {
     // 9. Main loop
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        // Handle completed background loading
+        if (UI::g_LoadingState.isLoading && UI::g_LoadingState.completed) {
+            UI::g_LoadingState.isLoading = false;
+            g_Canvas.MarkCompositeDirty();
+            if (UI::g_LoadingState.success) {
+                Logger::Get().Info("Background document load successful: " + UI::g_LoadingState.filepath);
+            } else {
+                Logger::Get().Error("Background document load failed: " + UI::g_LoadingState.filepath);
+            }
+        }
 
         // Handle window resizing
         int winW, winH;
@@ -804,7 +806,7 @@ int main(int argc, char* argv[]) {
             float localMouseY = mousePos.y - imageMin.y;
 
             // Precise hover check: only true if mouse is directly over the canvas viewport image
-            bool isHovered = ImGui::IsItemHovered();
+            bool isHovered = ImGui::IsItemHovered() && !UI::g_LoadingState.isLoading;
 
             // Map mouse coordinates to Canvas pixel coordinates using floored origin matching the vertex shader
             float screenOriginX = std::floor(g_Canvas.GetPan().x + static_cast<float>(viewportWidth) * 0.5f);
@@ -1558,6 +1560,13 @@ void CleanupCanvasRenderTarget() {
 
 void RenderCanvasToTexture(int width, int height) {
     if (!g_canvasRTV) return;
+
+    // Skip canvas rendering if background thread is loading resources
+    if (UI::g_LoadingState.isLoading) {
+        float clearColor[4] = { 0.12f, 0.12f, 0.14f, 1.0f }; // Slate background matches ImGui Child window
+        g_pd3dDeviceContext->ClearRenderTargetView(g_canvasRTV, clearColor);
+        return;
+    }
 
     D3D11_VIEWPORT vp = {};
     vp.Width = static_cast<float>(width);

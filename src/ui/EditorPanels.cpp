@@ -4,6 +4,7 @@
 #include "../core/KeymapManager.h"
 #include "../scripting/ScriptingEngine.h"
 #include "../core/ThreadPool.h"
+#include <thread>
 #include <imgui_internal.h>
 #include <filesystem>
 #include <algorithm>
@@ -120,6 +121,73 @@ static bool ShowSaveFileWin32(char* outPath, size_t maxLen, const char* filter =
 #endif
 
 namespace UI {
+
+    DocumentLoadingState g_LoadingState;
+
+    void TriggerBackgroundOpenDocument(const std::string& filepath, ID3D11Device* device, Canvas& canvas) {
+        if (g_LoadingState.isLoading) return;
+        
+        g_LoadingState.isLoading = true;
+        g_LoadingState.progress = 0.0f;
+        g_LoadingState.filepath = filepath;
+        g_LoadingState.completed = false;
+        g_LoadingState.success = false;
+        {
+            std::lock_guard<std::mutex> lock(g_LoadingState.mutex);
+            g_LoadingState.stage = "Initializing";
+        }
+
+        std::thread([filepath, device, &canvas]() {
+            Logger::Get().Info("Starting background load of: " + filepath);
+            bool ok = canvas.OpenDocument(device, filepath, [](float progress, const char* stage) {
+                g_LoadingState.progress = progress;
+                if (stage) {
+                    std::lock_guard<std::mutex> lock(g_LoadingState.mutex);
+                    g_LoadingState.stage = stage;
+                }
+            });
+            g_LoadingState.success = ok;
+            g_LoadingState.completed = true;
+        }).detach();
+    }
+
+    static void ReorderLayer(std::vector<Layer>& layers, int fromIdx, int toIdx) {
+        if (fromIdx == toIdx || fromIdx < 0 || fromIdx >= (int)layers.size() || toIdx < 0 || toIdx >= (int)layers.size()) return;
+
+        // Remember the original parent pointers by address
+        std::vector<Layer*> parents(layers.size(), nullptr);
+        for (size_t i = 0; i < layers.size(); ++i) {
+            int pid = layers[i].parentGroupId;
+            if (pid >= 0 && pid < (int)layers.size()) {
+                parents[i] = &layers[pid];
+            }
+        }
+
+        // Shift the layer in the vector
+        if (fromIdx < toIdx) {
+            std::rotate(layers.begin() + fromIdx, layers.begin() + fromIdx + 1, layers.begin() + toIdx + 1);
+            std::rotate(parents.begin() + fromIdx, parents.begin() + fromIdx + 1, parents.begin() + toIdx + 1);
+        } else {
+            std::rotate(layers.begin() + toIdx, layers.begin() + fromIdx, layers.begin() + fromIdx + 1);
+            std::rotate(parents.begin() + toIdx, parents.begin() + fromIdx, parents.begin() + fromIdx + 1);
+        }
+
+        // Re-map parent pointers back to the new indices
+        for (size_t i = 0; i < layers.size(); ++i) {
+            if (parents[i] == nullptr) {
+                layers[i].parentGroupId = -1;
+            } else {
+                int newPid = -1;
+                for (size_t j = 0; j < layers.size(); ++j) {
+                    if (&layers[j] == parents[i]) {
+                        newPid = (int)j;
+                        break;
+                    }
+                }
+                layers[i].parentGroupId = newPid;
+            }
+        }
+    }
 
     bool IsSelectTool(ActiveTool tool) {
         return tool == ActiveTool::RectSelect || tool == ActiveTool::EllipseSelect || tool == ActiveTool::LassoSelect;
@@ -364,20 +432,7 @@ namespace UI {
     }
 
     static void ToolbarBeginLayout(ImVec2 avail, bool isVertical, int buttonCount, float btnSize, float gap, bool hasSeparator) {
-        float separatorExtra = hasSeparator ? (gap * 2.0f + 1.0f) : 0.0f;
-        float totalMain = btnSize * (float)buttonCount + gap * (float)(buttonCount - 1) + separatorExtra;
-        float totalCross = btnSize;
-
-        float padMain = std::max(0.0f, (isVertical ? avail.y : avail.x) - totalMain);
-        float padCross = std::max(0.0f, (isVertical ? avail.x : avail.y) - totalCross);
-
-        if (isVertical) {
-            if (padMain > 0.0f) ImGui::Dummy(ImVec2(0.0f, padMain * 0.5f));
-            if (padCross > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + padCross * 0.5f);
-        } else {
-            if (padCross > 0.0f) ImGui::Dummy(ImVec2(0.0f, padCross * 0.5f));
-            if (padMain > 0.0f) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + padMain * 0.5f);
-        }
+        // Anchor to top-left, no dynamic alignment padding
     }
 
     static void RenderGroupedToolButton(
@@ -645,6 +700,7 @@ namespace UI {
                 ImGui::MenuItem("Toolbar", nullptr, &state.showToolbar);
                 ImGui::MenuItem("Properties", nullptr, &state.showProperties);
                 ImGui::MenuItem("Layers", nullptr, &state.showLayers);
+                ImGui::MenuItem("Channels", nullptr, &state.showChannels);
                 ImGui::MenuItem("Colors Window", nullptr, &state.showColors);
                 ImGui::MenuItem("Tool Settings", nullptr, &state.showToolSettings);
                 ImGui::MenuItem("Console logs", nullptr, &state.showConsole);
@@ -919,9 +975,8 @@ namespace UI {
             }
             ImGui::Separator();
             if (ImGui::Button("Import", ImVec2(120, 0))) {
-                if (canvas.LoadImageToLayer(device, importPath)) {
-                    ImGui::CloseCurrentPopup();
-                }
+                TriggerBackgroundOpenDocument(importPath, device, canvas);
+                ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
             if (ImGui::Button("Cancel", ImVec2(120, 0))) {
@@ -1375,9 +1430,8 @@ namespace UI {
             }
             ImGui::Separator();
             if (ImGui::Button("Load", ImVec2(120, 0))) {
-                if (canvas.LoadCanvasRayp(loadPath, device)) {
-                    ImGui::CloseCurrentPopup();
-                }
+                TriggerBackgroundOpenDocument(loadPath, device, canvas);
+                ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
             if (ImGui::Button("Cancel", ImVec2(120, 0))) {
@@ -1392,11 +1446,7 @@ namespace UI {
             ImGui::Text("Would you like to restore your auto-saved session?");
             ImGui::Separator();
             if (ImGui::Button("Restore Session", ImVec2(140, 0))) {
-                if (canvas.LoadCanvasRayp(state.backupPath, device)) {
-                    Logger::Get().Info("Restored auto-saved session successfully.");
-                } else {
-                    Logger::Get().Error("Failed to restore auto-saved session.");
-                }
+                TriggerBackgroundOpenDocument(state.backupPath, device, canvas);
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
@@ -1411,10 +1461,19 @@ namespace UI {
 
         // 5. Draw Toolbar Panel
         if (state.showToolbar) {
+            ImGuiWindow* window = ImGui::FindWindowByName("Toolbar");
+            bool isVertical = true;
+            if (window) {
+                isVertical = (window->Size.y > window->Size.x);
+            }
+            if (isVertical) {
+                ImGui::SetNextWindowSizeConstraints(ImVec2(16.0f, 100.0f), ImVec2(64.0f, 16384.0f));
+            } else {
+                ImGui::SetNextWindowSizeConstraints(ImVec2(100.0f, 16.0f), ImVec2(16384.0f, 64.0f));
+            }
             ImGui::Begin("Toolbar", &state.showToolbar, ImGuiWindowFlags_NoCollapse);
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
-            bool isVertical = (avail.y > avail.x);
 
             std::string brushBind = KeymapManager::Get().GetActionShortcutString("BrushTool");
             std::string eraserBind = KeymapManager::Get().GetActionShortcutString("EraserTool");
@@ -1441,7 +1500,7 @@ namespace UI {
             static std::string s_RebindAction = "";
             constexpr int kToolbarButtonCount = 11;
             const bool hasSeparator = true;
-            float btnSize = ComputeAdaptiveToolButtonSize(avail, isVertical, kToolbarButtonCount, hasSeparator);
+            float btnSize = 32.0f;
             float gap = isVertical ? ImGui::GetStyle().ItemSpacing.y : ImGui::GetStyle().ItemSpacing.x;
 
             ToolbarBeginLayout(avail, isVertical, kToolbarButtonCount, btnSize, gap, hasSeparator);
@@ -1569,42 +1628,6 @@ namespace UI {
             }
             
             ImGui::Separator();
-            ImGui::Text("Active Channels:");
-            
-            auto DrawUnifiedChannelToggle = [](const char* label, bool active, ImVec4 activeColor) -> bool {
-                if (active) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, activeColor);
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(activeColor.x * 1.1f, activeColor.y * 1.1f, activeColor.z * 1.1f, activeColor.w));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(activeColor.x * 0.9f, activeColor.y * 0.9f, activeColor.z * 0.9f, activeColor.w));
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-                } else {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_Button]);
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
-                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-                    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
-                }
-                
-                bool clicked = ImGui::Button(label, ImVec2(44, 30));
-                
-                ImGui::PopStyleColor(4);
-                return clicked;
-            };
-
-            bool r = canvas.GetChannelR();
-            bool g = canvas.GetChannelG();
-            bool b = canvas.GetChannelB();
-            bool a = canvas.GetChannelA();
-
-            if (DrawUnifiedChannelToggle("R", r, ImVec4(0.8f, 0.2f, 0.2f, 1.0f))) canvas.SetChannelR(!r);
-            ImGui::SameLine();
-            if (DrawUnifiedChannelToggle("G", g, ImVec4(0.2f, 0.7f, 0.2f, 1.0f))) canvas.SetChannelG(!g);
-            ImGui::SameLine();
-            if (DrawUnifiedChannelToggle("B", b, ImVec4(0.2f, 0.4f, 0.8f, 1.0f))) canvas.SetChannelB(!b);
-            ImGui::SameLine();
-            if (DrawUnifiedChannelToggle("A", a, ImVec4(0.6f, 0.6f, 0.6f, 1.0f))) canvas.SetChannelA(!a);
-            
-            ImGui::NewLine();
-            ImGui::Separator();
             ImGui::Text("Project Properties:");
             int pType = (canvas.GetProjectType() == Canvas::ProjectType::Simple) ? 0 : 1;
             const char* pTypeNames[] = { "Simple Project", "Advanced Project (.rayp)" };
@@ -1694,155 +1717,445 @@ namespace UI {
             if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows)) {
                 g_IsLayersHovered = true;
             }
-            
-            if (ImGui::Button("Add Layer", ImVec2(-1, 25))) {
+
+            // Add Layer and Add Group buttons
+            if (ImGui::Button("Add Layer", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - 4, 25))) {
                 std::string lName = "Layer " + std::to_string(canvas.GetLayers().size() + 1);
                 canvas.CreateNewLayer(device, lName);
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Add Group", ImVec2(ImGui::GetContentRegionAvail().x, 25))) {
+                std::string gName = "Group " + std::to_string(canvas.GetLayers().size() + 1);
+                canvas.CreateLayerGroup(device, gName);
+            }
 
             ImGui::BeginChild("LayersList", ImVec2(0, 0), true);
-            auto& layers = canvas.GetLayers();
-            for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
-                ImGui::PushID(i);
-                
-                bool isIsolated = canvas.IsLayerIsolated(i);
-                if (isIsolated) {
-                    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
-                }
-                
-                bool vis = layers[i].visible;
-                if (ImGui::Checkbox("##visible", &vis)) {
-                    if (ImGui::GetIO().KeyAlt) {
-                        canvas.ToggleLayerIsolation(i);
-                    } else {
-                        layers[i].visible = vis;
-                        canvas.MarkCompositeDirty();
-                    }
-                }
-                if (isIsolated) {
-                    ImGui::PopStyleColor();
-                }
-                if (ImGui::IsItemHovered()) {
-                    ImGui::SetTooltip("Alt+Click to Isolate this layer");
-                }
-                
-                ImGui::SameLine();
+                    auto& layers = canvas.GetLayers();
+                    for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
+                        auto& layer = layers[i];
+                        
+                        // Collapse/expand visibility check recursively
+                        bool parentCollapsed = false;
+                        int currParentId = layer.parentGroupId;
+                        while (currParentId >= 0 && currParentId < (int)layers.size()) {
+                            if (!layers[currParentId].groupExpanded) {
+                                parentCollapsed = true;
+                                break;
+                            }
+                            currParentId = layers[currParentId].parentGroupId;
+                        }
+                        if (parentCollapsed) {
+                            continue;
+                        }
 
-                bool isSelected = (canvas.GetActiveLayerIndex() == i);
-                if (ImGui::Selectable(layers[i].name.c_str(), isSelected, ImGuiSelectableFlags_None, ImVec2(ImGui::GetContentRegionAvail().x - 70, 0))) {
-                    canvas.SetActiveLayerIndex(i);
-                }
-                
-                ImGui::SameLine();
-                if (layers.size() > 1) {
-                    if (ImGui::Button("Del")) {
-                        canvas.DeleteLayer(i);
-                    }
-                }
+                        ImGui::PushID(i);
+                        
+                        // Indent child layers based on recursion depth
+                        int depth = 0;
+                        int pId = layer.parentGroupId;
+                        while (pId >= 0 && pId < (int)layers.size()) {
+                            depth++;
+                            pId = layers[pId].parentGroupId;
+                        }
 
-                ImGui::PushItemWidth(100);
-                if (ImGui::SliderFloat("Opacity", &layers[i].opacity, 0.0f, 1.0f, "%.2f")) {
-                    canvas.MarkCompositeDirty();
-                }
-                ImGui::PopItemWidth();
+                        bool indented = false;
+                        if (depth > 0) {
+                            ImGui::Indent(20.0f * depth);
+                            indented = true;
+                        }
 
-                // Blend Mode
-                ImGui::SameLine();
-                static const char* blendNames[] = {
-                    "Normal","Multiply","Screen","Overlay",
-                    "Add","Subtract","Darken","Lighten","HardLight","SoftLight"
-                };
-                int blendIdx = (int)layers[i].blendMode;
-                ImGui::PushItemWidth(90);
-                if (ImGui::Combo("##blend", &blendIdx, blendNames, IM_ARRAYSIZE(blendNames))) {
-                    layers[i].blendMode = (BlendMode)blendIdx;
-                    canvas.MarkCompositeDirty();
-                }
-                ImGui::PopItemWidth();
-
-                // Fx button — filter management popup
-                ImGui::SameLine();
-                bool hasFx = !layers[i].filters.empty();
-                if (hasFx) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f,0.6f,0.9f,0.7f));
-                if (ImGui::SmallButton("Fx")) ImGui::OpenPopup("##filterPopup");
-                if (hasFx) ImGui::PopStyleColor();
-
-                if (ImGui::BeginPopup("##filterPopup")) {
-                    ImGui::Text("Filters — Layer: %s", layers[i].name.c_str());
-                    ImGui::Separator();
-                    static const char* filterTypeNames[] = {"Blur","HSV","Curves","Alpha Invert","Noise"};
-                    for (int fi = 0; fi < (int)layers[i].filters.size(); ++fi) {
-                        ImGui::PushID(fi);
-                        LayerFilter& flt = layers[i].filters[fi];
-                        bool wasEnabled = flt.enabled;
-                        if (ImGui::Checkbox("##fen", &flt.enabled) && flt.enabled != wasEnabled)
-                            layers[i].filtersDirty = true;
-                        ImGui::SameLine();
-                        ImGui::Text("%s", filterTypeNames[(int)flt.type]);
-                        ImGui::SameLine();
-                        if (ImGui::SmallButton("X")) { layers[i].filters.erase(layers[i].filters.begin()+fi); layers[i].filtersDirty=true; ImGui::PopID(); break; }
-                        // Inline params
-                        if (flt.enabled) {
-                            switch(flt.type) {
-                            case FilterType::Blur:
-                                if (ImGui::SliderFloat("Radius##fp",&flt.p[0],0.5f,80.f,"%.1f")) layers[i].filtersDirty=true; break;
-                            case FilterType::HSV:
-                                if (ImGui::SliderFloat("H##fp",&flt.p[0],-0.5f,0.5f)||ImGui::SliderFloat("S##fp",&flt.p[1],-1.f,1.f)||ImGui::SliderFloat("V##fp",&flt.p[2],-1.f,1.f)) layers[i].filtersDirty=true; break;
-                            case FilterType::AlphaInvert: break;
-                            case FilterType::Noise:
-                                if (ImGui::SliderFloat("Str##fp",&flt.p[0],0.f,1.f)) layers[i].filtersDirty=true;
-                                { bool col=(flt.p[1]>0.5f); if(ImGui::Checkbox("Color##fp",&col)){flt.p[1]=col?1.f:0.f;layers[i].filtersDirty=true;} } break;
-                            case FilterType::Curves:
-                                ImGui::TextDisabled("Edit via Image > Curves"); break;
+                        bool isIsolated = canvas.IsLayerIsolated(i);
+                        if (isIsolated) {
+                            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
+                        }
+                        
+                        bool vis = layer.visible;
+                        if (ImGui::Checkbox("##visible", &vis)) {
+                            if (ImGui::GetIO().KeyAlt) {
+                                canvas.ToggleLayerIsolation(i);
+                            } else {
+                                layer.visible = vis;
+                                canvas.MarkCompositeDirty();
                             }
                         }
+                        if (isIsolated) {
+                            ImGui::PopStyleColor();
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Alt+Click to Isolate this layer");
+                        }
+                        
+                        ImGui::SameLine();
+
+                        // Collapse/Expand arrow for groups
+                        if (layer.isGroup) {
+                            if (ImGui::ArrowButton("##expand", layer.groupExpanded ? ImGuiDir_Down : ImGuiDir_Right)) {
+                                layer.groupExpanded = !layer.groupExpanded;
+                            }
+                            ImGui::SameLine();
+                        }
+
+                        // Content thumbnail
+                        if (!layer.isGroup && layer.srv) {
+                            bool isActiveContent = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerContent);
+                            if (isActiveContent) {
+                                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
+                                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
+                            } else {
+                                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+                                ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                            }
+                            
+                            if (ImGui::ImageButton("##layer_content_btn", (ImTextureID)layer.srv, ImVec2(36, 36), ImVec2(0,0), ImVec2(1,1))) {
+                                canvas.SetActiveLayerIndex(i);
+                                canvas.SetPaintTarget(PaintTarget::LayerContent);
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Layer Content (Click to paint color)");
+                            }
+                            
+                            ImGui::PopStyleVar();
+                            ImGui::PopStyleColor();
+                            ImGui::SameLine();
+                        } else if (layer.isGroup) {
+                            ImGui::Button("G##grp_icon", ImVec2(36, 36));
+                            if (ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("Group Folder (Drop layer here to group)");
+                            }
+                            
+                            // Drag target (add to group)
+                            if (ImGui::BeginDragDropTarget()) {
+                                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("LAYER_INDEX")) {
+                                    int draggedIdx = *(const int*)payload->Data;
+                                    if (draggedIdx != i) {
+                                        canvas.AddLayerToGroup(draggedIdx, i);
+                                        // Reorder it to be directly below/inside the group header (index i - 1)
+                                        int targetIdx = i - 1;
+                                        if (targetIdx < 0) targetIdx = 0;
+                                        
+                                        Layer* draggedLayer = &layers[draggedIdx];
+                                        ReorderLayer(layers, draggedIdx, targetIdx);
+                                        
+                                        // Update active layer index
+                                        for (int k = 0; k < (int)layers.size(); ++k) {
+                                            if (&layers[k] == draggedLayer) {
+                                                canvas.SetActiveLayerIndex(k);
+                                                break;
+                                            }
+                                        }
+                                        canvas.MarkCompositeDirty();
+                                    }
+                                }
+                                ImGui::EndDragDropTarget();
+                            }
+                            ImGui::SameLine();
+                        }
+                        
+                        // Mask thumbnail
+                        if (!layer.isGroup) {
+                            if (layer.hasMask && layer.maskSRV) {
+                                bool isActiveMask = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerMask);
+                                if (isActiveMask) {
+                                    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
+                                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f);
+                                } else {
+                                    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+                                    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+                                }
+                                
+                                if (ImGui::ImageButton("##layer_mask_btn", (ImTextureID)layer.maskSRV, ImVec2(36, 36), ImVec2(0,0), ImVec2(1,1))) {
+                                    canvas.SetActiveLayerIndex(i);
+                                    canvas.SetPaintTarget(PaintTarget::LayerMask);
+                                }
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip("Layer Mask (Click to paint mask)");
+                                }
+                                
+                                ImGui::PopStyleVar();
+                                ImGui::PopStyleColor();
+                            } else {
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 0.5f));
+                                if (ImGui::Button("+M##addmask", ImVec2(36, 36))) {
+                                    canvas.CreateLayerMask(device, i);
+                                    canvas.SetPaintTarget(PaintTarget::LayerMask);
+                                }
+                                if (ImGui::IsItemHovered()) {
+                                    ImGui::SetTooltip("Add Layer Mask");
+                                }
+                                ImGui::PopStyleColor();
+                            }
+                            ImGui::SameLine();
+                        }
+
+                        // Layer Selection and Label
+                        bool isSelected = (canvas.GetActiveLayerIndex() == i);
+                        char label[256];
+                        if (layer.isGroup) {
+                            std::sprintf(label, "[Group] %s", layer.name.c_str());
+                        } else {
+                            std::sprintf(label, "%s", layer.name.c_str());
+                        }
+                        
+                        if (ImGui::Selectable(label, isSelected, ImGuiSelectableFlags_None, ImVec2(ImGui::GetContentRegionAvail().x - 70, 36))) {
+                            canvas.SetActiveLayerIndex(i);
+                        }
+
+                        // Drag source
+                        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) {
+                            ImGui::SetDragDropPayload("LAYER_INDEX", &i, sizeof(int));
+                            ImGui::Text("Move %s", layer.name.c_str());
+                            ImGui::EndDragDropSource();
+                        }
+
+                        // Drag target (reorder / parent)
+                        if (ImGui::BeginDragDropTarget()) {
+                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("LAYER_INDEX")) {
+                                int draggedIdx = *(const int*)payload->Data;
+                                if (draggedIdx != i) {
+                                    int targetParent = layer.parentGroupId;
+                                    Layer* draggedLayer = &layers[draggedIdx];
+                                    
+                                    ReorderLayer(layers, draggedIdx, i);
+                                    
+                                    // Update active layer index
+                                    int newIdx = -1;
+                                    for (int k = 0; k < (int)layers.size(); ++k) {
+                                        if (&layers[k] == draggedLayer) {
+                                            newIdx = k;
+                                            break;
+                                        }
+                                    }
+                                    if (newIdx != -1) {
+                                        layers[newIdx].parentGroupId = targetParent;
+                                        canvas.SetActiveLayerIndex(newIdx);
+                                    }
+                                    canvas.MarkCompositeDirty();
+                                }
+                            }
+                            ImGui::EndDragDropTarget();
+                        }
+
+                        // Context menu for grouping/ungrouping
+                        if (ImGui::BeginPopupContextItem("##layer_context")) {
+                            if (ImGui::MenuItem("Remove from Group", nullptr, false, layer.parentGroupId != -1)) {
+                                canvas.RemoveLayerFromGroup(i);
+                            }
+                            
+                            if (ImGui::BeginMenu("Add to Group")) {
+                                for (int g = 0; g < (int)layers.size(); ++g) {
+                                    if (layers[g].isGroup && g != i) {
+                                        if (ImGui::MenuItem(layers[g].name.c_str())) {
+                                            canvas.AddLayerToGroup(i, g);
+                                        }
+                                    }
+                                }
+                                ImGui::EndMenu();
+                            }
+                            
+                            ImGui::Separator();
+                            
+                            if (layers.size() > 1) {
+                                if (ImGui::MenuItem("Delete Layer")) {
+                                    canvas.DeleteLayer(i);
+                                }
+                            }
+                            ImGui::EndPopup();
+                        }
+                        
+                        ImGui::SameLine();
+                        if (layers.size() > 1) {
+                            if (ImGui::Button("Del")) {
+                                canvas.DeleteLayer(i);
+                            }
+                        }
+
+                        ImGui::PushItemWidth(100);
+                        if (ImGui::SliderFloat("Opacity", &layer.opacity, 0.0f, 1.0f, "%.2f")) {
+                            canvas.MarkCompositeDirty();
+                        }
+                        ImGui::PopItemWidth();
+
+                        ImGui::SameLine();
+                        static const char* blendNames[] = {
+                            "Normal","Multiply","Screen","Overlay",
+                            "Add","Subtract","Darken","Lighten","HardLight","SoftLight"
+                        };
+                        int blendIdx = (int)layer.blendMode;
+                        ImGui::PushItemWidth(90);
+                        if (ImGui::Combo("##blend", &blendIdx, blendNames, IM_ARRAYSIZE(blendNames))) {
+                            layer.blendMode = (BlendMode)blendIdx;
+                            canvas.MarkCompositeDirty();
+                        }
+                        ImGui::PopItemWidth();
+
+                        ImGui::SameLine();
+                        bool hasFx = !layer.filters.empty();
+                        if (hasFx) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f,0.6f,0.9f,0.7f));
+                        if (ImGui::SmallButton("Fx")) ImGui::OpenPopup("##filterPopup");
+                        if (hasFx) ImGui::PopStyleColor();
+
+                        if (ImGui::BeginPopup("##filterPopup")) {
+                            ImGui::Text("Filters — Layer: %s", layer.name.c_str());
+                            ImGui::Separator();
+                            static const char* filterTypeNames[] = {"Blur","HSV","Curves","Alpha Invert","Noise"};
+                            for (int fi = 0; fi < (int)layer.filters.size(); ++fi) {
+                                ImGui::PushID(fi);
+                                LayerFilter& flt = layer.filters[fi];
+                                bool wasEnabled = flt.enabled;
+                                if (ImGui::Checkbox("##fen", &flt.enabled) && flt.enabled != wasEnabled)
+                                    layer.filtersDirty = true;
+                                ImGui::SameLine();
+                                ImGui::Text("%s", filterTypeNames[(int)flt.type]);
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("X")) { layer.filters.erase(layer.filters.begin()+fi); layer.filtersDirty=true; ImGui::PopID(); break; }
+                                if (flt.enabled) {
+                                    switch(flt.type) {
+                                    case FilterType::Blur:
+                                        if (ImGui::SliderFloat("Radius##fp",&flt.p[0],0.5f,80.f,"%.1f")) layer.filtersDirty=true; break;
+                                    case FilterType::HSV:
+                                        if (ImGui::SliderFloat("H##fp",&flt.p[0],-0.5f,0.5f)||ImGui::SliderFloat("S##fp",&flt.p[1],-1.f,1.f)||ImGui::SliderFloat("V##fp",&flt.p[2],-1.f,1.f)) layer.filtersDirty=true; break;
+                                    case FilterType::AlphaInvert: break;
+                                    case FilterType::Noise:
+                                        if (ImGui::SliderFloat("Str##fp",&flt.p[0],0.f,1.f)) layer.filtersDirty=true;
+                                        { bool col=(flt.p[1]>0.5f); if(ImGui::Checkbox("Color##fp",&col)){flt.p[1]=col?1.f:0.f;layer.filtersDirty=true;} } break;
+                                    case FilterType::Curves:
+                                        ImGui::TextDisabled("Edit via Image > Curves"); break;
+                                    }
+                                }
+                                ImGui::Separator();
+                                ImGui::PopID();
+                            }
+                            ImGui::Spacing();
+                            if (ImGui::BeginMenu("Add Filter")) {
+                                static const FilterType ftypes[] = {FilterType::Blur,FilterType::HSV,FilterType::Curves,FilterType::AlphaInvert,FilterType::Noise};
+                                for (int ti=0;ti<5;++ti) {
+                                    if (ImGui::MenuItem(filterTypeNames[ti])) {
+                                        LayerFilter nf; nf.type=ftypes[ti]; nf.enabled=true;
+                                        if (ftypes[ti]==FilterType::Blur) nf.p[0]=5.f;
+                                        if (ftypes[ti]==FilterType::Curves){ nf.lut.resize(256); for(int li=0;li<256;++li) nf.lut[li]=(float)li/255.f; }
+                                        layer.filters.push_back(nf);
+                                        layer.filtersDirty=true;
+                                    }
+                                }
+                                ImGui::EndMenu();
+                            }
+                            ImGui::EndPopup();
+                        }
+
+                        if (isSelected) {
+                            ImGui::Spacing();
+                            
+                            // Group Options in Selected details
+                            ImGui::Text("Group:");
+                            ImGui::SameLine();
+                            if (layer.parentGroupId == -1) {
+                                ImGui::Text("None");
+                            } else {
+                                int pId = layer.parentGroupId;
+                                if (pId >= 0 && pId < (int)layers.size()) {
+                                    ImGui::Text("%s", layers[pId].name.c_str());
+                                } else {
+                                    ImGui::Text("Unknown");
+                                }
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Move to Group")) {
+                                ImGui::OpenPopup("ChooseGroupPopup");
+                            }
+                            if (layer.parentGroupId != -1) {
+                                ImGui::SameLine();
+                                if (ImGui::Button("Ungroup")) {
+                                    canvas.RemoveLayerFromGroup(i);
+                                }
+                            }
+                            
+                            if (ImGui::BeginPopup("ChooseGroupPopup")) {
+                                for (int g = 0; g < (int)layers.size(); ++g) {
+                                    if (layers[g].isGroup && g != i) {
+                                        if (ImGui::MenuItem(layers[g].name.c_str())) {
+                                            canvas.AddLayerToGroup(i, g);
+                                        }
+                                    }
+                                }
+                                ImGui::EndPopup();
+                            }
+                            
+                            if (!layer.isGroup) {
+                                ImGui::Separator();
+                                if (layer.hasMask) {
+                                    ImGui::Text("Mask: Active");
+                                    ImGui::SameLine();
+                                    if (ImGui::Button("Apply Mask")) {
+                                        canvas.ApplyLayerMask(i);
+                                    }
+                                    ImGui::SameLine();
+                                    if (ImGui::Button("Delete Mask")) {
+                                        canvas.DeleteLayerMask(i);
+                                    }
+                                } else {
+                                    if (ImGui::Button("Create Mask")) {
+                                        canvas.CreateLayerMask(device, i);
+                                    }
+                                    ImGui::SameLine();
+                                    if (ImGui::Button("Mask from Sel")) {
+                                        canvas.CreateLayerMaskFromSelection(device, i);
+                                    }
+                                }
+                            }
+                        }
+
+                        if (indented) {
+                            ImGui::Unindent(20.0f * depth);
+                        }
+
                         ImGui::Separator();
                         ImGui::PopID();
                     }
-                    ImGui::Spacing();
-                    if (ImGui::BeginMenu("Add Filter")) {
-                        static const FilterType ftypes[] = {FilterType::Blur,FilterType::HSV,FilterType::Curves,FilterType::AlphaInvert,FilterType::Noise};
-                        for (int ti=0;ti<5;++ti) {
-                            if (ImGui::MenuItem(filterTypeNames[ti])) {
-                                LayerFilter nf; nf.type=ftypes[ti]; nf.enabled=true;
-                                if (ftypes[ti]==FilterType::Blur) nf.p[0]=5.f;
-                                if (ftypes[ti]==FilterType::Curves){ nf.lut.resize(256); for(int li=0;li<256;++li) nf.lut[li]=(float)li/255.f; }
-                                layers[i].filters.push_back(nf);
-                                layers[i].filtersDirty=true;
-                            }
-                        }
-                        ImGui::EndMenu();
-                    }
-                    ImGui::EndPopup();
-                }
+                    ImGui::EndChild();
+            ImGui::End();
+        }
 
-                if (isSelected) {
-                    ImGui::Spacing();
-                    if (layers[i].hasMask) {
-                        ImGui::Text("Mask: Active");
-                        ImGui::SameLine();
-                        if (ImGui::Button("Apply Mask")) {
-                            canvas.ApplyLayerMask(i);
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Delete Mask")) {
-                            canvas.DeleteLayerMask(i);
-                        }
-                    } else {
-                        if (ImGui::Button("Create Mask")) {
-                            canvas.CreateLayerMask(device, i);
-                        }
-                        ImGui::SameLine();
-                        if (ImGui::Button("Mask from Sel")) {
-                            canvas.CreateLayerMaskFromSelection(device, i);
-                        }
-                    }
-                }
+        if (state.showChannels) {
+            ImGui::Begin("Channels", &state.showChannels, ImGuiWindowFlags_NoCollapse);
 
-                ImGui::Separator();
+            bool r = canvas.GetChannelR();
+            bool g = canvas.GetChannelG();
+            bool b = canvas.GetChannelB();
+            bool a = canvas.GetChannelA();
+
+            auto drawChannelRow = [&](const char* label, bool* flag, const ImVec4& tint) {
+                ImGui::PushID(label);
+                ImGui::Checkbox("##flag", flag);
+                ImGui::SameLine();
+                
+                if (canvas.GetCompositeSRV()) {
+                    ImGui::ImageWithBg((ImTextureID)canvas.GetCompositeSRV(), ImVec2(32, 32), ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,0), tint);
+                } else {
+                    ImGui::Button("##preview", ImVec2(32, 32));
+                }
+                ImGui::SameLine();
+                ImGui::Text("%s", label);
                 ImGui::PopID();
+                ImGui::Separator();
+            };
+
+            if (ImGui::Button("Solo All", ImVec2(-1, 22))) {
+                canvas.SetChannelR(true);
+                canvas.SetChannelG(true);
+                canvas.SetChannelB(true);
+                canvas.SetChannelA(true);
             }
-            ImGui::EndChild();
+            ImGui::Separator();
+
+            drawChannelRow("Red Channel", &r, ImVec4(1, 0, 0, 1));
+            drawChannelRow("Green Channel", &g, ImVec4(0, 1, 0, 1));
+            drawChannelRow("Blue Channel", &b, ImVec4(0, 0, 1, 1));
+            drawChannelRow("Alpha Channel", &a, ImVec4(1, 1, 1, 1));
+
+            canvas.SetChannelR(r);
+            canvas.SetChannelG(g);
+            canvas.SetChannelB(b);
+            canvas.SetChannelA(a);
 
             ImGui::End();
         }
@@ -2053,6 +2366,27 @@ namespace UI {
             }
 
             ImGui::End();
+        }
+
+        // Draw loading progress modal
+        if (g_LoadingState.isLoading) {
+            ImGui::OpenPopup("Loading Document...");
+            ImGuiViewport* mainViewport = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(mainViewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            
+            if (ImGui::BeginPopupModal("Loading Document...", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+                ImGui::Text("Loading: %s", g_LoadingState.filepath.substr(g_LoadingState.filepath.find_last_of("\\/") + 1).c_str());
+                
+                float progress = g_LoadingState.progress;
+                std::string stage;
+                {
+                    std::lock_guard<std::mutex> lock(g_LoadingState.mutex);
+                    stage = g_LoadingState.stage;
+                }
+                
+                ImGui::ProgressBar(progress, ImVec2(300, 20), stage.c_str());
+                ImGui::EndPopup();
+            }
         }
     }
 }
