@@ -34,6 +34,7 @@
 #include "core/MemoryStats.h"
 #include "core/KeymapManager.h"
 #include "core/ClipboardHelper.h"
+#include "core/BrushLibrary.h"
 #include "ui/EditorPanels.h"
 #include "ui/style/UiTokens.h"
 
@@ -445,6 +446,7 @@ int main(int argc, char* argv[]) {
     // 1. CLI Arguments parsing
     bool testMode = false;
     bool headlessMode = false;
+    bool testBrushes = false;
     bool forceConsole = false;
     bool test16kMode = false;
     std::string scriptPath = "";
@@ -456,6 +458,9 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "--test") {
             testMode = true;
+        } else if (arg == "--test-brushes") {
+            testBrushes = true;
+            forceConsole = true;
         } else if (arg == "--test-16k") {
             // Heavy large-texture suite (optional path after smoke).
             test16kMode = true;
@@ -515,6 +520,14 @@ int main(int argc, char* argv[]) {
     else if (cfgLevel == "warn") Logger::Get().SetMinLevel(LogLevel::LogLevel_Warning);
     else if (cfgLevel == "error") Logger::Get().SetMinLevel(LogLevel::LogLevel_Error);
     else Logger::Get().SetMinLevel(LogLevel::LogLevel_Info);
+
+    // Brush presets: global user library (AppData/RayVPaint/brushes)
+    BrushLibrary::Get().LoadAll();
+    if (testBrushes) {
+        bool ok = BrushLibrary::RunSmokeTest();
+        Logger::Get().Info(ok ? "BrushLibrary smoke PASS" : "BrushLibrary smoke FAIL");
+        return ok ? 0 : 2;
+    }
     log_step("Logger & Config Systems");
 
     // 3. Initialize Concurrency (ThreadPool)

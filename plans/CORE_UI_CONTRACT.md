@@ -48,7 +48,15 @@ Pattern: BackupAll → mutate → CommitActiveLayerMutation.
 ### Groups
 `CreateLayerGroup`, `AddLayerToGroup`, `RemoveLayerFromGroup`, `ReorderLayer`, `MoveLayerIntoGroup`
 
-### Brush tips
+### Brush tips / presets
+**User library (global):** `BrushLibrary::Get()` — see `plans/BRUSH_PRESETS.md`  
+- `List()` → id, name, `isBuiltin` (blue), `isDirty` (unsaved orange)  
+- `ApplyTo(id, g_Brush)` — tip pointer owned by library / static builtins  
+- `CreateFromCurrent` / `UpdateStaging` / `SaveToDisk` / `DeleteCustom` / `DiscardStaging`  
+- Path: `%AppData%/Roaming/RayVPaint/brushes/*.rvbrush`  
+- FG color not stored in presets  
+
+**Legacy tip helpers (still valid):**  
 `BrushSettings::tip` → `&BrushPresets::SoftRound()` etc.  
 Project prefs: `Set/GetBrushTipId`, `Set/GetCustomBrushTip`  
 Ids: `procedural` \| `soft_round` \| `hard_round` \| `pencil` \| `airbrush` \| `custom`

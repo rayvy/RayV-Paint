@@ -110,6 +110,8 @@ set(SOURCES
     src/core/IccProfiles.h
     src/core/PaintEngine.cpp
     src/core/PaintEngine.h
+    src/core/BrushLibrary.cpp
+    src/core/BrushLibrary.h
     src/core/UndoRedoManager.cpp
     src/core/UndoRedoManager.h
     src/core/KeymapManager.cpp
