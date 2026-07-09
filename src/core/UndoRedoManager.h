@@ -5,6 +5,7 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 // Tile-level history delta. Snapshots share TileData (COW) — no full copies
 // until the live cache mutates a shared blob.
@@ -24,7 +25,16 @@ public:
     virtual std::string GetName() const = 0;
     virtual void Undo(Canvas* canvas) = 0;
     virtual void Redo(Canvas* canvas) = 0;
-    virtual size_t GetMemorySize() const = 0;
+
+    // Private / non-shared overhead (structs, names, selection masks, etc.).
+    // Tile pixel blobs are reported via CollectTileData instead.
+    virtual size_t GetOverheadBytes() const = 0;
+
+    // Visit every TileData pointer held by this command (may repeat; manager dedupes).
+    virtual void CollectTileData(std::unordered_set<const TileData*>& seen) const {}
+
+    // Convenience: unique blobs *inside this command only* + overhead.
+    size_t GetMemorySize() const;
 };
 
 class PaintStrokeCommand : public UndoCommand {
@@ -33,7 +43,8 @@ public:
     std::string GetName() const override { return m_Name; }
     void Undo(Canvas* canvas) override;
     void Redo(Canvas* canvas) override;
-    size_t GetMemorySize() const override;
+    size_t GetOverheadBytes() const override;
+    void CollectTileData(std::unordered_set<const TileData*>& seen) const override;
 
 private:
     std::string m_Name;
@@ -49,7 +60,7 @@ public:
     std::string GetName() const override { return m_Name; }
     void Undo(Canvas* canvas) override;
     void Redo(Canvas* canvas) override;
-    size_t GetMemorySize() const override;
+    size_t GetOverheadBytes() const override;
 
 private:
     std::string m_Name;
@@ -77,11 +88,16 @@ public:
 
     void  SetMemoryBudget(size_t bytes) { m_MemoryBudgetBytes = bytes; }
     size_t GetMemoryBudget() const      { return m_MemoryBudgetBytes; }
-    size_t GetCurrentMemoryUsage() const{ return m_CurrentMemoryBytes; }
+
+    // Global unique TileData accounting across undo + redo stacks.
+    size_t GetCurrentMemoryUsage() const { return m_CurrentMemoryBytes; }
+    size_t GetUniqueTileBlobCount() const { return m_UniqueTileBlobCount; }
+    size_t GetOverheadBytes() const       { return m_OverheadBytes; }
 
 private:
     void EnforceLimits();
     void RecalcMemory();
+    size_t EffectiveBudget() const;
 
     static constexpr size_t kDefaultMemoryBudget = 256ull * 1024 * 1024;
 
@@ -89,4 +105,6 @@ private:
     std::vector<std::shared_ptr<UndoCommand>> m_RedoStack;
     size_t m_MemoryBudgetBytes  = kDefaultMemoryBudget;
     size_t m_CurrentMemoryBytes = 0;
+    size_t m_UniqueTileBlobCount = 0;
+    size_t m_OverheadBytes = 0;
 };

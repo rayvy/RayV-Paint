@@ -2,11 +2,24 @@
 #include "../Canvas.h"
 #include "Logger.h"
 #include "ConfigManager.h"
-
-#include <unordered_set>
+#include "MemoryStats.h"
 
 // ---------------------------------------------------------------------------
-// PaintStrokeCommand — restores shared TileSnapshot handles
+// UndoCommand helpers
+// ---------------------------------------------------------------------------
+
+size_t UndoCommand::GetMemorySize() const {
+    std::unordered_set<const TileData*> seen;
+    CollectTileData(seen);
+    size_t bytes = GetOverheadBytes();
+    for (const TileData* td : seen) {
+        if (td) bytes += td->ByteSize();
+    }
+    return bytes;
+}
+
+// ---------------------------------------------------------------------------
+// PaintStrokeCommand
 // ---------------------------------------------------------------------------
 
 PaintStrokeCommand::PaintStrokeCommand(const std::string& name, int layerIdx,
@@ -41,24 +54,20 @@ void PaintStrokeCommand::Redo(Canvas* canvas) {
     canvas->MarkCompositeDirty();
 }
 
-size_t PaintStrokeCommand::GetMemorySize() const {
-    // Charge unique TileData blobs once (shared between old/new and across deltas).
-    std::unordered_set<const TileData*> seen;
-    size_t sz = sizeof(PaintStrokeCommand) + m_Name.capacity()
-              + m_Deltas.capacity() * sizeof(TileDelta);
+size_t PaintStrokeCommand::GetOverheadBytes() const {
+    return sizeof(PaintStrokeCommand)
+         + m_Name.capacity()
+         + m_Deltas.capacity() * sizeof(TileDelta);
+}
 
-    auto addSnap = [&](const TileSnapshot& s) {
-        if (!s.data) return;
-        if (seen.insert(s.data.get()).second) {
-            sz += s.data->ByteSize();
-        }
+void PaintStrokeCommand::CollectTileData(std::unordered_set<const TileData*>& seen) const {
+    auto add = [&](const TileSnapshot& s) {
+        if (s.data) seen.insert(s.data.get());
     };
-
     for (const auto& d : m_Deltas) {
-        addSnap(d.oldState);
-        addSnap(d.newState);
+        add(d.oldState);
+        add(d.newState);
     }
-    return sz;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,45 +91,58 @@ void SelectionCommand::Redo(Canvas* canvas) {
     canvas->SetSelectionMask(m_NewMask);
 }
 
-size_t SelectionCommand::GetMemorySize() const {
+size_t SelectionCommand::GetOverheadBytes() const {
     return sizeof(SelectionCommand) + m_Name.capacity()
-        + m_OldMask.capacity() * sizeof(uint8_t)
-        + m_NewMask.capacity() * sizeof(uint8_t);
+         + m_OldMask.capacity() * sizeof(uint8_t)
+         + m_NewMask.capacity() * sizeof(uint8_t);
 }
 
 // ---------------------------------------------------------------------------
-// UndoRedoManager
+// UndoRedoManager — global unique TileData budget
 // ---------------------------------------------------------------------------
 
 UndoRedoManager::UndoRedoManager() {}
 
-void UndoRedoManager::RecalcMemory() {
-    m_CurrentMemoryBytes = 0;
-    // Unique TileData across the whole history (undo + redo).
-    std::unordered_set<const TileData*> seenGlobal;
+size_t UndoRedoManager::EffectiveBudget() const {
+    // User-facing config is primary. Instance SetMemoryBudget overrides when
+    // called explicitly with a non-default path: if config is 0, treat as
+    // unlimited only when instance budget is also 0.
+    const int configMB = ConfigManager::Get().GetMaxUndoMemoryMB();
+    if (configMB > 0) {
+        return (size_t)configMB * 1024ull * 1024ull;
+    }
+    // config 0 = "use code default / instance"
+    return m_MemoryBudgetBytes; // default 256 MiB; SetMemoryBudget(0) => unlimited
+}
 
-    auto accumulate = [&](const std::shared_ptr<UndoCommand>& cmd) {
-        // Prefer exact shared accounting for paint commands.
-        auto* paint = dynamic_cast<PaintStrokeCommand*>(cmd.get());
-        if (paint) {
-            // Re-walk deltas via GetMemorySize is per-command unique only.
-            // For global budget we still sum per-command unique + selection sizes;
-            // double-count across commands that share is possible but rare after
-            // redo clear. Acceptable vs deep graph walk.
-            m_CurrentMemoryBytes += cmd->GetMemorySize();
-            return;
+void UndoRedoManager::RecalcMemory() {
+    std::unordered_set<const TileData*> seen;
+    m_OverheadBytes = 0;
+
+    auto walk = [&](const std::vector<std::shared_ptr<UndoCommand>>& stack) {
+        for (const auto& cmd : stack) {
+            if (!cmd) continue;
+            m_OverheadBytes += cmd->GetOverheadBytes();
+            cmd->CollectTileData(seen);
         }
-        m_CurrentMemoryBytes += cmd->GetMemorySize();
-        (void)seenGlobal;
     };
 
-    for (const auto& cmd : m_UndoStack) accumulate(cmd);
-    for (const auto& cmd : m_RedoStack) accumulate(cmd);
+    walk(m_UndoStack);
+    walk(m_RedoStack);
+
+    size_t tileBytes = 0;
+    for (const TileData* td : seen) {
+        if (td) tileBytes += td->ByteSize();
+    }
+
+    m_UniqueTileBlobCount = seen.size();
+    m_CurrentMemoryBytes  = m_OverheadBytes + tileBytes;
 }
 
 void UndoRedoManager::PushCommand(std::shared_ptr<UndoCommand> command) {
     m_UndoStack.push_back(std::move(command));
-    m_RedoStack.clear(); // drop redo branch; shared TileData refcounts drop
+    // New branch invalidates redo; shared TileData refcounts drop for orphaned history.
+    m_RedoStack.clear();
     EnforceLimits();
 }
 
@@ -129,7 +151,8 @@ bool UndoRedoManager::Undo(Canvas* canvas) {
     auto cmd = m_UndoStack.back();
     m_UndoStack.pop_back();
     cmd->Undo(canvas);
-    m_RedoStack.push_back(cmd);
+    m_RedoStack.push_back(std::move(cmd));
+    // Moving a command undo→redo does not free TileData (still referenced).
     RecalcMemory();
     return true;
 }
@@ -139,7 +162,7 @@ bool UndoRedoManager::Redo(Canvas* canvas) {
     auto cmd = m_RedoStack.back();
     m_RedoStack.pop_back();
     cmd->Redo(canvas);
-    m_UndoStack.push_back(cmd);
+    m_UndoStack.push_back(std::move(cmd));
     RecalcMemory();
     return true;
 }
@@ -148,6 +171,8 @@ void UndoRedoManager::Clear() {
     m_UndoStack.clear();
     m_RedoStack.clear();
     m_CurrentMemoryBytes = 0;
+    m_UniqueTileBlobCount = 0;
+    m_OverheadBytes = 0;
 }
 
 bool UndoRedoManager::CanUndo() const { return !m_UndoStack.empty(); }
@@ -162,18 +187,41 @@ std::string UndoRedoManager::GetRedoName() const {
 }
 
 void UndoRedoManager::EnforceLimits() {
-    int maxSteps = ConfigManager::Get().GetMaxUndoSteps();
-    while ((int)m_UndoStack.size() > maxSteps && !m_UndoStack.empty()) {
+    const int maxSteps = ConfigManager::Get().GetMaxUndoSteps();
+    int droppedSteps = 0;
+
+    // 1) Step cap — oldest undo first (front of stack).
+    while (maxSteps > 0 && (int)m_UndoStack.size() > maxSteps) {
         m_UndoStack.erase(m_UndoStack.begin());
+        ++droppedSteps;
     }
 
-    size_t configBudget = (size_t)ConfigManager::Get().GetMaxUndoMemoryMB() * 1024 * 1024;
-    size_t budget = (m_MemoryBudgetBytes > 0) ? m_MemoryBudgetBytes : configBudget;
-
+    // 2) Global unique TileData budget across undo + redo.
+    const size_t budget = EffectiveBudget();
     RecalcMemory();
 
-    while (m_CurrentMemoryBytes > budget && !m_UndoStack.empty()) {
-        m_UndoStack.erase(m_UndoStack.begin());
-        RecalcMemory();
+    if (budget > 0) {
+        // Drop oldest undo first (Krita-like purge of deep history).
+        while (m_CurrentMemoryBytes > budget && !m_UndoStack.empty()) {
+            m_UndoStack.erase(m_UndoStack.begin());
+            ++droppedSteps;
+            RecalcMemory();
+        }
+        // If still over (e.g. huge redo after many undos), drop oldest redo.
+        while (m_CurrentMemoryBytes > budget && !m_RedoStack.empty()) {
+            m_RedoStack.erase(m_RedoStack.begin());
+            ++droppedSteps;
+            RecalcMemory();
+        }
+    }
+
+    if (droppedSteps > 0) {
+        Logger::Get().InfoTag("mem",
+            "Undo history trimmed: dropped " + std::to_string(droppedSteps) +
+            " step(s) | unique blobs=" + std::to_string(m_UniqueTileBlobCount) +
+            " tiles=" + MemoryStats::FormatBytes(m_CurrentMemoryBytes - m_OverheadBytes) +
+            " overhead=" + MemoryStats::FormatBytes(m_OverheadBytes) +
+            " total=" + MemoryStats::FormatBytes(m_CurrentMemoryBytes) +
+            (budget ? " budget=" + MemoryStats::FormatBytes(budget) : " budget=unlimited"));
     }
 }
