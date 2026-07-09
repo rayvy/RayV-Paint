@@ -120,14 +120,22 @@ static ActiveTool g_LastSelectTool = ActiveTool::RectSelect;
 static ActiveTool g_LastLassoTool = ActiveTool::LassoSelect;
 static ActiveTool g_LastWandTool = ActiveTool::MagicWand;
 static BrushSettings g_Brush;
-static float g_SecondaryColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+float g_SecondaryColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+// Color swap animation 0→1 (toolbar + Colors); bumped on X / chip click
+float g_ColorSwapAnim = 0.f;
+bool g_ColorSwapPending = false;
 static bool g_IsPainting = false;
 static ActiveTool g_PrevActiveTool = ActiveTool::Brush;
+
+static int g_LayerPreviewRefreshFrames = 0;
 
 static void EndBrushStrokeIfNeeded() {
     if (g_IsPainting) {
         g_Canvas.PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
         g_IsPainting = false;
+        // Double-refresh layer thumbs (preview can lag one frame behind GPU upload)
+        g_LayerPreviewRefreshFrames = 2;
+        g_Canvas.MarkCompositeDirty();
     }
 }
 
@@ -704,6 +712,12 @@ int main(int argc, char* argv[]) {
         g_IsViewportHovered = false;
         g_IsLayersHovered = false;
 
+        // Layer preview double-refresh (paint/edit may leave thumbs one frame stale)
+        if (g_LayerPreviewRefreshFrames > 0) {
+            g_Canvas.MarkCompositeDirty();
+            --g_LayerPreviewRefreshFrames;
+        }
+
         // Render all UI Panels and Modals (Toolbar, Properties, Layers, Brush settings, Console logs, Colors)
         UI::RenderAll(uiState, g_Canvas, g_Brush, g_ActiveTool, g_pd3dDevice, g_pd3dDeviceContext, window);
 
@@ -1024,58 +1038,82 @@ int main(int argc, char* argv[]) {
 
             float wheelDelta = isHovered ? ImGui::GetIO().MouseWheel : 0.0f;
 
-            // Photoshop-like Brush Resize/Hardness drag controls (Ctrl+Alt+RMB)
+            // Photoshop-like Brush Resize/Hardness (Ctrl+Alt+RMB) — lock cursor pos, no pan/navigator drift
+            // Declared early so pan/zoom can be gated after this block runs
             static bool g_IsCtrlAltRmbDragging = false;
             static double g_CtrlAltRmbStartX = 0.0;
             static double g_CtrlAltRmbStartY = 0.0;
+            static ImVec2 g_CtrlAltRmbScreenPos(0, 0);
+            static double g_CtrlAltRmbLastX = 0.0, g_CtrlAltRmbLastY = 0.0;
 
-            if (isHovered && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            const bool brushOrEraser = isBrushLikeTool; // Brush or Eraser only
+            if (isHovered && brushOrEraser && ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt
+                && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 g_IsCtrlAltRmbDragging = true;
                 GLFWwindow* win = glfwGetCurrentContext();
                 if (win) {
                     glfwGetCursorPos(win, &g_CtrlAltRmbStartX, &g_CtrlAltRmbStartY);
-                    glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
+                    g_CtrlAltRmbLastX = g_CtrlAltRmbStartX;
+                    g_CtrlAltRmbLastY = g_CtrlAltRmbStartY;
+                    g_CtrlAltRmbScreenPos = mousePos;
+                    // DISABLED gives raw deltas and freezes OS cursor (PS-like)
+                    glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
                 }
             }
             if (g_IsCtrlAltRmbDragging) {
                 GLFWwindow* win = glfwGetCurrentContext();
-                if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) || !brushOrEraser) {
                     g_IsCtrlAltRmbDragging = false;
                     if (win) {
                         glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-                    }
-                } else {
-                    ImVec2 mouseDelta = ImGui::GetIO().MouseDelta;
-                    g_Brush.radius = std::clamp(g_Brush.radius + mouseDelta.x * 0.5f, 1.0f, 250.0f);
-                    g_Brush.hardness = std::clamp(g_Brush.hardness - mouseDelta.y * 0.01f, 0.0f, 1.0f);
-
-                    if (win) {
                         glfwSetCursorPos(win, g_CtrlAltRmbStartX, g_CtrlAltRmbStartY);
                     }
+                    // Prevent residual delta from warping the view
+                    ImGui::GetIO().MouseDelta = ImVec2(0, 0);
+                } else {
+                    // Prefer raw GLFW delta (stable under DISABLED); fall back to ImGui delta
+                    double cx = 0, cy = 0;
+                    float dx = 0.f, dy = 0.f;
+                    if (win) {
+                        glfwGetCursorPos(win, &cx, &cy);
+                        dx = (float)(cx - g_CtrlAltRmbLastX);
+                        dy = (float)(cy - g_CtrlAltRmbLastY);
+                        g_CtrlAltRmbLastX = cx;
+                        g_CtrlAltRmbLastY = cy;
+                    }
+                    if (std::fabs(dx) < 1e-6f && std::fabs(dy) < 1e-6f) {
+                        dx = ImGui::GetIO().MouseDelta.x;
+                        dy = ImGui::GetIO().MouseDelta.y;
+                    }
+                    g_Brush.radius = std::clamp(g_Brush.radius + dx * 0.5f, 1.0f, 250.0f);
+                    g_Brush.hardness = std::clamp(g_Brush.hardness - dy * 0.01f, 0.0f, 1.0f);
 
-                    // Show visual feedback tooltip
-                    ImGui::BeginTooltip();
-                    ImGui::Text("Brush Size: %.1f px", g_Brush.radius);
-                    ImGui::Text("Hardness: %.2f", g_Brush.hardness);
-                    ImGui::EndTooltip();
+                    // Kill ImGui delta so pan/hover coords stay put
+                    ImGui::GetIO().MouseDelta = ImVec2(0, 0);
+                    ImGui::GetIO().MousePos = g_CtrlAltRmbScreenPos;
 
-                    // Draw Photoshop-like preview
+                    ImGui::SetTooltip("Size: %.1f px\nHardness: %.0f%%", g_Brush.radius, g_Brush.hardness * 100.f);
+
+                    // Preview ring fixed at drag origin (not following cursor)
                     ImDrawList* drawList = ImGui::GetForegroundDrawList();
                     float rScreen = g_Brush.radius * g_Canvas.GetZoom();
                     float hScreen = rScreen * g_Brush.hardness;
-                    
-                    ImU32 outerColor = IM_COL32(235, 64, 52, 200);      // Ring
-                    ImU32 solidColor = IM_COL32(235, 64, 52, 90);       // Solid core
-                    ImU32 falloffColor = IM_COL32(235, 64, 52, 35);     // Falloff region
-                    
-                    if (g_Brush.hardness < 1.0f) {
-                        drawList->AddCircleFilled(mousePos, rScreen, falloffColor, 64);
-                    }
-                    if (hScreen > 0.0f) {
-                        drawList->AddCircleFilled(mousePos, hScreen, solidColor, 64);
-                    }
-                    drawList->AddCircle(mousePos, rScreen, outerColor, 64, 2.0f);
+                    ImVec2 fixed = g_CtrlAltRmbScreenPos;
+                    ImU32 outerColor = IM_COL32(235, 64, 52, 200);
+                    ImU32 solidColor = IM_COL32(235, 64, 52, 90);
+                    ImU32 falloffColor = IM_COL32(235, 64, 52, 35);
+                    if (g_Brush.hardness < 1.0f)
+                        drawList->AddCircleFilled(fixed, rScreen, falloffColor, 64);
+                    if (hScreen > 0.0f)
+                        drawList->AddCircleFilled(fixed, hScreen, solidColor, 64);
+                    drawList->AddCircle(fixed, rScreen, outerColor, 64, 2.0f);
                 }
+            }
+            if (g_IsCtrlAltRmbDragging) {
+                isPanning = false;
+                isRotating = false;
+                wheelDelta = 0.f;
+                dragDx = dragDy = 0.f;
             }
 
             // Handle custom brush / smudge visualizer and cursor hiding when inside canvas bounds
@@ -1106,6 +1144,49 @@ int main(int argc, char* argv[]) {
                     imageMin.y + screenOriginY + (rotY + ch * 0.5f) * zoom
                 );
             };
+
+            // Rulers (canvas pixel coords) — View → Rulers
+            if (uiState.showRulers) {
+                const float R = 16.f;
+                ImDrawList* rdl = ImGui::GetWindowDrawList();
+                ImU32 bg = IM_COL32(28, 28, 30, 230);
+                ImU32 tick = IM_COL32(160, 160, 165, 200);
+                ImU32 textC = IM_COL32(200, 200, 205, 220);
+                // Background strips
+                rdl->AddRectFilled(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + R), bg);
+                rdl->AddRectFilled(imageMin, ImVec2(imageMin.x + R, imageMin.y + viewportHeight), bg);
+                rdl->AddRectFilled(imageMin, ImVec2(imageMin.x + R, imageMin.y + R), IM_COL32(22, 22, 24, 255));
+
+                // Choose step so labels stay readable
+                float step = 50.f;
+                if (zoom >= 2.f) step = 25.f;
+                if (zoom >= 4.f) step = 10.f;
+                if (zoom < 0.5f) step = 100.f;
+                if (zoom < 0.25f) step = 200.f;
+
+                // Horizontal ticks (top)
+                for (float cx = 0.f; cx <= cw; cx += step) {
+                    ImVec2 sp = canvasToScreen(cx, 0.f);
+                    if (sp.x < imageMin.x + R || sp.x > imageMin.x + viewportWidth) continue;
+                    float len = (std::fmod(cx, step * 2.f) < 0.01f) ? R - 2.f : R * 0.55f;
+                    rdl->AddLine(ImVec2(sp.x, imageMin.y + R), ImVec2(sp.x, imageMin.y + R - len), tick, 1.f);
+                    if (std::fmod(cx, step * 2.f) < 0.01f || step >= 50.f) {
+                        char lb[16]; std::snprintf(lb, sizeof(lb), "%.0f", cx);
+                        rdl->AddText(ImVec2(sp.x + 2.f, imageMin.y + 1.f), textC, lb);
+                    }
+                }
+                // Vertical ticks (left)
+                for (float cy = 0.f; cy <= ch; cy += step) {
+                    ImVec2 sp = canvasToScreen(0.f, cy);
+                    if (sp.y < imageMin.y + R || sp.y > imageMin.y + viewportHeight) continue;
+                    float len = (std::fmod(cy, step * 2.f) < 0.01f) ? R - 2.f : R * 0.55f;
+                    rdl->AddLine(ImVec2(imageMin.x + R, sp.y), ImVec2(imageMin.x + R - len, sp.y), tick, 1.f);
+                    if (std::fmod(cy, step * 2.f) < 0.01f || step >= 50.f) {
+                        char lb[16]; std::snprintf(lb, sizeof(lb), "%.0f", cy);
+                        rdl->AddText(ImVec2(imageMin.x + 1.f, sp.y + 1.f), textC, lb);
+                    }
+                }
+            }
 
             // Draw Symmetrical Guidelines
             if (g_Canvas.GetMirrorHorizontal() || g_Canvas.GetMirrorVertical()) {
@@ -1297,7 +1378,20 @@ int main(int argc, char* argv[]) {
                 std::swap(g_Brush.color[1], g_SecondaryColor[1]);
                 std::swap(g_Brush.color[2], g_SecondaryColor[2]);
                 std::swap(g_Brush.color[3], g_SecondaryColor[3]);
+                g_ColorSwapPending = true; // toolbar/Colors play cross-fade
             }
+
+            // Selection modifiers: Ctrl = add, Alt = subtract (Photoshop-like)
+            auto selAdd = []() { return ImGui::GetIO().KeyCtrl; };
+            auto selSub = []() { return ImGui::GetIO().KeyAlt; };
+            // Shift constrains Rect/Ellipse to 1:1
+            auto constrainSquare = [](float x0, float y0, float& x1, float& y1) {
+                float dx = x1 - x0, dy = y1 - y0;
+                float s = std::max(std::fabs(dx), std::fabs(dy));
+                if (s < 1e-4f) return;
+                x1 = x0 + (dx >= 0.f ? s : -s);
+                y1 = y0 + (dy >= 0.f ? s : -s);
+            };
 
             // Drag-based selection tools only (Magic Wand is click-once, not drag).
             bool isDragSelectionTool = (g_ActiveTool == ActiveTool::RectSelect ||
@@ -1310,8 +1404,8 @@ int main(int argc, char* argv[]) {
                 // Magic Wand (click sets sticky seed + selection; not a drag tool)
                 if (g_ActiveTool == ActiveTool::MagicWand) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && isInsideCanvas) {
-                        bool add = ImGui::GetIO().KeyShift;
-                        bool subtract = ImGui::GetIO().KeyAlt;
+                        bool add = selAdd();
+                        bool subtract = selSub();
                         int sx = std::clamp((int)std::floor(canvasX), 0, g_Canvas.GetWidth() - 1);
                         int sy = std::clamp((int)std::floor(canvasY), 0, g_Canvas.GetHeight() - 1);
                         g_Canvas.ApplyMagicWandSelection(g_pd3dDevice, sx, sy, uiState.magicWandTolerance, add, subtract, uiState.magicWandContiguous);
@@ -1407,8 +1501,8 @@ int main(int argc, char* argv[]) {
                 }
                 // Polygonal Lasso
                 else if (g_ActiveTool == ActiveTool::PolygonalLasso) {
-                    bool add = ImGui::GetIO().KeyShift;
-                    bool subtract = ImGui::GetIO().KeyAlt;
+                    bool add = selAdd();
+                    bool subtract = selSub();
                     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                         if (!g_PolygonalLassoPoints.empty()) {
                             g_PolygonalLassoPoints.pop_back(); // double-click also emits a single click vertex
@@ -1427,8 +1521,8 @@ int main(int argc, char* argv[]) {
 
             // Keyboard close/cancel for Polygonal Lasso
             if (g_ActiveTool == ActiveTool::PolygonalLasso && !ImGui::GetIO().WantTextInput) {
-                bool add = ImGui::GetIO().KeyShift;
-                bool subtract = ImGui::GetIO().KeyAlt;
+                bool add = selAdd();
+                bool subtract = selSub();
                 if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
                     if (g_PolygonalLassoPoints.size() >= 3) {
                         g_Canvas.ApplyPolygonalLassoSelection(g_PolygonalLassoPoints, add, subtract);
@@ -1466,13 +1560,18 @@ int main(int argc, char* argv[]) {
             // End drag handling
             if (g_IsSelectionDragging && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
                 g_IsSelectionDragging = false;
-                bool add = ImGui::GetIO().KeyShift || (g_ActiveTool == ActiveTool::QuickSelect && !ImGui::GetIO().KeyAlt);
-                bool subtract = ImGui::GetIO().KeyAlt;
+                bool add = selAdd() || (g_ActiveTool == ActiveTool::QuickSelect && !selSub());
+                bool subtract = selSub();
 
+                float fx2 = canvasX, fy2 = canvasY;
+                if ((g_ActiveTool == ActiveTool::RectSelect || g_ActiveTool == ActiveTool::EllipseSelect)
+                    && ImGui::GetIO().KeyShift) {
+                    constrainSquare(g_SelectionDragStartX, g_SelectionDragStartY, fx2, fy2);
+                }
                 int x1 = (int)g_SelectionDragStartX;
                 int y1 = (int)g_SelectionDragStartY;
-                int x2 = (int)canvasX;
-                int y2 = (int)canvasY;
+                int x2 = (int)fx2;
+                int y2 = (int)fy2;
 
                 if (g_ActiveTool == ActiveTool::RectSelect) {
                     g_Canvas.ApplyRectSelection(x1, y1, x2, y2, add, subtract);
@@ -1574,21 +1673,26 @@ int main(int argc, char* argv[]) {
                 ImU32 outlineCol = IM_COL32(255, 255, 0, 255);
                 float thickness = 2.0f;
 
+                float drawX = canvasX, drawY = canvasY;
+                if ((g_ActiveTool == ActiveTool::RectSelect || g_ActiveTool == ActiveTool::EllipseSelect)
+                    && ImGui::GetIO().KeyShift) {
+                    constrainSquare(g_SelectionDragStartX, g_SelectionDragStartY, drawX, drawY);
+                }
                 if (g_ActiveTool == ActiveTool::RectSelect) {
                     ImVec2 p1 = canvasToScreen(g_SelectionDragStartX, g_SelectionDragStartY);
-                    ImVec2 p2 = canvasToScreen(canvasX, g_SelectionDragStartY);
-                    ImVec2 p3 = canvasToScreen(canvasX, canvasY);
-                    ImVec2 p4 = canvasToScreen(g_SelectionDragStartX, canvasY);
+                    ImVec2 p2 = canvasToScreen(drawX, g_SelectionDragStartY);
+                    ImVec2 p3 = canvasToScreen(drawX, drawY);
+                    ImVec2 p4 = canvasToScreen(g_SelectionDragStartX, drawY);
                     dl->AddLine(p1, p2, outlineCol, thickness);
                     dl->AddLine(p2, p3, outlineCol, thickness);
                     dl->AddLine(p3, p4, outlineCol, thickness);
                     dl->AddLine(p4, p1, outlineCol, thickness);
                 }
                 else if (g_ActiveTool == ActiveTool::EllipseSelect) {
-                    float cx = (g_SelectionDragStartX + canvasX) * 0.5f;
-                    float cy = (g_SelectionDragStartY + canvasY) * 0.5f;
-                    float rx = std::abs(canvasX - g_SelectionDragStartX) * 0.5f;
-                    float ry = std::abs(canvasY - g_SelectionDragStartY) * 0.5f;
+                    float cx = (g_SelectionDragStartX + drawX) * 0.5f;
+                    float cy = (g_SelectionDragStartY + drawY) * 0.5f;
+                    float rx = std::abs(drawX - g_SelectionDragStartX) * 0.5f;
+                    float ry = std::abs(drawY - g_SelectionDragStartY) * 0.5f;
                     const int numSegments = 36;
                     std::vector<ImVec2> pts(numSegments);
                     for (int i = 0; i < numSegments; ++i) {

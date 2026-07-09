@@ -21,10 +21,6 @@ bool VisualSlider(const char* id, float* value, ImVec2 size,
     auto& T = Tokens();
     ImGuiID gid = ImGui::GetID("##vsl_anim");
     auto& anim = AnimState<SliderAnim>(gid);
-    if (!anim.display.active && std::fabs(anim.display.value - *value) > 0.001f && !ImGui::IsMouseDown(0))
-        anim.display.SetTarget(*value, T.durFast, EaseKind::EaseOutCubic);
-    anim.display.Update(DeltaTime());
-
     ImVec2 pos = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("##vsl", size);
     bool hovered = ImGui::IsItemHovered();
@@ -46,12 +42,15 @@ bool VisualSlider(const char* id, float* value, ImVec2 size,
         }
         if (std::fabs(t - *value) > 1e-5f) {
             *value = t;
-            anim.display.Snap(t); // follow drag tightly
             changed = true;
         }
     }
 
-    float vis = (active ? *value : anim.display.value);
+    // Thumb always eases toward value (including while dragging — no hard Snap)
+    if (std::fabs(anim.display.to - *value) > 1e-4f || (!anim.display.active && std::fabs(anim.display.value - *value) > 1e-4f))
+        anim.display.SetTarget(*value, active ? T.durFast * 0.55f : T.durFast, EaseKind::EaseOutCubic);
+    anim.display.Update(DeltaTime());
+    float vis = anim.display.value;
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p1 = pos, p2(pos.x + size.x, pos.y + size.y);
 
@@ -111,21 +110,66 @@ bool VisualSlider(const char* id, float* value, ImVec2 size,
 bool SmartSliderFloat(const char* label, float* v, float vMin, float vMax,
                       float defaultValue, float snapStep, const char* format) {
     if (!v) return false;
+    auto& T = Tokens();
+    ImGui::PushID(label);
+    ImGuiID gid = ImGui::GetID("##ssl_anim");
+    auto& anim = AnimState<SliderAnim>(gid);
+    // Normalize 0..1 for animation, map back for display
+    float range = std::max(1e-6f, vMax - vMin);
+    float tVal = (*v - vMin) / range;
+    if (std::fabs(anim.display.to - tVal) > 1e-4f || (!anim.display.active && std::fabs(anim.display.value - tVal) > 1e-4f))
+        anim.display.SetTarget(tVal, T.durFast * 0.65f, EaseKind::EaseOutCubic);
+    anim.display.Update(DeltaTime());
+
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    float w = ImGui::CalcItemWidth();
+    if (w < 40.f) w = ImGui::GetContentRegionAvail().x;
+    float h = ImGui::GetFrameHeight();
+    ImGui::InvisibleButton("##ssl", ImVec2(w, h));
+    bool hovered = ImGui::IsItemHovered();
+    bool active = ImGui::IsItemActive();
     bool changed = false;
-    if (ImGui::SliderFloat(label, v, vMin, vMax, format)) {
-        if (ImGui::GetIO().KeyCtrl && snapStep > 0.f) {
-            *v = std::round((*v - vMin) / snapStep) * snapStep + vMin;
-            *v = Clampf(*v, vMin, vMax);
-        }
+
+    if (hovered && ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+        *v = defaultValue;
         changed = true;
     }
-    if (ImGui::IsItemHovered()) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
-            *v = defaultValue;
+    if (active || (hovered && ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
+        float t = Clampf((ImGui::GetIO().MousePos.x - pos.x) / std::max(1.f, w), 0.f, 1.f);
+        if (ImGui::GetIO().KeyCtrl && snapStep > 0.f) {
+            float raw = vMin + t * range;
+            raw = std::round((raw - vMin) / snapStep) * snapStep + vMin;
+            t = Clampf((raw - vMin) / range, 0.f, 1.f);
+        }
+        float nv = vMin + t * range;
+        if (std::fabs(nv - *v) > 1e-5f) {
+            *v = nv;
+            anim.display.SetTarget(t, T.durFast * 0.55f, EaseKind::EaseOutCubic);
             changed = true;
         }
-        Tooltip("Backspace: default  ·  Ctrl: snap");
     }
+
+    float vis = anim.display.value;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImVec2 p2(pos.x + w, pos.y + h);
+    dl->AddRectFilled(pos, p2, T.ColU32(ImVec4(0.18f, 0.18f, 0.20f, 1.f)), T.rSm);
+    float fx = pos.x + w * vis;
+    dl->AddRectFilled(pos, ImVec2(fx, p2.y), T.ColU32(ImVec4(T.accent.x, T.accent.y, T.accent.z, 0.65f)), T.rSm);
+    dl->AddRect(pos, p2, T.ColU32(T.strokeHairline), T.rSm);
+    float th = h * 0.5f;
+    dl->AddCircleFilled(ImVec2(fx, pos.y + h * 0.5f), th * 0.55f, IM_COL32(255, 255, 255, 240));
+    dl->AddCircle(ImVec2(fx, pos.y + h * 0.5f), th * 0.55f, T.ColU32(T.strokeActive), 12, 1.25f);
+
+    // Value label
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), format ? format : "%.2f", *v);
+    ImVec2 ts = ImGui::CalcTextSize(buf);
+    dl->AddText(ImVec2(pos.x + (w - ts.x) * 0.5f, pos.y + (h - ts.y) * 0.5f),
+                T.ColU32(T.textPrimary), buf);
+
+    if (hovered)
+        Tooltip("Backspace: default  ·  Ctrl: snap");
+    ImGui::PopID();
     return changed;
 }
 

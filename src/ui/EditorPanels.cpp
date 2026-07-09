@@ -15,6 +15,7 @@
 #include "widgets/UiPanel.h"
 #include "widgets/UiPathField.h"
 #include "widgets/UiTooltip.h"
+#include <stb_image.h>
 #include <thread>
 #include <imgui_internal.h>
 #include <filesystem>
@@ -30,6 +31,9 @@
 extern void ApplyTheme(const std::string& themeName);
 extern bool g_IsLayersHovered;
 extern bool g_IsViewportHovered;
+extern float g_SecondaryColor[4];
+extern float g_ColorSwapAnim;
+extern bool g_ColorSwapPending;
 extern std::vector<float> Canvas_BuildSplineLUT(const std::vector<std::pair<float,float>>& pts);
 
 #ifdef _WIN32
@@ -582,12 +586,13 @@ namespace UI {
                 ImGui::MenuItem("Properties", nullptr, &state.showProperties);
                 ImGui::MenuItem("Viewport Navigation", nullptr, &state.showViewportNav);
                 ImGui::MenuItem("Layers", nullptr, &state.showLayers);
-                ImGui::MenuItem("Layer Effects", nullptr, &state.showLayerEffects);
+                // Layer Effects: only via Layers panel (Fx), not View menu
                 ImGui::MenuItem("Channels", nullptr, &state.showChannels);
                 ImGui::MenuItem("Colors Window", nullptr, &state.showColors);
                 ImGui::MenuItem("Tool Settings", nullptr, &state.showToolSettings);
                 ImGui::MenuItem("Console logs", nullptr, &state.showConsole);
                 ImGui::Separator();
+                ImGui::MenuItem("Rulers", nullptr, &state.showRulers);
                 if (ImGui::MenuItem("Reset View")) {
                     canvas.ResetView();
                 }
@@ -597,6 +602,11 @@ namespace UI {
                 if (ImGui::MenuItem("Run test command")) {
                     ScriptingEngine::Get().RunString("import rayv; rayv.log_warn('Executing scripting check.')");
                 }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Help")) {
+                if (ImGui::MenuItem("About RayV-Paint…"))
+                    state.openAboutModal = true;
                 ImGui::EndMenu();
             }
             ImGui::EndMainMenuBar();
@@ -1524,7 +1534,54 @@ namespace UI {
             } else {
                 ImGui::SameLine(0.0f, gap * 2.0f);
             }
-            RenderToolButton("Reset", "Reset View", activeTool, false, std::string(""), btnSize, s_RebindAction, activeTool, brush, canvas);
+
+            // Primary / Secondary color chip (replaces Reset View) — X or click swaps with animation
+            {
+                ToolbarCenterCursor(btnSize);
+                ImVec2 cpos = ImGui::GetCursorScreenPos();
+                ImGui::InvisibleButton("##colorswap", ImVec2(btnSize, btnSize));
+                bool chipHover = ImGui::IsItemHovered();
+                bool chipClick = ImGui::IsItemClicked(ImGuiMouseButton_Left);
+                if (chipClick) {
+                    std::swap(brush.color[0], g_SecondaryColor[0]);
+                    std::swap(brush.color[1], g_SecondaryColor[1]);
+                    std::swap(brush.color[2], g_SecondaryColor[2]);
+                    std::swap(brush.color[3], g_SecondaryColor[3]);
+                    g_ColorSwapPending = true;
+                }
+                if (chipHover)
+                    Ui::Tooltip("Primary / Secondary\nClick or X: swap");
+
+                // After color swap: start at crossed positions (t=1) → ease to rest (t=0)
+                static Ui::AnimFloat s_swapT;
+                if (g_ColorSwapPending) {
+                    s_swapT.Snap(1.f);
+                    s_swapT.SetTarget(0.f, Ui::Tokens().durMed * 1.15f, Ui::EaseKind::EaseOutCubic);
+                    g_ColorSwapPending = false;
+                }
+                s_swapT.Update(Ui::DeltaTime());
+                g_ColorSwapAnim = s_swapT.value;
+                float useT = s_swapT.value;
+
+                auto& tok = Ui::Tokens();
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                float sq = btnSize * 0.48f;
+                ImVec2 pPri(cpos.x + btnSize * 0.12f, cpos.y + btnSize * 0.12f);
+                ImVec2 pSec(cpos.x + btnSize * 0.40f, cpos.y + btnSize * 0.40f);
+                ImVec2 a0 = ImVec2(pPri.x + (pSec.x - pPri.x) * useT, pPri.y + (pSec.y - pPri.y) * useT);
+                ImVec2 b0 = ImVec2(pSec.x + (pPri.x - pSec.x) * useT, pSec.y + (pPri.y - pSec.y) * useT);
+                // Secondary behind
+                dl->AddRectFilled(b0, ImVec2(b0.x + sq, b0.y + sq),
+                    IM_COL32((int)(g_SecondaryColor[0]*255),(int)(g_SecondaryColor[1]*255),
+                             (int)(g_SecondaryColor[2]*255),(int)(g_SecondaryColor[3]*255)), tok.rSm);
+                dl->AddRect(b0, ImVec2(b0.x + sq, b0.y + sq), tok.ColU32(tok.strokeHairline), tok.rSm, 0, 1.f);
+                // Primary in front
+                dl->AddRectFilled(a0, ImVec2(a0.x + sq, a0.y + sq),
+                    IM_COL32((int)(brush.color[0]*255),(int)(brush.color[1]*255),
+                             (int)(brush.color[2]*255),(int)(brush.color[3]*255)), tok.rSm);
+                dl->AddRect(a0, ImVec2(a0.x + sq, a0.y + sq),
+                    chipHover ? tok.ColU32(tok.strokeActive) : tok.ColU32(tok.strokeHairline), tok.rSm, 0, 1.25f);
+            }
 
             if (ImGui::BeginPopup("RebindToolPopup")) {
                 ImGui::Text("Rebind Action: %s", s_RebindAction.c_str());
@@ -1760,35 +1817,59 @@ namespace UI {
                 return {};
             };
 
-            // Fixed top: active layer opacity + blend (not per-row — saves list space)
+            // Fixed top: opacity + blend + FX (Photoshop-like header)
             {
                 int ai = canvas.GetActiveLayerIndex();
                 if (ai >= 0 && ai < (int)layers.size()) {
                     auto& al = layers[ai];
                     ImGui::PushID("##active_hdr");
-                    ImGui::TextDisabled("%s", al.name.c_str());
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.50f);
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.32f);
                     if (Ui::SmartSliderFloat("##op_top", &al.opacity, 0.f, 1.f, 1.f, 0.05f, "Op %.2f"))
                         canvas.MarkCompositeDirty();
-                    ImGui::SameLine();
+                    ImGui::SameLine(0, 6);
                     static const char* blendNamesTop[] = {
                         "Normal","Multiply","Screen","Overlay","Add","Subtract","Darken","Lighten","HardLight","SoftLight"
                     };
                     int blendIdx = (int)al.blendMode;
-                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 52.f);
                     if (UiCombo("##bl_top", &blendIdx, blendNamesTop, IM_ARRAYSIZE(blendNamesTop))) {
                         al.blendMode = (BlendMode)blendIdx;
                         canvas.MarkCompositeDirty();
                     }
+                    ImGui::SameLine(0, 6);
+                    bool hasFxTop = !al.filters.empty();
+                    if (hasFxTop) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 0.55f));
+                    if (ImGui::Button("Fx##top", ImVec2(40, 0))) {
+                        if (!al.isGroup) {
+                            state.showLayerEffects = true;
+                            state.layerEffectsFocusIdx = al.filters.empty() ? -1 : 0;
+                        }
+                    }
+                    if (hasFxTop) ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip(al.isGroup ? "Groups have no pixel FX" : "Layer Effects…");
                     ImGui::PopID();
                     ImGui::Separator();
+                }
+            }
+
+            // Rename state (double-click name zone or F2 while Layers hovered)
+            static int s_RenameIdx = -1;
+            static char s_RenameBuf[256] = {};
+            if (g_IsLayersHovered && !ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_F2)) {
+                int ai = canvas.GetActiveLayerIndex();
+                if (ai >= 0 && ai < (int)layers.size()) {
+                    s_RenameIdx = ai;
+                    std::snprintf(s_RenameBuf, sizeof(s_RenameBuf), "%s", layers[ai].name.c_str());
                 }
             }
 
             // List fills remaining height minus bottom bar
             const float barH = 40.f;
             ImGui::BeginChild("LayersList", ImVec2(0, -barH), true);
-            const float thumb = 28.0f;
+            const float thumb = 28.0f;       // fixed preview size
+            const float eyeSz = 14.0f;       // ~50% of previous checkbox footprint
+            const float rowPad = 4.0f;
             auto& tok = Ui::Tokens();
 
             for (int i = static_cast<int>(layers.size()) - 1; i >= 0; --i) {
@@ -1809,24 +1890,39 @@ namespace UI {
                     depth++;
                 if (depth > 0) ImGui::Indent(12.0f * depth);
 
-                // Visibility
-                bool isIsolated = canvas.IsLayerIsolated(i);
-                if (isIsolated) ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.15f, 0.45f, 0.15f, 1.0f));
-                bool vis = layer.visible;
-                if (ImGui::Checkbox("##vis", &vis)) {
-                    if (ImGui::GetIO().KeyAlt) canvas.ToggleLayerIsolation(i);
-                    else { layer.visible = vis; canvas.MarkCompositeDirty(); }
+                // Row: center items vertically to thumb height
+                float rowY = ImGui::GetCursorPosY();
+                auto centerY = [&](float h) {
+                    ImGui::SetCursorPosY(rowY + (thumb - h) * 0.5f);
+                };
+
+                // 6.1 Eye visibility (small, centered)
+                centerY(eyeSz);
+                {
+                    bool isIsolated = canvas.IsLayerIsolated(i);
+                    auto r = Ui::IconButton("##vis", "layer_visible", ImVec2(eyeSz, eyeSz),
+                        "Visibility\nAlt+Click: Isolate", true, layer.visible || isIsolated);
+                    if (r.clicked) {
+                        if (ImGui::GetIO().KeyAlt) canvas.ToggleLayerIsolation(i);
+                        else { layer.visible = !layer.visible; canvas.MarkCompositeDirty(); }
+                    }
+                    // Dim when hidden
+                    if (!layer.visible && !isIsolated) {
+                        ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+                        ImGui::GetWindowDrawList()->AddRectFilled(mn, mx, IM_COL32(0, 0, 0, 120), tok.rSm);
+                    }
                 }
-                if (isIsolated) ImGui::PopStyleColor();
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Visibility\nAlt+Click: Isolate");
-                ImGui::SameLine(0, 4);
+                ImGui::SameLine(0, rowPad);
 
                 if (layer.isGroup) {
+                    centerY(ImGui::GetFrameHeight() * 0.75f);
                     if (ImGui::ArrowButton("##exp", layer.groupExpanded ? ImGuiDir_Down : ImGuiDir_Right))
                         layer.groupExpanded = !layer.groupExpanded;
-                    ImGui::SameLine(0, 2);
+                    ImGui::SameLine(0, rowPad);
                 }
 
+                // 6.2 Fixed thumb preview
+                centerY(thumb);
                 if (!layer.isGroup && layer.srv) {
                     bool isActiveContent = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerContent);
                     if (isActiveContent) {
@@ -1839,7 +1935,6 @@ namespace UI {
                     if (ImGui::ImageButton("##thumb", (ImTextureID)layer.srv, ImVec2(thumb, thumb), ImVec2(0,0), ImVec2(1,1))) {
                         ImGuiIO& io = ImGui::GetIO();
                         if (io.KeyAlt) {
-                            // Alt+Click thumb: select opaque pixels (was Ctrl — multi-select uses Ctrl)
                             canvas.SelectOpaquePixels(i);
                             canvas.UpdateSelectionMaskTexture(device);
                         } else if (io.KeyCtrl) {
@@ -1867,7 +1962,7 @@ namespace UI {
                     }
                     ImGui::PopStyleVar();
                     ImGui::PopStyleColor();
-                    ImGui::SameLine(0, 2);
+                    ImGui::SameLine(0, rowPad);
                 } else if (layer.isGroup) {
                     ImGui::Button("G##g", ImVec2(thumb, thumb));
                     if (ImGui::BeginDragDropTarget()) {
@@ -1888,11 +1983,12 @@ namespace UI {
                         }
                         ImGui::EndDragDropTarget();
                     }
-                    ImGui::SameLine(0, 2);
+                    ImGui::SameLine(0, rowPad);
                 }
 
-                // Mask: smart +M (selection -> from selection, else blank)
+                // 6.3 Fixed mask slot (always reserved for non-group)
                 if (!layer.isGroup) {
+                    centerY(thumb);
                     if (layer.hasMask && layer.maskSRV) {
                         bool isActiveMask = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerMask);
                         if (isActiveMask) {
@@ -1915,7 +2011,8 @@ namespace UI {
                         ImGui::PopStyleVar();
                         ImGui::PopStyleColor();
                     } else {
-                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.15f, 0.15f, 0.55f));
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.12f, 0.13f, 0.65f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.18f, 0.20f, 0.85f));
                         if (ImGui::Button("+M##addm", ImVec2(thumb, thumb))) {
                             if (canvas.HasSelection())
                                 canvas.CreateLayerMaskFromSelection(device, i);
@@ -1923,149 +2020,160 @@ namespace UI {
                                 canvas.CreateLayerMask(device, i);
                             canvas.SetPaintTarget(PaintTarget::LayerMask);
                         }
-                        ImGui::PopStyleColor();
+                        ImGui::PopStyleColor(2);
                         if (ImGui::IsItemHovered()) {
                             Ui::Tooltip(canvas.HasSelection()
                                 ? "Add Layer Mask from Selection"
                                 : "Add Layer Mask");
                         }
                     }
-                    ImGui::SameLine(0, 4);
+                    ImGui::SameLine(0, rowPad);
                 }
 
+                // 6.4 Name zone — vertically centered; double-click / F2 rename
                 const bool isActive = (canvas.GetActiveLayerIndex() == i);
                 const bool multiSel = isLayerSelected(i);
-                char label[256];
-                if (layer.isGroup) std::snprintf(label, sizeof(label), "[G] %s", layer.name.c_str());
-                else if (layer.type == Layer::Type::VectorSvg) std::snprintf(label, sizeof(label), "[SVG] %s", layer.name.c_str());
-                else if (layer.type == Layer::Type::SmartObject) std::snprintf(label, sizeof(label), "[SO] %s", layer.name.c_str());
-                else std::snprintf(label, sizeof(label), "%s", layer.name.c_str());
-
-                // Selection fill (multi) behind name — reserve only for FX chip
-                float rightReserve = 36.0f;
-                float nameW = ImGui::GetContentRegionAvail().x - rightReserve;
+                float nameW = ImGui::GetContentRegionAvail().x;
                 if (nameW < 40.f) nameW = 40.f;
+                centerY(thumb);
 
-                if (multiSel && !isActive) {
-                    ImVec2 p = ImGui::GetCursorScreenPos();
-                    ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + nameW, p.y + thumb),
-                        tok.ColU32(ImVec4(tok.accent.x, tok.accent.y, tok.accent.z, 0.18f)), tok.rSm);
-                }
+                if (s_RenameIdx == i) {
+                    ImGui::SetNextItemWidth(nameW);
+                    ImGui::SetKeyboardFocusHere();
+                    if (ImGui::InputText("##rename", s_RenameBuf, sizeof(s_RenameBuf),
+                            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll)) {
+                        if (s_RenameBuf[0]) layer.name = s_RenameBuf;
+                        s_RenameIdx = -1;
+                    }
+                    if (!ImGui::IsItemActive() && ImGui::IsMouseClicked(0) && !ImGui::IsItemHovered())
+                        s_RenameIdx = -1;
+                    if (ImGui::IsKeyPressed(ImGuiKey_Escape))
+                        s_RenameIdx = -1;
+                } else {
+                    char label[256];
+                    if (layer.isGroup) std::snprintf(label, sizeof(label), "[G] %s", layer.name.c_str());
+                    else if (layer.type == Layer::Type::VectorSvg) std::snprintf(label, sizeof(label), "[SVG] %s", layer.name.c_str());
+                    else if (layer.type == Layer::Type::SmartObject) std::snprintf(label, sizeof(label), "[SO] %s", layer.name.c_str());
+                    else std::snprintf(label, sizeof(label), "%s", layer.name.c_str());
 
-                if (ImGui::Selectable(label, isActive, ImGuiSelectableFlags_None, ImVec2(nameW, thumb))) {
-                    ImGuiIO& io = ImGui::GetIO();
-                    if (io.KeyShift) {
-                        rangeSelect(i);
-                        canvas.SetActiveLayerIndex(i);
-                    } else if (io.KeyCtrl) {
-                        toggleSelection(i);
-                        canvas.SetActiveLayerIndex(i);
-                    } else {
-                        setSoleSelection(i);
-                        canvas.SetActiveLayerIndex(i);
+                    if (multiSel && !isActive) {
+                        ImVec2 p = ImGui::GetCursorScreenPos();
+                        ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + nameW, p.y + thumb),
+                            tok.ColU32(ImVec4(tok.accent.x, tok.accent.y, tok.accent.z, 0.18f)), tok.rSm);
                     }
-                }
-                // Active = stronger outline
-                if (isActive) {
-                    ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
-                    ImGui::GetWindowDrawList()->AddRect(mn, mx, tok.ColU32(tok.strokeActive), tok.rSm, 0, 1.5f);
-                }
-                if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) {
-                    ImGui::SetDragDropPayload("LAYER_INDEX", &i, sizeof(int));
-                    ImGui::Text("%s", layer.name.c_str());
-                    ImGui::EndDragDropSource();
-                }
-                if (ImGui::BeginDragDropTarget()) {
-                    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
-                            "LAYER_INDEX",
-                            ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
-                        int draggedIdx = *(const int*)payload->Data;
-                        if (draggedIdx >= 0 && draggedIdx < (int)layers.size() && draggedIdx != i) {
-                            const bool intoGroup = layer.isGroup && !layers[draggedIdx].isGroup &&
-                                                   !IsGroupAncestorOf(layers, draggedIdx, i);
-                            DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), intoGroup);
-                            if (payload->IsDelivery()) {
-                                if (intoGroup) {
-                                    canvas.SetActiveLayerIndex(canvas.MoveLayerIntoGroup(draggedIdx, i));
-                                } else {
-                                    int targetParentOrig = layer.parentGroupId;
-                                    int newIdx = canvas.ReorderLayer(draggedIdx, i);
-                                    auto mapIdx = [](int j, int fromIdx, int toIdx) {
-                                        if (fromIdx == toIdx) return j;
-                                        if (fromIdx < toIdx) {
-                                            if (j == fromIdx) return toIdx;
-                                            if (j > fromIdx && j <= toIdx) return j - 1;
-                                            return j;
-                                        }
-                                        if (j == fromIdx) return toIdx;
-                                        if (j >= toIdx && j < fromIdx) return j + 1;
-                                        return j;
-                                    };
-                                    int newParent = mapIdx(targetParentOrig, draggedIdx, i);
-                                    auto& L = canvas.GetLayers();
-                                    if (newParent == newIdx || newParent < 0 || newParent >= (int)L.size()) newParent = -1;
-                                    if (newParent >= 0 && !L[newParent].isGroup) newParent = -1;
-                                    L[newIdx].parentGroupId = newParent;
-                                    canvas.SetActiveLayerIndex(newIdx);
-                                }
-                                canvas.MarkCompositeDirty();
-                            }
-                        }
-                    }
-                    ImGui::EndDragDropTarget();
-                }
 
-                if (ImGui::BeginPopupContextItem("##lyrctx")) {
-                    if (ImGui::MenuItem("Remove from Group", nullptr, false, layer.parentGroupId != -1))
-                        canvas.RemoveLayerFromGroup(i);
-                    if (ImGui::BeginMenu("Add to Group")) {
-                        for (int g = 0; g < (int)layers.size(); ++g) {
-                            if (layers[g].isGroup && g != i && ImGui::MenuItem(layers[g].name.c_str()))
-                                canvas.AddLayerToGroup(i, g);
-                        }
-                        ImGui::EndMenu();
-                    }
-                    if (!layer.isGroup && (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg)) {
-                        ImGui::Separator();
-                        if (ImGui::MenuItem("Rasterize Layer")) canvas.RasterizeLayer(device, i);
-                    }
-                    if (!layer.isGroup) {
-                        ImGui::Separator();
-                        if (!layer.hasMask) {
-                            if (ImGui::MenuItem(canvas.HasSelection() ? "Add Mask from Selection" : "Add Mask")) {
-                                if (canvas.HasSelection()) canvas.CreateLayerMaskFromSelection(device, i);
-                                else canvas.CreateLayerMask(device, i);
-                            }
+                    if (ImGui::Selectable(label, isActive, ImGuiSelectableFlags_None, ImVec2(nameW, thumb))) {
+                        ImGuiIO& io = ImGui::GetIO();
+                        if (io.KeyShift) {
+                            rangeSelect(i);
+                            canvas.SetActiveLayerIndex(i);
+                        } else if (io.KeyCtrl) {
+                            toggleSelection(i);
+                            canvas.SetActiveLayerIndex(i);
                         } else {
-                            if (ImGui::MenuItem("Apply Mask")) canvas.ApplyLayerMask(i);
-                            if (ImGui::MenuItem("Delete Mask")) canvas.DeleteLayerMask(i);
+                            setSoleSelection(i);
+                            canvas.SetActiveLayerIndex(i);
                         }
                     }
-                    ImGui::Separator();
-                    if (ImGui::MenuItem("Duplicate", "Ctrl+J")) {
-                        canvas.DuplicateLayer(device, i);
-                        setSoleSelection(canvas.GetActiveLayerIndex());
+                    if (isActive) {
+                        ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+                        ImGui::GetWindowDrawList()->AddRect(mn, mx, tok.ColU32(tok.strokeActive), tok.rSm, 0, 1.5f);
                     }
-                    if (layers.size() > 1 && ImGui::MenuItem("Delete Layer")) {
-                        canvas.DeleteLayer(i);
-                        pruneSel();
+                    // Double-click name zone only → rename
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        s_RenameIdx = i;
+                        std::snprintf(s_RenameBuf, sizeof(s_RenameBuf), "%s", layer.name.c_str());
                     }
-                    ImGui::EndPopup();
+                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) {
+                        ImGui::SetDragDropPayload("LAYER_INDEX", &i, sizeof(int));
+                        ImGui::Text("%s", layer.name.c_str());
+                        ImGui::EndDragDropSource();
+                    }
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
+                                "LAYER_INDEX",
+                                ImGuiDragDropFlags_AcceptBeforeDelivery | ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
+                            int draggedIdx = *(const int*)payload->Data;
+                            if (draggedIdx >= 0 && draggedIdx < (int)layers.size() && draggedIdx != i) {
+                                const bool intoGroup = layer.isGroup && !layers[draggedIdx].isGroup &&
+                                                       !IsGroupAncestorOf(layers, draggedIdx, i);
+                                DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), intoGroup);
+                                if (payload->IsDelivery()) {
+                                    if (intoGroup) {
+                                        canvas.SetActiveLayerIndex(canvas.MoveLayerIntoGroup(draggedIdx, i));
+                                    } else {
+                                        int targetParentOrig = layer.parentGroupId;
+                                        int newIdx = canvas.ReorderLayer(draggedIdx, i);
+                                        auto mapIdx = [](int j, int fromIdx, int toIdx) {
+                                            if (fromIdx == toIdx) return j;
+                                            if (fromIdx < toIdx) {
+                                                if (j == fromIdx) return toIdx;
+                                                if (j > fromIdx && j <= toIdx) return j - 1;
+                                                return j;
+                                            }
+                                            if (j == fromIdx) return toIdx;
+                                            if (j >= toIdx && j < fromIdx) return j + 1;
+                                            return j;
+                                        };
+                                        int newParent = mapIdx(targetParentOrig, draggedIdx, i);
+                                        auto& L = canvas.GetLayers();
+                                        if (newParent == newIdx || newParent < 0 || newParent >= (int)L.size()) newParent = -1;
+                                        if (newParent >= 0 && !L[newParent].isGroup) newParent = -1;
+                                        L[newIdx].parentGroupId = newParent;
+                                        canvas.SetActiveLayerIndex(newIdx);
+                                    }
+                                    canvas.MarkCompositeDirty();
+                                }
+                            }
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
+
+                    if (ImGui::BeginPopupContextItem("##lyrctx")) {
+                        if (ImGui::MenuItem("Rename", "F2")) {
+                            s_RenameIdx = i;
+                            std::snprintf(s_RenameBuf, sizeof(s_RenameBuf), "%s", layer.name.c_str());
+                        }
+                        if (ImGui::MenuItem("Remove from Group", nullptr, false, layer.parentGroupId != -1))
+                            canvas.RemoveLayerFromGroup(i);
+                        if (ImGui::BeginMenu("Add to Group")) {
+                            for (int g = 0; g < (int)layers.size(); ++g) {
+                                if (layers[g].isGroup && g != i && ImGui::MenuItem(layers[g].name.c_str()))
+                                    canvas.AddLayerToGroup(i, g);
+                            }
+                            ImGui::EndMenu();
+                        }
+                        if (!layer.isGroup && (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg)) {
+                            ImGui::Separator();
+                            if (ImGui::MenuItem("Rasterize Layer")) canvas.RasterizeLayer(device, i);
+                        }
+                        if (!layer.isGroup) {
+                            ImGui::Separator();
+                            if (!layer.hasMask) {
+                                if (ImGui::MenuItem(canvas.HasSelection() ? "Add Mask from Selection" : "Add Mask")) {
+                                    if (canvas.HasSelection()) canvas.CreateLayerMaskFromSelection(device, i);
+                                    else canvas.CreateLayerMask(device, i);
+                                }
+                            } else {
+                                if (ImGui::MenuItem("Apply Mask")) canvas.ApplyLayerMask(i);
+                                if (ImGui::MenuItem("Delete Mask")) canvas.DeleteLayerMask(i);
+                            }
+                        }
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("Duplicate", "Ctrl+J")) {
+                            canvas.DuplicateLayer(device, i);
+                            setSoleSelection(canvas.GetActiveLayerIndex());
+                        }
+                        if (layers.size() > 1 && ImGui::MenuItem("Delete Layer")) {
+                            canvas.DeleteLayer(i);
+                            pruneSel();
+                        }
+                        ImGui::EndPopup();
+                    }
                 }
 
-                // FX → modal popup (Photoshop-like)
-                ImGui::SameLine(0, 2);
-                bool hasFx = !layer.filters.empty();
-                if (hasFx) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 0.55f));
-                if (ImGui::SmallButton("Fx")) {
-                    canvas.SetActiveLayerIndex(i);
-                    setSoleSelection(i);
-                    state.showLayerEffects = true;
-                    state.layerEffectsFocusIdx = layer.filters.empty() ? -1 : 0;
-                }
-                if (hasFx) ImGui::PopStyleColor();
-                if (ImGui::IsItemHovered())
-                    Ui::Tooltip("Layer Effects…");
+                // Advance cursor past full row height
+                ImGui::SetCursorPosY(rowY + thumb + 4.f);
 
                 if (depth > 0) ImGui::Unindent(12.0f * depth);
                 ImGui::PopID();
@@ -2597,7 +2705,7 @@ namespace UI {
                     if (ImGui::Checkbox("##cont", &state.magicWandContiguous)) changed = true;
                     if (ImGui::IsItemHovered()) Ui::Tooltip("Contiguous");
                     if (changed && canvas.HasWandSeed()) {
-                        bool add = ImGui::GetIO().KeyShift;
+                        bool add = ImGui::GetIO().KeyCtrl;
                         bool subtract = ImGui::GetIO().KeyAlt;
                         canvas.PreviewWandFromSeed(device, state.magicWandTolerance, add, subtract, state.magicWandContiguous);
                     }
@@ -2612,9 +2720,11 @@ namespace UI {
             }
             else if (IsSelectTool(activeTool) || IsLassoTool(activeTool)) {
                 if (activeTool == ActiveTool::PolygonalLasso)
-                    ImGui::TextDisabled("Click vertices · Enter/Dbl close · Esc cancel");
+                    ImGui::TextDisabled("Click vertices · Enter/Dbl close · Esc cancel  ·  Ctrl: add  ·  Alt: sub");
+                else if (activeTool == ActiveTool::RectSelect || activeTool == ActiveTool::EllipseSelect)
+                    ImGui::TextDisabled("Ctrl: add  ·  Alt: subtract  ·  Shift: 1:1 proportions");
                 else
-                    ImGui::TextDisabled("Shift: add  ·  Alt: subtract");
+                    ImGui::TextDisabled("Ctrl: add  ·  Alt: subtract");
             }
             else if (activeTool == ActiveTool::Gradient) {
                 ImGui::TextDisabled("Drag: Primary → Secondary");
@@ -2696,22 +2806,22 @@ namespace UI {
             Ui::EndDockPanel();
         }
 
-        // 10. Colors — adaptive SV rect + visual Hue / Alpha (checker)
+        // 10. Colors — adaptive SV + Hue/Alpha; primary & secondary
         if (state.showColors) {
             Ui::BeginDockPanel("Colors", &state.showColors);
 
+            static bool s_EditSecondary = false;
+            float* editCol = s_EditSecondary ? g_SecondaryColor : brush.color;
+
             ImVec2 avail = ImGui::GetContentRegionAvail();
             float h, s, v;
-            ImGui::ColorConvertRGBtoHSV(brush.color[0], brush.color[1], brush.color[2], h, s, v);
+            ImGui::ColorConvertRGBtoHSV(editCol[0], editCol[1], editCol[2], h, s, v);
 
-            // Fill available width; height proportional but may be rectangle
             float stripH = 22.f;
-            float pad = 8.f;
             float svW = std::max(80.f, avail.x - 4.f);
-            float svH = std::clamp(avail.y - stripH * 2.f - 80.f, 100.f, std::max(120.f, avail.y * 0.55f));
-            // Prefer using width: allow wide rectangles
+            float svH = std::clamp(avail.y - stripH * 2.f - 100.f, 100.f, std::max(120.f, avail.y * 0.55f));
             if (avail.x > avail.y)
-                svH = std::clamp(svW * 0.65f, 100.f, avail.y - stripH * 2.f - 70.f);
+                svH = std::clamp(svW * 0.65f, 100.f, avail.y - stripH * 2.f - 90.f);
 
             ImVec2 sqPos = ImGui::GetCursorScreenPos();
             ImGui::InvisibleButton("##svsq", ImVec2(svW, svH));
@@ -2744,28 +2854,52 @@ namespace UI {
                 ImVec2 mp = ImGui::GetIO().MousePos;
                 s = std::clamp((mp.x - sqPos.x) / svW, 0.f, 1.f);
                 v = std::clamp(1.f - (mp.y - sqPos.y) / svH, 0.f, 1.f);
-                ImGui::ColorConvertHSVtoRGB(h, s, v, brush.color[0], brush.color[1], brush.color[2]);
+                ImGui::ColorConvertHSVtoRGB(h, s, v, editCol[0], editCol[1], editCol[2]);
             }
 
             ImGui::Spacing();
-            // Visual Hue strip
             if (Ui::VisualSlider("##huevis", &h, ImVec2(svW, stripH), Ui::VisualSliderSkin::HueStrip, nullptr, "Hue")) {
-                ImGui::ColorConvertHSVtoRGB(h, s, v, brush.color[0], brush.color[1], brush.color[2]);
+                ImGui::ColorConvertHSVtoRGB(h, s, v, editCol[0], editCol[1], editCol[2]);
             }
             ImGui::Spacing();
-            // Visual Alpha on checkerboard
-            if (Ui::VisualSlider("##alphavis", &brush.color[3], ImVec2(svW, stripH),
-                    Ui::VisualSliderSkin::OpacityChecker, brush.color, "Opacity / Alpha")) {
-                // value written in-place
+            if (Ui::VisualSlider("##alphavis", &editCol[3], ImVec2(svW, stripH),
+                    Ui::VisualSliderSkin::OpacityChecker, editCol, "Opacity / Alpha")) {
             }
 
             ImGui::Spacing();
-            ImGui::ColorButton("##pri", ImVec4(brush.color[0], brush.color[1], brush.color[2], brush.color[3]),
-                ImGuiColorEditFlags_AlphaPreview, ImVec2(36, 36));
-            if (ImGui::IsItemHovered()) Ui::Tooltip("Primary color");
+            // Primary (front) + Secondary (offset) like PS
+            {
+                ImVec2 base = ImGui::GetCursorScreenPos();
+                // Secondary drawn first (behind / offset)
+                ImGui::SetCursorScreenPos(ImVec2(base.x + 14.f, base.y + 14.f));
+                if (ImGui::ColorButton("##sec", ImVec4(g_SecondaryColor[0], g_SecondaryColor[1], g_SecondaryColor[2], g_SecondaryColor[3]),
+                        ImGuiColorEditFlags_AlphaPreview | (s_EditSecondary ? ImGuiColorEditFlags_None : 0), ImVec2(28, 28))) {
+                    s_EditSecondary = true;
+                }
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Secondary\nClick to edit · X: swap");
+
+                ImGui::SetCursorScreenPos(base);
+                if (ImGui::ColorButton("##pri", ImVec4(brush.color[0], brush.color[1], brush.color[2], brush.color[3]),
+                        ImGuiColorEditFlags_AlphaPreview, ImVec2(36, 36))) {
+                    s_EditSecondary = false;
+                }
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Primary\nClick to edit");
+
+                ImGui::SetCursorScreenPos(ImVec2(base.x + 56.f, base.y + 8.f));
+                if (ImGui::SmallButton("X##sw")) {
+                    std::swap(brush.color[0], g_SecondaryColor[0]);
+                    std::swap(brush.color[1], g_SecondaryColor[1]);
+                    std::swap(brush.color[2], g_SecondaryColor[2]);
+                    std::swap(brush.color[3], g_SecondaryColor[3]);
+                    g_ColorSwapPending = true;
+                }
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Swap primary ↔ secondary (X)");
+                ImGui::SameLine();
+                ImGui::TextDisabled(s_EditSecondary ? "Editing secondary" : "Editing primary");
+                ImGui::Dummy(ImVec2(1, 28));
+            }
 
             ImGui::Spacing();
-            // Compact palette
             static const ImVec4 paletteColors[] = {
                 ImVec4(0,0,0,1), ImVec4(1,1,1,1), ImVec4(0.5f,0.5f,0.5f,1), ImVec4(0.75f,0.75f,0.75f,1),
                 ImVec4(1,0,0,1), ImVec4(1,1,0,1), ImVec4(0,1,0,1), ImVec4(0,1,1,1),
@@ -2778,15 +2912,74 @@ namespace UI {
                 ImGui::PushID(i);
                 if (i > 0 && (i % perRow) != 0) ImGui::SameLine(0, 3);
                 if (ImGui::ColorButton("##pal", paletteColors[i], ImGuiColorEditFlags_NoTooltip, ImVec2(cell, cell))) {
-                    brush.color[0] = paletteColors[i].x;
-                    brush.color[1] = paletteColors[i].y;
-                    brush.color[2] = paletteColors[i].z;
-                    brush.color[3] = paletteColors[i].w;
+                    editCol[0] = paletteColors[i].x;
+                    editCol[1] = paletteColors[i].y;
+                    editCol[2] = paletteColors[i].z;
+                    editCol[3] = paletteColors[i].w;
                 }
                 ImGui::PopID();
             }
 
             Ui::EndDockPanel();
+        }
+
+        // About modal
+        if (state.openAboutModal)
+            ImGui::OpenPopup("About RayV-Paint##about");
+        {
+            ImGuiViewport* avp = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(avp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(480, 420), ImGuiCond_Appearing);
+            if (ImGui::BeginPopupModal("About RayV-Paint##about", &state.openAboutModal, ImGuiWindowFlags_NoResize)) {
+                static ID3D11ShaderResourceView* s_MascotSrv = nullptr;
+                static int s_MascotW = 0, s_MascotH = 0;
+                static bool s_MascotTried = false;
+                if (!s_MascotTried && device) {
+                    s_MascotTried = true;
+                    const char* paths[] = {
+                        "testfield/ray_chan_kissing.png",
+                        "../testfield/ray_chan_kissing.png",
+                        "../../testfield/ray_chan_kissing.png",
+                        "C:/Users/Rayvy/Documents/GitHub/RayV-Paint/testfield/ray_chan_kissing.png"
+                    };
+                    for (const char* p : paths) {
+                        int w = 0, h = 0, n = 0;
+                        unsigned char* px = stbi_load(p, &w, &h, &n, 4);
+                        if (!px) continue;
+                        D3D11_TEXTURE2D_DESC desc = {};
+                        desc.Width = w; desc.Height = h; desc.MipLevels = 1; desc.ArraySize = 1;
+                        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                        desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_IMMUTABLE;
+                        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                        D3D11_SUBRESOURCE_DATA srd = {};
+                        srd.pSysMem = px; srd.SysMemPitch = w * 4;
+                        ID3D11Texture2D* tex = nullptr;
+                        if (SUCCEEDED(device->CreateTexture2D(&desc, &srd, &tex))) {
+                            device->CreateShaderResourceView(tex, nullptr, &s_MascotSrv);
+                            tex->Release();
+                            s_MascotW = w; s_MascotH = h;
+                        }
+                        stbi_image_free(px);
+                        break;
+                    }
+                }
+                ImGui::Text("RayV-Paint");
+                ImGui::TextDisabled("by Rayvich");
+                ImGui::Separator();
+                if (s_MascotSrv) {
+                    float maxW = 200.f;
+                    float sc = maxW / (float)std::max(1, s_MascotW);
+                    ImGui::Image((ImTextureID)s_MascotSrv, ImVec2(s_MascotW * sc, s_MascotH * sc));
+                }
+                ImGui::Spacing();
+                ImGui::TextWrapped("Bla bla Bla. Better look at this, RayChan is kissing!");
+                ImGui::Spacing();
+                if (ImGui::Button("Close", ImVec2(120, 0))) {
+                    state.openAboutModal = false;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndPopup();
+            }
         }
 
         Ui::TooltipEndFrame();

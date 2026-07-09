@@ -48,7 +48,10 @@ namespace UI {
         bool showToolbar = true;
         bool showColors = true;
         bool showToolSettings = true;
+        bool showRulers = true;
+        bool openAboutModal = false;
         int  layerEffectsFocusIdx = -1; // selected FX in Layer Effects panel
+        int  layerPreviewRefreshFrames = 0; // double-refresh after paint/edit
 
         // Modal visibility triggers
         bool openImportModal = false;
