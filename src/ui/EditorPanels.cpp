@@ -582,7 +582,9 @@ namespace UI {
             if (ImGui::BeginMenu("View")) {
                 ImGui::MenuItem("Toolbar", nullptr, &state.showToolbar);
                 ImGui::MenuItem("Properties", nullptr, &state.showProperties);
+                ImGui::MenuItem("Viewport Navigation", nullptr, &state.showViewportNav);
                 ImGui::MenuItem("Layers", nullptr, &state.showLayers);
+                ImGui::MenuItem("Layer Effects", nullptr, &state.showLayerEffects);
                 ImGui::MenuItem("Channels", nullptr, &state.showChannels);
                 ImGui::MenuItem("Colors Window", nullptr, &state.showColors);
                 ImGui::MenuItem("Tool Settings", nullptr, &state.showToolSettings);
@@ -1542,35 +1544,30 @@ namespace UI {
             Ui::EndDockPanel();
         }
 
-        // 6. Draw Properties Panel
+        // 6a. Viewport Navigation (Stage 2c)
+        if (state.showViewportNav) {
+            Ui::BeginDockPanel("Viewport Navigation", &state.showViewportNav);
+            ImGui::Text("Zoom: %.0f%%", canvas.GetZoom() * 100.0f);
+            ImGui::Text("Pan: (%.1f, %.1f)", canvas.GetPan().x, canvas.GetPan().y);
+            ImGui::Spacing();
+            bool flipH = canvas.GetViewportFlipH();
+            if (ImGui::Checkbox("Flip H", &flipH)) canvas.SetViewportFlipH(flipH);
+            ImGui::SameLine();
+            bool flipV = canvas.GetViewportFlipV();
+            if (ImGui::Checkbox("Flip V", &flipV)) canvas.SetViewportFlipV(flipV);
+            float rotAngle = canvas.GetRotationAngle() * (180.0f / 3.14159265f);
+            if (ImGui::SliderFloat("Rotation", &rotAngle, -180.0f, 180.0f, "%.1f°")) {
+                canvas.SetRotationAngle(rotAngle * (3.14159265f / 180.0f));
+            }
+            if (ImGui::Button("Reset Viewport", ImVec2(-1, 0)))
+                canvas.ResetView();
+            Ui::EndDockPanel();
+        }
+
+        // 6b. Properties — project / export only
         if (state.showProperties) {
             Ui::BeginDockPanel("Properties", &state.showProperties);
             
-            ImGui::Text("Zoom: %.0f%%", canvas.GetZoom() * 100.0f);
-            ImGui::Text("Pan: (%.1f, %.1f)", canvas.GetPan().x, canvas.GetPan().y);
-            
-            ImGui::Spacing();
-            ImGui::Text("Viewport Transformations:");
-            bool flipH = canvas.GetViewportFlipH();
-            if (ImGui::Checkbox("Flip Horizontal", &flipH)) {
-                canvas.SetViewportFlipH(flipH);
-            }
-            ImGui::SameLine();
-            bool flipV = canvas.GetViewportFlipV();
-            if (ImGui::Checkbox("Flip Vertical", &flipV)) {
-                canvas.SetViewportFlipV(flipV);
-            }
-
-            float rotAngle = canvas.GetRotationAngle() * (180.0f / 3.14159265f);
-            if (ImGui::SliderFloat("Rotation", &rotAngle, -180.0f, 180.0f, "%.1f deg")) {
-                canvas.SetRotationAngle(rotAngle * (3.14159265f / 180.0f));
-            }
-
-            if (ImGui::Button("Reset Viewport")) {
-                canvas.ResetView();
-            }
-            
-            ImGui::Separator();
             ImGui::Text("Project Properties:");
             int pType = (canvas.GetProjectType() == Canvas::ProjectType::Simple) ? 0 : 1;
             const char* pTypeNames[] = { "Simple Project", "Advanced Project (.rayp)" };
@@ -1721,6 +1718,31 @@ namespace UI {
                 if (a >= 0) return { a };
                 return {};
             };
+
+            // Fixed top: active layer opacity + blend (not per-row — saves list space)
+            {
+                int ai = canvas.GetActiveLayerIndex();
+                if (ai >= 0 && ai < (int)layers.size()) {
+                    auto& al = layers[ai];
+                    ImGui::PushID("##active_hdr");
+                    ImGui::TextDisabled("%s", al.name.c_str());
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+                    if (ImGui::SliderFloat("##op_top", &al.opacity, 0.f, 1.f, "Opacity %.2f"))
+                        canvas.MarkCompositeDirty();
+                    ImGui::SameLine();
+                    static const char* blendNamesTop[] = {
+                        "Normal","Multiply","Screen","Overlay","Add","Subtract","Darken","Lighten","HardLight","SoftLight"
+                    };
+                    int blendIdx = (int)al.blendMode;
+                    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                    if (UiCombo("##bl_top", &blendIdx, blendNamesTop, IM_ARRAYSIZE(blendNamesTop))) {
+                        al.blendMode = (BlendMode)blendIdx;
+                        canvas.MarkCompositeDirty();
+                    }
+                    ImGui::PopID();
+                    ImGui::Separator();
+                }
+            }
 
             // List fills remaining height minus bottom bar
             const float barH = 40.f;
@@ -1878,8 +1900,8 @@ namespace UI {
                 else if (layer.type == Layer::Type::SmartObject) std::snprintf(label, sizeof(label), "[SO] %s", layer.name.c_str());
                 else std::snprintf(label, sizeof(label), "%s", layer.name.c_str());
 
-                // Selection fill (multi) behind name
-                float rightReserve = isActive ? 150.0f : 100.0f;
+                // Selection fill (multi) behind name — reserve only for FX chip
+                float rightReserve = 36.0f;
                 float nameW = ImGui::GetContentRegionAvail().x - rightReserve;
                 if (nameW < 40.f) nameW = 40.f;
 
@@ -1990,67 +2012,18 @@ namespace UI {
                     ImGui::EndPopup();
                 }
 
-                // Opacity only for active layer/group (compact)
-                if (isActive) {
-                    ImGui::SameLine(0, 4);
-                    ImGui::SetNextItemWidth(52.f);
-                    if (ImGui::SliderFloat("##op", &layer.opacity, 0.f, 1.f, "%.2f"))
-                        canvas.MarkCompositeDirty();
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Opacity (active)");
-                }
-
-                ImGui::SameLine(0, 2);
-                static const char* blendNames[] = {
-                    "N","M","S","O","A","Sub","Dk","Lt","HL","SL"
-                };
-                static const char* blendTips[] = {
-                    "Normal","Multiply","Screen","Overlay","Add","Subtract","Darken","Lighten","Hard Light","Soft Light"
-                };
-                int blendIdx = (int)layer.blendMode;
-                ImGui::SetNextItemWidth(42.f);
-                if (UiCombo("##bl", &blendIdx, blendNames, IM_ARRAYSIZE(blendNames))) {
-                    layer.blendMode = (BlendMode)blendIdx;
-                    canvas.MarkCompositeDirty();
-                }
-                if (ImGui::IsItemHovered() && blendIdx >= 0 && blendIdx < IM_ARRAYSIZE(blendTips))
-                    ImGui::SetTooltip("%s", blendTips[blendIdx]);
-
+                // FX opens dedicated Layer Effects dock (Stage 2c)
                 ImGui::SameLine(0, 2);
                 bool hasFx = !layer.filters.empty();
-                if (hasFx) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 0.7f));
-                if (ImGui::SmallButton("Fx")) ImGui::OpenPopup("##filterPopup");
-                if (hasFx) ImGui::PopStyleColor();
-                if (ImGui::BeginPopup("##filterPopup")) {
-                    ImGui::Text("Filters: %s", layer.name.c_str());
-                    ImGui::Separator();
-                    static const char* filterTypeNames[] = {"Blur","HSV","Curves","Alpha Invert","Noise"};
-                    for (int fi = 0; fi < (int)layer.filters.size(); ++fi) {
-                        ImGui::PushID(fi);
-                        LayerFilter& flt = layer.filters[fi];
-                        bool wasEnabled = flt.enabled;
-                        if (ImGui::Checkbox("##fen", &flt.enabled) && flt.enabled != wasEnabled)
-                            layer.filtersDirty = true;
-                        ImGui::SameLine();
-                        ImGui::TextUnformatted(filterTypeNames[(int)flt.type]);
-                        ImGui::SameLine();
-                        if (ImGui::SmallButton("X")) { layer.filters.erase(layer.filters.begin()+fi); layer.filtersDirty=true; ImGui::PopID(); break; }
-                        ImGui::PopID();
-                    }
-                    if (ImGui::BeginMenu("Add Filter")) {
-                        static const FilterType ftypes[] = {FilterType::Blur,FilterType::HSV,FilterType::Curves,FilterType::AlphaInvert,FilterType::Noise};
-                        for (int ti=0;ti<5;++ti) {
-                            if (ImGui::MenuItem(filterTypeNames[ti])) {
-                                LayerFilter nf; nf.type=ftypes[ti]; nf.enabled=true;
-                                if (ftypes[ti]==FilterType::Blur) nf.p[0]=5.f;
-                                if (ftypes[ti]==FilterType::Curves){ nf.lut.resize(256); for(int li=0;li<256;++li) nf.lut[li]=(float)li/255.f; }
-                                layer.filters.push_back(nf);
-                                layer.filtersDirty=true;
-                            }
-                        }
-                        ImGui::EndMenu();
-                    }
-                    ImGui::EndPopup();
+                if (hasFx) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 0.55f));
+                if (ImGui::SmallButton("Fx")) {
+                    canvas.SetActiveLayerIndex(i);
+                    setSoleSelection(i);
+                    state.showLayerEffects = true;
+                    state.layerEffectsFocusIdx = layer.filters.empty() ? -1 : 0;
                 }
+                if (hasFx) ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Layer Effects…");
 
                 if (depth > 0) ImGui::Unindent(12.0f * depth);
                 ImGui::PopID();
@@ -2102,6 +2075,161 @@ namespace UI {
                     doDel();
             }
 
+            Ui::EndDockPanel();
+        }
+
+        // Layer Effects dock (Photoshop-like FX stack for active layer)
+        if (state.showLayerEffects) {
+            Ui::BeginDockPanel("Layer Effects", &state.showLayerEffects);
+            int ai = canvas.GetActiveLayerIndex();
+            auto& L = canvas.GetLayers();
+            if (ai < 0 || ai >= (int)L.size()) {
+                ImGui::TextDisabled("No active layer");
+            } else if (L[ai].isGroup) {
+                ImGui::TextDisabled("Groups have no pixel filters");
+            } else {
+                Layer& layer = L[ai];
+                ImGui::Text("%s", layer.name.c_str());
+                ImGui::Separator();
+
+                static const char* filterTypeNames[] = {"Blur","HSV","Curves","Alpha Invert","Noise"};
+                static const FilterType ftypes[] = {
+                    FilterType::Blur, FilterType::HSV, FilterType::Curves,
+                    FilterType::AlphaInvert, FilterType::Noise
+                };
+
+                // Left: stack list with reorder
+                float listW = ImGui::GetContentRegionAvail().x * 0.42f;
+                ImGui::BeginChild("##fxlist", ImVec2(listW, 0), true);
+                if (layer.filters.empty())
+                    ImGui::TextDisabled("No effects — Add below");
+
+                int removeIdx = -1;
+                int moveFrom = -1, moveTo = -1;
+                for (int fi = 0; fi < (int)layer.filters.size(); ++fi) {
+                    ImGui::PushID(fi);
+                    LayerFilter& flt = layer.filters[fi];
+                    bool en = flt.enabled;
+                    if (ImGui::Checkbox("##en", &en)) {
+                        flt.enabled = en;
+                        layer.filtersDirty = true;
+                        canvas.MarkCompositeDirty();
+                    }
+                    ImGui::SameLine();
+                    bool sel = (state.layerEffectsFocusIdx == fi);
+                    char row[64];
+                    std::snprintf(row, sizeof(row), "%s##fxrow", filterTypeNames[(int)flt.type]);
+                    if (ImGui::Selectable(row, sel, 0, ImVec2(0, 0)))
+                        state.layerEffectsFocusIdx = fi;
+
+                    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+                        ImGui::SetDragDropPayload("FX_INDEX", &fi, sizeof(int));
+                        ImGui::Text("%s", filterTypeNames[(int)flt.type]);
+                        ImGui::EndDragDropSource();
+                    }
+                    if (ImGui::BeginDragDropTarget()) {
+                        if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("FX_INDEX")) {
+                            int from = *(const int*)p->Data;
+                            if (from != fi) { moveFrom = from; moveTo = fi; }
+                        }
+                        ImGui::EndDragDropTarget();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("✕")) removeIdx = fi;
+                    ImGui::PopID();
+                }
+                if (moveFrom >= 0 && moveTo >= 0) {
+                    LayerFilter tmp = layer.filters[moveFrom];
+                    layer.filters.erase(layer.filters.begin() + moveFrom);
+                    if (moveTo > moveFrom) moveTo--;
+                    layer.filters.insert(layer.filters.begin() + moveTo, std::move(tmp));
+                    layer.filtersDirty = true;
+                    canvas.MarkCompositeDirty();
+                    state.layerEffectsFocusIdx = moveTo;
+                }
+                if (removeIdx >= 0) {
+                    layer.filters.erase(layer.filters.begin() + removeIdx);
+                    layer.filtersDirty = true;
+                    canvas.MarkCompositeDirty();
+                    if (state.layerEffectsFocusIdx >= (int)layer.filters.size())
+                        state.layerEffectsFocusIdx = (int)layer.filters.size() - 1;
+                }
+
+                ImGui::Spacing();
+                if (ImGui::BeginMenu("Add Effect")) {
+                    for (int ti = 0; ti < 5; ++ti) {
+                        if (ImGui::MenuItem(filterTypeNames[ti])) {
+                            LayerFilter nf;
+                            nf.type = ftypes[ti];
+                            nf.enabled = true;
+                            if (ftypes[ti] == FilterType::Blur) nf.p[0] = 5.f;
+                            if (ftypes[ti] == FilterType::Curves) {
+                                nf.lut.resize(256);
+                                for (int li = 0; li < 256; ++li) nf.lut[li] = (float)li / 255.f;
+                            }
+                            layer.filters.push_back(nf);
+                            layer.filtersDirty = true;
+                            canvas.MarkCompositeDirty();
+                            state.layerEffectsFocusIdx = (int)layer.filters.size() - 1;
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+                ImGui::EndChild();
+
+                ImGui::SameLine();
+                // Right: params for focused effect
+                ImGui::BeginChild("##fxparams", ImVec2(0, 0), true);
+                int fi = state.layerEffectsFocusIdx;
+                if (fi < 0 || fi >= (int)layer.filters.size()) {
+                    ImGui::TextDisabled("Select an effect");
+                } else {
+                    LayerFilter& flt = layer.filters[fi];
+                    ImGui::Text("%s", filterTypeNames[(int)flt.type]);
+                    ImGui::Separator();
+                    bool dirty = false;
+                    switch (flt.type) {
+                    case FilterType::Blur:
+                        dirty |= ImGui::SliderFloat("Radius", &flt.p[0], 0.5f, 80.f, "%.1f");
+                        break;
+                    case FilterType::HSV:
+                        dirty |= ImGui::SliderFloat("Hue", &flt.p[0], -0.5f, 0.5f);
+                        dirty |= ImGui::SliderFloat("Sat", &flt.p[1], -1.f, 1.f);
+                        dirty |= ImGui::SliderFloat("Val", &flt.p[2], -1.f, 1.f);
+                        break;
+                    case FilterType::Noise:
+                        dirty |= ImGui::SliderFloat("Strength", &flt.p[0], 0.f, 1.f);
+                        { bool col = flt.p[1] > 0.5f;
+                          if (ImGui::Checkbox("Color noise", &col)) { flt.p[1] = col ? 1.f : 0.f; dirty = true; } }
+                        break;
+                    case FilterType::AlphaInvert:
+                        ImGui::TextDisabled("No parameters");
+                        break;
+                    case FilterType::Curves:
+                        ImGui::TextDisabled("Edit via Image → Curves, or tune LUT later");
+                        break;
+                    }
+                    if (dirty) {
+                        layer.filtersDirty = true;
+                        canvas.MarkCompositeDirty();
+                    }
+                    ImGui::Spacing();
+                    if (ImGui::Button("Move Up") && fi > 0) {
+                        std::swap(layer.filters[fi], layer.filters[fi - 1]);
+                        state.layerEffectsFocusIdx = fi - 1;
+                        layer.filtersDirty = true;
+                        canvas.MarkCompositeDirty();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Move Down") && fi + 1 < (int)layer.filters.size()) {
+                        std::swap(layer.filters[fi], layer.filters[fi + 1]);
+                        state.layerEffectsFocusIdx = fi + 1;
+                        layer.filtersDirty = true;
+                        canvas.MarkCompositeDirty();
+                    }
+                }
+                ImGui::EndChild();
+            }
             Ui::EndDockPanel();
         }
 

@@ -41,11 +41,14 @@ namespace UI {
         // Window visibility flags
         bool showConsole = true;
         bool showProperties = true;
+        bool showViewportNav = true;   // Stage 2c — zoom/pan/flip/rot
+        bool showLayerEffects = false; // Stage 2c — FX panel for active layer
         bool showLayers = true;
         bool showChannels = true;
         bool showToolbar = true;
         bool showColors = true;
         bool showToolSettings = true;
+        int  layerEffectsFocusIdx = -1; // selected FX in Layer Effects panel
 
         // Modal visibility triggers
         bool openImportModal = false;
