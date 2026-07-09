@@ -9,7 +9,7 @@
 #include "../Canvas.h"
 #include "../core/PaintEngine.h"
 
-enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSelect, MagicWand, SmartSelect, MovePixels, Pipette, BucketFill, Gradient, Smudge };
+enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSelect, PolygonalLasso, QuickSelect, MagicWand, SmartSelect, MovePixels, Pipette, BucketFill, Gradient, Smudge };
 
 
 #include <GLFW/glfw3.h>
@@ -30,8 +30,10 @@ namespace UI {
     void TriggerBackgroundOpenDocument(const std::string& filepath, ID3D11Device* device, Canvas& canvas);
 
     bool IsSelectTool(ActiveTool tool);
+    bool IsLassoTool(ActiveTool tool);
     bool IsWandTool(ActiveTool tool);
     ActiveTool CycleSelectTool(ActiveTool current);
+    ActiveTool CycleLassoTool(ActiveTool current);
     ActiveTool CycleWandTool(ActiveTool current);
     void SampleCanvasColor(Canvas& canvas, float canvasX, float canvasY, float outColor[4]);
 
@@ -95,9 +97,11 @@ namespace UI {
         float noiseStrength   = 0.1f;
         bool  noiseColor      = false;
         // Curves: control points for spline editor [{x,y} in [0,1]]
-        std::vector<std::pair<float,float>> curvesPoints;
-        std::vector<float> curvesLUT; // 256 floats, rebuilt from curvesPoints
-        int   curvesChannel   = 0; // 0=RGB, 1=R, 2=G, 3=B (for display; apply always affects all same way for now)
+        std::vector<std::pair<float,float>> curvesPointsRGB;
+        std::vector<float> curvesLUTRGB;
+        std::vector<std::pair<float,float>> curvesPointsAlpha;
+        std::vector<float> curvesLUTAlpha;
+        int   curvesChannel   = 0; // 0 = RGB, 1 = Alpha
 
         // Recovery path
         std::string backupPath = "";

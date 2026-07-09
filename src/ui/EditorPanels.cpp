@@ -255,21 +255,30 @@ namespace UI {
     }
 
     bool IsSelectTool(ActiveTool tool) {
-        return tool == ActiveTool::RectSelect || tool == ActiveTool::EllipseSelect || tool == ActiveTool::LassoSelect;
+        return tool == ActiveTool::RectSelect || tool == ActiveTool::EllipseSelect;
+    }
+
+    bool IsLassoTool(ActiveTool tool) {
+        return tool == ActiveTool::LassoSelect || tool == ActiveTool::PolygonalLasso;
     }
 
     bool IsWandTool(ActiveTool tool) {
-        return tool == ActiveTool::MagicWand || tool == ActiveTool::SmartSelect;
+        return tool == ActiveTool::MagicWand || tool == ActiveTool::SmartSelect || tool == ActiveTool::QuickSelect;
     }
 
     ActiveTool CycleSelectTool(ActiveTool current) {
         if (current == ActiveTool::RectSelect) return ActiveTool::EllipseSelect;
-        if (current == ActiveTool::EllipseSelect) return ActiveTool::LassoSelect;
         return ActiveTool::RectSelect;
+    }
+
+    ActiveTool CycleLassoTool(ActiveTool current) {
+        if (current == ActiveTool::LassoSelect) return ActiveTool::PolygonalLasso;
+        return ActiveTool::LassoSelect;
     }
 
     ActiveTool CycleWandTool(ActiveTool current) {
         if (current == ActiveTool::MagicWand) return ActiveTool::SmartSelect;
+        if (current == ActiveTool::SmartSelect) return ActiveTool::QuickSelect;
         return ActiveTool::MagicWand;
     }
 

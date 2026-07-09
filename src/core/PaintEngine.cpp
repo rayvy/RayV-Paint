@@ -66,18 +66,32 @@ static void StampAt(TileCache& cache, float px, float py,
 
             uint8_t* raw = cache.LockTile(tx, ty);
 
+            const float r2 = r * r;
+            const bool useTip = brush.tip && brush.tip->size > 0 &&
+                                (int)brush.tip->pixels.size() >= brush.tip->size * brush.tip->size;
+            const int tipSize = useTip ? brush.tip->size : 0;
+
             for (int y = py0; y <= py1; ++y) {
                 int ly = y - tileY0;
                 uint8_t* row = raw + ((size_t)ly * TILE_SIZE) * bytesPerPixel;
 
                 for (int x = px0; x <= px1; ++x) {
-                    float dx = x - px;
-                    float dy = y - py;
-                    float dist = std::sqrt(dx * dx + dy * dy);
-                    if (dist >= r) continue;
+                    float dx = (float)x - px;
+                    float dy = (float)y - py;
+                    float dist2 = dx * dx + dy * dy;
+                    if (dist2 >= r2) continue;
 
                     float intensity = 1.0f;
-                    if (h < 1.0f) {
+                    if (useTip) {
+                        // Map stamp disk to tip texture
+                        float u = (dx / r + 1.0f) * 0.5f * (float)(tipSize - 1);
+                        float v = (dy / r + 1.0f) * 0.5f * (float)(tipSize - 1);
+                        int ix = std::clamp((int)std::lround(u), 0, tipSize - 1);
+                        int iy = std::clamp((int)std::lround(v), 0, tipSize - 1);
+                        intensity = brush.tip->pixels[(size_t)iy * tipSize + ix] / 255.0f;
+                        if (intensity <= 0.0f) continue;
+                    } else if (h < 1.0f) {
+                        float dist = std::sqrt(dist2);
                         float core = r * h;
                         if (dist > core) {
                             float denom = (r - core);
@@ -90,6 +104,7 @@ static void StampAt(TileCache& cache, float px, float py,
                     float selVal = 1.0f;
                     if (!selectionMask.empty()) {
                         selVal = selectionMask[(size_t)y * width + x] / 255.0f;
+                        if (selVal <= 0.0f) continue;
                     }
 
                     float stampAlpha = brush.color[3] * op * intensity * selVal;
@@ -171,7 +186,8 @@ void PaintEngine::DrawStrokeSegment(TileCache& cache,
     float segLen = std::sqrt(dx*dx + dy*dy);
     if (segLen == 0.0f) return;
 
-    float spacing = std::max(1.0f, brush.radius * 2.0f * brush.spacing);
+    float spacingMul = (brush.tip) ? brush.tip->spacingMul : 1.0f;
+    float spacing = std::max(1.0f, brush.radius * 2.0f * brush.spacing * spacingMul);
     float dirX    = dx / segLen, dirY = dy / segLen;
     float traveled = 0.0f;
 
@@ -192,3 +208,54 @@ void PaintEngine::DrawStrokeSegment(TileCache& cache,
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Built-in tip presets (64x64 grayscale)
+// ---------------------------------------------------------------------------
+namespace {
+BrushTip MakeRadialTip(int size, float hardness, float softnessPow, const char* name, float spacingMul) {
+    BrushTip t;
+    t.size = size;
+    t.name = name;
+    t.spacingMul = spacingMul;
+    t.pixels.resize((size_t)size * size);
+    float c = (size - 1) * 0.5f;
+    float r = c;
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            float dx = x - c, dy = y - c;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            float v = 0.f;
+            if (dist < r) {
+                float nd = dist / r;
+                if (nd <= hardness) v = 1.f;
+                else {
+                    float t01 = (nd - hardness) / std::max(1e-6f, 1.f - hardness);
+                    v = std::pow(1.f - t01, softnessPow);
+                }
+            }
+            t.pixels[(size_t)y * size + x] = (uint8_t)(std::clamp(v, 0.f, 1.f) * 255.f + 0.5f);
+        }
+    }
+    return t;
+}
+} // namespace
+
+namespace BrushPresets {
+const BrushTip& SoftRound() {
+    static BrushTip tip = MakeRadialTip(64, 0.35f, 1.2f, "Soft Round", 1.0f);
+    return tip;
+}
+const BrushTip& HardRound() {
+    static BrushTip tip = MakeRadialTip(64, 0.92f, 4.0f, "Hard Round", 0.85f);
+    return tip;
+}
+const BrushTip& Pencil() {
+    static BrushTip tip = MakeRadialTip(32, 0.75f, 2.5f, "Pencil", 0.55f);
+    return tip;
+}
+const BrushTip& Airbrush() {
+    static BrushTip tip = MakeRadialTip(64, 0.05f, 0.65f, "Airbrush", 1.25f);
+    return tip;
+}
+} // namespace BrushPresets

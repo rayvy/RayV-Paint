@@ -2,6 +2,15 @@
 #include <vector>
 #include <cstdint>
 
+// Optional grayscale tip stamp (row-major, tipSize x tipSize, 0=transparent 255=solid).
+// When tipPixels is null/empty, procedural soft circle is used (legacy path).
+struct BrushTip {
+    int size = 0;                      // width=height
+    std::vector<uint8_t> pixels;       // size*size
+    float spacingMul = 1.0f;
+    const char* name = "Custom";
+};
+
 struct BrushSettings {
     float color[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
     float radius    = 10.0f;
@@ -19,7 +28,18 @@ struct BrushSettings {
     bool pressureRadius   = false;
     bool pressureHardness = false;
     bool pressureOpacity  = false;
+
+    // Optional custom tip (null = procedural circle, no regression)
+    const BrushTip* tip = nullptr;
 };
+
+// Built-in brush tip presets (generated procedurally once).
+namespace BrushPresets {
+    const BrushTip& SoftRound();
+    const BrushTip& HardRound();
+    const BrushTip& Pencil();
+    const BrushTip& Airbrush();
+}
 
 struct SmudgeSettings {
     float radius   = 20.0f;

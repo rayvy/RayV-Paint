@@ -70,6 +70,38 @@ private:
     bool m_NewHasSelection;
 };
 
+// Full document geometry change (crop / canvas edit): stores per-layer tile maps + size.
+class DocumentGeometryCommand : public UndoCommand {
+public:
+    struct LayerTiles {
+        int layerIdx = 0;
+        bool hasMask = false;
+        std::vector<uint8_t> mask;
+        // Sparse tiles for this layer at the associated document size
+        std::vector<TileDelta> tiles;
+    };
+    struct DocSnap {
+        int width = 0;
+        int height = 0;
+        std::vector<uint8_t> selection;
+        bool hasSelection = false;
+        std::vector<LayerTiles> layers;
+    };
+
+    DocumentGeometryCommand(const std::string& name, DocSnap oldSnap, DocSnap newSnap);
+    std::string GetName() const override { return m_Name; }
+    void Undo(Canvas* canvas) override;
+    void Redo(Canvas* canvas) override;
+    size_t GetOverheadBytes() const override;
+    void CollectTileData(std::unordered_set<const TileData*>& seen) const override;
+
+private:
+    void Apply(Canvas* canvas, const DocSnap& snap);
+    std::string m_Name;
+    DocSnap m_Old;
+    DocSnap m_New;
+};
+
 class UndoRedoManager {
 public:
     UndoRedoManager();

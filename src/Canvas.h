@@ -84,6 +84,14 @@ struct Layer {
     bool isGroup        = false; // group header — no pixel data
     int  parentGroupId  = -1;    // -1 = top-level
     bool groupExpanded  = true;
+
+    // Layer type (Raster default; Group when isGroup; SmartObject/VectorSvg for vectors)
+    enum class Type : uint8_t { Raster = 0, Group = 1, SmartObject = 2, VectorSvg = 3 };
+    Type type = Type::Raster;
+    // Source bytes for smart objects / SVG (empty for pure raster).
+    std::vector<uint8_t> smartSourceBytes;
+    std::string smartSourcePath;
+    float smartScale = 1.0f;
 };
 
 
@@ -93,10 +101,13 @@ enum class StrokePhase {
     End
 };
 
+class DocumentGeometryCommand;
+
 class Canvas {
 public:
     Canvas();
     ~Canvas();
+    friend class DocumentGeometryCommand;
 
     bool Initialize(ID3D11Device* device);
     void Shutdown();
@@ -120,7 +131,28 @@ public:
     int GetHeight() const { return m_Height; }
 
     // Resizes canvas and all layers (retaining existing pixel data where possible)
+    // Extend mode: pad/crop content (current behaviour). No pixel scaling.
     void ResizeCanvas(ID3D11Device* device, int width, int height);
+
+    enum class CanvasEditMode : uint8_t { Extend = 0, Resize = 1 };
+    enum class ResampleFilter : uint8_t { Nearest = 0, Bilinear = 1, Lanczos = 2 };
+    // Canvas Edit: Extend (content unscaled) or Resize (scale content with filter).
+    // anchorX/Y in [0,1] for Extend placement of old content (0.5,0.5 = center).
+    bool EditCanvas(ID3D11Device* device, CanvasEditMode mode, int newW, int newH,
+                    ResampleFilter filter = ResampleFilter::Bilinear,
+                    float anchorX = 0.5f, float anchorY = 0.5f);
+    // Crop document to selection AABB (or given rect). Registers document undo.
+    bool CropCanvasToSelection(ID3D11Device* device);
+    bool CropCanvasToRect(ID3D11Device* device, int x, int y, int w, int h);
+
+    enum class IccPreset : uint8_t { None = 0, sRGB = 1, DisplayP3 = 2, AdobeRGB = 3 };
+    static const char* IccPresetName(IccPreset p);
+    void SetExportIccPreset(IccPreset p);
+    IccPreset GetExportIccPreset() const { return m_ExportIccPreset; }
+
+    // Layer types / smart objects (Layer::Type)
+    bool ImportSvgAsSmartObject(ID3D11Device* device, const std::string& filepath);
+    bool RasterizeLayer(ID3D11Device* device, int layerIdx);
 
     // Layer Management
     void CreateNewLayer(ID3D11Device* device, const std::string& name);
@@ -157,18 +189,24 @@ public:
     void SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s);
 
     // Destructive image adjustments (operate on active layer, respect selection mask)
-    void SelectAll();
+    void SelectAll();                       // full canvas selection (with undo)
+    void SelectOpaquePixels(int layerIdx = -1); // alpha-as-mask; -1 = active layer
     void InvertSelection();
     void InvertAlpha();
     void ApplyBlur(float radius);
     void ApplyHSV(float dH, float dS, float dV);
-    void ApplyCurves(const std::vector<float>& lut256); // 256-element LUT [0..1] applied to R,G,B
+    // lutRGB: 256 floats [0..1]; lutAlpha optional 256 floats (empty = leave A unchanged)
+    void ApplyCurves(const std::vector<float>& lutRGB, const std::vector<float>& lutAlpha = {});
     void ApplyNoise(float strength, bool colorNoise);
 
     // Layer group management
     void CreateLayerGroup(ID3D11Device* device, const std::string& name);
     void AddLayerToGroup(int layerIdx, int groupLayerIdx);
     void RemoveLayerFromGroup(int layerIdx);
+    // Reorder + remaps parentGroupId. Returns new index of moved layer.
+    int  ReorderLayer(int fromIdx, int toIdx);
+    // Move layer into group (reparent + place under header). Returns new layer index.
+    int  MoveLayerIntoGroup(int layerIdx, int groupIdx);
 
     // Selection System
     bool HasSelection() const { return m_HasSelection; }
@@ -179,8 +217,20 @@ public:
     void ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract);
     void ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, bool subtract);
     void ApplyLassoSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
+    // Polygonal (straight) lasso — same fill as freehand; points are polygon vertices.
+    void ApplyPolygonalLassoSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
     void ApplyMagicWandSelection(ID3D11Device* device, int startX, int startY, float tolerance, bool add, bool subtract, bool contiguous);
+    // Sticky wand seed (Photoshop-like): click sets seed; tolerance scrub re-previews without new click.
+    bool HasWandSeed() const { return m_WandSeedValid; }
+    void ClearWandSeed() { m_WandSeedValid = false; }
+    void GetWandSeed(int& outX, int& outY) const { outX = m_WandSeedX; outY = m_WandSeedY; }
+    // Re-run wand from last seed with new tolerance (no undo until Commit). Returns false if no seed.
+    bool PreviewWandFromSeed(ID3D11Device* device, float tolerance, bool add, bool subtract, bool contiguous);
     void ApplySmartSelectSelection(ID3D11Device* device, const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
+    // Quick Selection (non-AI): brush seeds → region grow with edge stop.
+    void BeginQuickSelectStroke();
+    void StrokeQuickSelect(const std::vector<std::pair<int, int>>& points, float radius, bool subtract);
+    void EndQuickSelectStroke(ID3D11Device* device, bool add, bool subtract);
     bool IsSmartSelectInProgress() const { return m_SmartSelectInProgress.load(); }
     void CancelSmartSelect() { m_SmartSelectCancelled.store(true); }
     void ApplyBucketFill(int startX, int startY, float tolerance, const float color[4], bool contiguous);
@@ -218,7 +268,9 @@ public:
     bool OpenDocument(ID3D11Device* device, const std::string& filepath, LoadProgressFn progress = nullptr);
     bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath, LoadProgressFn progress = nullptr);
     bool SaveCanvas(const std::string& filepath, DdsFormat ddsFormat);
+    // iccProfilePath: legacy path or empty. Prefer SetExportIccPreset + SaveCanvasStandard(path).
     bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath = "");
+    bool SaveCanvasStandard(const std::string& filepath, IccPreset preset);
     bool SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed);
     std::vector<float> GetCompositePixels() const;
     void CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height);
@@ -288,6 +340,18 @@ public:
 
 private:
     void BackupTile(int tileX, int tileY);
+    // Snapshot every tile in the active layer grid (empty tiles get empty oldState).
+    // Required before full-layer Import so undo covers all tiles (fixes partial-tile undo).
+    void BackupAllActiveLayerTiles();
+    // Snapshot newState for all backed-up tiles and push PaintStrokeCommand.
+    void CommitActiveLayerMutation(const std::string& actionName);
+    // Restore oldState from m_ActiveStrokeDeltas without pushing (cancel transform).
+    void RestoreActiveLayerMutation();
+    void RunMagicWand(ID3D11Device* device, int startX, int startY, float tolerance,
+                      bool add, bool subtract, bool contiguous, bool pushUndo);
+    bool GetSelectionBounds(int& outX, int& outY, int& outW, int& outH) const;
+    void EnsureWandSourceCache();
+    void InvalidateWandSourceCache();
 
     struct Vertex {
         DirectX::XMFLOAT2 pos;
@@ -409,6 +473,7 @@ private:
     bool m_ExportGenerateMipMaps = true;
     std::string m_ExportMipFilter = "Bicubic";
     std::string m_ExportPngColorSpace = "sRGB";
+    IccPreset m_ExportIccPreset = IccPreset::sRGB;
 
     float m_RotationAngle = 0.0f;
     bool m_MirrorHorizontal = false;
@@ -427,9 +492,28 @@ private:
     std::atomic<bool> m_SmartSelectInProgress{false};
     std::atomic<bool> m_SmartSelectCancelled{false};
 
+    // Magic wand sticky seed
+    bool m_WandSeedValid = false;
+    int  m_WandSeedX = 0;
+    int  m_WandSeedY = 0;
+    // Cached RGB8 source for live tolerance scrub (invalidated on layer edit).
+    std::vector<uint8_t> m_WandSourceRGB;
+    int m_WandSourceW = 0, m_WandSourceH = 0;
+    int m_WandSourceLayerIdx = -1;
+
+    // Quick select session
+    std::vector<uint8_t> m_QuickSelectMask; // working mask during stroke
+    std::vector<uint8_t> m_QuickSelectEdge; // cached edge strength 0-255
+    bool m_QuickSelectEdgeValid = false;
+    float m_QuickSelectLabMean[3] = {0,0,0};
+    int   m_QuickSelectSampleCount = 0;
+
     // Move Pixels State
     bool m_IsMovingPixels = false;
     std::vector<float> m_FloatingPixels;
+    // BBox of floating content in document space (for perf; full buffer may still be used as fallback)
+    int m_FloatingBBoxX = 0, m_FloatingBBoxY = 0, m_FloatingBBoxW = 0, m_FloatingBBoxH = 0;
+    int m_FloatingBufW = 0, m_FloatingBufH = 0; // size of m_FloatingPixels layout
     std::vector<uint8_t> m_OriginalSelectionMask;
     int m_FloatingOffsetX = 0;
     int m_FloatingOffsetY = 0;

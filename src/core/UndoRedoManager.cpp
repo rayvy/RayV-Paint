@@ -98,6 +98,88 @@ size_t SelectionCommand::GetOverheadBytes() const {
 }
 
 // ---------------------------------------------------------------------------
+// DocumentGeometryCommand
+// ---------------------------------------------------------------------------
+
+DocumentGeometryCommand::DocumentGeometryCommand(const std::string& name, DocSnap oldSnap, DocSnap newSnap)
+    : m_Name(name), m_Old(std::move(oldSnap)), m_New(std::move(newSnap)) {}
+
+void DocumentGeometryCommand::Apply(Canvas* canvas, const DocSnap& snap) {
+    if (!canvas) return;
+    canvas->m_Width = snap.width;
+    canvas->m_Height = snap.height;
+    canvas->m_SelectionMask = snap.selection;
+    canvas->m_HasSelection = snap.hasSelection;
+    canvas->m_SelectionMaskNeedsUpload = true;
+
+    auto& layers = canvas->GetLayers();
+    for (const auto& lt : snap.layers) {
+        if (lt.layerIdx < 0 || lt.layerIdx >= (int)layers.size()) continue;
+        auto& layer = layers[lt.layerIdx];
+        if (layer.isGroup) continue;
+        if (!layer.tileCache) {
+            layer.tileCache = std::make_unique<TileCache>();
+        }
+        layer.tileCache->Clear();
+        layer.tileCache->Init(snap.width, snap.height, canvas->m_CanvasFormat);
+        for (const auto& d : lt.tiles) {
+            layer.tileCache->RestoreTile(d.tileX, d.tileY, d.newState);
+        }
+        layer.hasMask = lt.hasMask;
+        layer.mask = lt.mask;
+        layer.maskNeedsUpload = true;
+        layer.needsUpload = true;
+        layer.filtersDirty = true;
+        // Drop GPU textures so ComposeLayers recreates at new document size.
+        if (layer.texture) { layer.texture->Release(); layer.texture = nullptr; }
+        if (layer.srv) { layer.srv->Release(); layer.srv = nullptr; }
+        if (layer.maskTexture) { layer.maskTexture->Release(); layer.maskTexture = nullptr; }
+        if (layer.maskSRV) { layer.maskSRV->Release(); layer.maskSRV = nullptr; }
+    }
+    // Force composite rebuild at new size on next frame (device-less path).
+    canvas->ReleaseCompositeResources();
+    if (canvas->m_SelectionMaskTexture) {
+        canvas->m_SelectionMaskTexture->Release();
+        canvas->m_SelectionMaskTexture = nullptr;
+    }
+    if (canvas->m_SelectionMaskSRV) {
+        canvas->m_SelectionMaskSRV->Release();
+        canvas->m_SelectionMaskSRV = nullptr;
+    }
+    canvas->m_CompositeDirty = true;
+    canvas->m_IsDocumentModified = true;
+}
+
+void DocumentGeometryCommand::Undo(Canvas* canvas) { Apply(canvas, m_Old); }
+void DocumentGeometryCommand::Redo(Canvas* canvas) { Apply(canvas, m_New); }
+
+size_t DocumentGeometryCommand::GetOverheadBytes() const {
+    size_t n = sizeof(DocumentGeometryCommand) + m_Name.capacity()
+             + m_Old.selection.capacity() + m_New.selection.capacity();
+    auto addLayers = [&](const DocSnap& s) {
+        for (const auto& lt : s.layers) {
+            n += lt.mask.capacity() + lt.tiles.capacity() * sizeof(TileDelta);
+        }
+    };
+    addLayers(m_Old);
+    addLayers(m_New);
+    return n;
+}
+
+void DocumentGeometryCommand::CollectTileData(std::unordered_set<const TileData*>& seen) const {
+    auto walk = [&](const DocSnap& s) {
+        for (const auto& lt : s.layers) {
+            for (const auto& d : lt.tiles) {
+                if (d.oldState.data) seen.insert(d.oldState.data.get());
+                if (d.newState.data) seen.insert(d.newState.data.get());
+            }
+        }
+    };
+    walk(m_Old);
+    walk(m_New);
+}
+
+// ---------------------------------------------------------------------------
 // UndoRedoManager — global unique TileData budget
 // ---------------------------------------------------------------------------
 

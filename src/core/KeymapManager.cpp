@@ -119,13 +119,16 @@ void KeymapManager::Initialize() {
     // Tool groups: one key cycles between variants (repeat press)
     m_Bindings["SelectToolGroup"] = KeyCombination{ GLFW_KEY_S, -1, false, false, false };
     m_Bindings["WandToolGroup"] = KeyCombination{ GLFW_KEY_W, -1, false, false, false };
+    m_Bindings["LassoToolGroup"] = KeyCombination{ GLFW_KEY_L, -1, false, false, false };
 
     // Per-variant entries (unbound; activated via group cycling or toolbar)
     m_Bindings["RectSelectTool"] = KeyCombination{ 0, -1, false, false, false };
     m_Bindings["EllipseSelectTool"] = KeyCombination{ 0, -1, false, false, false };
     m_Bindings["LassoSelectTool"] = KeyCombination{ 0, -1, false, false, false };
+    m_Bindings["PolygonalLassoTool"] = KeyCombination{ 0, -1, false, false, false };
     m_Bindings["MagicWandTool"] = KeyCombination{ 0, -1, false, false, false };
     m_Bindings["SmartSelectTool"] = KeyCombination{ 0, -1, false, false, false };
+    m_Bindings["QuickSelectTool"] = KeyCombination{ 0, -1, false, false, false };
 
     // Resolve their scancodes
     ResolveScancodes();
