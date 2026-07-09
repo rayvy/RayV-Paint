@@ -2458,15 +2458,14 @@ namespace UI {
             bool a = canvas.GetChannelA();
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
-            // More vertical space than horizontal -> list with names; else horizontal previews only
             bool listMode = (avail.y >= avail.x);
 
-            struct Ch { const char* name; bool* flag; ImVec4 tint; bool alphaLike; };
+            struct Ch { const char* name; bool* flag; Canvas::ChannelPreview preview; };
             Ch chans[] = {
-                { "Red",   &r, ImVec4(1, 0, 0, 1), false },
-                { "Green", &g, ImVec4(0, 1, 0, 1), false },
-                { "Blue",  &b, ImVec4(0, 0, 1, 1), false },
-                { "Alpha", &a, ImVec4(1, 1, 1, 1), true  },
+                { "Red",   &r, Canvas::ChannelPreview::R },
+                { "Green", &g, Canvas::ChannelPreview::G },
+                { "Blue",  &b, Canvas::ChannelPreview::B },
+                { "Alpha", &a, Canvas::ChannelPreview::A },
             };
 
             float thumb = listMode ? 36.f : std::clamp(std::min(avail.x / 4.5f, avail.y - 8.f), 28.f, 64.f);
@@ -2479,20 +2478,11 @@ namespace UI {
                 ImGui::Checkbox("##en", chans[i].flag);
                 if (listMode) ImGui::SameLine();
 
-                // Alpha: grayscale preview (multiply RGB by white, show as luminance-style)
-                ImVec4 tint = chans[i].alphaLike ? ImVec4(1, 1, 1, 1) : chans[i].tint;
-                if (canvas.GetCompositeSRV()) {
-                    if (chans[i].alphaLike) {
-                        // Draw desaturated / B&W-style: use white tint on composite (shows luminance-ish);
-                        // force monochrome by drawing as grayscale via identical RGB channels in tint
-                        // and a dark background so alpha hole reads as black.
-                        ImGui::ImageWithBg((ImTextureID)canvas.GetCompositeSRV(), ImVec2(thumb, thumb),
-                            ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,1), ImVec4(1,1,1,1));
-                        // Overlay label that it's alpha B/W approximation
-                    } else {
-                        ImGui::ImageWithBg((ImTextureID)canvas.GetCompositeSRV(), ImVec2(thumb, thumb),
-                            ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,0), tint);
-                    }
+                // Core grayscale channel thumbs (A is true B&W alpha)
+                ID3D11ShaderResourceView* prev = canvas.GetChannelPreviewSRV(device, chans[i].preview);
+                if (prev) {
+                    ImGui::ImageWithBg((ImTextureID)prev, ImVec2(thumb, thumb),
+                        ImVec2(0,0), ImVec2(1,1), ImVec4(0,0,0,1), ImVec4(1,1,1,1));
                 } else {
                     ImGui::Dummy(ImVec2(thumb, thumb));
                 }
@@ -2541,33 +2531,63 @@ namespace UI {
             bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser);
 
             if (isBrushLike) {
-                // Brush tip presets (core BrushPresets)
+                // Brush tips: ids persisted on Canvas (.rayp brush_tip_id / custom pixels)
                 static BrushTip s_CustomTip;
                 static bool s_CustomLoaded = false;
+                static std::string s_LastSyncedTipId;
+
+                auto ApplyTipId = [&](const std::string& id) {
+                    if (id == "hard_round") { brush.tip = &BrushPresets::HardRound(); state.brushTipPreset = 1; }
+                    else if (id == "pencil") { brush.tip = &BrushPresets::Pencil(); state.brushTipPreset = 2; }
+                    else if (id == "airbrush") { brush.tip = &BrushPresets::Airbrush(); state.brushTipPreset = 3; }
+                    else if (id == "custom") {
+                        int sz = 0; std::vector<uint8_t> px;
+                        if (canvas.GetCustomBrushTip(sz, px) && sz > 0) {
+                            s_CustomTip.size = sz;
+                            s_CustomTip.pixels = std::move(px);
+                            s_CustomTip.name = "Custom";
+                            s_CustomTip.spacingMul = 1.0f;
+                            s_CustomLoaded = true;
+                            state.hasCustomBrushTip = true;
+                            brush.tip = &s_CustomTip;
+                        } else {
+                            brush.tip = s_CustomLoaded ? &s_CustomTip : nullptr;
+                        }
+                        state.brushTipPreset = 4;
+                    }
+                    else if (id == "procedural") { brush.tip = nullptr; state.brushTipPreset = 0; }
+                    else { // soft_round default
+                        brush.tip = &BrushPresets::SoftRound();
+                        state.brushTipPreset = 0;
+                    }
+                };
+
+                // Pull tip from project after load / when canvas id changes
+                if (canvas.GetBrushTipId() != s_LastSyncedTipId) {
+                    s_LastSyncedTipId = canvas.GetBrushTipId();
+                    ApplyTipId(s_LastSyncedTipId.empty() ? "soft_round" : s_LastSyncedTipId);
+                }
+
                 const char* tipNames[] = { "Soft", "Hard", "Pencil", "Air", "Custom" };
+                const char* tipIds[] = { "soft_round", "hard_round", "pencil", "airbrush", "custom" };
                 int tipIdx = state.brushTipPreset;
                 ImGui::SetNextItemWidth(72.f);
                 if (ImGui::Combo("##tip", &tipIdx, tipNames, IM_ARRAYSIZE(tipNames))) {
                     state.brushTipPreset = tipIdx;
-                    switch (tipIdx) {
-                    case 0: brush.tip = &BrushPresets::SoftRound(); break;
-                    case 1: brush.tip = &BrushPresets::HardRound(); break;
-                    case 2: brush.tip = &BrushPresets::Pencil(); break;
-                    case 3: brush.tip = &BrushPresets::Airbrush(); break;
-                    case 4: brush.tip = (s_CustomLoaded ? &s_CustomTip : nullptr); break;
-                    default: brush.tip = nullptr; break;
+                    if (tipIdx >= 0 && tipIdx < 5) {
+                        canvas.SetBrushTipId(tipIds[tipIdx]);
+                        s_LastSyncedTipId = tipIds[tipIdx];
+                        ApplyTipId(tipIds[tipIdx]);
                     }
                 }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brush tip preset");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Brush tip (saved in project)");
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Load Tip...")) {
                     char path[512] = "";
                     if (ShowOpenFileWin32(path, sizeof(path), "Images (*.png;*.jpg;*.bmp;*.tga)\0*.png;*.jpg;*.bmp;*.tga\0All\0*.*\0")) {
                         std::vector<uint8_t> px; int tw=0, th=0;
                         if (ImageManager::LoadImageFromFile(path, px, tw, th) && tw > 0 && th > 0) {
-                            // Build grayscale tip (max size 128)
-                            int side = std::min(tw, th);
-                            side = std::min(side, 128);
+                            int side = std::min(std::min(tw, th), 128);
                             s_CustomTip.size = side;
                             s_CustomTip.pixels.assign((size_t)side * side, 0);
                             s_CustomTip.name = "Custom";
@@ -2578,7 +2598,6 @@ namespace UI {
                                     int sy = y * th / side;
                                     size_t si = ((size_t)sy * tw + sx) * 4;
                                     uint8_t r8 = px[si], g8 = px[si+1], b8 = px[si+2], a8 = px[si+3];
-                                    // luminance * alpha
                                     float lum = (0.2126f*r8 + 0.7152f*g8 + 0.0722f*b8) * (a8 / 255.f);
                                     s_CustomTip.pixels[(size_t)y * side + x] = (uint8_t)std::clamp(lum, 0.f, 255.f);
                                 }
@@ -2588,10 +2607,12 @@ namespace UI {
                             state.customBrushTipName = path;
                             state.brushTipPreset = 4;
                             brush.tip = &s_CustomTip;
+                            canvas.SetCustomBrushTip(side, s_CustomTip.pixels); // also sets id=custom
+                            s_LastSyncedTipId = "custom";
                         }
                     }
                 }
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Load grayscale stamp texture for custom tip");
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Load grayscale stamp (persisted in .rayp)");
                 ImGui::SameLine();
 
                 MiniSlider("##rad", &brush.radius, 1.f, 250.f, "Radius (px)", 100.f);

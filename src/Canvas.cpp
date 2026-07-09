@@ -3076,8 +3076,8 @@ bool Canvas::SaveProjectAuto() {
         if (ext == "dds") {
             success = SaveCanvasCompressed(path, m_ExportFormat, m_ExportGenerateMipMaps, m_ExportMipFilter, m_ExportCompressionSpeed);
         } else {
-            std::string icc = m_ExportPngColorSpace;
-            success = SaveCanvasStandard(path, icc == "sRGB" ? "" : icc);
+            // Contract: PNG via IccPreset only (no free-text path)
+            success = SaveCanvasStandard(path, GetExportIccPreset());
         }
 
         if (success) {

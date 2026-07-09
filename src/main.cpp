@@ -943,6 +943,12 @@ int main(int argc, char* argv[]) {
 
             if (g_ActiveTool != g_PrevActiveTool) {
                 EndBrushStrokeIfNeeded();
+                // Contract: cancel in-progress quick-select stroke on tool switch (no undo/selection change)
+                if (g_PrevActiveTool == ActiveTool::QuickSelect && g_Canvas.IsQuickSelectStrokeActive()) {
+                    g_Canvas.CancelQuickSelectStroke();
+                    g_IsSelectionDragging = false;
+                    g_LassoPoints.clear();
+                }
                 g_PrevActiveTool = g_ActiveTool;
             }
 
@@ -1415,6 +1421,16 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // Quick Select: Esc mid-stroke → CancelQuickSelectStroke (no selection/undo change)
+            if (g_ActiveTool == ActiveTool::QuickSelect && !ImGui::GetIO().WantTextInput &&
+                ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                if (g_Canvas.IsQuickSelectStrokeActive()) {
+                    g_Canvas.CancelQuickSelectStroke();
+                }
+                g_IsSelectionDragging = false;
+                g_LassoPoints.clear();
+            }
+
             // Accumulate points if lasso or smart select or quick select is active
             if (g_IsSelectionDragging && (g_ActiveTool == ActiveTool::LassoSelect || g_ActiveTool == ActiveTool::SmartSelect || g_ActiveTool == ActiveTool::QuickSelect)) {
                 int cx = (int)canvasX;
@@ -1454,7 +1470,9 @@ int main(int argc, char* argv[]) {
                     g_Canvas.ApplySmartSelectSelection(g_pd3dDevice, g_LassoPoints, add, subtract);
                 }
                 else if (g_ActiveTool == ActiveTool::QuickSelect) {
-                    g_Canvas.EndQuickSelectStroke(g_pd3dDevice, add, subtract);
+                    // Skip if already cancelled via Esc
+                    if (g_Canvas.IsQuickSelectStrokeActive())
+                        g_Canvas.EndQuickSelectStroke(g_pd3dDevice, add, subtract);
                 }
                 g_LassoPoints.clear();
             }
