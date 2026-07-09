@@ -100,16 +100,78 @@ bool ImageManager::LoadImageFromFile(const std::string& filepath, std::vector<ui
     return true;
 }
 
-bool ImageManager::SaveImageToFile(const std::string& filepath, const std::vector<float>& pixels, int width, int height, const std::string& iccProfilePath) {
-    size_t numPixels = (size_t)width * height;
-    std::vector<uint8_t> rawBytes(numPixels * 4);
+static bool InjectIccIntoPng(std::vector<uint8_t>& pngBytes, const std::string& iccProfilePath) {
+    if (iccProfilePath.empty()) return true;
+#ifdef _WIN32
+    std::ifstream iccFile(UTF8ToWString(iccProfilePath), std::ios::binary);
+#else
+    std::ifstream iccFile(iccProfilePath, std::ios::binary);
+#endif
+    if (!iccFile.is_open()) {
+        Logger::Get().Error("Failed to open ICC profile file: " + iccProfilePath);
+        return false;
+    }
+    std::vector<uint8_t> profileData((std::istreambuf_iterator<char>(iccFile)),
+                                     std::istreambuf_iterator<char>());
+    iccFile.close();
+    if (profileData.empty()) return true;
 
-    for (size_t i = 0; i < numPixels * 4; ++i) {
-        float val = std::clamp(pixels[i], 0.0f, 1.0f);
-        rawBytes[i] = static_cast<uint8_t>(val * 255.0f + 0.5f);
+    int compressedSize = 0;
+    unsigned char* compressedData = stbi_zlib_compress(profileData.data(), static_cast<int>(profileData.size()), &compressedSize, 8);
+    if (!compressedData) {
+        Logger::Get().Error("Failed to compress ICC profile data: " + iccProfilePath);
+        return false;
     }
 
-    std::string ext = "";
+    if (pngBytes.size() >= 33 &&
+        pngBytes[0] == 0x89 && pngBytes[1] == 0x50 && pngBytes[2] == 0x4E && pngBytes[3] == 0x47) {
+
+        std::vector<uint8_t> chunkBytes;
+        chunkBytes.push_back('i');
+        chunkBytes.push_back('C');
+        chunkBytes.push_back('C');
+        chunkBytes.push_back('P');
+
+        std::string profileName = "sRGB";
+        size_t lastSlash = iccProfilePath.find_last_of("\\/");
+        if (lastSlash != std::string::npos) {
+            profileName = iccProfilePath.substr(lastSlash + 1);
+        } else {
+            profileName = iccProfilePath;
+        }
+        size_t dotPosName = profileName.find_last_of('.');
+        if (dotPosName != std::string::npos) {
+            profileName = profileName.substr(0, dotPosName);
+        }
+        if (profileName.size() > 79) profileName = profileName.substr(0, 79);
+        if (profileName.empty()) profileName = "Custom";
+
+        for (char c : profileName) chunkBytes.push_back(static_cast<uint8_t>(c));
+        chunkBytes.push_back(0);
+        chunkBytes.push_back(0);
+        chunkBytes.insert(chunkBytes.end(), compressedData, compressedData + compressedSize);
+
+        uint32_t crc = CalculateCRC32(chunkBytes.data(), chunkBytes.size());
+        std::vector<uint8_t> iCCPBlock(4 + chunkBytes.size() + 4);
+        uint32_t chunkDataLen = static_cast<uint32_t>(chunkBytes.size() - 4);
+        WriteBigEndian32(iCCPBlock.data(), chunkDataLen);
+        std::memcpy(iCCPBlock.data() + 4, chunkBytes.data(), chunkBytes.size());
+        WriteBigEndian32(iCCPBlock.data() + 4 + chunkBytes.size(), crc);
+        pngBytes.insert(pngBytes.begin() + 33, iCCPBlock.begin(), iCCPBlock.end());
+    }
+    free(compressedData);
+    return true;
+}
+
+bool ImageManager::SaveRGBA8ToFile(const std::string& filepath, const uint8_t* rgba, int width, int height,
+                                   int rowStrideBytes, const std::string& iccProfilePath) {
+    if (!rgba || width <= 0 || height <= 0) {
+        Logger::Get().Error("SaveRGBA8ToFile: invalid buffer/dimensions");
+        return false;
+    }
+    if (rowStrideBytes <= 0) rowStrideBytes = width * 4;
+
+    std::string ext;
     size_t dotPos = filepath.find_last_of('.');
     if (dotPos != std::string::npos) {
         ext = filepath.substr(dotPos + 1);
@@ -119,23 +181,20 @@ bool ImageManager::SaveImageToFile(const std::string& filepath, const std::vecto
     int result = 0;
     std::string targetPath = filepath;
     SaveContext saveCtx;
+
     if (ext == "png") {
-        result = stbi_write_png_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rawBytes.data(), width * 4);
-    } 
-    else if (ext == "jpg" || ext == "jpeg") {
-        result = stbi_write_jpg_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rawBytes.data(), 90);
-    } 
-    else if (ext == "tga") {
-        result = stbi_write_tga_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rawBytes.data());
-    } 
-    else if (ext == "bmp") {
-        result = stbi_write_bmp_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rawBytes.data());
-    } 
-    else {
+        result = stbi_write_png_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rgba, rowStrideBytes);
+    } else if (ext == "jpg" || ext == "jpeg") {
+        result = stbi_write_jpg_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rgba, 90);
+    } else if (ext == "tga") {
+        result = stbi_write_tga_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rgba);
+    } else if (ext == "bmp") {
+        result = stbi_write_bmp_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rgba);
+    } else {
         targetPath = filepath + ".png";
         ext = "png";
-        Logger::Get().Warn("Unknown extension '" + ext + "', exporting as PNG to: " + targetPath);
-        result = stbi_write_png_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rawBytes.data(), width * 4);
+        Logger::Get().Warn("Unknown extension, exporting as PNG to: " + targetPath);
+        result = stbi_write_png_to_func(stbi_write_func_vector, &saveCtx, width, height, 4, rgba, rowStrideBytes);
     }
 
     if (!result || saveCtx.bytes.empty()) {
@@ -144,74 +203,7 @@ bool ImageManager::SaveImageToFile(const std::string& filepath, const std::vecto
     }
 
     if (!iccProfilePath.empty() && ext == "png") {
-#ifdef _WIN32
-        std::ifstream iccFile(UTF8ToWString(iccProfilePath), std::ios::binary);
-#else
-        std::ifstream iccFile(iccProfilePath, std::ios::binary);
-#endif
-        if (iccFile.is_open()) {
-            std::vector<uint8_t> profileData((std::istreambuf_iterator<char>(iccFile)),
-                                             std::istreambuf_iterator<char>());
-            iccFile.close();
-
-            if (!profileData.empty()) {
-                int compressedSize = 0;
-                unsigned char* compressedData = stbi_zlib_compress(profileData.data(), static_cast<int>(profileData.size()), &compressedSize, 8);
-                if (compressedData) {
-                    auto& pngBytes = saveCtx.bytes;
-                    if (pngBytes.size() >= 33 && 
-                        pngBytes[0] == 0x89 && pngBytes[1] == 0x50 && pngBytes[2] == 0x4E && pngBytes[3] == 0x47) {
-                        
-                        std::vector<uint8_t> chunkBytes;
-                        chunkBytes.push_back('i');
-                        chunkBytes.push_back('C');
-                        chunkBytes.push_back('C');
-                        chunkBytes.push_back('P');
-                        
-                        std::string profileName = "sRGB";
-                        size_t lastSlash = iccProfilePath.find_last_of("\\/");
-                        if (lastSlash != std::string::npos) {
-                            profileName = iccProfilePath.substr(lastSlash + 1);
-                        } else {
-                            profileName = iccProfilePath;
-                        }
-                        size_t dotPosName = profileName.find_last_of('.');
-                        if (dotPosName != std::string::npos) {
-                            profileName = profileName.substr(0, dotPosName);
-                        }
-                        if (profileName.size() > 79) {
-                            profileName = profileName.substr(0, 79);
-                        }
-                        if (profileName.empty()) {
-                            profileName = "Custom";
-                        }
-
-                        for (char c : profileName) {
-                            chunkBytes.push_back(static_cast<uint8_t>(c));
-                        }
-                        chunkBytes.push_back(0); // Null terminator
-                        chunkBytes.push_back(0); // Compression method: 0
-                        
-                        chunkBytes.insert(chunkBytes.end(), compressedData, compressedData + compressedSize);
-                        
-                        uint32_t crc = CalculateCRC32(chunkBytes.data(), chunkBytes.size());
-                        
-                        std::vector<uint8_t> iCCPBlock(4 + chunkBytes.size() + 4);
-                        uint32_t chunkDataLen = static_cast<uint32_t>(chunkBytes.size() - 4); // exclude 'iCCP' type
-                        WriteBigEndian32(iCCPBlock.data(), chunkDataLen);
-                        std::memcpy(iCCPBlock.data() + 4, chunkBytes.data(), chunkBytes.size());
-                        WriteBigEndian32(iCCPBlock.data() + 4 + chunkBytes.size(), crc);
-                        
-                        pngBytes.insert(pngBytes.begin() + 33, iCCPBlock.begin(), iCCPBlock.end());
-                    }
-                    free(compressedData);
-                } else {
-                    Logger::Get().Error("Failed to compress ICC profile data: " + iccProfilePath);
-                }
-            }
-        } else {
-            Logger::Get().Error("Failed to open ICC profile file: " + iccProfilePath);
-        }
+        InjectIccIntoPng(saveCtx.bytes, iccProfilePath);
     }
 
 #ifdef _WIN32
@@ -223,11 +215,25 @@ bool ImageManager::SaveImageToFile(const std::string& filepath, const std::vecto
         Logger::Get().Error("Failed to open image file for writing: " + targetPath);
         return false;
     }
-    outFile.write(reinterpret_cast<const char*>(saveCtx.bytes.data()), saveCtx.bytes.size());
+    outFile.write(reinterpret_cast<const char*>(saveCtx.bytes.data()), (std::streamsize)saveCtx.bytes.size());
     outFile.close();
 
     Logger::Get().Info("Image saved successfully: " + targetPath);
     return true;
+}
+
+bool ImageManager::SaveImageToFile(const std::string& filepath, const std::vector<float>& pixels, int width, int height, const std::string& iccProfilePath) {
+    size_t numPixels = (size_t)width * height;
+    if (pixels.size() < numPixels * 4) {
+        Logger::Get().Error("SaveImageToFile: pixel buffer too small");
+        return false;
+    }
+    std::vector<uint8_t> rawBytes(numPixels * 4);
+    for (size_t i = 0; i < numPixels * 4; ++i) {
+        float val = std::clamp(pixels[i], 0.0f, 1.0f);
+        rawBytes[i] = static_cast<uint8_t>(val * 255.0f + 0.5f);
+    }
+    return SaveRGBA8ToFile(filepath, rawBytes.data(), width, height, width * 4, iccProfilePath);
 }
 
 cv::Mat ImageManager::PixelsToMat8UC3(const std::vector<float>& pixels, int width, int height) {

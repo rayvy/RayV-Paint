@@ -150,6 +150,127 @@ static std::vector<float> ComposeVisibleLayers(const std::vector<Layer>& layers,
     return composite;
 }
 
+// Straight-alpha "Normal" over blend in float space, write back as u8.
+static inline void BlendOverU8(uint8_t* dest, float srcR, float srcG, float srcB, float srcA) {
+    if (srcA <= 0.f) return;
+    float destR = dest[0] / 255.f;
+    float destG = dest[1] / 255.f;
+    float destB = dest[2] / 255.f;
+    float destA = dest[3] / 255.f;
+    float outA = srcA + destA * (1.f - srcA);
+    if (outA <= 0.f) return;
+    float inv = 1.f / outA;
+    dest[0] = (uint8_t)(std::clamp((srcR * srcA + destR * destA * (1.f - srcA)) * inv, 0.f, 1.f) * 255.f + 0.5f);
+    dest[1] = (uint8_t)(std::clamp((srcG * srcA + destG * destA * (1.f - srcA)) * inv, 0.f, 1.f) * 255.f + 0.5f);
+    dest[2] = (uint8_t)(std::clamp((srcB * srcA + destB * destA * (1.f - srcA)) * inv, 0.f, 1.f) * 255.f + 0.5f);
+    dest[3] = (uint8_t)(std::clamp(outA, 0.f, 1.f) * 255.f + 0.5f);
+}
+
+// Large-doc export: tile-stream composite into one RGBA8 buffer (no float 4 GiB path).
+// Peak: ~w*h*4 (1 GiB @ 16K) — not strip-PNG yet (stb needs full image for encode).
+static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, int h,
+                                      std::vector<uint8_t>& out) {
+    const size_t bytes = (size_t)w * (size_t)h * 4ull;
+    if (bytes == 0) {
+        out.clear();
+        return true;
+    }
+    if (MemoryStats::ExceedsRamBudget(bytes, 0.50)) {
+        Logger::Get().ErrorTag("mem",
+            "ComposeVisibleLayersRGBA8: " + MemoryStats::FormatBytes(bytes) +
+            " exceeds 50% RAM budget.");
+        return false;
+    }
+
+    Logger::Get().InfoTag("io",
+        "Export composite RGBA8 " + std::to_string(w) + "x" + std::to_string(h) +
+        " est=" + MemoryStats::FormatBytes(bytes));
+    MemoryStats::LogSnapshot("export_rgba8_alloc");
+
+    out.assign(bytes, 0);
+
+    std::vector<const Layer*> vis;
+    vis.reserve(layers.size());
+    for (const auto& layer : layers) {
+        if (layer.isGroup || !layer.visible || !LayerHasPixels(layer)) continue;
+        vis.push_back(&layer);
+    }
+    if (vis.empty()) return true;
+
+    // Fast path: single full-opacity layer, no mask → direct tile export.
+    if (vis.size() == 1 && vis[0]->opacity >= 0.999f &&
+        !(vis[0]->hasMask && vis[0]->mask.size() == (size_t)w * h)) {
+        vis[0]->tileCache->ExportRGBA8(out.data(), w, h);
+        MemoryStats::LogSnapshot("export_rgba8_single_layer");
+        return true;
+    }
+
+    const int tilesX = (w + TILE_SIZE - 1) / TILE_SIZE;
+    const int tilesY = (h + TILE_SIZE - 1) / TILE_SIZE;
+    const int progressStep = std::max(1, tilesY / 20);
+
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX; ++tx) {
+            const int x0 = tx * TILE_SIZE;
+            const int y0 = ty * TILE_SIZE;
+            const int x1 = std::min(x0 + TILE_SIZE, w);
+            const int y1 = std::min(y0 + TILE_SIZE, h);
+            const int tw = x1 - x0;
+            const int th = y1 - y0;
+
+            for (const Layer* layer : vis) {
+                const TileCache* cache = layer->tileCache.get();
+                if (!cache) continue;
+                const uint8_t* tile = cache->GetTileData(tx, ty);
+                // Missing tile = transparent contribution from this layer.
+
+                const bool useMask = layer->hasMask && layer->mask.size() == (size_t)w * h;
+                const float opacity = layer->opacity;
+
+                if (cache->GetFormat() == CanvasPixelFormat::RGBA8) {
+                    if (!tile) continue;
+                    for (int ly = 0; ly < th; ++ly) {
+                        const int y = y0 + ly;
+                        for (int lx = 0; lx < tw; ++lx) {
+                            const int x = x0 + lx;
+                            const uint8_t* sp = tile + ((size_t)ly * TILE_SIZE + lx) * 4;
+                            float sa = (sp[3] / 255.f) * opacity;
+                            if (useMask) sa *= layer->mask[(size_t)y * w + x] / 255.f;
+                            if (sa <= 0.f) continue;
+                            uint8_t* dp = out.data() + ((size_t)y * w + x) * 4;
+                            BlendOverU8(dp, sp[0] / 255.f, sp[1] / 255.f, sp[2] / 255.f, sa);
+                        }
+                    }
+                } else {
+                    // Float tiles or sparse: sample via GetPixelF (slower, correct).
+                    for (int ly = 0; ly < th; ++ly) {
+                        const int y = y0 + ly;
+                        for (int lx = 0; lx < tw; ++lx) {
+                            const int x = x0 + lx;
+                            float rgba[4];
+                            cache->GetPixelF(x, y, rgba);
+                            float sa = rgba[3] * opacity;
+                            if (useMask) sa *= layer->mask[(size_t)y * w + x] / 255.f;
+                            if (sa <= 0.f) continue;
+                            uint8_t* dp = out.data() + ((size_t)y * w + x) * 4;
+                            BlendOverU8(dp, rgba[0], rgba[1], rgba[2], sa);
+                        }
+                    }
+                }
+            }
+        }
+        if (ty == 0 || ((ty + 1) % progressStep) == 0 || ty + 1 == tilesY) {
+            int pct = (int)(((ty + 1) * 100.0) / tilesY);
+            Logger::Get().InfoTag("io",
+                "Export composite " + std::to_string(pct) + "% (" +
+                std::to_string(ty + 1) + "/" + std::to_string(tilesY) + " tile-rows)");
+        }
+    }
+
+    MemoryStats::LogSnapshot("export_rgba8_done");
+    return true;
+}
+
 static void ComputeCompositePreviewSize(int canvasW, int canvasH, int& outW, int& outH) {
     constexpr int kProxyThreshold = 4096;
     constexpr int kProxyMaxDim = 2048;
@@ -1671,16 +1792,23 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
         return false;
     }
 
-    if (!CanAllocateFlatComposite(m_Width, m_Height, "SaveCanvasStandard")) {
+    ScopedTimer saveTimer("SaveCanvasStandard " + filepath);
+    MemoryStats::LogSnapshot("before_SaveCanvasStandard");
+
+    // Prefer tile-streamed RGBA8 composite — works for 16K without 4 GiB float.
+    std::vector<uint8_t> rgba8;
+    if (!ComposeVisibleLayersRGBA8(m_Layers, m_Width, m_Height, rgba8)) {
+        Logger::Get().Error("SaveCanvasStandard: RGBA8 composite failed.");
         return false;
     }
 
-    std::vector<float> composite = ComposeVisibleLayers(m_Layers, m_Width, m_Height);
-    if (composite.empty()) {
-        Logger::Get().Error("SaveCanvasStandard: composite is empty.");
-        return false;
-    }
-    return ImageManager::SaveImageToFile(filepath, composite, m_Width, m_Height, iccProfilePath);
+    const bool ok = ImageManager::SaveRGBA8ToFile(
+        filepath, rgba8.data(), m_Width, m_Height, m_Width * 4, iccProfilePath);
+    // Free composite before encode buffer is already written inside SaveRGBA8.
+    rgba8.clear();
+    rgba8.shrink_to_fit();
+    MemoryStats::LogSnapshot("after_SaveCanvasStandard");
+    return ok;
 }
 
 bool Canvas::SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed) {
