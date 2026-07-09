@@ -35,6 +35,7 @@
 #include "core/KeymapManager.h"
 #include "core/ClipboardHelper.h"
 #include "ui/EditorPanels.h"
+#include "ui/style/UiTokens.h"
 
 // Tablet Pointer API support
 float g_PenPressure = 1.0f;
@@ -334,26 +335,16 @@ void RedirectIOToConsole() {
 
 void ApplyTheme(const std::string& themeName) {
     ImGuiStyle& style = ImGui::GetStyle();
-    
-    // Core structure / spacings common to modern premium interfaces
-    style.WindowRounding = 6.0f;
-    style.ChildRounding = 4.0f;
-    style.FrameRounding = 4.0f;
-    style.PopupRounding = 6.0f;
-    style.ScrollbarRounding = 9.0f;
-    style.GrabRounding = 4.0f;
-    style.TabRounding = 4.0f;
-    
+
+    // Stage 1 UI kit tokens (icon tint, elevated panels, motion-related radii)
+    Ui::Tokens().ApplyFromThemeName(themeName);
+    Ui::Tokens().ApplyToImGuiStyle(style);
+
     style.WindowBorderSize = 1.0f;
     style.ChildBorderSize = 1.0f;
     style.PopupBorderSize = 1.0f;
     style.FrameBorderSize = 0.0f;
     style.TabBorderSize = 0.0f;
-    
-    style.WindowPadding = ImVec2(12.0f, 12.0f);
-    style.FramePadding = ImVec2(8.0f, 6.0f);
-    style.ItemSpacing = ImVec2(8.0f, 6.0f);
-    style.ItemInnerSpacing = ImVec2(6.0f, 6.0f);
     style.ScrollbarSize = 13.0f;
     style.GrabMinSize = 10.0f;
 
@@ -361,12 +352,13 @@ void ApplyTheme(const std::string& themeName) {
         ImGui::StyleColorsClassic();
         style.FrameRounding = 0.0f;
         style.WindowRounding = 0.0f;
+        Ui::Tokens().ApplyDark(); // classic → light icons on dark chrome still
     } else if (themeName == "Light") {
         ImGui::StyleColorsLight();
         ImVec4* colors = style.Colors;
         colors[ImGuiCol_WindowBg]           = ImVec4(0.95f, 0.95f, 0.96f, 1.00f);
         colors[ImGuiCol_ChildBg]            = ImVec4(0.98f, 0.98f, 0.98f, 1.00f);
-        colors[ImGuiCol_PopupBg]            = ImVec4(1.00f, 1.00f, 1.00f, 0.98f);
+        colors[ImGuiCol_PopupBg]            = ImVec4(1.00f, 1.00f, 1.00f, 0.96f);
         colors[ImGuiCol_Border]             = ImVec4(0.80f, 0.80f, 0.85f, 1.00f);
         colors[ImGuiCol_FrameBg]            = ImVec4(0.88f, 0.88f, 0.90f, 1.00f);
         colors[ImGuiCol_FrameBgHovered]     = ImVec4(0.82f, 0.82f, 0.86f, 1.00f);

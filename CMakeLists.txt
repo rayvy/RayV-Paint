@@ -120,6 +120,20 @@ set(SOURCES
     src/scripting/ScriptingEngine.h
     src/ui/EditorPanels.cpp
     src/ui/EditorPanels.h
+    src/ui/style/UiTokens.cpp
+    src/ui/style/UiTokens.h
+    src/ui/style/UiMotion.cpp
+    src/ui/style/UiMotion.h
+    src/ui/icons/SvgIconCache.cpp
+    src/ui/icons/SvgIconCache.h
+    src/ui/widgets/UiIconButton.cpp
+    src/ui/widgets/UiIconButton.h
+    src/ui/widgets/UiIconToggle.cpp
+    src/ui/widgets/UiIconToggle.h
+    src/ui/widgets/UiDropdown.cpp
+    src/ui/widgets/UiDropdown.h
+    src/ui/widgets/UiVisualSlider.cpp
+    src/ui/widgets/UiVisualSlider.h
 )
 
 # Shaders
@@ -168,6 +182,20 @@ add_custom_command(
     "${OPENCV_INSTALL_DIR}/LICENSE"
     "$<TARGET_FILE_DIR:RayVPaint_Core>/OPENCV_LICENSE"
     COMMENT "Copying OpenCV LICENSE to output directory"
+)
+
+# Ship SVG icons next to Core binary and next to launchers (Release/)
+add_custom_command(
+    TARGET RayVPaint_Core POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:RayVPaint_Core>/icons"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/src/resources/icons"
+        "$<TARGET_FILE_DIR:RayVPaint_Core>/icons"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:RayVPaint_Core>/../icons"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/src/resources/icons"
+        "$<TARGET_FILE_DIR:RayVPaint_Core>/../icons"
+    COMMENT "Copying UI SVG icons to output directories"
 )
 
 # Create Launchers

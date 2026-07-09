@@ -5,6 +5,12 @@
 #include "../core/ImageManager.h"
 #include "../scripting/ScriptingEngine.h"
 #include "../core/ThreadPool.h"
+#include "style/UiTokens.h"
+#include "icons/SvgIconCache.h"
+#include "widgets/UiIconButton.h"
+#include "widgets/UiIconToggle.h"
+#include "widgets/UiDropdown.h"
+#include "widgets/UiVisualSlider.h"
 #include <thread>
 #include <imgui_internal.h>
 #include <filesystem>
@@ -745,6 +751,75 @@ namespace UI {
         // Anchor to top-left, no dynamic alignment padding
     }
 
+    static const char* IconNameForAction(const char* actionName) {
+        if (!actionName) return "placeholder";
+        if (strcmp(actionName, "BrushTool") == 0) return "tool_brush";
+        if (strcmp(actionName, "EraserTool") == 0) return "tool_eraser";
+        if (strcmp(actionName, "BucketFillTool") == 0) return "tool_fill";
+        if (strcmp(actionName, "GradientTool") == 0) return "tool_gradient";
+        if (strcmp(actionName, "SmudgeTool") == 0) return "tool_smudge";
+        if (strcmp(actionName, "PipetteTool") == 0) return "tool_pipette";
+        if (strcmp(actionName, "PanTool") == 0) return "tool_pan";
+        if (strcmp(actionName, "TransformTool") == 0) return "tool_transform";
+        if (strcmp(actionName, "RectSelectTool") == 0) return "tool_select_rect";
+        if (strcmp(actionName, "EllipseSelectTool") == 0) return "tool_select_ellipse";
+        if (strcmp(actionName, "LassoSelectTool") == 0) return "tool_lasso";
+        if (strcmp(actionName, "PolygonalLassoTool") == 0) return "tool_lasso_poly";
+        if (strcmp(actionName, "MagicWandTool") == 0) return "tool_wand";
+        if (strcmp(actionName, "QuickSelectTool") == 0) return "tool_quick_select";
+        if (strcmp(actionName, "SmartSelectTool") == 0) return "tool_smart_select";
+        if (strcmp(actionName, "Reset") == 0) return "tool_reset";
+        return "placeholder";
+    }
+
+    static void ToolbarCenterCursor(float size) {
+        ImGuiWindow* win = ImGui::GetCurrentWindow();
+        float winWidth = win->Size.x;
+        float winHeight = win->Size.y;
+        bool isVertical = (winHeight > winWidth);
+        if (isVertical) {
+            float posX = (winWidth - size) * 0.5f;
+            if (posX > 0.0f) ImGui::SetCursorPosX(posX);
+        } else {
+            float posY = (winHeight - size) * 0.5f;
+            if (posY > 0.0f) ImGui::SetCursorPosY(posY);
+        }
+    }
+
+    // Stage 1 kit: SVG icon button with press/bounce motion
+    static void RenderToolButton(const char* actionName, const char* displayName, ActiveTool targetTool, bool isEraseTool, std::string keybindString, float size, std::string& rebindAction, ActiveTool& activeTool, BrushSettings& brush, Canvas& canvas) {
+        bool isActive = (activeTool == targetTool && (targetTool != ActiveTool::Brush || isEraseTool == brush.erase));
+        if (strcmp(actionName, "Reset") == 0) isActive = false;
+
+        ToolbarCenterCursor(size);
+        char tip[192];
+        if (strcmp(actionName, "Reset") == 0)
+            std::snprintf(tip, sizeof(tip), "Reset View");
+        else
+            std::snprintf(tip, sizeof(tip), "%s%s%s\nRight-click: rebind",
+                displayName,
+                keybindString.empty() ? "" : "  (",
+                keybindString.empty() ? "" : (keybindString + ")").c_str());
+
+        auto r = Ui::IconButton(actionName, IconNameForAction(actionName), ImVec2(size, size), tip, true, isActive);
+        if (r.clicked) {
+            if (strcmp(actionName, "Reset") == 0) {
+                canvas.ResetView();
+            } else {
+                activeTool = targetTool;
+                if (targetTool == ActiveTool::Brush)
+                    brush.erase = isEraseTool;
+            }
+        }
+        if (strcmp(actionName, "Reset") != 0 && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+            rebindAction = actionName;
+            ImGui::OpenPopup("RebindToolPopup");
+        }
+        if (strcmp(actionName, "Reset") != 0 && !keybindString.empty()) {
+            DrawKeybindBadge(ImGui::GetItemRectMax(), keybindString, size);
+        }
+    }
+
     static void RenderGroupedToolButton(
         const char* groupId,
         const char* rebindActionName,
@@ -757,8 +832,6 @@ namespace UI {
         ActiveTool& activeTool)
     {
         static std::unordered_map<std::string, int> s_LastVariantIndex;
-        static std::unordered_map<ImGuiID, double> s_PressStart;
-        static std::unordered_map<ImGuiID, bool> s_LongPressOpened;
 
         int activeIdx = -1;
         for (int i = 0; i < variantCount; ++i) {
@@ -774,151 +847,56 @@ namespace UI {
         const ToolVariant& display = variants[displayIdx];
         bool isActive = (activeIdx >= 0);
 
-        ImGui::PushID(groupId);
-        if (isActive) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
+        // Build label list for dual-mode dropdown
+        std::vector<const char*> labels;
+        labels.reserve(variantCount);
+        for (int i = 0; i < variantCount; ++i)
+            labels.push_back(variants[i].displayName);
+
+        ToolbarCenterCursor(size);
+        char tip[256];
+        std::snprintf(tip, sizeof(tip), "%s%s%s\nClick: activate/cycle  ·  Hold: pick variant\nRight-click: rebind",
+            groupTooltip,
+            keybindString.empty() ? "" : "  (",
+            keybindString.empty() ? "" : (keybindString + ")").c_str());
+
+        int sel = displayIdx;
+        // ClickAndHold dropdown: short click opens list; hold scrub+release selects
+        bool changed = Ui::DropdownIcon(groupId, IconNameForAction(display.actionName), ImVec2(size, size),
+            labels.data(), variantCount, &sel, tip, Ui::DropdownFlags_ClickAndHold);
+
+        if (changed && sel >= 0 && sel < variantCount) {
+            activeTool = variants[sel].tool;
+            s_LastVariantIndex[groupId] = sel;
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_Button]);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
-        }
-
-        ImGui::BeginGroup();
-        ImGuiWindow* win = ImGui::GetCurrentWindow();
-        float winWidth = win->Size.x;
-        float winHeight = win->Size.y;
-        bool isVertical = (winHeight > winWidth);
-        if (isVertical) {
-            float posX = (winWidth - size) * 0.5f;
-            if (posX > 0.0f) ImGui::SetCursorPosX(posX);
-        } else {
-            float posY = (winHeight - size) * 0.5f;
-            if (posY > 0.0f) ImGui::SetCursorPosY(posY);
-        }
-        ImGui::Button("##groupBtn", ImVec2(size, size));
-        ImGuiID itemId = ImGui::GetItemID();
-        double now = ImGui::GetTime();
-
-        if (ImGui::IsItemActive()) {
-            if (s_PressStart.find(itemId) == s_PressStart.end()) {
-                s_PressStart[itemId] = now;
-                s_LongPressOpened[itemId] = false;
-            }
-            if (!s_LongPressOpened[itemId] && (now - s_PressStart[itemId]) > 0.15) {
-                ImGui::OpenPopup("##variantPopup");
-                s_LongPressOpened[itemId] = true;
-            }
-        }
-
-        if (ImGui::IsItemDeactivated() && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            if (!s_LongPressOpened[itemId]) {
+            // Short click on closed dropdown opens it — also treat simple IconButton click-activate:
+            // DropdownIcon uses IconButton internally; if user clicked without selecting (re-activated group)
+            // ensure tool is active with last variant
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !isActive && !changed) {
                 activeTool = display.tool;
                 s_LastVariantIndex[groupId] = displayIdx;
             }
-            s_PressStart.erase(itemId);
-            s_LongPressOpened.erase(itemId);
         }
 
         if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
             rebindAction = rebindActionName;
             ImGui::OpenPopup("RebindToolPopup");
         }
+        if (!keybindString.empty())
+            DrawKeybindBadge(ImGui::GetItemRectMax(), keybindString, size);
 
-        if (ImGui::BeginPopup("##variantPopup")) {
-            for (int i = 0; i < variantCount; ++i) {
-                if (ImGui::Selectable(variants[i].displayName, displayIdx == i)) {
-                    activeTool = variants[i].tool;
-                    s_LastVariantIndex[groupId] = i;
-                }
-            }
-            ImGui::EndPopup();
-        }
-
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s (%s)\nClick: activate  |  Hold: pick variant\nRight-click: rebind",
-                groupTooltip, keybindString.c_str());
-        }
-
-        ImVec2 btnMin = ImGui::GetItemRectMin();
-        ImVec2 btnMax = ImGui::GetItemRectMax();
-        DrawToolIcon(display.actionName, btnMin, btnMax,
-            GetThemedIconColor(isActive), isActive);
-        DrawKeybindBadge(btnMax, keybindString, size);
-
-        ImGui::EndGroup();
-        ImGui::PopStyleColor(2);
-        ImGui::PopID();
-    }
-
-    static void RenderToolButton(const char* actionName, const char* displayName, ActiveTool targetTool, bool isEraseTool, std::string keybindString, float size, std::string& rebindAction, ActiveTool& activeTool, BrushSettings& brush, Canvas& canvas) {
-        bool isActive = (activeTool == targetTool && (targetTool != ActiveTool::Brush || isEraseTool == brush.erase));
-        if (strcmp(actionName, "Reset") == 0) isActive = false;
-
-        ImGui::PushID(actionName);
-        
+        // Active outline when tool in group selected
         if (isActive) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonActive]);
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyle().Colors[ImGuiCol_Button]);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyle().Colors[ImGuiCol_ButtonHovered]);
+            ImVec2 mn = ImGui::GetItemRectMin();
+            ImVec2 mx = ImGui::GetItemRectMax();
+            ImGui::GetWindowDrawList()->AddRect(mn, mx, Ui::Tokens().ColU32(Ui::Tokens().strokeActive), Ui::Tokens().rSm, 0, 1.5f);
         }
-        
-        ImGui::BeginGroup();
-        ImGuiWindow* win = ImGui::GetCurrentWindow();
-        float winWidth = win->Size.x;
-        float winHeight = win->Size.y;
-        bool isVertical = (winHeight > winWidth);
-        if (isVertical) {
-            float posX = (winWidth - size) * 0.5f;
-            if (posX > 0.0f) ImGui::SetCursorPosX(posX);
-        } else {
-            float posY = (winHeight - size) * 0.5f;
-            if (posY > 0.0f) ImGui::SetCursorPosY(posY);
-        }
-        ImGui::Button("##toolBtn", ImVec2(size, size));
-        
-        if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
-            if (strcmp(actionName, "Reset") == 0) {
-                canvas.ResetView();
-            } else {
-                activeTool = targetTool;
-                if (targetTool == ActiveTool::Brush) {
-                    brush.erase = isEraseTool;
-                }
-            }
-        }
-        if (strcmp(actionName, "Reset") != 0 && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-            rebindAction = actionName;
-            ImGui::OpenPopup("RebindToolPopup");
-        }
-        if (ImGui::IsItemHovered()) {
-            if (strcmp(actionName, "Reset") == 0) {
-                ImGui::SetTooltip("Reset View");
-            } else {
-                ImGui::SetTooltip("%s (%s)\nRight-click to rebind", displayName, keybindString.c_str());
-            }
-        }
-        
-        ImVec2 btnMin = ImGui::GetItemRectMin();
-        ImVec2 btnMax = ImGui::GetItemRectMax();
-        DrawToolIcon(actionName, btnMin, btnMax, GetThemedIconColor(isActive), isActive);
-
-        if (strcmp(actionName, "Reset") != 0) {
-            DrawKeybindBadge(btnMax, keybindString, size);
-        }
-
-        ImGui::EndGroup();
-        ImGui::PopStyleColor(2);
-        ImGui::PopID();
     }
 
     void RenderAll(UIState& state, Canvas& canvas, BrushSettings& brush, ActiveTool& activeTool, ID3D11Device* device, ID3D11DeviceContext* context, GLFWwindow* window) {
-        if (device && device != s_SvgIconDevice) {
-            ReleaseSvgIcons();
-            s_SvgIconDevice = device;
-        } else if (device) {
-            s_SvgIconDevice = device;
+        if (device) {
+            Ui::SvgIconCache::Get().SetDevice(device);
+            s_SvgIconDevice = device; // legacy inline SVG path still used by some panels
         }
         ImGuiViewport* mainViewport = ImGui::GetMainViewport();
 
@@ -2617,15 +2595,23 @@ namespace UI {
 
                 MiniSlider("##rad", &brush.radius, 1.f, 250.f, "Radius (px)", 100.f);
                 ImGui::SameLine();
-                IconToggle("##pr", "P·R", &brush.pressureRadius, "Pressure → Radius");
+                Ui::IconToggle("##pr", "ts_pressure_radius", &brush.pressureRadius, ImVec2(28, 28),
+                    "Pressure → Radius (on)", "Pressure → Radius (off)");
                 ImGui::SameLine();
                 MiniSlider("##hrd", &brush.hardness, 0.f, 1.f, "Hardness", 80.f);
                 ImGui::SameLine();
-                IconToggle("##ph", "P·H", &brush.pressureHardness, "Pressure → Hardness");
+                Ui::IconToggle("##ph", "ts_pressure_hardness", &brush.pressureHardness, ImVec2(28, 28),
+                    "Pressure → Hardness (on)", "Pressure → Hardness (off)");
                 ImGui::SameLine();
-                MiniSlider("##opc", &brush.opacity, 0.f, 1.f, "Opacity", 80.f);
+                // Visual opacity (checker + color) — Stage 1 pilot of VisualSlider
+                {
+                    float op = brush.opacity;
+                    if (Ui::VisualSlider("##opcvis", &op, ImVec2(88, 22), Ui::VisualSliderSkin::OpacityChecker, brush.color, "Opacity"))
+                        brush.opacity = op;
+                }
                 ImGui::SameLine();
-                IconToggle("##po", "P·O", &brush.pressureOpacity, "Pressure → Opacity");
+                Ui::IconToggle("##po", "ts_pressure_opacity", &brush.pressureOpacity, ImVec2(28, 28),
+                    "Pressure → Opacity (on)", "Pressure → Opacity (off)");
                 ImGui::SameLine();
                 MiniSlider("##spc", &brush.spacing, 0.01f, 5.f, "Spacing", 70.f);
                 ImGui::SameLine();
@@ -2637,15 +2623,11 @@ namespace UI {
                     ImGui::SameLine();
                     bool mirrorH = canvas.GetMirrorHorizontal();
                     bool mirrorV = canvas.GetMirrorVertical();
-                    if (ImGui::Button(mirrorH ? "[H]" : " H ", ImVec2(28, 28))) {
-                        canvas.SetMirrorHorizontal(!mirrorH);
-                    }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mirror Horizontal");
+                    if (Ui::IconToggle("##mh", "ts_mirror_h", &mirrorH, ImVec2(28, 28), "Mirror H on", "Mirror H off"))
+                        canvas.SetMirrorHorizontal(mirrorH);
                     ImGui::SameLine();
-                    if (ImGui::Button(mirrorV ? "[V]" : " V ", ImVec2(28, 28))) {
-                        canvas.SetMirrorVertical(!mirrorV);
-                    }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Mirror Vertical");
+                    if (Ui::IconToggle("##mv", "ts_mirror_v", &mirrorV, ImVec2(28, 28), "Mirror V on", "Mirror V off"))
+                        canvas.SetMirrorVertical(mirrorV);
                 }
             }
             else if (activeTool == ActiveTool::MagicWand || activeTool == ActiveTool::SmartSelect || activeTool == ActiveTool::QuickSelect) {
@@ -2758,28 +2740,31 @@ namespace UI {
             ImGui::End();
         }
 
-        // 10. Draw Colors Panel — SV square + Hue / Alpha sliders (adaptive)
+        // 10. Colors — adaptive SV rect + visual Hue / Alpha (checker)
         if (state.showColors) {
             ImGui::Begin("Colors", &state.showColors);
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
-            bool wide = avail.x > avail.y * 1.1f;
-
             float h, s, v;
             ImGui::ColorConvertRGBtoHSV(brush.color[0], brush.color[1], brush.color[2], h, s, v);
 
-            // SV square size
-            float sq = wide ? std::min(avail.y - 8.f, avail.x * 0.55f) : std::min(avail.x - 8.f, 180.f);
-            sq = std::clamp(sq, 80.f, 220.f);
+            // Fill available width; height proportional but may be rectangle
+            float stripH = 22.f;
+            float pad = 8.f;
+            float svW = std::max(80.f, avail.x - 4.f);
+            float svH = std::clamp(avail.y - stripH * 2.f - 80.f, 100.f, std::max(120.f, avail.y * 0.55f));
+            // Prefer using width: allow wide rectangles
+            if (avail.x > avail.y)
+                svH = std::clamp(svW * 0.65f, 100.f, avail.y - stripH * 2.f - 70.f);
 
             ImVec2 sqPos = ImGui::GetCursorScreenPos();
-            ImGui::InvisibleButton("##svsq", ImVec2(sq, sq));
+            ImGui::InvisibleButton("##svsq", ImVec2(svW, svH));
             bool svActive = ImGui::IsItemActive();
             bool svHovered = ImGui::IsItemHovered();
             ImDrawList* dl = ImGui::GetWindowDrawList();
+            auto& tok = Ui::Tokens();
 
-            // Draw SV square for current Hue
-            const int steps = 32;
+            const int steps = 28;
             for (int yi = 0; yi < steps; ++yi) {
                 for (int xi = 0; xi < steps; ++xi) {
                     float ss = (xi + 0.5f) / steps;
@@ -2787,48 +2772,41 @@ namespace UI {
                     float rr, gg, bb;
                     ImGui::ColorConvertHSVtoRGB(h, ss, vv, rr, gg, bb);
                     ImU32 col = IM_COL32((int)(rr*255),(int)(gg*255),(int)(bb*255),255);
-                    float x0 = sqPos.x + xi * (sq / steps);
-                    float y0 = sqPos.y + yi * (sq / steps);
-                    float x1 = sqPos.x + (xi + 1) * (sq / steps);
-                    float y1 = sqPos.y + (yi + 1) * (sq / steps);
+                    float x0 = sqPos.x + xi * (svW / steps);
+                    float y0 = sqPos.y + yi * (svH / steps);
+                    float x1 = sqPos.x + (xi + 1) * (svW / steps);
+                    float y1 = sqPos.y + (yi + 1) * (svH / steps);
                     dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), col);
                 }
             }
-            dl->AddRect(sqPos, ImVec2(sqPos.x + sq, sqPos.y + sq), IM_COL32(120,120,120,255));
-            // Cursor
-            ImVec2 cur(sqPos.x + s * sq, sqPos.y + (1.f - v) * sq);
-            dl->AddCircle(cur, 5.f, IM_COL32(0,0,0,200), 16, 2.f);
-            dl->AddCircle(cur, 5.f, IM_COL32(255,255,255,220), 16, 1.f);
+            dl->AddRect(sqPos, ImVec2(sqPos.x + svW, sqPos.y + svH), tok.ColU32(tok.strokeHairline), tok.rSm);
+            ImVec2 cur(sqPos.x + s * svW, sqPos.y + (1.f - v) * svH);
+            dl->AddCircle(cur, 6.f, IM_COL32(0,0,0,200), 16, 2.f);
+            dl->AddCircle(cur, 6.f, IM_COL32(255,255,255,230), 16, 1.5f);
 
             if (svActive || (svHovered && ImGui::IsMouseDown(ImGuiMouseButton_Left))) {
                 ImVec2 mp = ImGui::GetIO().MousePos;
-                s = std::clamp((mp.x - sqPos.x) / sq, 0.f, 1.f);
-                v = std::clamp(1.f - (mp.y - sqPos.y) / sq, 0.f, 1.f);
+                s = std::clamp((mp.x - sqPos.x) / svW, 0.f, 1.f);
+                v = std::clamp(1.f - (mp.y - sqPos.y) / svH, 0.f, 1.f);
                 ImGui::ColorConvertHSVtoRGB(h, s, v, brush.color[0], brush.color[1], brush.color[2]);
             }
 
-            if (wide) {
-                ImGui::SameLine();
-                ImGui::BeginGroup();
-            }
-
-            // Hue slider 0..1
-            ImGui::SetNextItemWidth(wide ? std::max(80.f, avail.x - sq - 24.f) : sq);
-            if (ImGui::SliderFloat("##hue", &h, 0.f, 1.f, "H %.2f")) {
+            ImGui::Spacing();
+            // Visual Hue strip
+            if (Ui::VisualSlider("##huevis", &h, ImVec2(svW, stripH), Ui::VisualSliderSkin::HueStrip, nullptr, "Hue")) {
                 ImGui::ColorConvertHSVtoRGB(h, s, v, brush.color[0], brush.color[1], brush.color[2]);
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hue");
+            ImGui::Spacing();
+            // Visual Alpha on checkerboard
+            if (Ui::VisualSlider("##alphavis", &brush.color[3], ImVec2(svW, stripH),
+                    Ui::VisualSliderSkin::OpacityChecker, brush.color, "Opacity / Alpha")) {
+                // value written in-place
+            }
 
-            ImGui::SetNextItemWidth(wide ? std::max(80.f, avail.x - sq - 24.f) : sq);
-            ImGui::SliderFloat("##alpha", &brush.color[3], 0.f, 1.f, "A %.2f");
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Alpha");
-
-            // Primary / Secondary swatches
+            ImGui::Spacing();
             ImGui::ColorButton("##pri", ImVec4(brush.color[0], brush.color[1], brush.color[2], brush.color[3]),
-                ImGuiColorEditFlags_AlphaPreview, ImVec2(28, 28));
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Primary");
-
-            if (wide) ImGui::EndGroup();
+                ImGuiColorEditFlags_AlphaPreview, ImVec2(36, 36));
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Primary color");
 
             ImGui::Spacing();
             // Compact palette
