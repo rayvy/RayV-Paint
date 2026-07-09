@@ -116,6 +116,7 @@ static double g_StartupTimeMs = 0.0;
 // Painting state
 static ActiveTool g_ActiveTool = ActiveTool::Brush;
 static ActiveTool g_LastSelectTool = ActiveTool::RectSelect;
+static ActiveTool g_LastLassoTool = ActiveTool::LassoSelect;
 static ActiveTool g_LastWandTool = ActiveTool::MagicWand;
 static BrushSettings g_Brush;
 static float g_SecondaryColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
@@ -134,6 +135,7 @@ static bool g_IsSelectionDragging = false;
 static float g_SelectionDragStartX = 0.0f;
 static float g_SelectionDragStartY = 0.0f;
 static std::vector<std::pair<int, int>> g_LassoPoints;
+static std::vector<std::pair<int, int>> g_PolygonalLassoPoints;
 
 static bool g_IsMoveDragging = false;
 static float g_MoveDragStartX = 0.0f;
@@ -141,6 +143,82 @@ static float g_MoveDragStartY = 0.0f;
 static int g_MoveAccumulatedOffsetX = 0;
 static int g_MoveAccumulatedOffsetY = 0;
 static bool g_IsGradientDragging = false;
+
+enum class TransformGizmoHandle {
+    None,
+    Move,
+    Scale_TL, Scale_TR, Scale_BR, Scale_BL,
+    Scale_T, Scale_R, Scale_B, Scale_L,
+    Rotate
+};
+
+static TransformGizmoHandle g_ActiveGizmoHandle = TransformGizmoHandle::None;
+static float g_GizmoDragStartScaleX = 1.0f;
+static float g_GizmoDragStartScaleY = 1.0f;
+static float g_GizmoDragStartRotation = 0.0f;
+static float g_GizmoDragStartMouseAngle = 0.0f;
+static float g_GizmoDragStartDist = 1.0f;
+
+struct GizmoScreenGeometry {
+    ImVec2 p1, p2, p3, p4;
+    ImVec2 mT, mR, mB, mL;
+    ImVec2 center;
+};
+
+static inline float distSq(ImVec2 a, ImVec2 b) {
+    return (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y);
+}
+
+static inline float crossProduct(ImVec2 a, ImVec2 b, ImVec2 p) {
+    return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+}
+
+static inline bool IsPointInsideQuad(ImVec2 p, ImVec2 p1, ImVec2 p2, ImVec2 p3, ImVec2 p4) {
+    float d1 = crossProduct(p1, p2, p);
+    float d2 = crossProduct(p2, p3, p);
+    float d3 = crossProduct(p3, p4, p);
+    float d4 = crossProduct(p4, p1, p);
+    
+    bool has_neg = (d1 < 0) || (d2 < 0) || (d3 < 0) || (d4 < 0);
+    bool has_pos = (d1 > 0) || (d2 > 0) || (d3 > 0) || (d4 > 0);
+    
+    return !(has_neg && has_pos);
+}
+
+static bool GetGizmoGeometry(Canvas& canvas, const std::function<ImVec2(float, float)>& canvasToScreen, GizmoScreenGeometry& outGeo) {
+    int minX = 0, minY = 0, minW = 0, minH = 0;
+    if (!canvas.GetFloatingBBox(minX, minY, minW, minH)) {
+        return false;
+    }
+    int maxX = minX + minW - 1;
+    int maxY = minY + minH - 1;
+
+    float cx = (minX + maxX) * 0.5f;
+    float cy = (minY + maxY) * 0.5f;
+    float cosA = std::cos(canvas.GetFloatingRotation());
+    float sinA = std::sin(canvas.GetFloatingRotation());
+
+    auto transformCorner = [&](float px, float py) -> ImVec2 {
+        float rx = (px - cx) * canvas.GetFloatingScaleX();
+        float ry = (py - cy) * canvas.GetFloatingScaleY();
+        float tx = rx * cosA - ry * sinA + cx + (float)canvas.GetFloatingOffsetX();
+        float ty = rx * sinA + ry * cosA + cy + (float)canvas.GetFloatingOffsetY();
+        return canvasToScreen(tx, ty);
+    };
+
+    outGeo.p1 = transformCorner((float)minX, (float)minY);
+    outGeo.p2 = transformCorner((float)maxX, (float)minY);
+    outGeo.p3 = transformCorner((float)maxX, (float)maxY);
+    outGeo.p4 = transformCorner((float)minX, (float)maxY);
+
+    outGeo.mT = ImVec2((outGeo.p1.x + outGeo.p2.x) * 0.5f, (outGeo.p1.y + outGeo.p2.y) * 0.5f);
+    outGeo.mR = ImVec2((outGeo.p2.x + outGeo.p3.x) * 0.5f, (outGeo.p2.y + outGeo.p3.y) * 0.5f);
+    outGeo.mB = ImVec2((outGeo.p3.x + outGeo.p4.x) * 0.5f, (outGeo.p3.y + outGeo.p4.y) * 0.5f);
+    outGeo.mL = ImVec2((outGeo.p4.x + outGeo.p1.x) * 0.5f, (outGeo.p4.y + outGeo.p1.y) * 0.5f);
+    
+    outGeo.center = transformCorner(cx, cy);
+    return true;
+}
 static void CustomDropCallback(GLFWwindow* window, int count, const char** paths) {
     if (count <= 0) return;
     std::string path = paths[0];
@@ -672,6 +750,14 @@ int main(int argc, char* argv[]) {
                 }
                 g_LastSelectTool = g_ActiveTool;
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("LassoToolGroup")) {
+                if (UI::IsLassoTool(g_ActiveTool)) {
+                    g_ActiveTool = UI::CycleLassoTool(g_ActiveTool);
+                } else {
+                    g_ActiveTool = g_LastLassoTool;
+                }
+                g_LastLassoTool = g_ActiveTool;
+            }
             if (KeymapManager::Get().ConsumeActionTrigger("WandToolGroup")) {
                 if (UI::IsWandTool(g_ActiveTool)) {
                     g_ActiveTool = UI::CycleWandTool(g_ActiveTool);
@@ -694,6 +780,11 @@ int main(int argc, char* argv[]) {
             }
             if (KeymapManager::Get().ConsumeActionTrigger("SelectAll")) {
                 g_Canvas.SelectAll();
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("CropToSelection")) {
+                if (g_Canvas.HasSelection()) {
+                    g_Canvas.CropCanvasToSelection(g_pd3dDevice);
+                }
             }
             if (KeymapManager::Get().ConsumeActionTrigger("InvertSelection")) {
                 g_Canvas.InvertSelection();
@@ -734,8 +825,7 @@ int main(int argc, char* argv[]) {
                         Logger::Get().Error("Quick export DDS failed for path: " + path);
                     }
                 } else {
-                    std::string icc = g_Canvas.GetExportPngColorSpace();
-                    if (g_Canvas.SaveCanvasStandard(path, icc == "sRGB" ? "" : icc)) {
+                    if (g_Canvas.SaveCanvasStandard(path, g_Canvas.GetExportIccPreset())) {
                         Logger::Get().Info("Quick exported image successfully to: " + path);
                     } else {
                         Logger::Get().Error("Quick export image failed for path: " + path);
@@ -1166,8 +1256,9 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Keyboard shortcut X for swapping primary/secondary colors
-            if (ImGui::IsKeyPressed(ImGuiKey_X) && !ImGui::GetIO().WantTextInput) {
+            // Keyboard shortcut X for swapping primary/secondary colors (not Ctrl+X = crop)
+            if (ImGui::IsKeyPressed(ImGuiKey_X) && !ImGui::GetIO().WantTextInput &&
+                !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt) {
                 std::swap(g_Brush.color[0], g_SecondaryColor[0]);
                 std::swap(g_Brush.color[1], g_SecondaryColor[1]);
                 std::swap(g_Brush.color[2], g_SecondaryColor[2]);
@@ -1179,7 +1270,8 @@ int main(int argc, char* argv[]) {
                                     g_ActiveTool == ActiveTool::EllipseSelect || 
                                     g_ActiveTool == ActiveTool::LassoSelect || 
                                     g_ActiveTool == ActiveTool::MagicWand ||
-                                    g_ActiveTool == ActiveTool::SmartSelect);
+                                    g_ActiveTool == ActiveTool::SmartSelect ||
+                                    g_ActiveTool == ActiveTool::QuickSelect);
 
             if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging) {
                 // Magic Wand
@@ -1216,10 +1308,53 @@ int main(int argc, char* argv[]) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                         if (!g_Canvas.IsMovingPixels()) {
                             g_Canvas.StartMovePixels(g_pd3dDevice);
+                            g_ActiveGizmoHandle = TransformGizmoHandle::Move;
+                            g_IsMoveDragging = true;
+                            g_MoveDragStartX = canvasX;
+                            g_MoveDragStartY = canvasY;
+                        } else {
+                            GizmoScreenGeometry geo;
+                            if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                                float threshSq = 64.0f; // 8px radius
+                                ImVec2 mousePos = ImGui::GetMousePos();
+                                if (distSq(mousePos, geo.p1) <= threshSq) g_ActiveGizmoHandle = TransformGizmoHandle::Scale_TL;
+                                else if (distSq(mousePos, geo.p2) <= threshSq) g_ActiveGizmoHandle = TransformGizmoHandle::Scale_TR;
+                                else if (distSq(mousePos, geo.p3) <= threshSq) g_ActiveGizmoHandle = TransformGizmoHandle::Scale_BR;
+                                else if (distSq(mousePos, geo.p4) <= threshSq) g_ActiveGizmoHandle = TransformGizmoHandle::Scale_BL;
+                                else if (distSq(mousePos, geo.mT) <= threshSq) g_ActiveGizmoHandle = TransformGizmoHandle::Scale_T;
+                                else if (distSq(mousePos, geo.mR) <= threshSq) g_ActiveGizmoHandle = TransformGizmoHandle::Scale_R;
+                                else if (distSq(mousePos, geo.mB) <= threshSq) g_ActiveGizmoHandle = TransformGizmoHandle::Scale_B;
+                                else if (distSq(mousePos, geo.mL) <= threshSq) g_ActiveGizmoHandle = TransformGizmoHandle::Scale_L;
+                                else if (IsPointInsideQuad(mousePos, geo.p1, geo.p2, geo.p3, geo.p4)) {
+                                    g_ActiveGizmoHandle = TransformGizmoHandle::Move;
+                                } else {
+                                    float diag = std::sqrt(distSq(geo.p1, geo.p3));
+                                    float distToCenter = std::sqrt(distSq(mousePos, geo.center));
+                                    if (distToCenter < diag + 80.0f) {
+                                        g_ActiveGizmoHandle = TransformGizmoHandle::Rotate;
+                                        g_GizmoDragStartRotation = g_Canvas.GetFloatingRotation();
+                                        g_GizmoDragStartMouseAngle = std::atan2(mousePos.y - geo.center.y, mousePos.x - geo.center.x);
+                                    } else {
+                                        g_ActiveGizmoHandle = TransformGizmoHandle::None;
+                                    }
+                                }
+
+                                if (g_ActiveGizmoHandle != TransformGizmoHandle::None) {
+                                    g_IsMoveDragging = true;
+                                    g_MoveDragStartX = canvasX;
+                                    g_MoveDragStartY = canvasY;
+                                    g_GizmoDragStartScaleX = g_Canvas.GetFloatingScaleX();
+                                    g_GizmoDragStartScaleY = g_Canvas.GetFloatingScaleY();
+                                    g_GizmoDragStartDist = std::sqrt(distSq(mousePos, geo.center));
+                                    if (g_GizmoDragStartDist < 5.0f) g_GizmoDragStartDist = 5.0f;
+                                }
+                            } else {
+                                g_ActiveGizmoHandle = TransformGizmoHandle::Move;
+                                g_IsMoveDragging = true;
+                                g_MoveDragStartX = canvasX;
+                                g_MoveDragStartY = canvasY;
+                            }
                         }
-                        g_IsMoveDragging = true;
-                        g_MoveDragStartX = canvasX;
-                        g_MoveDragStartY = canvasY;
                     }
                 }
                 // Drag-based selections
@@ -1230,23 +1365,63 @@ int main(int argc, char* argv[]) {
                         g_SelectionDragStartY = canvasY;
                         g_LassoPoints.clear();
                         g_LassoPoints.push_back({ (int)canvasX, (int)canvasY });
+                        if (g_ActiveTool == ActiveTool::QuickSelect) {
+                            g_Canvas.BeginQuickSelectStroke();
+                        }
+                    }
+                }
+                // Polygonal Lasso
+                else if (g_ActiveTool == ActiveTool::PolygonalLasso) {
+                    bool add = ImGui::GetIO().KeyShift;
+                    bool subtract = ImGui::GetIO().KeyAlt;
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        if (!g_PolygonalLassoPoints.empty()) {
+                            g_PolygonalLassoPoints.pop_back(); // double-click also emits a single click vertex
+                        }
+                        if (g_PolygonalLassoPoints.size() >= 3) {
+                            g_Canvas.ApplyPolygonalLassoSelection(g_PolygonalLassoPoints, add, subtract);
+                            g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                        }
+                        g_PolygonalLassoPoints.clear();
+                    }
+                    else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        g_PolygonalLassoPoints.push_back({ (int)canvasX, (int)canvasY });
                     }
                 }
             }
 
-            // Accumulate points if lasso or smart select is active
-            if (g_IsSelectionDragging && (g_ActiveTool == ActiveTool::LassoSelect || g_ActiveTool == ActiveTool::SmartSelect)) {
+            // Keyboard close/cancel for Polygonal Lasso
+            if (g_ActiveTool == ActiveTool::PolygonalLasso && !ImGui::GetIO().WantTextInput) {
+                bool add = ImGui::GetIO().KeyShift;
+                bool subtract = ImGui::GetIO().KeyAlt;
+                if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
+                    if (g_PolygonalLassoPoints.size() >= 3) {
+                        g_Canvas.ApplyPolygonalLassoSelection(g_PolygonalLassoPoints, add, subtract);
+                        g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                    }
+                    g_PolygonalLassoPoints.clear();
+                }
+                else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                    g_PolygonalLassoPoints.clear();
+                }
+            }
+
+            // Accumulate points if lasso or smart select or quick select is active
+            if (g_IsSelectionDragging && (g_ActiveTool == ActiveTool::LassoSelect || g_ActiveTool == ActiveTool::SmartSelect || g_ActiveTool == ActiveTool::QuickSelect)) {
                 int cx = (int)canvasX;
                 int cy = (int)canvasY;
                 if (g_LassoPoints.empty() || g_LassoPoints.back() != std::make_pair(cx, cy)) {
                     g_LassoPoints.push_back({ cx, cy });
+                    if (g_ActiveTool == ActiveTool::QuickSelect) {
+                        g_Canvas.StrokeQuickSelect(g_LassoPoints, g_Brush.radius, ImGui::GetIO().KeyAlt);
+                    }
                 }
             }
 
             // End drag handling
             if (g_IsSelectionDragging && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
                 g_IsSelectionDragging = false;
-                bool add = ImGui::GetIO().KeyShift;
+                bool add = ImGui::GetIO().KeyShift || (g_ActiveTool == ActiveTool::QuickSelect && !ImGui::GetIO().KeyAlt);
                 bool subtract = ImGui::GetIO().KeyAlt;
 
                 int x1 = (int)g_SelectionDragStartX;
@@ -1269,21 +1444,72 @@ int main(int argc, char* argv[]) {
                 else if (g_ActiveTool == ActiveTool::SmartSelect) {
                     g_Canvas.ApplySmartSelectSelection(g_pd3dDevice, g_LassoPoints, add, subtract);
                 }
+                else if (g_ActiveTool == ActiveTool::QuickSelect) {
+                    g_Canvas.EndQuickSelectStroke(g_pd3dDevice, add, subtract);
+                }
                 g_LassoPoints.clear();
             }
 
-            // Move drag update
+            // Move/Transform drag update
             if (g_IsMoveDragging) {
-                int dx = (int)floor(canvasX - g_MoveDragStartX);
-                int dy = (int)floor(canvasY - g_MoveDragStartY);
-                g_Canvas.UpdateMovePixels(g_pd3dDevice, g_MoveAccumulatedOffsetX + dx, g_MoveAccumulatedOffsetY + dy);
+                ImVec2 mousePos = ImGui::GetMousePos();
+                if (g_ActiveGizmoHandle == TransformGizmoHandle::Move) {
+                    int dx = (int)floor(canvasX - g_MoveDragStartX);
+                    int dy = (int)floor(canvasY - g_MoveDragStartY);
+                    g_Canvas.UpdateMovePixels(g_pd3dDevice, g_MoveAccumulatedOffsetX + dx, g_MoveAccumulatedOffsetY + dy);
+                }
+                else if (g_ActiveGizmoHandle == TransformGizmoHandle::Rotate) {
+                    GizmoScreenGeometry geo;
+                    if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                        float currentAngle = std::atan2(mousePos.y - geo.center.y, mousePos.x - geo.center.x);
+                        float deltaAngle = currentAngle - g_GizmoDragStartMouseAngle;
+                        g_Canvas.SetFloatingRotation(g_GizmoDragStartRotation + deltaAngle);
+                        g_Canvas.MarkCompositeDirty();
+                    }
+                }
+                else if (g_ActiveGizmoHandle == TransformGizmoHandle::Scale_TL ||
+                         g_ActiveGizmoHandle == TransformGizmoHandle::Scale_TR ||
+                         g_ActiveGizmoHandle == TransformGizmoHandle::Scale_BR ||
+                         g_ActiveGizmoHandle == TransformGizmoHandle::Scale_BL) {
+                    GizmoScreenGeometry geo;
+                    if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                        float currentDist = std::sqrt(distSq(mousePos, geo.center));
+                        float factor = currentDist / g_GizmoDragStartDist;
+                        g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                        g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                        g_Canvas.MarkCompositeDirty();
+                    }
+                }
+                else if (g_ActiveGizmoHandle == TransformGizmoHandle::Scale_T ||
+                         g_ActiveGizmoHandle == TransformGizmoHandle::Scale_B) {
+                    GizmoScreenGeometry geo;
+                    if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                        float currentDist = std::sqrt(distSq(mousePos, geo.center));
+                        float factor = currentDist / g_GizmoDragStartDist;
+                        g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                        g_Canvas.MarkCompositeDirty();
+                    }
+                }
+                else if (g_ActiveGizmoHandle == TransformGizmoHandle::Scale_L ||
+                         g_ActiveGizmoHandle == TransformGizmoHandle::Scale_R) {
+                    GizmoScreenGeometry geo;
+                    if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                        float currentDist = std::sqrt(distSq(mousePos, geo.center));
+                        float factor = currentDist / g_GizmoDragStartDist;
+                        g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                        g_Canvas.MarkCompositeDirty();
+                    }
+                }
             }
 
             // Move drag release
             if (g_IsMoveDragging && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
                 g_IsMoveDragging = false;
-                g_MoveAccumulatedOffsetX += (int)floor(canvasX - g_MoveDragStartX);
-                g_MoveAccumulatedOffsetY += (int)floor(canvasY - g_MoveDragStartY);
+                if (g_ActiveGizmoHandle == TransformGizmoHandle::Move) {
+                    g_MoveAccumulatedOffsetX += (int)floor(canvasX - g_MoveDragStartX);
+                    g_MoveAccumulatedOffsetY += (int)floor(canvasY - g_MoveDragStartY);
+                }
+                g_ActiveGizmoHandle = TransformGizmoHandle::None;
             }
 
             // Gradient drag release
@@ -1293,7 +1519,8 @@ int main(int argc, char* argv[]) {
             }
 
             // Draw interactive shape outline during drag/selection
-            if (g_IsSelectionDragging || (g_ActiveTool == ActiveTool::Gradient && g_IsGradientDragging)) {
+            if (g_IsSelectionDragging || (g_ActiveTool == ActiveTool::Gradient && g_IsGradientDragging) || 
+                (g_ActiveTool == ActiveTool::PolygonalLasso && !g_PolygonalLassoPoints.empty())) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
 
@@ -1327,7 +1554,7 @@ int main(int argc, char* argv[]) {
                         dl->AddLine(pts[i], pts[(i + 1) % numSegments], outlineCol, thickness);
                     }
                 }
-                else if (g_ActiveTool == ActiveTool::LassoSelect || g_ActiveTool == ActiveTool::SmartSelect) {
+                else if (g_ActiveTool == ActiveTool::LassoSelect || g_ActiveTool == ActiveTool::SmartSelect || g_ActiveTool == ActiveTool::QuickSelect) {
                     if (g_LassoPoints.size() >= 2) {
                         for (size_t i = 0; i < g_LassoPoints.size() - 1; ++i) {
                             dl->AddLine(canvasToScreen((float)g_LassoPoints[i].first, (float)g_LassoPoints[i].second),
@@ -1337,6 +1564,23 @@ int main(int argc, char* argv[]) {
                         dl->AddLine(canvasToScreen((float)g_LassoPoints.back().first, (float)g_LassoPoints.back().second),
                                     canvasToScreen(canvasX, canvasY),
                                     outlineCol, thickness);
+                    }
+                }
+                else if (g_ActiveTool == ActiveTool::PolygonalLasso) {
+                    if (!g_PolygonalLassoPoints.empty()) {
+                        for (size_t i = 0; i < g_PolygonalLassoPoints.size() - 1; ++i) {
+                            ImVec2 pStart = canvasToScreen((float)g_PolygonalLassoPoints[i].first, (float)g_PolygonalLassoPoints[i].second);
+                            ImVec2 pEnd = canvasToScreen((float)g_PolygonalLassoPoints[i+1].first, (float)g_PolygonalLassoPoints[i+1].second);
+                            dl->AddLine(pStart, pEnd, outlineCol, thickness);
+                            dl->AddCircleFilled(pStart, 3.0f, IM_COL32(255, 255, 255, 255));
+                            dl->AddCircle(pStart, 3.0f, IM_COL32(0, 0, 0, 255));
+                        }
+                        ImVec2 pLast = canvasToScreen((float)g_PolygonalLassoPoints.back().first, (float)g_PolygonalLassoPoints.back().second);
+                        dl->AddCircleFilled(pLast, 3.0f, IM_COL32(255, 255, 255, 255));
+                        dl->AddCircle(pLast, 3.0f, IM_COL32(0, 0, 0, 255));
+
+                        // Line from last point to current mouse position
+                        dl->AddLine(pLast, canvasToScreen(canvasX, canvasY), outlineCol, thickness);
                     }
                 }
                 else if (g_ActiveTool == ActiveTool::Gradient) {
@@ -1355,6 +1599,24 @@ int main(int argc, char* argv[]) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
                 g_Canvas.DrawMoveGizmo(dl, canvasToScreen);
+                dl->PopClipRect();
+            }
+
+            // Magic Wand seed crosshair (sticky sample point)
+            if (g_ActiveTool == ActiveTool::MagicWand && g_Canvas.HasWandSeed()) {
+                int sx = 0, sy = 0;
+                g_Canvas.GetWandSeed(sx, sy);
+                ImVec2 sp = canvasToScreen((float)sx + 0.5f, (float)sy + 0.5f);
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
+                const float arm = 8.0f;
+                ImU32 colOuter = IM_COL32(0, 0, 0, 200);
+                ImU32 colInner = IM_COL32(255, 220, 40, 255);
+                dl->AddLine(ImVec2(sp.x - arm, sp.y), ImVec2(sp.x + arm, sp.y), colOuter, 3.0f);
+                dl->AddLine(ImVec2(sp.x, sp.y - arm), ImVec2(sp.x, sp.y + arm), colOuter, 3.0f);
+                dl->AddLine(ImVec2(sp.x - arm, sp.y), ImVec2(sp.x + arm, sp.y), colInner, 1.5f);
+                dl->AddLine(ImVec2(sp.x, sp.y - arm), ImVec2(sp.x, sp.y + arm), colInner, 1.5f);
+                dl->AddCircle(sp, 4.0f, colInner, 12, 1.5f);
                 dl->PopClipRect();
             }
 

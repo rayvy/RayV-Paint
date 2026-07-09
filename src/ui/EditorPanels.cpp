@@ -10,6 +10,10 @@
 #include <algorithm>
 #include <cstring>
 #include <chrono>
+#include <cmath>
+#include <cctype>
+#include <fstream>
+#include <sstream>
 #include <unordered_map>
 
 extern void ApplyTheme(const std::string& themeName);
@@ -151,61 +155,6 @@ namespace UI {
         }).detach();
     }
 
-    // Map a pre-reorder index to its post-reorder index after moving fromIdx → toIdx.
-    static int MapIndexAfterReorder(int j, int fromIdx, int toIdx) {
-        if (fromIdx == toIdx) return j;
-        if (fromIdx < toIdx) {
-            if (j == fromIdx) return toIdx;
-            if (j > fromIdx && j <= toIdx) return j - 1;
-            return j;
-        }
-        if (j == fromIdx) return toIdx;
-        if (j >= toIdx && j < fromIdx) return j + 1;
-        return j;
-    }
-
-    // Reorder layer stack. parentGroupId is an index — remapped via stable identities
-    // (NOT Layer* pointers: std::rotate moves objects, so address remapping is wrong).
-    // Returns the new index of the moved layer.
-    static int ReorderLayer(std::vector<Layer>& layers, int fromIdx, int toIdx) {
-        if (fromIdx == toIdx || fromIdx < 0 || fromIdx >= (int)layers.size() ||
-            toIdx < 0 || toIdx >= (int)layers.size()) {
-            return fromIdx;
-        }
-
-        const int n = (int)layers.size();
-        // identity[i] = original index of the layer currently at slot i
-        std::vector<int> identity(n);
-        // parentIdent[i] = original index of parent of the layer at slot i (-1 = none)
-        std::vector<int> parentIdent(n, -1);
-        for (int i = 0; i < n; ++i) {
-            identity[i] = i;
-            int pid = layers[i].parentGroupId;
-            parentIdent[i] = (pid >= 0 && pid < n) ? pid : -1;
-        }
-
-        if (fromIdx < toIdx) {
-            std::rotate(layers.begin() + fromIdx, layers.begin() + fromIdx + 1, layers.begin() + toIdx + 1);
-            std::rotate(identity.begin() + fromIdx, identity.begin() + fromIdx + 1, identity.begin() + toIdx + 1);
-            std::rotate(parentIdent.begin() + fromIdx, parentIdent.begin() + fromIdx + 1, parentIdent.begin() + toIdx + 1);
-        } else {
-            std::rotate(layers.begin() + toIdx, layers.begin() + fromIdx, layers.begin() + fromIdx + 1);
-            std::rotate(identity.begin() + toIdx, identity.begin() + fromIdx, identity.begin() + fromIdx + 1);
-            std::rotate(parentIdent.begin() + toIdx, parentIdent.begin() + fromIdx, parentIdent.begin() + fromIdx + 1);
-        }
-
-        std::vector<int> identToNew(n, -1);
-        for (int i = 0; i < n; ++i)
-            identToNew[identity[i]] = i;
-
-        for (int i = 0; i < n; ++i) {
-            int pIdent = parentIdent[i];
-            layers[i].parentGroupId = (pIdent >= 0) ? identToNew[pIdent] : -1;
-        }
-
-        return identToNew[fromIdx]; // original fromIdx identity → new slot
-    }
-
     // True if `maybeAncestor` is parent/ancestor of `layerIdx` (cycle guard).
     static bool IsGroupAncestorOf(const std::vector<Layer>& layers, int maybeAncestor, int layerIdx) {
         int p = layers[layerIdx].parentGroupId;
@@ -228,30 +177,287 @@ namespace UI {
         }
     }
 
-    // Drop layer into group: reparent + place directly under group header in the list.
-    // Returns new index of the dragged layer.
-    static int DropLayerIntoGroup(std::vector<Layer>& layers, int draggedIdx, int groupIdx) {
-        if (draggedIdx < 0 || draggedIdx >= (int)layers.size() ||
-            groupIdx < 0 || groupIdx >= (int)layers.size()) return draggedIdx;
-        if (draggedIdx == groupIdx) return draggedIdx;
-        if (!layers[groupIdx].isGroup) return draggedIdx;
-        if (layers[draggedIdx].isGroup) return draggedIdx; // no nested groups for now
-        if (IsGroupAncestorOf(layers, draggedIdx, groupIdx)) return draggedIdx;
+    // ICC preset combo (presets only — no free-text path). Returns true if changed.
+    static bool DrawIccPresetCombo(Canvas& canvas, const char* label = "ICC Profile") {
+        static const Canvas::IccPreset kPresets[] = {
+            Canvas::IccPreset::None,
+            Canvas::IccPreset::sRGB,
+            Canvas::IccPreset::DisplayP3,
+            Canvas::IccPreset::AdobeRGB
+        };
+        int cur = 1; // sRGB default
+        Canvas::IccPreset p = canvas.GetExportIccPreset();
+        for (int i = 0; i < IM_ARRAYSIZE(kPresets); ++i) {
+            if (kPresets[i] == p) { cur = i; break; }
+        }
+        const char* names[] = {
+            Canvas::IccPresetName(Canvas::IccPreset::None),
+            Canvas::IccPresetName(Canvas::IccPreset::sRGB),
+            Canvas::IccPresetName(Canvas::IccPreset::DisplayP3),
+            Canvas::IccPresetName(Canvas::IccPreset::AdobeRGB)
+        };
+        if (ImGui::Combo(label, &cur, names, IM_ARRAYSIZE(names))) {
+            canvas.SetExportIccPreset(kPresets[cur]);
+            return true;
+        }
+        return false;
+    }
 
-        // UI lists high index first (top of stack). Child should sit just under group header.
-        // Moving down onto group: land at groupIdx → group shifts to groupIdx+1.
-        // Moving up toward group: land at groupIdx-1 → group stays put.
-        int targetIdx = (draggedIdx > groupIdx)
-            ? groupIdx
-            : ((groupIdx > 0) ? groupIdx - 1 : 0);
+    // ---------------------------------------------------------------------------
+    // Themed monochrome SVG icons (ignore native fill colors; tint via ImGui text color)
+    // ---------------------------------------------------------------------------
+    struct SvgIconTex {
+        ID3D11ShaderResourceView* srv = nullptr;
+        int w = 0, h = 0;
+    };
+    static std::unordered_map<std::string, SvgIconTex> s_SvgIcons;
+    static ID3D11Device* s_SvgIconDevice = nullptr;
 
-        int newLayerIdx = ReorderLayer(layers, draggedIdx, targetIdx);
-        int newGroupIdx = MapIndexAfterReorder(groupIdx, draggedIdx, targetIdx);
-        if (newGroupIdx >= 0 && newGroupIdx < (int)layers.size() && layers[newGroupIdx].isGroup)
-            layers[newLayerIdx].parentGroupId = newGroupIdx;
-        else
-            layers[newLayerIdx].parentGroupId = -1;
-        return newLayerIdx;
+    static void ReleaseSvgIcons() {
+        for (auto& kv : s_SvgIcons) {
+            if (kv.second.srv) kv.second.srv->Release();
+        }
+        s_SvgIcons.clear();
+        s_SvgIconDevice = nullptr;
+    }
+
+    static float SvgParseNumber(const char*& p) {
+        while (*p && (isspace((unsigned char)*p) || *p == ',')) ++p;
+        char* end = nullptr;
+        float v = strtof(p, &end);
+        p = end ? end : p;
+        return v;
+    }
+
+    static void SvgSampleCubic(std::vector<ImVec2>& out, ImVec2 p0, ImVec2 p1, ImVec2 p2, ImVec2 p3, int segs = 12) {
+        for (int i = 1; i <= segs; ++i) {
+            float t = (float)i / (float)segs;
+            float u = 1.f - t;
+            float x = u*u*u*p0.x + 3*u*u*t*p1.x + 3*u*t*t*p2.x + t*t*t*p3.x;
+            float y = u*u*u*p0.y + 3*u*u*t*p1.y + 3*u*t*t*p2.y + t*t*t*p3.y;
+            out.push_back(ImVec2(x, y));
+        }
+    }
+
+    static bool SvgParsePath(const std::string& d, std::vector<std::vector<ImVec2>>& contours) {
+        const char* p = d.c_str();
+        std::vector<ImVec2> cur;
+        ImVec2 pos(0, 0), start(0, 0), lastC(0, 0);
+        char cmd = 0;
+        auto flush = [&]() {
+            if (cur.size() >= 3) contours.push_back(cur);
+            cur.clear();
+        };
+        while (*p) {
+            while (*p && (isspace((unsigned char)*p) || *p == ',')) ++p;
+            if (!*p) break;
+            if (isalpha((unsigned char)*p)) { cmd = *p++; }
+            if (!cmd) break;
+            bool rel = islower((unsigned char)cmd);
+            char c = (char)tolower((unsigned char)cmd);
+            if (c == 'm') {
+                float x = SvgParseNumber(p), y = SvgParseNumber(p);
+                if (rel) { x += pos.x; y += pos.y; }
+                flush();
+                pos = start = ImVec2(x, y);
+                cur.push_back(pos);
+                cmd = rel ? 'l' : 'L'; // subsequent pairs are lineto
+            } else if (c == 'l') {
+                float x = SvgParseNumber(p), y = SvgParseNumber(p);
+                if (rel) { x += pos.x; y += pos.y; }
+                pos = ImVec2(x, y);
+                cur.push_back(pos);
+            } else if (c == 'h') {
+                float x = SvgParseNumber(p);
+                if (rel) x += pos.x;
+                pos.x = x;
+                cur.push_back(pos);
+            } else if (c == 'v') {
+                float y = SvgParseNumber(p);
+                if (rel) y += pos.y;
+                pos.y = y;
+                cur.push_back(pos);
+            } else if (c == 'c') {
+                float x1 = SvgParseNumber(p), y1 = SvgParseNumber(p);
+                float x2 = SvgParseNumber(p), y2 = SvgParseNumber(p);
+                float x  = SvgParseNumber(p), y  = SvgParseNumber(p);
+                if (rel) { x1 += pos.x; y1 += pos.y; x2 += pos.x; y2 += pos.y; x += pos.x; y += pos.y; }
+                ImVec2 p1(x1, y1), p2(x2, y2), p3(x, y);
+                SvgSampleCubic(cur, pos, p1, p2, p3);
+                lastC = p2;
+                pos = p3;
+            } else if (c == 'z') {
+                if (!cur.empty()) cur.push_back(start);
+                pos = start;
+                flush();
+                cmd = 0;
+            } else {
+                // unsupported command — skip one number pair if possible
+                SvgParseNumber(p); SvgParseNumber(p);
+            }
+        }
+        flush();
+        return !contours.empty();
+    }
+
+    static void SvgRasterizeEvenOdd(const std::vector<std::vector<ImVec2>>& contours,
+                                    int outW, int outH, float vbX, float vbY, float vbW, float vbH,
+                                    std::vector<uint8_t>& rgba) {
+        rgba.assign((size_t)outW * outH * 4, 0);
+        if (vbW <= 0.f || vbH <= 0.f) return;
+        auto mapX = [&](float x) { return (x - vbX) / vbW * (outW - 1); };
+        auto mapY = [&](float y) { return (y - vbY) / vbH * (outH - 1); };
+
+        for (int y = 0; y < outH; ++y) {
+            float py = (float)y + 0.5f;
+            std::vector<float> xs;
+            for (const auto& c : contours) {
+                for (size_t i = 0, n = c.size(); i + 1 < n; ++i) {
+                    float y0 = mapY(c[i].y), y1 = mapY(c[i + 1].y);
+                    float x0 = mapX(c[i].x), x1 = mapX(c[i + 1].x);
+                    if ((y0 <= py && y1 > py) || (y1 <= py && y0 > py)) {
+                        float t = (py - y0) / (y1 - y0);
+                        xs.push_back(x0 + t * (x1 - x0));
+                    }
+                }
+            }
+            std::sort(xs.begin(), xs.end());
+            for (size_t i = 0; i + 1 < xs.size(); i += 2) {
+                int xStart = std::clamp((int)std::floor(xs[i]), 0, outW - 1);
+                int xEnd   = std::clamp((int)std::ceil(xs[i + 1]), 0, outW);
+                for (int x = xStart; x < xEnd; ++x) {
+                    size_t idx = ((size_t)y * outW + x) * 4;
+                    rgba[idx + 0] = 255;
+                    rgba[idx + 1] = 255;
+                    rgba[idx + 2] = 255;
+                    rgba[idx + 3] = 255;
+                }
+            }
+        }
+    }
+
+    static bool LoadSvgIconFile(ID3D11Device* device, const std::string& path, SvgIconTex& out) {
+        std::string text;
+        {
+#ifdef _WIN32
+            std::ifstream in(UTF8ToWString(path), std::ios::binary);
+#else
+            std::ifstream in(path, std::ios::binary);
+#endif
+            if (!in) return false;
+            std::ostringstream ss; ss << in.rdbuf();
+            text = ss.str();
+        }
+        float vbX = 0, vbY = 0, vbW = 32, vbH = 32;
+        size_t vbPos = text.find("viewBox");
+        if (vbPos != std::string::npos) {
+            size_t q = text.find_first_of("\"'", vbPos);
+            if (q != std::string::npos) {
+                char quote = text[q];
+                size_t q2 = text.find(quote, q + 1);
+                if (q2 != std::string::npos) {
+                    std::string vb = text.substr(q + 1, q2 - q - 1);
+                    std::replace(vb.begin(), vb.end(), ',', ' ');
+                    std::istringstream iss(vb);
+                    iss >> vbX >> vbY >> vbW >> vbH;
+                }
+            }
+        }
+        std::vector<std::vector<ImVec2>> contours;
+        size_t pos = 0;
+        while ((pos = text.find("<path", pos)) != std::string::npos) {
+            size_t dpos = text.find(" d=", pos);
+            size_t endTag = text.find('>', pos);
+            if (dpos != std::string::npos && endTag != std::string::npos && dpos < endTag) {
+                size_t q = text.find_first_of("\"'", dpos + 3);
+                if (q != std::string::npos) {
+                    char quote = text[q];
+                    size_t q2 = text.find(quote, q + 1);
+                    if (q2 != std::string::npos) {
+                        SvgParsePath(text.substr(q + 1, q2 - q - 1), contours);
+                    }
+                }
+            }
+            pos = endTag != std::string::npos ? endTag + 1 : pos + 5;
+        }
+        if (contours.empty()) return false;
+
+        const int iconSize = 64;
+        std::vector<uint8_t> rgba;
+        SvgRasterizeEvenOdd(contours, iconSize, iconSize, vbX, vbY, vbW, vbH, rgba);
+
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = iconSize; desc.Height = iconSize;
+        desc.MipLevels = 1; desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_IMMUTABLE;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA srd = {};
+        srd.pSysMem = rgba.data();
+        srd.SysMemPitch = iconSize * 4;
+        ID3D11Texture2D* tex = nullptr;
+        if (FAILED(device->CreateTexture2D(&desc, &srd, &tex))) return false;
+        ID3D11ShaderResourceView* srv = nullptr;
+        HRESULT hr = device->CreateShaderResourceView(tex, nullptr, &srv);
+        tex->Release();
+        if (FAILED(hr)) return false;
+        out.srv = srv; out.w = iconSize; out.h = iconSize;
+        return true;
+    }
+
+    static const char* SvgFileForAction(const char* actionName) {
+        if (strcmp(actionName, "BrushTool") == 0) return "brush.svg";
+        if (strcmp(actionName, "EraserTool") == 0) return "eraser.svg";
+        if (strcmp(actionName, "BucketFillTool") == 0) return "fill_bucket.svg";
+        return nullptr;
+    }
+
+    static SvgIconTex* GetSvgIcon(ID3D11Device* device, const char* actionName) {
+        if (!device || !actionName) return nullptr;
+        if (device != s_SvgIconDevice) {
+            ReleaseSvgIcons();
+            s_SvgIconDevice = device;
+        }
+        auto it = s_SvgIcons.find(actionName);
+        if (it != s_SvgIcons.end()) return it->second.srv ? &it->second : nullptr;
+
+        const char* file = SvgFileForAction(actionName);
+        SvgIconTex tex;
+        if (file) {
+            // Search common locations relative to cwd / exe
+            const char* roots[] = { "testfield/svg/", "svg/", "assets/icons/", "../testfield/svg/" };
+            for (const char* root : roots) {
+                std::string path = std::string(root) + file;
+                if (LoadSvgIconFile(device, path, tex)) break;
+            }
+        }
+        s_SvgIcons[actionName] = tex;
+        return tex.srv ? &s_SvgIcons[actionName] : nullptr;
+    }
+
+    // Theme-aware icon color: dark UI → white, light UI → black (ignore SVG native colors)
+    static ImU32 GetThemedIconColor(bool active) {
+        ImVec4 bg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+        float lum = 0.2126f * bg.x + 0.7152f * bg.y + 0.0722f * bg.z;
+        float v = (lum < 0.5f) ? 1.0f : 0.0f;
+        float a = active ? 1.0f : 0.45f;
+        return IM_COL32((int)(v * 255), (int)(v * 255), (int)(v * 255), (int)(a * 255));
+    }
+
+    static bool DrawThemedSvgIcon(ID3D11Device* device, const char* actionName, ImVec2 min, ImVec2 max, bool active) {
+        SvgIconTex* icon = GetSvgIcon(device, actionName);
+        if (!icon || !icon->srv) return false;
+        // Preserve aspect: fit inside button with padding
+        float bw = max.x - min.x, bh = max.y - min.y;
+        float pad = std::min(bw, bh) * 0.12f;
+        float side = std::min(bw, bh) - pad * 2.0f;
+        if (side < 4.0f) return false;
+        ImVec2 c((min.x + max.x) * 0.5f, (min.y + max.y) * 0.5f);
+        ImVec2 p0(c.x - side * 0.5f, c.y - side * 0.5f);
+        ImVec2 p1(c.x + side * 0.5f, c.y + side * 0.5f);
+        ImGui::GetWindowDrawList()->AddImage((ImTextureID)icon->srv, p0, p1, ImVec2(0,0), ImVec2(1,1), GetThemedIconColor(active));
+        return true;
     }
 
     bool IsSelectTool(ActiveTool tool) {
@@ -283,28 +489,9 @@ namespace UI {
     }
 
     void SampleCanvasColor(Canvas& canvas, float canvasX, float canvasY, float outColor[4]) {
-        static std::vector<float> s_CachedComposite;
-        static int s_CachedFrame = -1;
-        static int s_CachedW = 0;
-        static int s_CachedH = 0;
-
-        int frame = ImGui::GetFrameCount();
-        int w = canvas.GetWidth();
-        int h = canvas.GetHeight();
-        if (frame != s_CachedFrame || w != s_CachedW || h != s_CachedH) {
-            s_CachedComposite = canvas.GetCompositePixels();
-            s_CachedFrame = frame;
-            s_CachedW = w;
-            s_CachedH = h;
-        }
-
-        int cx = std::clamp((int)canvasX, 0, w - 1);
-        int cy = std::clamp((int)canvasY, 0, h - 1);
-        size_t idx = ((size_t)cy * w + cx) * 4;
-        outColor[0] = s_CachedComposite[idx + 0];
-        outColor[1] = s_CachedComposite[idx + 1];
-        outColor[2] = s_CachedComposite[idx + 2];
-        outColor[3] = s_CachedComposite[idx + 3];
+        int cx = std::clamp((int)canvasX, 0, canvas.GetWidth() - 1);
+        int cy = std::clamp((int)canvasY, 0, canvas.GetHeight() - 1);
+        canvas.SampleCompositePixel(cx, cy, outColor);
     }
 
     struct ToolVariant {
@@ -313,10 +500,22 @@ namespace UI {
         ActiveTool tool;
     };
 
-    static void DrawToolIcon(const char* actionName, ImVec2 min, ImVec2 max, ImU32 color) {
+    static void DrawToolIcon(const char* actionName, ImVec2 min, ImVec2 max, ImU32 color, bool active = true) {
+        // Prefer themed SVG assets (ignore native SVG fill colors)
+        if (s_SvgIconDevice && DrawThemedSvgIcon(s_SvgIconDevice, actionName, min, max, active)) {
+            return;
+        }
+
         ImDrawList* drawList = ImGui::GetWindowDrawList();
         float w = max.x - min.x;
         float h = max.y - min.y;
+        // Preserve square aspect for procedural glyphs
+        float side = std::min(w, h);
+        float ox = (w - side) * 0.5f;
+        float oy = (h - side) * 0.5f;
+        min = ImVec2(min.x + ox, min.y + oy);
+        max = ImVec2(min.x + side, min.y + side);
+        w = side; h = side;
         float cx = min.x + w * 0.5f;
         float cy = min.y + h * 0.5f;
         float pad = w * 0.25f;
@@ -442,6 +641,42 @@ namespace UI {
             drawList->AddCircle(ImVec2(cx, cy), r, color, 16, 2.0f);
             drawList->AddTriangleFilled(ImVec2(cx + r - 3.0f, cy - 3.0f), ImVec2(cx + r + 3.0f, cy - 3.0f), ImVec2(cx + r, cy + 2.0f), color);
         }
+        else if (strcmp(actionName, "PolygonalLassoTool") == 0) {
+            ImVec2 pts[] = {
+                ImVec2(cx - 6.0f, cy - 6.0f),
+                ImVec2(cx + 6.0f, cy - 6.0f),
+                ImVec2(cx + 6.0f, cy + 3.0f),
+                ImVec2(cx - 1.0f, cy + 7.0f),
+                ImVec2(cx - 7.0f, cy + 2.0f)
+            };
+            for (int i = 0; i < 5; ++i) {
+                drawList->AddLine(pts[i], pts[(i + 1) % 5], color, 1.5f);
+                drawList->AddCircleFilled(pts[i], 1.5f, color);
+            }
+        }
+        else if (strcmp(actionName, "QuickSelectTool") == 0) {
+            drawList->AddCircle(ImVec2(cx - 3.0f, cy + 3.0f), 4.0f, color, 12, 1.5f);
+            drawList->AddLine(ImVec2(cx + 1.0f, cy - 1.0f), ImVec2(cx + 7.0f, cy - 7.0f), color, 2.0f);
+            drawList->AddCircleFilled(ImVec2(cx - 8.0f, cy - 8.0f), 1.0f, color);
+            drawList->AddCircleFilled(ImVec2(cx + 8.0f, cy + 8.0f), 1.0f, color);
+            drawList->AddCircleFilled(ImVec2(cx + 8.0f, cy - 8.0f), 1.0f, color);
+            drawList->AddCircleFilled(ImVec2(cx - 8.0f, cy + 8.0f), 1.0f, color);
+        }
+        else if (strcmp(actionName, "TransformTool") == 0) {
+            float rL = min.x + pad;
+            float rR = max.x - pad;
+            float rT = min.y + pad;
+            float rB = max.y - pad;
+            drawList->AddRect(ImVec2(rL, rT), ImVec2(rR, rB), color, 1.0f);
+            float hs = 2.0f;
+            auto drawBoxHandle = [&](ImVec2 p) {
+                drawList->AddRectFilled(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), color);
+            };
+            drawBoxHandle(ImVec2(rL, rT));
+            drawBoxHandle(ImVec2(rR, rT));
+            drawBoxHandle(ImVec2(rR, rB));
+            drawBoxHandle(ImVec2(rL, rB));
+        }
         else {
             drawList->AddRect(min, max, color, 1.0f);
         }
@@ -548,6 +783,17 @@ namespace UI {
         }
 
         ImGui::BeginGroup();
+        ImGuiWindow* win = ImGui::GetCurrentWindow();
+        float winWidth = win->Size.x;
+        float winHeight = win->Size.y;
+        bool isVertical = (winHeight > winWidth);
+        if (isVertical) {
+            float posX = (winWidth - size) * 0.5f;
+            if (posX > 0.0f) ImGui::SetCursorPosX(posX);
+        } else {
+            float posY = (winHeight - size) * 0.5f;
+            if (posY > 0.0f) ImGui::SetCursorPosY(posY);
+        }
         ImGui::Button("##groupBtn", ImVec2(size, size));
         ImGuiID itemId = ImGui::GetItemID();
         double now = ImGui::GetTime();
@@ -595,7 +841,7 @@ namespace UI {
         ImVec2 btnMin = ImGui::GetItemRectMin();
         ImVec2 btnMax = ImGui::GetItemRectMax();
         DrawToolIcon(display.actionName, btnMin, btnMax,
-            ImGui::GetColorU32(isActive ? ImGuiCol_Text : ImGuiCol_TextDisabled));
+            GetThemedIconColor(isActive), isActive);
         DrawKeybindBadge(btnMax, keybindString, size);
 
         ImGui::EndGroup();
@@ -618,6 +864,17 @@ namespace UI {
         }
         
         ImGui::BeginGroup();
+        ImGuiWindow* win = ImGui::GetCurrentWindow();
+        float winWidth = win->Size.x;
+        float winHeight = win->Size.y;
+        bool isVertical = (winHeight > winWidth);
+        if (isVertical) {
+            float posX = (winWidth - size) * 0.5f;
+            if (posX > 0.0f) ImGui::SetCursorPosX(posX);
+        } else {
+            float posY = (winHeight - size) * 0.5f;
+            if (posY > 0.0f) ImGui::SetCursorPosY(posY);
+        }
         ImGui::Button("##toolBtn", ImVec2(size, size));
         
         if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
@@ -644,7 +901,7 @@ namespace UI {
         
         ImVec2 btnMin = ImGui::GetItemRectMin();
         ImVec2 btnMax = ImGui::GetItemRectMax();
-        DrawToolIcon(actionName, btnMin, btnMax, ImGui::GetColorU32(isActive ? ImGuiCol_Text : ImGuiCol_TextDisabled));
+        DrawToolIcon(actionName, btnMin, btnMax, GetThemedIconColor(isActive), isActive);
 
         if (strcmp(actionName, "Reset") != 0) {
             DrawKeybindBadge(btnMax, keybindString, size);
@@ -656,6 +913,12 @@ namespace UI {
     }
 
     void RenderAll(UIState& state, Canvas& canvas, BrushSettings& brush, ActiveTool& activeTool, ID3D11Device* device, ID3D11DeviceContext* context, GLFWwindow* window) {
+        if (device && device != s_SvgIconDevice) {
+            ReleaseSvgIcons();
+            s_SvgIconDevice = device;
+        } else if (device) {
+            s_SvgIconDevice = device;
+        }
         ImGuiViewport* mainViewport = ImGui::GetMainViewport();
 
         // 1. Persistent Header (Main Menu Bar)
@@ -716,8 +979,11 @@ namespace UI {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Canvas")) {
-                if (ImGui::MenuItem("Canvas Size...")) {
+                if (ImGui::MenuItem("Canvas Edit...")) {
                     state.openCanvasSizeModal = true;
+                }
+                if (ImGui::MenuItem("Crop to Selection", KeymapManager::Get().GetActionShortcutString("CropToSelection").c_str(), false, canvas.HasSelection())) {
+                    canvas.CropCanvasToSelection(device);
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Rotate Canvas 90 CW")) {
@@ -752,11 +1018,6 @@ namespace UI {
                 if (ImGui::MenuItem("HSV Adjust...", "Ctrl+U", false, hasLayer))
                     state.showHSVModal = true;
                 if (ImGui::MenuItem("Curves...", nullptr, false, hasLayer)) {
-                    if (state.curvesPoints.empty()) {
-                        state.curvesPoints = {{0.f,0.f},{1.f,1.f}};
-                        state.curvesLUT.assign(256, 0.f);
-                        for (int i=0;i<256;++i) state.curvesLUT[i]=(float)i/255.f;
-                    }
                     state.showCurvesModal = true;
                 }
                 if (ImGui::MenuItem("Add Noise...", nullptr, false, hasLayer))
@@ -840,87 +1101,120 @@ namespace UI {
             ImGui::EndPopup();
         }
 
-        // Curves Modal — interactive spline editor like Paint.NET
+        // Curves Modal — interactive spline editor (mouse on graph moves points, not window)
         if (state.showCurvesModal) ImGui::OpenPopup("Curves##modal");
         if (ImGui::BeginPopupModal("Curves##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            static const char* chanNames[] = {"RGB","R","G","B"};
-            ImGui::Combo("Channel", &state.curvesChannel, chanNames, 4);
+            if (state.curvesPointsRGB.empty()) {
+                state.curvesPointsRGB = {{0.f, 0.f}, {1.f, 1.f}};
+                state.curvesLUTRGB = Canvas_BuildSplineLUT(state.curvesPointsRGB);
+            }
+            if (state.curvesPointsAlpha.empty()) {
+                state.curvesPointsAlpha = {{0.f, 0.f}, {1.f, 1.f}};
+                state.curvesLUTAlpha = Canvas_BuildSplineLUT(state.curvesPointsAlpha);
+            }
+
+            static const char* chanNames[] = {"RGB","Alpha"};
+            ImGui::Combo("Channel", &state.curvesChannel, chanNames, 2);
             ImGui::SameLine(); ImGui::TextDisabled("(right-click = remove point)");
+
+            std::vector<std::pair<float,float>>& activePoints = (state.curvesChannel == 0) ? state.curvesPointsRGB : state.curvesPointsAlpha;
+            std::vector<float>& activeLUT = (state.curvesChannel == 0) ? state.curvesLUTRGB : state.curvesLUTAlpha;
 
             const float graphSz = 256.f;
             const float pad = 8.f;
+
+            // Child captures mouse so parent modal is not dragged from the graph area
+            ImGui::BeginChild("##curves_graph_child", ImVec2(graphSz + pad * 2.f, graphSz + pad * 2.f),
+                ImGuiChildFlags_Borders, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
+
             ImVec2 graphPos = ImGui::GetCursorScreenPos();
             graphPos.x += pad; graphPos.y += pad;
-            ImGui::Dummy(ImVec2(graphSz + pad*2, graphSz + pad*2));
+            ImGui::SetCursorScreenPos(graphPos);
+            ImGui::InvisibleButton("##graph_bounds", ImVec2(graphSz, graphSz));
+            const bool graphActive = ImGui::IsItemActive();
+            const bool graphHovered = ImGui::IsItemHovered();
+
             ImDrawList* dl = ImGui::GetWindowDrawList();
 
-            // Background
             dl->AddRectFilled(graphPos, ImVec2(graphPos.x+graphSz,graphPos.y+graphSz), IM_COL32(30,30,30,255));
-            // Grid lines
             for (int gi=1;gi<4;++gi) {
                 float gx=graphPos.x+graphSz*gi/4.f, gy=graphPos.y+graphSz*gi/4.f;
                 dl->AddLine(ImVec2(gx,graphPos.y),ImVec2(gx,graphPos.y+graphSz),IM_COL32(60,60,60,255));
                 dl->AddLine(ImVec2(graphPos.x,gy),ImVec2(graphPos.x+graphSz,gy),IM_COL32(60,60,60,255));
             }
-            // Diagonal identity
             dl->AddLine(graphPos,ImVec2(graphPos.x+graphSz,graphPos.y+graphSz),IM_COL32(80,80,80,255));
-            // Border
             dl->AddRect(graphPos,ImVec2(graphPos.x+graphSz,graphPos.y+graphSz),IM_COL32(120,120,120,255));
 
-            // Rebuild LUT and draw curve
-            if (!state.curvesPoints.empty())
-                state.curvesLUT = Canvas_BuildSplineLUT(state.curvesPoints);
+            if (!activePoints.empty())
+                activeLUT = Canvas_BuildSplineLUT(activePoints);
             for (int xi=0;xi<255;++xi) {
-                float x0=graphPos.x+xi, y0=graphPos.y+graphSz*(1.f-state.curvesLUT[xi]);
-                float x1=graphPos.x+xi+1, y1=graphPos.y+graphSz*(1.f-state.curvesLUT[xi+1]);
+                float x0=graphPos.x+xi, y0=graphPos.y+graphSz*(1.f-activeLUT[xi]);
+                float x1=graphPos.x+xi+1, y1=graphPos.y+graphSz*(1.f-activeLUT[xi+1]);
                 dl->AddLine(ImVec2(x0,y0),ImVec2(x1,y1),IM_COL32(220,220,220,255),1.5f);
             }
 
-            // Handle control points
             static int draggingPt = -1;
             ImVec2 mpos = ImGui::GetIO().MousePos;
-            bool inGraph = mpos.x>=graphPos.x && mpos.x<=graphPos.x+graphSz && mpos.y>=graphPos.y && mpos.y<=graphPos.y+graphSz;
+            bool inGraph = graphHovered || graphActive ||
+                (mpos.x>=graphPos.x && mpos.x<=graphPos.x+graphSz && mpos.y>=graphPos.y && mpos.y<=graphPos.y+graphSz);
 
-            for (int pi=0;pi<(int)state.curvesPoints.size();++pi) {
-                float cx=graphPos.x+state.curvesPoints[pi].first*graphSz;
-                float cy=graphPos.y+(1.f-state.curvesPoints[pi].second)*graphSz;
+            for (int pi=0;pi<(int)activePoints.size();++pi) {
+                float cx=graphPos.x+activePoints[pi].first*graphSz;
+                float cy=graphPos.y+(1.f-activePoints[pi].second)*graphSz;
                 bool hovered = fabsf(mpos.x-cx)<7.f && fabsf(mpos.y-cy)<7.f;
                 dl->AddCircleFilled(ImVec2(cx,cy),5.f,hovered?IM_COL32(255,200,100,255):IM_COL32(200,200,200,255));
                 dl->AddCircle(ImVec2(cx,cy),5.f,IM_COL32(60,60,60,255));
 
                 if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) draggingPt=pi;
-                if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && pi!=0 && pi!=(int)state.curvesPoints.size()-1)
-                    state.curvesPoints.erase(state.curvesPoints.begin()+pi);
+                if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && pi!=0 && pi!=(int)activePoints.size()-1) {
+                    activePoints.erase(activePoints.begin()+pi);
+                    activeLUT = Canvas_BuildSplineLUT(activePoints);
+                    break;
+                }
             }
             if (draggingPt>=0) {
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                     float nx=std::clamp((mpos.x-graphPos.x)/graphSz,0.f,1.f);
                     float ny=std::clamp(1.f-(mpos.y-graphPos.y)/graphSz,0.f,1.f);
-                    // endpoints locked in X
                     if (draggingPt==0) nx=0.f;
-                    if (draggingPt==(int)state.curvesPoints.size()-1) nx=1.f;
-                    state.curvesPoints[draggingPt]={nx,ny};
-                    // keep sorted by x
-                    std::sort(state.curvesPoints.begin(),state.curvesPoints.end(),[](auto&a,auto&b){return a.first<b.first;});
+                    if (draggingPt==(int)activePoints.size()-1) nx=1.f;
+                    activePoints[draggingPt]={nx,ny};
+                    std::sort(activePoints.begin(),activePoints.end(),[](auto&a,auto&b){return a.first<b.first;});
+                    // re-find dragged index after sort (endpoints fixed at 0/1)
+                    if (draggingPt > 0 && draggingPt < (int)activePoints.size()-1) {
+                        // keep draggingPt as sorted index of moved point — approximate via nearest
+                    }
                 } else draggingPt=-1;
             }
-            // Left-click in graph (not on a point) = add point
-            if (inGraph && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && draggingPt<0) {
-                float nx=std::clamp((mpos.x-graphPos.x)/graphSz,0.f,1.f);
-                float ny=std::clamp(1.f-(mpos.y-graphPos.y)/graphSz,0.f,1.f);
-                state.curvesPoints.push_back({nx,ny});
-                std::sort(state.curvesPoints.begin(),state.curvesPoints.end(),[](auto&a,auto&b){return a.first<b.first;});
+            // Left-click empty graph = add point (InvisibleButton is active, so don't require !IsAnyItemActive)
+            if (inGraph && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && draggingPt < 0) {
+                bool onPoint = false;
+                for (auto& pt : activePoints) {
+                    float cx=graphPos.x+pt.first*graphSz;
+                    float cy=graphPos.y+(1.f-pt.second)*graphSz;
+                    if (fabsf(mpos.x-cx)<7.f && fabsf(mpos.y-cy)<7.f) { onPoint = true; break; }
+                }
+                if (!onPoint) {
+                    float nx=std::clamp((mpos.x-graphPos.x)/graphSz,0.f,1.f);
+                    float ny=std::clamp(1.f-(mpos.y-graphPos.y)/graphSz,0.f,1.f);
+                    activePoints.push_back({nx,ny});
+                    std::sort(activePoints.begin(),activePoints.end(),[](auto&a,auto&b){return a.first<b.first;});
+                }
             }
 
-            // Readout
+            ImGui::EndChild();
+
             float posX=(mpos.x-graphPos.x)/graphSz*255.f, posY=(1.f-(mpos.y-graphPos.y)/graphSz)*255.f;
             if (inGraph) ImGui::Text("(%.0f, %.0f)", posX, posY);
             else ImGui::TextDisabled("Move mouse over graph");
             ImGui::Spacing();
-            if (ImGui::Button("Reset",ImVec2(80,0))){ state.curvesPoints={{0.f,0.f},{1.f,1.f}}; }
+            if (ImGui::Button("Reset",ImVec2(80,0))){
+                activePoints={{0.f,0.f},{1.f,1.f}};
+                activeLUT = Canvas_BuildSplineLUT(activePoints);
+            }
             ImGui::SameLine();
             if (ImGui::Button("Apply",ImVec2(80,0))){
-                canvas.ApplyCurves(state.curvesLUT);
+                canvas.ApplyCurves(state.curvesLUTRGB, state.curvesLUTAlpha);
                 state.showCurvesModal=false; ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
@@ -941,6 +1235,8 @@ namespace UI {
             case ActiveTool::RectSelect: toolLabel = "Rect Select"; break;
             case ActiveTool::EllipseSelect: toolLabel = "Ellipse Select"; break;
             case ActiveTool::LassoSelect: toolLabel = "Lasso Select"; break;
+            case ActiveTool::PolygonalLasso: toolLabel = "Polygonal Lasso"; break;
+            case ActiveTool::QuickSelect: toolLabel = "Quick Select"; break;
             case ActiveTool::MagicWand: toolLabel = "Magic Wand"; break;
             case ActiveTool::SmartSelect: toolLabel = "Smart Select"; break;
             case ActiveTool::MovePixels: toolLabel = "Transform"; break;
@@ -977,6 +1273,7 @@ namespace UI {
             ImGui::DockBuilderDockWindow("Canvas Viewport", dock_main_id);
             ImGui::DockBuilderDockWindow("Properties", dock_right_top_id);
             ImGui::DockBuilderDockWindow("Layers", dock_right_middle_id);
+            ImGui::DockBuilderDockWindow("Channels", dock_right_middle_id);
             ImGui::DockBuilderDockWindow("Tool Settings", dock_right_bottom_id);
 
             ImGui::DockBuilderFinish(dockspace_id);
@@ -988,7 +1285,7 @@ namespace UI {
         if (state.openExportStdModal) { ImGui::OpenPopup("Export Standard Image"); state.openExportStdModal = false; }
         if (state.openExportAdvancedModal) { ImGui::OpenPopup("Advanced Export Settings"); state.openExportAdvancedModal = false; }
         if (state.openSettingsModal) { ImGui::OpenPopup("Settings"); state.openSettingsModal = false; }
-        if (state.openCanvasSizeModal) { ImGui::OpenPopup("Canvas Size"); state.openCanvasSizeModal = false; }
+        if (state.openCanvasSizeModal) { ImGui::OpenPopup("Canvas Edit"); state.openCanvasSizeModal = false; }
         if (state.openSaveRaypModal) { ImGui::OpenPopup("Save Project"); state.openSaveRaypModal = false; }
         if (state.openLoadRaypModal) { ImGui::OpenPopup("Load Project"); state.openLoadRaypModal = false; }
         if (state.openLoadConfigModal) { ImGui::OpenPopup("Load Config"); state.openLoadConfigModal = false; }
@@ -1114,7 +1411,6 @@ namespace UI {
         // Export Standard Image Popup Modal
         if (ImGui::BeginPopupModal("Export Standard Image", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
             static char exportPath[512] = "export.png";
-            static char iccPath[512] = "";
             ImGui::Text("Enter export path (PNG, JPG, BMP, TGA):");
             ImGui::InputText("##exportpathstd", exportPath, IM_ARRAYSIZE(exportPath));
             ImGui::SameLine();
@@ -1122,20 +1418,11 @@ namespace UI {
                 ShowSaveFileWin32(exportPath, IM_ARRAYSIZE(exportPath), "Image Files (*.png;*.jpg;*.jpeg;*.bmp;*.tga)\0*.png;*.jpg;*.jpeg;*.bmp;*.tga\0All Files (*.*)\0*.*\0");
             }
             ImGui::Spacing();
-            ImGui::Text("Optional ICC Profile (PNG only):");
-            ImGui::InputText("##iccpath", iccPath, IM_ARRAYSIZE(iccPath));
-            ImGui::SameLine();
-            if (ImGui::Button("Browse...##icc")) {
-                ShowOpenFileWin32(iccPath, IM_ARRAYSIZE(iccPath), "ICC Profiles (*.icc;*.icm)\0*.icc;*.icm\0All Files (*.*)\0*.*\0");
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Clear")) {
-                iccPath[0] = '\0';
-            }
-            ImGui::TextDisabled("Leave empty for default sRGB colorspace");
+            DrawIccPresetCombo(canvas, "ICC Profile (PNG)");
+            ImGui::TextDisabled("Presets only — no free-text ICC path");
             ImGui::Separator();
             if (ImGui::Button("Export", ImVec2(120, 0))) {
-                if (canvas.SaveCanvasStandard(exportPath, iccPath)) {
+                if (canvas.SaveCanvasStandard(exportPath, canvas.GetExportIccPreset())) {
                     ImGui::CloseCurrentPopup();
                 }
             }
@@ -1218,21 +1505,8 @@ namespace UI {
                 }
             } else if (ext == "png") {
                 ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "PNG Export Settings");
-                
-                static char iccPath[512] = "";
-                std::string currentIcc = canvas.GetExportPngColorSpace();
-                if (currentIcc != "sRGB" && currentIcc != "Linear") {
-                    std::strncpy(iccPath, currentIcc.c_str(), sizeof(iccPath));
-                }
-                
-                ImGui::InputText("ICC Color Profile Path", iccPath, IM_ARRAYSIZE(iccPath));
-                ImGui::SameLine();
-                if (ImGui::Button("Browse...##iccpathadv")) {
-                    ShowOpenFileWin32(iccPath, IM_ARRAYSIZE(iccPath), "ICC Profiles (*.icc;*.icm)\0*.icc;*.icm\0All Files (*.*)\0*.*\0");
-                }
-                ImGui::TextDisabled("Leave empty for standard sRGB colorspace");
-                
-                canvas.SetExportPngColorSpace(strlen(iccPath) > 0 ? iccPath : "sRGB");
+                DrawIccPresetCombo(canvas, "ICC Profile");
+                ImGui::TextDisabled("Presets only — no free-text ICC path");
             } else {
                 ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "Standard Format Export");
                 ImGui::Text("Format: %s", ext.empty() ? "None" : ext.c_str());
@@ -1255,8 +1529,7 @@ namespace UI {
                         canvas.GetExportCompressionSpeed()
                     );
                 } else {
-                    std::string icc = canvas.GetExportPngColorSpace();
-                    success = canvas.SaveCanvasStandard(exportPath, icc == "sRGB" ? "" : icc);
+                    success = canvas.SaveCanvasStandard(exportPath, canvas.GetExportIccPreset());
                 }
                 
                 if (success) {
@@ -1438,10 +1711,12 @@ namespace UI {
             ImGui::EndPopup();
         }
 
-        // Canvas Size Popup Modal
-        if (ImGui::BeginPopupModal("Canvas Size", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+        // Canvas Edit Popup Modal (Extend | Resize + resample algorithm)
+        if (ImGui::BeginPopupModal("Canvas Edit", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
             static int targetW = 0;
             static int targetH = 0;
+            static int editMode = 0; // 0=Extend, 1=Resize
+            static int resample = 1; // 0=Nearest, 1=Bilinear, 2=Lanczos
             static bool initSize = false;
             if (!initSize) {
                 targetW = canvas.GetWidth();
@@ -1449,17 +1724,30 @@ namespace UI {
                 initSize = true;
             }
 
-            ImGui::Text("Resize Canvas Dimensions:");
+            ImGui::Text("Canvas: %d x %d", canvas.GetWidth(), canvas.GetHeight());
+            ImGui::Separator();
+            ImGui::RadioButton("Extend (pad/crop, no scale)", &editMode, 0);
+            ImGui::RadioButton("Resize (scale content)", &editMode, 1);
             ImGui::Separator();
             ImGui::InputInt("Width", &targetW, 128, 256);
             ImGui::InputInt("Height", &targetH, 128, 256);
-
             if (targetW < 1) targetW = 1;
             if (targetH < 1) targetH = 1;
 
+            if (editMode == 1) {
+                const char* filters[] = { "Nearest", "Bilinear", "Lanczos" };
+                ImGui::Combo("Algorithm", &resample, filters, IM_ARRAYSIZE(filters));
+            } else {
+                ImGui::TextDisabled("Extend keeps pixels 1:1; content is centered.");
+            }
+
             ImGui::Separator();
-            if (ImGui::Button("Resize", ImVec2(120, 0))) {
-                canvas.ResizeCanvas(device, targetW, targetH);
+            if (ImGui::Button("Apply", ImVec2(120, 0))) {
+                auto mode = (editMode == 0) ? Canvas::CanvasEditMode::Extend : Canvas::CanvasEditMode::Resize;
+                auto filter = Canvas::ResampleFilter::Bilinear;
+                if (resample == 0) filter = Canvas::ResampleFilter::Nearest;
+                else if (resample == 2) filter = Canvas::ResampleFilter::Lanczos;
+                canvas.EditCanvas(device, mode, targetW, targetH, filter, 0.5f, 0.5f);
                 initSize = false;
                 ImGui::CloseCurrentPopup();
             }
@@ -1540,12 +1828,29 @@ namespace UI {
             if (window) {
                 isVertical = (window->Size.y > window->Size.x);
             }
+            // Size constraints apply when floating; when docked, also clamp dock node cross-axis
             if (isVertical) {
                 ImGui::SetNextWindowSizeConstraints(ImVec2(16.0f, 100.0f), ImVec2(64.0f, 16384.0f));
             } else {
                 ImGui::SetNextWindowSizeConstraints(ImVec2(100.0f, 16.0f), ImVec2(16384.0f, 64.0f));
             }
             ImGui::Begin("Toolbar", &state.showToolbar, ImGuiWindowFlags_NoCollapse);
+
+            // Docked: keep toolbar strip thin so icons stay proportional
+            if (ImGuiWindow* tw = ImGui::GetCurrentWindow()) {
+                if (tw->DockNode && !tw->DockNode->IsFloatingNode()) {
+                    ImGuiDockNode* node = tw->DockNode;
+                    if (isVertical) {
+                        float w = std::clamp(node->Size.x, 16.0f, 64.0f);
+                        if (std::fabs(node->Size.x - w) > 0.5f)
+                            ImGui::DockBuilderSetNodeSize(node->ID, ImVec2(w, node->Size.y));
+                    } else {
+                        float h = std::clamp(node->Size.y, 16.0f, 64.0f);
+                        if (std::fabs(node->Size.y - h) > 0.5f)
+                            ImGui::DockBuilderSetNodeSize(node->ID, ImVec2(node->Size.x, h));
+                    }
+                }
+            }
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
 
@@ -1558,23 +1863,29 @@ namespace UI {
             std::string pipetteBind = KeymapManager::Get().GetActionShortcutString("PipetteTool");
             std::string smudgeBind  = KeymapManager::Get().GetActionShortcutString("SmudgeTool");
             std::string selectBind = KeymapManager::Get().GetActionShortcutString("SelectToolGroup");
+            std::string lassoBind = KeymapManager::Get().GetActionShortcutString("LassoToolGroup");
             std::string wandBind = KeymapManager::Get().GetActionShortcutString("WandToolGroup");
             std::string transformBind = KeymapManager::Get().GetActionShortcutString("TransformTool");
 
             static const ToolVariant s_SelectVariants[] = {
                 { "RectSelectTool", "Rectangular Selection", ActiveTool::RectSelect },
                 { "EllipseSelectTool", "Ellipse Selection", ActiveTool::EllipseSelect },
+            };
+            static const ToolVariant s_LassoVariants[] = {
                 { "LassoSelectTool", "Lasso Selection", ActiveTool::LassoSelect },
+                { "PolygonalLassoTool", "Polygonal Lasso", ActiveTool::PolygonalLasso },
             };
             static const ToolVariant s_WandVariants[] = {
                 { "MagicWandTool", "Magic Wand", ActiveTool::MagicWand },
+                { "QuickSelectTool", "Quick Selection", ActiveTool::QuickSelect },
                 { "SmartSelectTool", "Smart Select", ActiveTool::SmartSelect },
             };
 
             static std::string s_RebindAction = "";
             constexpr int kToolbarButtonCount = 11;
             const bool hasSeparator = true;
-            float btnSize = 32.0f;
+            // Adaptive icon size from dock/window content region (works docked + floating)
+            float btnSize = ComputeAdaptiveToolButtonSize(avail, isVertical, kToolbarButtonCount + 1 /*+Reset*/, hasSeparator);
             float gap = isVertical ? ImGui::GetStyle().ItemSpacing.y : ImGui::GetStyle().ItemSpacing.x;
 
             ToolbarBeginLayout(avail, isVertical, kToolbarButtonCount, btnSize, gap, hasSeparator);
@@ -1594,8 +1905,11 @@ namespace UI {
             RenderGroupedToolButton("SelectGroup", "SelectToolGroup", s_SelectVariants, IM_ARRAYSIZE(s_SelectVariants),
                 "Selection Tools", selectBind, btnSize, s_RebindAction, activeTool);
             ToolbarAdvance(isVertical, gap);
+            RenderGroupedToolButton("LassoGroup", "LassoToolGroup", s_LassoVariants, IM_ARRAYSIZE(s_LassoVariants),
+                "Lasso Tools", lassoBind, btnSize, s_RebindAction, activeTool);
+            ToolbarAdvance(isVertical, gap);
             RenderGroupedToolButton("WandGroup", "WandToolGroup", s_WandVariants, IM_ARRAYSIZE(s_WandVariants),
-                "Wand / Smart Select", wandBind, btnSize, s_RebindAction, activeTool);
+                "Wand / Selection Tools", wandBind, btnSize, s_RebindAction, activeTool);
             ToolbarAdvance(isVertical, gap);
             RenderToolButton("TransformTool", "Transform", ActiveTool::MovePixels, false, transformBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             ToolbarAdvance(isVertical, gap);
@@ -1769,18 +2083,7 @@ namespace UI {
                     }
                 }
             } else if (ext == "png") {
-                char propIccPath[512] = "";
-                std::string currentIcc = canvas.GetExportPngColorSpace();
-                if (currentIcc != "sRGB" && currentIcc != "Linear") {
-                    std::strncpy(propIccPath, currentIcc.c_str(), sizeof(propIccPath));
-                }
-                ImGui::InputText("ICC Profile", propIccPath, IM_ARRAYSIZE(propIccPath));
-                ImGui::SameLine();
-                if (ImGui::Button("...##propIccPath")) {
-                    if (ShowOpenFileWin32(propIccPath, IM_ARRAYSIZE(propIccPath), "ICC Profiles (*.icc;*.icm)\0*.icc;*.icm\0All Files (*.*)\0*.*\0")) {
-                        canvas.SetExportPngColorSpace(strlen(propIccPath) > 0 ? propIccPath : "sRGB");
-                    }
-                }
+                DrawIccPresetCombo(canvas, "ICC Profile");
             }
 
             ImGui::End();
@@ -1881,11 +2184,29 @@ namespace UI {
                             }
                             
                             if (ImGui::ImageButton("##layer_content_btn", (ImTextureID)layer.srv, ImVec2(36, 36), ImVec2(0,0), ImVec2(1,1))) {
-                                canvas.SetActiveLayerIndex(i);
-                                canvas.SetPaintTarget(PaintTarget::LayerContent);
+                                if (ImGui::GetIO().KeyCtrl) {
+                                    // Ctrl+Click thumbnail → select opaque pixels of this layer
+                                    canvas.SelectOpaquePixels(i);
+                                    canvas.UpdateSelectionMaskTexture(device);
+                                } else {
+                                    canvas.SetActiveLayerIndex(i);
+                                    canvas.SetPaintTarget(PaintTarget::LayerContent);
+                                }
                             }
                             if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("Layer Content (Click to paint color)");
+                                ImGui::SetTooltip("Layer Content (Click to paint)\nCtrl+Click: select opaque pixels");
+                            }
+                            // Smart Object / Vector SVG badge on thumbnail
+                            if (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg) {
+                                ImVec2 tmin = ImGui::GetItemRectMin();
+                                ImVec2 tmax = ImGui::GetItemRectMax();
+                                ImDrawList* ldl = ImGui::GetWindowDrawList();
+                                const char* badge = (layer.type == Layer::Type::VectorSvg) ? "SVG" : "SO";
+                                ImVec2 ts = ImGui::CalcTextSize(badge);
+                                ImVec2 bmin(tmax.x - ts.x - 6.f, tmin.y + 1.f);
+                                ImVec2 bmax(tmax.x - 1.f, tmin.y + ts.y + 3.f);
+                                ldl->AddRectFilled(bmin, bmax, IM_COL32(40, 120, 220, 220), 2.f);
+                                ldl->AddText(ImVec2(bmin.x + 2.f, bmin.y + 1.f), IM_COL32(255,255,255,255), badge);
                             }
                             
                             ImGui::PopStyleVar();
@@ -1909,7 +2230,7 @@ namespace UI {
                                     if (ok) {
                                         DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), true);
                                         if (payload->IsDelivery()) {
-                                            int newIdx = DropLayerIntoGroup(layers, draggedIdx, i);
+                                            int newIdx = canvas.MoveLayerIntoGroup(draggedIdx, i);
                                             canvas.SetActiveLayerIndex(newIdx);
                                             canvas.MarkCompositeDirty();
                                         }
@@ -1961,12 +2282,21 @@ namespace UI {
                         char label[256];
                         if (layer.isGroup) {
                             std::sprintf(label, "[Group] %s", layer.name.c_str());
+                        } else if (layer.type == Layer::Type::VectorSvg) {
+                            std::sprintf(label, "[SVG] %s", layer.name.c_str());
+                        } else if (layer.type == Layer::Type::SmartObject) {
+                            std::sprintf(label, "[Smart] %s", layer.name.c_str());
                         } else {
                             std::sprintf(label, "%s", layer.name.c_str());
                         }
                         
                         if (ImGui::Selectable(label, isSelected, ImGuiSelectableFlags_None, ImVec2(ImGui::GetContentRegionAvail().x - 70, 36))) {
-                            canvas.SetActiveLayerIndex(i);
+                            if (ImGui::GetIO().KeyCtrl && !layer.isGroup) {
+                                canvas.SelectOpaquePixels(i);
+                                canvas.UpdateSelectionMaskTexture(device);
+                            } else {
+                                canvas.SetActiveLayerIndex(i);
+                            }
                         }
 
                         // Drag source (whole label)
@@ -1977,6 +2307,7 @@ namespace UI {
                         }
 
                         // Drag target: drop ON a group name → into group; drop on layer → reorder as sibling
+                        // Uses core MoveLayerIntoGroup / ReorderLayer (stable parentGroupId remap)
                         if (ImGui::BeginDragDropTarget()) {
                             if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
                                     "LAYER_INDEX",
@@ -1990,19 +2321,30 @@ namespace UI {
 
                                     if (payload->IsDelivery()) {
                                         if (intoGroup) {
-                                            int newIdx = DropLayerIntoGroup(layers, draggedIdx, i);
+                                            int newIdx = canvas.MoveLayerIntoGroup(draggedIdx, i);
                                             canvas.SetActiveLayerIndex(newIdx);
                                         } else {
-                                            // Reorder as sibling of target (same parent as target)
                                             int targetParentOrig = layer.parentGroupId;
-                                            int newIdx = ReorderLayer(layers, draggedIdx, i);
-                                            int newParent = MapIndexAfterReorder(targetParentOrig, draggedIdx, i);
-                                            // Don't parent a layer to itself / invalid
-                                            if (newParent == newIdx || newParent < 0 || newParent >= (int)layers.size())
+                                            int newIdx = canvas.ReorderLayer(draggedIdx, i);
+                                            // Remap desired parent after core reorder
+                                            auto mapIdx = [](int j, int fromIdx, int toIdx) {
+                                                if (fromIdx == toIdx) return j;
+                                                if (fromIdx < toIdx) {
+                                                    if (j == fromIdx) return toIdx;
+                                                    if (j > fromIdx && j <= toIdx) return j - 1;
+                                                    return j;
+                                                }
+                                                if (j == fromIdx) return toIdx;
+                                                if (j >= toIdx && j < fromIdx) return j + 1;
+                                                return j;
+                                            };
+                                            int newParent = mapIdx(targetParentOrig, draggedIdx, i);
+                                            auto& L = canvas.GetLayers();
+                                            if (newParent == newIdx || newParent < 0 || newParent >= (int)L.size())
                                                 newParent = -1;
-                                            if (newParent >= 0 && !layers[newParent].isGroup)
+                                            if (newParent >= 0 && !L[newParent].isGroup)
                                                 newParent = -1;
-                                            layers[newIdx].parentGroupId = newParent;
+                                            L[newIdx].parentGroupId = newParent;
                                             canvas.SetActiveLayerIndex(newIdx);
                                         }
                                         canvas.MarkCompositeDirty();
@@ -2012,7 +2354,7 @@ namespace UI {
                             ImGui::EndDragDropTarget();
                         }
 
-                        // Context menu for grouping/ungrouping
+                        // Context menu for grouping/ungrouping / smart objects
                         if (ImGui::BeginPopupContextItem("##layer_context")) {
                             if (ImGui::MenuItem("Remove from Group", nullptr, false, layer.parentGroupId != -1)) {
                                 canvas.RemoveLayerFromGroup(i);
@@ -2027,6 +2369,13 @@ namespace UI {
                                     }
                                 }
                                 ImGui::EndMenu();
+                            }
+
+                            if (!layer.isGroup && (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg)) {
+                                ImGui::Separator();
+                                if (ImGui::MenuItem("Rasterize Layer")) {
+                                    canvas.RasterizeLayer(device, i);
+                                }
                             }
                             
                             ImGui::Separator();
@@ -2296,11 +2645,19 @@ namespace UI {
                     ImGui::TextDisabled("Hold Alt+LMB: sample color (eyedropper)");
                 }
             }
-            else if (activeTool == ActiveTool::MagicWand || activeTool == ActiveTool::SmartSelect) {
-                BeginToolSection(activeTool == ActiveTool::MagicWand ? "Magic Wand" : "Smart Select");
+            else if (activeTool == ActiveTool::MagicWand || activeTool == ActiveTool::SmartSelect || activeTool == ActiveTool::QuickSelect) {
+                BeginToolSection(activeTool == ActiveTool::MagicWand ? "Magic Wand" : (activeTool == ActiveTool::QuickSelect ? "Quick Selection" : "Smart Select"));
                 if (activeTool == ActiveTool::MagicWand) {
-                    ImGui::SliderFloat("Tolerance##mw", &state.magicWandTolerance, 0.0f, 1.0f, "%.2f");
-                    ImGui::Checkbox("Contiguous", &state.magicWandContiguous);
+                    bool changed = false;
+                    if (ImGui::SliderFloat("Tolerance##mw", &state.magicWandTolerance, 0.0f, 1.0f, "%.2f")) changed = true;
+                    if (ImGui::Checkbox("Contiguous", &state.magicWandContiguous)) changed = true;
+                    if (changed && canvas.HasWandSeed()) {
+                        bool add = ImGui::GetIO().KeyShift;
+                        bool subtract = ImGui::GetIO().KeyAlt;
+                        canvas.PreviewWandFromSeed(device, state.magicWandTolerance, add, subtract, state.magicWandContiguous);
+                    }
+                } else if (activeTool == ActiveTool::QuickSelect) {
+                    ImGui::SliderFloat("Brush Size##qs", &brush.radius, 1.0f, 200.0f, "%.0f");
                 } else {
                     ImGui::TextWrapped("Draw contour; GrabCut runs in background.");
                 }
@@ -2310,12 +2667,16 @@ namespace UI {
                 BeginToolSection("Bucket Fill");
                 ImGui::SliderFloat("Tolerance##bf", &state.bucketFillTolerance, 0.0f, 1.0f, "%.2f");
             }
-            else if (IsSelectTool(activeTool)) {
+            else if (IsSelectTool(activeTool) || IsLassoTool(activeTool)) {
                 const char* selName =
                     activeTool == ActiveTool::RectSelect ? "Rectangular Selection" :
-                    activeTool == ActiveTool::EllipseSelect ? "Ellipse Selection" : "Lasso Selection";
+                    activeTool == ActiveTool::EllipseSelect ? "Ellipse Selection" :
+                    activeTool == ActiveTool::LassoSelect ? "Lasso Selection" : "Polygonal Lasso";
                 BeginToolSection(selName);
-                ImGui::TextDisabled("Shift: add  |  Alt: subtract  |  S: cycle select tools");
+                if (activeTool == ActiveTool::PolygonalLasso) {
+                    ImGui::TextWrapped("Click to add vertices. Double-click/Enter to close. Esc to cancel.");
+                }
+                ImGui::TextDisabled("Shift: add  |  Alt: subtract");
             }
             else if (activeTool == ActiveTool::Gradient) {
                 BeginToolSection("Gradient");

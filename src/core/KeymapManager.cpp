@@ -113,6 +113,7 @@ void KeymapManager::Initialize() {
 
     // Image / Selection operations
     m_Bindings["SelectAll"]        = KeyCombination{ GLFW_KEY_A, -1, true, false, false };
+    m_Bindings["CropToSelection"]  = KeyCombination{ GLFW_KEY_X, -1, true, false, false }; // Ctrl+X = crop canvas to selection
     m_Bindings["InvertSelection"]  = KeyCombination{ GLFW_KEY_I, -1, true, true,  false };
     m_Bindings["AdjustHSV"]        = KeyCombination{ GLFW_KEY_U, -1, true, false, false };
 

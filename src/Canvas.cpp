@@ -2169,6 +2169,53 @@ std::vector<float> Canvas::GetCompositePixels() const {
     return ComposeVisibleLayers(m_Layers, m_Width, m_Height);
 }
 
+void Canvas::SampleCompositePixel(int x, int y, float outColor[4]) const {
+    outColor[0] = 0.0f;
+    outColor[1] = 0.0f;
+    outColor[2] = 0.0f;
+    outColor[3] = 0.0f;
+
+    if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) return;
+
+    std::vector<const Layer*> vis;
+    vis.reserve(m_Layers.size());
+    for (const auto& layer : m_Layers) {
+        if (LayerEffectivelyVisible(m_Layers, layer)) vis.push_back(&layer);
+    }
+    if (vis.empty()) return;
+
+    uint8_t dp[4] = { 0, 0, 0, 0 };
+
+    for (const Layer* layer : vis) {
+        const TileCache* cache = layer->tileCache.get();
+        if (!cache) continue;
+
+        const bool useMask = layer->hasMask && layer->mask.size() == (size_t)m_Width * m_Height;
+        const float opacity = layer->opacity;
+        const BlendMode mode = layer->blendMode;
+
+        float rgba[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        cache->GetPixelF(x, y, rgba);
+
+        float sr = rgba[0];
+        float sg = rgba[1];
+        float sb = rgba[2];
+        float sa = rgba[3] * opacity;
+
+        if (useMask) {
+            sa *= layer->mask[(size_t)y * m_Width + x] / 255.f;
+        }
+
+        if (sa <= 0.f) continue;
+        BlendLayerPixelU8(dp, sr, sg, sb, sa, mode);
+    }
+
+    outColor[0] = dp[0] / 255.f;
+    outColor[1] = dp[1] / 255.f;
+    outColor[2] = dp[2] / 255.f;
+    outColor[3] = dp[3] / 255.f;
+}
+
 void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height) {
     if (pixels.empty() || width <= 0 || height <= 0) return;
 

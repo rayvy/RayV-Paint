@@ -246,6 +246,15 @@ public:
     float GetFloatingScaleX() const { return m_FloatingScaleX; }
     float GetFloatingScaleY() const { return m_FloatingScaleY; }
     float GetFloatingRotation() const { return m_FloatingRotation; }
+    int GetFloatingOffsetX() const { return m_FloatingOffsetX; }
+    int GetFloatingOffsetY() const { return m_FloatingOffsetY; }
+    // Selection AABB of floating transform content (canvas space, before offset/scale/rot).
+    bool GetFloatingBBox(int& outX, int& outY, int& outW, int& outH) const {
+        if (!m_IsMovingPixels || m_FloatingBBoxW <= 0 || m_FloatingBBoxH <= 0) return false;
+        outX = m_FloatingBBoxX; outY = m_FloatingBBoxY;
+        outW = m_FloatingBBoxW; outH = m_FloatingBBoxH;
+        return true;
+    }
     void SetFloatingScaleX(float sx) { m_FloatingScaleX = sx; }
     void SetFloatingScaleY(float sy) { m_FloatingScaleY = sy; }
     void SetFloatingRotation(float rot) { m_FloatingRotation = rot; }
@@ -273,6 +282,7 @@ public:
     bool SaveCanvasStandard(const std::string& filepath, IccPreset preset);
     bool SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed);
     std::vector<float> GetCompositePixels() const;
+    void SampleCompositePixel(int x, int y, float outColor[4]) const;
     void CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height);
 
     // Pixel Transformations
