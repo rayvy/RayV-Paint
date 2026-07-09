@@ -1618,6 +1618,22 @@ bool Canvas::ExtractAndSetICCProfile(const std::string& pngPath) {
     return false;
 }
 
+bool Canvas::OpenDocument(ID3D11Device* device, const std::string& filepath) {
+    std::string ext;
+    size_t dotPos = filepath.find_last_of('.');
+    if (dotPos != std::string::npos) {
+        ext = filepath.substr(dotPos + 1);
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    }
+
+    if (ext == "rayp") {
+        Logger::Get().InfoTag("io", "OpenDocument: .rayp project → LoadCanvasRayp: " + filepath);
+        return LoadCanvasRayp(filepath, device);
+    }
+    Logger::Get().InfoTag("io", "OpenDocument: image import → LoadImageToLayer: " + filepath);
+    return LoadImageToLayer(device, filepath);
+}
+
 bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath) {
     ScopedTimer loadTimer("LoadImageToLayer " + filepath);
     MemoryStats::LogSnapshot("before_LoadImageToLayer");
@@ -1627,6 +1643,13 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     if (dotPos != std::string::npos) {
         ext = filepath.substr(dotPos + 1);
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    }
+
+    // Never decode projects with STB — route explicitly.
+    if (ext == "rayp") {
+        Logger::Get().ErrorTag("io",
+            "LoadImageToLayer refused .rayp project. Use Open Project / OpenDocument: " + filepath);
+        return false;
     }
 
     int imgWidth = 0, imgHeight = 0;
@@ -1969,6 +1992,169 @@ void Canvas::ClearUndoHistory() {
     m_UndoRedoManager.Clear();
 }
 
+// RAYP format:
+//   v1: name/visible/opacity + zlib float RGBA pixels per layer
+//   v2: + blend_mode, filters, groups, has_mask; after each layer pixels optional mask blob
+static constexpr uint32_t kRaypVersionCurrent = 2;
+
+static const char* BlendModeToString(BlendMode m) {
+    switch (m) {
+        case BlendMode::Normal:    return "Normal";
+        case BlendMode::Multiply:  return "Multiply";
+        case BlendMode::Screen:    return "Screen";
+        case BlendMode::Overlay:   return "Overlay";
+        case BlendMode::Add:       return "Add";
+        case BlendMode::Subtract:  return "Subtract";
+        case BlendMode::Darken:    return "Darken";
+        case BlendMode::Lighten:   return "Lighten";
+        case BlendMode::HardLight: return "HardLight";
+        case BlendMode::SoftLight: return "SoftLight";
+        default: return "Normal";
+    }
+}
+
+static BlendMode BlendModeFromString(const std::string& s) {
+    if (s == "Multiply")  return BlendMode::Multiply;
+    if (s == "Screen")    return BlendMode::Screen;
+    if (s == "Overlay")   return BlendMode::Overlay;
+    if (s == "Add")       return BlendMode::Add;
+    if (s == "Subtract")  return BlendMode::Subtract;
+    if (s == "Darken")    return BlendMode::Darken;
+    if (s == "Lighten")   return BlendMode::Lighten;
+    if (s == "HardLight") return BlendMode::HardLight;
+    if (s == "SoftLight") return BlendMode::SoftLight;
+    return BlendMode::Normal;
+}
+
+static const char* FilterTypeToString(FilterType t) {
+    switch (t) {
+        case FilterType::Blur:        return "Blur";
+        case FilterType::HSV:         return "HSV";
+        case FilterType::Curves:      return "Curves";
+        case FilterType::AlphaInvert: return "AlphaInvert";
+        case FilterType::Noise:       return "Noise";
+        default: return "Blur";
+    }
+}
+
+static FilterType FilterTypeFromString(const std::string& s) {
+    if (s == "HSV")         return FilterType::HSV;
+    if (s == "Curves")      return FilterType::Curves;
+    if (s == "AlphaInvert") return FilterType::AlphaInvert;
+    if (s == "Noise")       return FilterType::Noise;
+    return FilterType::Blur;
+}
+
+static json LayerToJson(const Layer& layer) {
+    json j;
+    j["name"] = layer.name;
+    j["visible"] = layer.visible;
+    j["opacity"] = layer.opacity;
+    j["blend_mode"] = BlendModeToString(layer.blendMode);
+    j["is_group"] = layer.isGroup;
+    j["parent_group_id"] = layer.parentGroupId;
+    j["group_expanded"] = layer.groupExpanded;
+    j["has_mask"] = layer.hasMask && !layer.mask.empty();
+
+    json filters = json::array();
+    for (const auto& f : layer.filters) {
+        json fj;
+        fj["type"] = FilterTypeToString(f.type);
+        fj["enabled"] = f.enabled;
+        fj["p"] = { f.p[0], f.p[1], f.p[2], f.p[3] };
+        if (!f.lut.empty()) fj["lut"] = f.lut;
+        filters.push_back(fj);
+    }
+    j["filters"] = filters;
+    return j;
+}
+
+static void LayerFromJson(Layer& layer, const json& j) {
+    if (j.contains("name")) layer.name = j["name"].get<std::string>();
+    if (j.contains("visible")) layer.visible = j["visible"].get<bool>();
+    if (j.contains("opacity")) layer.opacity = j["opacity"].get<float>();
+
+    if (j.contains("blend_mode")) {
+        if (j["blend_mode"].is_string()) {
+            layer.blendMode = BlendModeFromString(j["blend_mode"].get<std::string>());
+        } else if (j["blend_mode"].is_number_integer()) {
+            layer.blendMode = static_cast<BlendMode>(j["blend_mode"].get<int>());
+        }
+    }
+
+    if (j.contains("is_group")) layer.isGroup = j["is_group"].get<bool>();
+    if (j.contains("parent_group_id")) layer.parentGroupId = j["parent_group_id"].get<int>();
+    if (j.contains("group_expanded")) layer.groupExpanded = j["group_expanded"].get<bool>();
+    if (j.contains("has_mask")) layer.hasMask = j["has_mask"].get<bool>();
+
+    layer.filters.clear();
+    if (j.contains("filters") && j["filters"].is_array()) {
+        for (const auto& fj : j["filters"]) {
+            LayerFilter f;
+            if (fj.contains("type")) {
+                if (fj["type"].is_string()) f.type = FilterTypeFromString(fj["type"].get<std::string>());
+                else if (fj["type"].is_number_integer()) f.type = static_cast<FilterType>(fj["type"].get<int>());
+            }
+            if (fj.contains("enabled")) f.enabled = fj["enabled"].get<bool>();
+            if (fj.contains("p") && fj["p"].is_array()) {
+                for (int i = 0; i < 4 && i < (int)fj["p"].size(); ++i) {
+                    f.p[i] = fj["p"][i].get<float>();
+                }
+            }
+            if (fj.contains("lut") && fj["lut"].is_array()) {
+                f.lut = fj["lut"].get<std::vector<float>>();
+            }
+            layer.filters.push_back(std::move(f));
+        }
+    }
+    layer.filtersDirty = !layer.filters.empty();
+}
+
+static bool WriteZlibBlob(std::ostream& out, const void* data, size_t uncompressedBytes) {
+    int compSize = 0;
+    unsigned char* compData = stbi_zlib_compress(
+        reinterpret_cast<unsigned char*>(const_cast<void*>(data)),
+        static_cast<int>(uncompressedBytes),
+        &compSize,
+        8
+    );
+    if (!compData) return false;
+    uint64_t uncompressedSize = uncompressedBytes;
+    uint64_t compressedSize = (uint64_t)compSize;
+    out.write(reinterpret_cast<const char*>(&uncompressedSize), sizeof(uncompressedSize));
+    out.write(reinterpret_cast<const char*>(&compressedSize), sizeof(compressedSize));
+    out.write(reinterpret_cast<const char*>(compData), compressedSize);
+    free(compData);
+    return true;
+}
+
+static bool ReadZlibBlob(std::istream& in, std::vector<uint8_t>& outBytes) {
+    uint64_t uncompressedSize = 0;
+    uint64_t compressedSize = 0;
+    in.read(reinterpret_cast<char*>(&uncompressedSize), sizeof(uncompressedSize));
+    in.read(reinterpret_cast<char*>(&compressedSize), sizeof(compressedSize));
+    if (!in || compressedSize > (1ull << 32)) return false;
+
+    std::vector<uint8_t> compressedBytes(compressedSize);
+    in.read(reinterpret_cast<char*>(compressedBytes.data()), (std::streamsize)compressedSize);
+    if (!in) return false;
+
+    int decompSize = 0;
+    char* decompData = stbi_zlib_decode_malloc(
+        reinterpret_cast<const char*>(compressedBytes.data()),
+        static_cast<int>(compressedSize),
+        &decompSize
+    );
+    if (!decompData || static_cast<size_t>(decompSize) != uncompressedSize) {
+        if (decompData) free(decompData);
+        return false;
+    }
+    outBytes.resize(uncompressedSize);
+    std::memcpy(outBytes.data(), decompData, uncompressedSize);
+    free(decompData);
+    return true;
+}
+
 bool Canvas::SaveCanvasRayp(const std::string& filepath) {
     if (m_Layers.empty()) {
         Logger::Get().Error("No layers to save in RAYP.");
@@ -1976,13 +2162,13 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
     }
 
     try {
-        // 1. Create JSON metadata
         json metadata;
         metadata["width"] = m_Width;
         metadata["height"] = m_Height;
         metadata["active_layer"] = m_ActiveLayerIdx;
         metadata["project_type"] = (m_ProjectType == ProjectType::Simple) ? "simple" : "advanced";
-        
+        metadata["format_features"] = "blend_filters_mask_groups";
+
         metadata["export_path"] = m_ExportPath;
         metadata["export_format"] = m_ExportFormat;
         metadata["export_advanced_mode"] = m_ExportAdvancedMode;
@@ -1993,17 +2179,12 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
 
         json layersArray = json::array();
         for (const auto& layer : m_Layers) {
-            json layerJson;
-            layerJson["name"] = layer.name;
-            layerJson["visible"] = layer.visible;
-            layerJson["opacity"] = layer.opacity;
-            layersArray.push_back(layerJson);
+            layersArray.push_back(LayerToJson(layer));
         }
         metadata["layers"] = layersArray;
 
         std::string metadataStr = metadata.dump();
 
-        // 2. Open binary file for writing
 #ifdef _WIN32
         std::ofstream out(UTF8ToWString(filepath), std::ios::binary);
 #else
@@ -2014,47 +2195,36 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
             return false;
         }
 
-        // Write Magic header
         out.write("RAYP", 4);
-        
-        // Write format version
-        uint32_t version = 1;
+        uint32_t version = kRaypVersionCurrent;
         out.write(reinterpret_cast<const char*>(&version), sizeof(version));
 
-        // Write Metadata size and content
         uint64_t metadataSize = metadataStr.size();
         out.write(reinterpret_cast<const char*>(&metadataSize), sizeof(metadataSize));
         out.write(metadataStr.data(), metadataStr.size());
 
-        // 3. Compress and write pixel data for each layer
+        // Pixels (float RGBA) + optional mask blob per layer (v2)
         for (auto& layer : m_Layers) {
             std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
-            uint64_t uncompressedSize = layerPixels.size() * sizeof(float);
-            
-            int compSize = 0;
-            unsigned char* compData = stbi_zlib_compress(
-                reinterpret_cast<unsigned char*>(layerPixels.data()),
-                static_cast<int>(uncompressedSize),
-                &compSize,
-                8 // good compression level
-            );
-
-            if (!compData) {
+            if (!WriteZlibBlob(out, layerPixels.data(), layerPixels.size() * sizeof(float))) {
                 Logger::Get().Error("Failed to compress layer data for " + layer.name);
                 return false;
             }
 
-            uint64_t compressedSize = compSize;
-            out.write(reinterpret_cast<const char*>(&uncompressedSize), sizeof(uncompressedSize));
-            out.write(reinterpret_cast<const char*>(&compressedSize), sizeof(compressedSize));
-            out.write(reinterpret_cast<const char*>(compData), compressedSize);
-
-            free(compData);
+            // v2: mask follows pixels when present
+            if (layer.hasMask && !layer.mask.empty()) {
+                if (!WriteZlibBlob(out, layer.mask.data(), layer.mask.size())) {
+                    Logger::Get().Error("Failed to compress mask for " + layer.name);
+                    return false;
+                }
+            }
         }
 
         m_IsDocumentModified = false;
         m_CurrentProjectFilePath = filepath;
-        Logger::Get().Info("Successfully saved project to " + filepath);
+        Logger::Get().Info("Successfully saved project to " + filepath +
+            " (RAYP v" + std::to_string(kRaypVersionCurrent) +
+            ", layers=" + std::to_string(m_Layers.size()) + ")");
         return true;
     }
     catch (const std::exception& e) {
@@ -2084,29 +2254,28 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
             return false;
         }
 
-        // Read format version
+        // Read format version (1 = basic, 2 = blend/filters/mask/groups)
         uint32_t version = 0;
         in.read(reinterpret_cast<char*>(&version), sizeof(version));
-        if (version != 1) {
+        if (version != 1 && version != 2) {
             Logger::Get().Error("Unsupported RAYP version: " + std::to_string(version));
             return false;
         }
 
-        // Read Metadata size and content
         uint64_t metadataSize = 0;
         in.read(reinterpret_cast<char*>(&metadataSize), sizeof(metadataSize));
-        
+
         std::string metadataStr;
         metadataStr.resize(metadataSize);
         in.read(&metadataStr[0], metadataSize);
 
-        // Parse JSON metadata
         json metadata = json::parse(metadataStr);
 
-        // Release old resources
         for (auto& layer : m_Layers) {
             if (layer.texture) layer.texture->Release();
             if (layer.srv) layer.srv->Release();
+            if (layer.maskTexture) layer.maskTexture->Release();
+            if (layer.maskSRV) layer.maskSRV->Release();
         }
         m_Layers.clear();
 
@@ -2131,59 +2300,63 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
         if (metadata.contains("export_mip_filter")) m_ExportMipFilter = metadata["export_mip_filter"].get<std::string>();
         if (metadata.contains("export_png_color_space")) m_ExportPngColorSpace = metadata["export_png_color_space"].get<std::string>();
 
-        // Recreate composition resources
         CreateCompositeResources(device);
 
         auto layersArray = metadata["layers"];
         for (size_t idx = 0; idx < layersArray.size(); ++idx) {
-            auto layerJson = layersArray[idx];
             Layer layer;
-            layer.name = layerJson["name"].get<std::string>();
-            layer.visible = layerJson["visible"].get<bool>();
-            layer.opacity = layerJson["opacity"].get<float>();
-            
-            // Read uncompressed and compressed size
-            uint64_t uncompressedSize = 0;
-            uint64_t compressedSize = 0;
-            in.read(reinterpret_cast<char*>(&uncompressedSize), sizeof(uncompressedSize));
-            in.read(reinterpret_cast<char*>(&compressedSize), sizeof(compressedSize));
+            LayerFromJson(layer, layersArray[idx]);
 
-            std::vector<uint8_t> compressedBytes(compressedSize);
-            in.read(reinterpret_cast<char*>(compressedBytes.data()), compressedSize);
-
-            // Decompress using stbi_zlib_decode_malloc
-            int decompSize = 0;
-            char* decompData = stbi_zlib_decode_malloc(
-                reinterpret_cast<const char*>(compressedBytes.data()),
-                static_cast<int>(compressedSize),
-                &decompSize
-            );
-
-            if (!decompData || static_cast<size_t>(decompSize) != uncompressedSize) {
+            std::vector<uint8_t> pixelBytes;
+            if (!ReadZlibBlob(in, pixelBytes)) {
                 Logger::Get().Error("Failed to decompress layer data for " + layer.name);
-                if (decompData) free(decompData);
                 return false;
             }
 
-            std::vector<float> layerPixels(uncompressedSize / sizeof(float));
-            std::memcpy(layerPixels.data(), decompData, uncompressedSize);
-            free(decompData);
+            if (!layer.isGroup) {
+                if (pixelBytes.size() % sizeof(float) != 0) {
+                    Logger::Get().Error("Corrupt layer pixel blob for " + layer.name);
+                    return false;
+                }
+                std::vector<float> layerPixels(pixelBytes.size() / sizeof(float));
+                std::memcpy(layerPixels.data(), pixelBytes.data(), pixelBytes.size());
 
-            layer.tileCache = std::make_unique<TileCache>();
-            layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
-            layer.tileCache->ImportRGBA32F(layerPixels.data(), m_Width, m_Height);
-            layer.tileCache->MarkAllDirty();
-            layer.needsUpload = true;
-            RecreateLayerTexture(device, layer);
+                layer.tileCache = std::make_unique<TileCache>();
+                layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+                layer.tileCache->ImportRGBA32F(layerPixels.data(), m_Width, m_Height);
+                layer.tileCache->MarkAllDirty();
+                layer.needsUpload = true;
+                RecreateLayerTexture(device, layer);
+            }
+
+            // v2: mask blob after pixels when has_mask
+            if (version >= 2 && layer.hasMask) {
+                std::vector<uint8_t> maskBytes;
+                if (!ReadZlibBlob(in, maskBytes)) {
+                    Logger::Get().Error("Failed to decompress mask for " + layer.name);
+                    return false;
+                }
+                layer.mask = std::move(maskBytes);
+                layer.maskNeedsUpload = true;
+            } else if (version < 2) {
+                layer.hasMask = false;
+            }
 
             m_Layers.push_back(std::move(layer));
+            if (m_Layers.back().hasMask && !m_Layers.back().mask.empty() && device) {
+                UpdateLayerMaskTexture(device, static_cast<int>(m_Layers.size()) - 1);
+            }
         }
         m_CompositeDirty = true;
 
         m_UndoRedoManager.Clear();
         m_IsDocumentModified = false;
         m_CurrentProjectFilePath = filepath;
-        Logger::Get().Info("Successfully loaded project from " + filepath);
+        MemoryStats::LogSnapshot("after_LoadCanvasRayp");
+        Logger::Get().Info("Successfully loaded project from " + filepath +
+            " (RAYP v" + std::to_string(version) +
+            ", " + std::to_string(m_Width) + "x" + std::to_string(m_Height) +
+            ", layers=" + std::to_string(m_Layers.size()) + ")");
         return true;
     }
     catch (const std::exception& e) {
@@ -2192,87 +2365,57 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
     }
 }
 
-static bool SaveCanvasRaypInternal(const std::string& filepath, int width, int height, int activeLayerIdx,
-                                  const std::vector<std::string>& layerNames,
-                                  const std::vector<bool>& layerVisibles,
-                                  const std::vector<float>& layerOpacities,
-                                  const std::vector<std::vector<float>>& layerPixels,
-                                  const std::string& exportPath,
-                                  const std::string& exportFormat,
-                                  bool exportAdvancedMode,
-                                  const std::string& exportCompressionSpeed,
-                                  bool exportGenerateMipMaps,
-                                  const std::string& exportMipFilter,
-                                  const std::string& exportPngColorSpace) {
+// Async autosave: snapshot full layer JSON + pixels + masks on the calling thread,
+// then write on a worker (same v2 layout as SaveCanvasRayp).
+struct RaypLayerSnapshot {
+    json meta;
+    std::vector<float> pixels;
+    std::vector<uint8_t> mask;
+    bool hasMask = false;
+};
+
+static bool SaveCanvasRaypFromSnapshots(
+    const std::string& filepath,
+    int width, int height, int activeLayerIdx,
+    const std::string& projectType,
+    const json& exportMeta,
+    const std::vector<RaypLayerSnapshot>& layers)
+{
     try {
-        json metadata;
+        json metadata = exportMeta;
         metadata["width"] = width;
         metadata["height"] = height;
         metadata["active_layer"] = activeLayerIdx;
-
-        metadata["export_path"] = exportPath;
-        metadata["export_format"] = exportFormat;
-        metadata["export_advanced_mode"] = exportAdvancedMode;
-        metadata["export_compression_speed"] = exportCompressionSpeed;
-        metadata["export_generate_mip_maps"] = exportGenerateMipMaps;
-        metadata["export_mip_filter"] = exportMipFilter;
-        metadata["export_png_color_space"] = exportPngColorSpace;
+        metadata["project_type"] = projectType;
+        metadata["format_features"] = "blend_filters_mask_groups";
 
         json layersArray = json::array();
-        for (size_t i = 0; i < layerNames.size(); ++i) {
-            json layerJson;
-            layerJson["name"] = layerNames[i];
-            layerJson["visible"] = layerVisibles[i];
-            layerJson["opacity"] = layerOpacities[i];
-            layersArray.push_back(layerJson);
-        }
+        for (const auto& L : layers) layersArray.push_back(L.meta);
         metadata["layers"] = layersArray;
 
         std::string metadataStr = metadata.dump();
-
 #ifdef _WIN32
         std::ofstream out(UTF8ToWString(filepath), std::ios::binary);
 #else
         std::ofstream out(filepath, std::ios::binary);
 #endif
-        if (!out.is_open()) {
-            return false;
-        }
+        if (!out.is_open()) return false;
 
         out.write("RAYP", 4);
-        uint32_t version = 1;
+        uint32_t version = kRaypVersionCurrent;
         out.write(reinterpret_cast<const char*>(&version), sizeof(version));
-
         uint64_t metadataSize = metadataStr.size();
         out.write(reinterpret_cast<const char*>(&metadataSize), sizeof(metadataSize));
         out.write(metadataStr.data(), metadataStr.size());
 
-        for (size_t i = 0; i < layerPixels.size(); ++i) {
-            const auto& pixels = layerPixels[i];
-            uint64_t uncompressedSize = pixels.size() * sizeof(float);
-            
-            int compSize = 0;
-            unsigned char* compData = stbi_zlib_compress(
-                reinterpret_cast<unsigned char*>(const_cast<float*>(pixels.data())),
-                static_cast<int>(uncompressedSize),
-                &compSize,
-                8
-            );
-
-            if (!compData) {
-                return false;
+        for (const auto& L : layers) {
+            if (!WriteZlibBlob(out, L.pixels.data(), L.pixels.size() * sizeof(float))) return false;
+            if (L.hasMask && !L.mask.empty()) {
+                if (!WriteZlibBlob(out, L.mask.data(), L.mask.size())) return false;
             }
-
-            uint64_t compressedSize = compSize;
-            out.write(reinterpret_cast<const char*>(&uncompressedSize), sizeof(uncompressedSize));
-            out.write(reinterpret_cast<const char*>(&compressedSize), sizeof(compressedSize));
-            out.write(reinterpret_cast<const char*>(compData), compressedSize);
-
-            free(compData);
         }
         return true;
-    }
-    catch (...) {
+    } catch (...) {
         return false;
     }
 }
@@ -2281,39 +2424,33 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
     int width = m_Width;
     int height = m_Height;
     int activeLayer = m_ActiveLayerIdx;
-    
-    std::vector<std::string> names;
-    std::vector<bool> visibles;
-    std::vector<float> opacities;
-    std::vector<std::vector<float>> pixels;
-    
-    names.reserve(m_Layers.size());
-    visibles.reserve(m_Layers.size());
-    opacities.reserve(m_Layers.size());
-    pixels.reserve(m_Layers.size());
-    
-    for (size_t i = 0; i < m_Layers.size(); ++i) {
-        const auto& layer = m_Layers[i];
-        names.push_back(layer.name);
-        visibles.push_back(layer.visible);
-        opacities.push_back(layer.opacity);
-        pixels.push_back(ExportLayerF(layer, width, height));
+    std::string projectType = (m_ProjectType == ProjectType::Simple) ? "simple" : "advanced";
+
+    json exportMeta;
+    exportMeta["export_path"] = m_ExportPath;
+    exportMeta["export_format"] = m_ExportFormat;
+    exportMeta["export_advanced_mode"] = m_ExportAdvancedMode;
+    exportMeta["export_compression_speed"] = m_ExportCompressionSpeed;
+    exportMeta["export_generate_mip_maps"] = m_ExportGenerateMipMaps;
+    exportMeta["export_mip_filter"] = m_ExportMipFilter;
+    exportMeta["export_png_color_space"] = m_ExportPngColorSpace;
+
+    std::vector<RaypLayerSnapshot> layers;
+    layers.reserve(m_Layers.size());
+    for (const auto& layer : m_Layers) {
+        RaypLayerSnapshot snap;
+        snap.meta = LayerToJson(layer);
+        snap.pixels = ExportLayerF(layer, width, height);
+        snap.hasMask = layer.hasMask && !layer.mask.empty();
+        if (snap.hasMask) snap.mask = layer.mask;
+        layers.push_back(std::move(snap));
     }
 
-    std::string expPath = m_ExportPath;
-    std::string expFormat = m_ExportFormat;
-    bool expAdv = m_ExportAdvancedMode;
-    std::string expSpeed = m_ExportCompressionSpeed;
-    bool expMips = m_ExportGenerateMipMaps;
-    std::string expMipF = m_ExportMipFilter;
-    std::string expPngCS = m_ExportPngColorSpace;
-    
-    std::thread([=, pixels = std::move(pixels)]() {
-        bool success = SaveCanvasRaypInternal(filepath, width, height, activeLayer, names, visibles, opacities, pixels,
-                                             expPath, expFormat, expAdv, expSpeed, expMips, expMipF, expPngCS);
-        if (callback) {
-            callback(success);
-        }
+    std::thread([filepath, width, height, activeLayer, projectType, exportMeta,
+                 layers = std::move(layers), callback]() mutable {
+        bool success = SaveCanvasRaypFromSnapshots(
+            filepath, width, height, activeLayer, projectType, exportMeta, layers);
+        if (callback) callback(success);
     }).detach();
 }
 

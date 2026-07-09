@@ -144,7 +144,24 @@ static bool g_IsGradientDragging = false;
 static void CustomDropCallback(GLFWwindow* window, int count, const char** paths) {
     if (count <= 0) return;
     std::string path = paths[0];
-    
+
+    size_t dot = path.find_last_of('.');
+    std::string ext;
+    if (dot != std::string::npos) {
+        ext = path.substr(dot + 1);
+        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    }
+
+    // .rayp is always a full project document — never import as a flat image layer.
+    if (ext == "rayp") {
+        if (g_Canvas.OpenDocument(g_pd3dDevice, path)) {
+            Logger::Get().Info("Successfully loaded project from drop: " + path);
+        } else {
+            Logger::Get().Error("Failed to load project from drop: " + path);
+        }
+        return;
+    }
+
     if (g_IsViewportHovered || g_IsLayersHovered) {
         if (g_Canvas.LoadImageToLayer(g_pd3dDevice, path)) {
             Logger::Get().Info("Dropped file imported as layer: " + path);
@@ -152,31 +169,16 @@ static void CustomDropCallback(GLFWwindow* window, int count, const char** paths
             Logger::Get().Error("Failed to import dropped file as layer: " + path);
         }
     } else {
-        size_t dot = path.find_last_of('.');
-        std::string ext = "";
-        if (dot != std::string::npos) {
-            ext = path.substr(dot + 1);
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        }
-        
-        if (ext == "rayp") {
-            if (g_Canvas.LoadCanvasRayp(path, g_pd3dDevice)) {
-                Logger::Get().Info("Successfully loaded project from drop: " + path);
-            } else {
-                Logger::Get().Error("Failed to load project from drop: " + path);
-            }
+        g_Canvas.ClearUndoHistory();
+        g_Canvas.GetLayers().clear();
+        g_Canvas.SetActiveLayerIndex(-1);
+        g_Canvas.SetCurrentProjectFilePath("");
+
+        if (g_Canvas.OpenDocument(g_pd3dDevice, path)) {
+            Logger::Get().Info("Dropped file opened as new project: " + path);
         } else {
-            g_Canvas.ClearUndoHistory();
-            g_Canvas.GetLayers().clear();
-            g_Canvas.SetActiveLayerIndex(-1);
-            g_Canvas.SetCurrentProjectFilePath("");
-            
-            if (g_Canvas.LoadImageToLayer(g_pd3dDevice, path)) {
-                Logger::Get().Info("Dropped file opened as new project: " + path);
-            } else {
-                Logger::Get().Error("Failed to open dropped file as new project: " + path);
-                g_Canvas.CreateNewLayer(g_pd3dDevice, "Background");
-            }
+            Logger::Get().Error("Failed to open dropped file as new project: " + path);
+            g_Canvas.CreateNewLayer(g_pd3dDevice, "Background");
         }
     }
 }
@@ -201,7 +203,8 @@ void SetCanvasZoom(float zoom) { g_Canvas.SetZoom(zoom); }
 void SetCanvasPan(float x, float y) { g_Canvas.SetPan(DirectX::XMFLOAT2(x, y)); }
 void ResetCanvasView() { g_Canvas.ResetView(); }
 bool LoadCanvasImage(const std::string& filepath) {
-    return g_Canvas.LoadImageToLayer(g_pd3dDevice, filepath);
+    // Python / automation: open documents by type (.rayp or image).
+    return g_Canvas.OpenDocument(g_pd3dDevice, filepath);
 }
 int GetCanvasWidth() { return g_Canvas.GetWidth(); }
 int GetCanvasHeight() { return g_Canvas.GetHeight(); }
@@ -547,9 +550,11 @@ int main(int argc, char* argv[]) {
     std::string backupPath = backupDir + "/autosave_backup.rayp";
     bool showRecoveryModal = std::filesystem::exists(backupPath);
 
-    // Load startup image if specified on CLI
+    // Load startup document if specified on CLI (image or .rayp project)
     if (!startupImagePath.empty()) {
-        g_Canvas.LoadImageToLayer(g_pd3dDevice, startupImagePath);
+        if (!g_Canvas.OpenDocument(g_pd3dDevice, startupImagePath)) {
+            Logger::Get().Error("Failed to open startup document: " + startupImagePath);
+        }
     }
 
     // Measure startup time

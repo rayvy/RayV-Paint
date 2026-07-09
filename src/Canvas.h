@@ -185,6 +185,8 @@ public:
     void SetFloatingRotation(float rot) { m_FloatingRotation = rot; }
 
     // File Import / Export
+    // Routes by extension: .rayp → LoadCanvasRayp, else LoadImageToLayer.
+    bool OpenDocument(ID3D11Device* device, const std::string& filepath);
     bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath);
     bool SaveCanvas(const std::string& filepath, DdsFormat ddsFormat);
     bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath = "");
