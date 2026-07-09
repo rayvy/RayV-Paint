@@ -26,6 +26,16 @@ enum class BlendMode : uint8_t {
     SoftLight
 };
 
+// What the brush/smudge tools write into for the active layer (Photoshop-like).
+enum class PaintTarget : uint8_t {
+    LayerContent = 0, // paint RGB(A) into tileCache
+    LayerMask    = 1  // paint grayscale into layer.mask (white=reveal, black=hide)
+};
+
+// Optional progress for long I/O (open image / .rayp). UI shows a bar; core stays free of ImGui.
+// progress01 is in [0,1]; stage is a short stable tag e.g. "decode", "layers", "upload".
+using LoadProgressFn = std::function<void(float progress01, const char* stage)>;
+
 // ---- Non-destructive Layer Filters ----
 enum class FilterType : uint8_t {
     Blur = 0,
@@ -128,12 +138,18 @@ public:
         return (layer.tileCache) ? layer.tileCache->GetTileCount() : 0;
     }
 
-    // Layer Mask operations
+    // Layer Mask operations (Photoshop-like: paint white=show, black=hide)
     void CreateLayerMask(ID3D11Device* device, int index);
     void CreateLayerMaskFromSelection(ID3D11Device* device, int index);
     void DeleteLayerMask(int index);
     void ApplyLayerMask(int index);
     void UpdateLayerMaskTexture(ID3D11Device* device, int index);
+    bool ActiveLayerHasMask() const;
+    // Switch brush target: content vs mask. Creating a mask auto-selects mask target.
+    void SetPaintTarget(PaintTarget t);
+    PaintTarget GetPaintTarget() const { return m_PaintTarget; }
+    // True when mask is selected for painting (UI can show mask as grayscale preview).
+    bool IsEditingLayerMask() const { return m_PaintTarget == PaintTarget::LayerMask; }
 
     // Paint Operation
     void PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush);
@@ -186,8 +202,9 @@ public:
 
     // File Import / Export
     // Routes by extension: .rayp → LoadCanvasRayp, else LoadImageToLayer.
-    bool OpenDocument(ID3D11Device* device, const std::string& filepath);
-    bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath);
+    // progress: optional; called on main/worker thread — UI should marshal to UI thread if needed.
+    bool OpenDocument(ID3D11Device* device, const std::string& filepath, LoadProgressFn progress = nullptr);
+    bool LoadImageToLayer(ID3D11Device* device, const std::string& filepath, LoadProgressFn progress = nullptr);
     bool SaveCanvas(const std::string& filepath, DdsFormat ddsFormat);
     bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath = "");
     bool SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed);
@@ -264,7 +281,7 @@ public:
     // Native RAYP Format
     bool SaveCanvasRayp(const std::string& filepath);
     void SaveCanvasRaypAsync(const std::string& filepath, std::function<void(bool)> callback = nullptr);
-    bool LoadCanvasRayp(const std::string& filepath, ID3D11Device* device);
+    bool LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, LoadProgressFn progress = nullptr);
 
     std::vector<float> GetComposedPixels();
 
@@ -337,11 +354,18 @@ private:
     ID3D11Texture2D* m_CompositeTexture = nullptr;
     ID3D11RenderTargetView* m_CompositeRTV = nullptr;
     ID3D11ShaderResourceView* m_CompositeSRV = nullptr;
+    // History copy for blend modes (cannot sample a texture bound as RTV).
+    ID3D11Texture2D* m_CompositeHistoryTexture = nullptr;
+    ID3D11ShaderResourceView* m_CompositeHistorySRV = nullptr;
     int m_CompositeWidth = 0;
     int m_CompositeHeight = 0;
     bool m_CompositeDirty = true;
     ID3D11BlendState* m_LayerBlendState = nullptr;
     ID3D11RasterizerState* m_RasterizerState = nullptr;
+
+    PaintTarget m_PaintTarget = PaintTarget::LayerContent;
+    void EnsureActiveLayerMaskAllocated();
+    void PaintMaskStamp(float cx, float cy, const BrushSettings& brush);
 
     // Group Compositing: temp RT for rendering a group's children before blending into main
     ID3D11Texture2D* m_GroupCompositeTexture = nullptr;

@@ -691,6 +691,19 @@ void Canvas::CreateCompositeResources(ID3D11Device* device) {
         Logger::Get().ErrorTag("gpu", oss.str());
     }
 
+    // Ping/history texture: blend modes sample previous composite while writing new one.
+    // Reading+writing the same resource is illegal in D3D11 and caused black Overlay strokes.
+    if (m_CompositeHistoryTexture) { m_CompositeHistoryTexture->Release(); m_CompositeHistoryTexture = nullptr; }
+    if (m_CompositeHistorySRV) { m_CompositeHistorySRV->Release(); m_CompositeHistorySRV = nullptr; }
+    D3D11_TEXTURE2D_DESC histDesc = desc;
+    histDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    hr = device->CreateTexture2D(&histDesc, nullptr, &m_CompositeHistoryTexture);
+    if (SUCCEEDED(hr)) {
+        device->CreateShaderResourceView(m_CompositeHistoryTexture, nullptr, &m_CompositeHistorySRV);
+    } else {
+        Logger::Get().ErrorTag("gpu", "CreateCompositeResources: history texture failed");
+    }
+
     // Do NOT allocate a full-document selection mask here (16K = 256 MiB).
     // Selection tools allocate lazily when first used.
     m_SelectionMask.clear();
@@ -704,6 +717,8 @@ void Canvas::ReleaseCompositeResources() {
     if (m_CompositeTexture) { m_CompositeTexture->Release(); m_CompositeTexture = nullptr; }
     if (m_CompositeRTV) { m_CompositeRTV->Release(); m_CompositeRTV = nullptr; }
     if (m_CompositeSRV) { m_CompositeSRV->Release(); m_CompositeSRV = nullptr; }
+    if (m_CompositeHistoryTexture) { m_CompositeHistoryTexture->Release(); m_CompositeHistoryTexture = nullptr; }
+    if (m_CompositeHistorySRV) { m_CompositeHistorySRV->Release(); m_CompositeHistorySRV = nullptr; }
     m_CompositeWidth = 0;
     m_CompositeHeight = 0;
     if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
@@ -727,16 +742,18 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
         return;
     }
 
+    // Photoshop default: white mask = fully reveal layer content.
     layer.mask.assign((size_t)m_Width * m_Height, 255);
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
-    
+    m_PaintTarget = PaintTarget::LayerMask;
+    if (m_ActiveLayerIdx != index) m_ActiveLayerIdx = index;
+
     if (device) {
         UpdateLayerMaskTexture(device, index);
     }
     m_CompositeDirty = true;
-    
-    Logger::Get().Info("Created layer mask for layer: " + layer.name);
+    Logger::Get().InfoTag("io", "Created layer mask on '" + layer.name + "' (paint target = mask)");
 }
 
 void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
@@ -744,7 +761,7 @@ void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     Layer& layer = m_Layers[index];
     
     layer.mask.assign((size_t)m_Width * m_Height, 0);
-    if (m_HasSelection) {
+    if (m_HasSelection && m_SelectionMask.size() == (size_t)m_Width * m_Height) {
         std::copy(m_SelectionMask.begin(), m_SelectionMask.end(), layer.mask.begin());
     } else {
         layer.mask.assign((size_t)m_Width * m_Height, 255);
@@ -752,6 +769,8 @@ void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
+    m_PaintTarget = PaintTarget::LayerMask;
+    if (m_ActiveLayerIdx != index) m_ActiveLayerIdx = index;
     
     if (device) {
         UpdateLayerMaskTexture(device, index);
@@ -770,9 +789,88 @@ void Canvas::DeleteLayerMask(int index) {
     layer.mask.clear();
     layer.hasMask = false;
     layer.maskNeedsUpload = false;
+    if (m_PaintTarget == PaintTarget::LayerMask && m_ActiveLayerIdx == index) {
+        m_PaintTarget = PaintTarget::LayerContent;
+    }
     m_CompositeDirty = true;
     
     Logger::Get().Info("Deleted layer mask for layer: " + layer.name);
+}
+
+bool Canvas::ActiveLayerHasMask() const {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return false;
+    return m_Layers[m_ActiveLayerIdx].hasMask && !m_Layers[m_ActiveLayerIdx].mask.empty();
+}
+
+void Canvas::SetPaintTarget(PaintTarget t) {
+    if (t == PaintTarget::LayerMask) {
+        if (!ActiveLayerHasMask()) {
+            Logger::Get().WarnTag("io", "SetPaintTarget(Mask): active layer has no mask");
+            return;
+        }
+    }
+    m_PaintTarget = t;
+    Logger::Get().InfoTag("io",
+        t == PaintTarget::LayerMask ? "Paint target = LayerMask" : "Paint target = LayerContent");
+}
+
+void Canvas::EnsureActiveLayerMaskAllocated() {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    const size_t need = (size_t)m_Width * (size_t)m_Height;
+    if (!layer.hasMask || layer.mask.size() != need) {
+        layer.mask.assign(need, 255);
+        layer.hasMask = true;
+    }
+}
+
+void Canvas::PaintMaskStamp(float cx, float cy, const BrushSettings& brush) {
+    EnsureActiveLayerMaskAllocated();
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    if (!layer.hasMask || layer.mask.empty()) return;
+
+    const float radius = std::max(1.f, brush.radius);
+    const float hardness = std::clamp(brush.hardness, 0.f, 1.f);
+    const float opacity = std::clamp(brush.opacity, 0.f, 1.f);
+    // Mask paint: brush color luminance → white paint reveals, black hides.
+    // Eraser forces black (hide). Default white brush when painting mask.
+    float paintVal = 1.f;
+    if (brush.erase) {
+        paintVal = 0.f;
+    } else {
+        // Use RGB average so any brush color maps to gray; pure white/black intentional.
+        paintVal = std::clamp((brush.color[0] + brush.color[1] + brush.color[2]) / 3.f, 0.f, 1.f);
+    }
+
+    const int rCeil = (int)std::ceil(radius);
+    const int x0 = std::max(0, (int)std::floor(cx) - rCeil);
+    const int y0 = std::max(0, (int)std::floor(cy) - rCeil);
+    const int x1 = std::min(m_Width - 1, (int)std::ceil(cx) + rCeil);
+    const int y1 = std::min(m_Height - 1, (int)std::ceil(cy) + rCeil);
+    const float softStart = radius * hardness; // hard core radius
+
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            float dx = (float)x + 0.5f - cx;
+            float dy = (float)y + 0.5f - cy;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            if (dist > radius) continue;
+            float w = 1.f;
+            if (dist > softStart && radius > softStart) {
+                w = 1.f - (dist - softStart) / (radius - softStart);
+                w = w * w * (3.f - 2.f * w); // smoothstep
+            }
+            w *= opacity;
+            if (w <= 0.f) continue;
+            size_t idx = (size_t)y * (size_t)m_Width + (size_t)x;
+            float cur = layer.mask[idx] / 255.f;
+            float out = cur * (1.f - w) + paintVal * w;
+            layer.mask[idx] = (uint8_t)(std::clamp(out, 0.f, 1.f) * 255.f + 0.5f);
+        }
+    }
+    layer.maskNeedsUpload = true;
+    m_CompositeDirty = true;
 }
 
 void Canvas::ApplyLayerMask(int index) {
@@ -1044,6 +1142,63 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     }
     if (brush.pressureOpacity) {
         activeBrush.opacity = brush.opacity * g_PenPressure;
+    }
+
+    // ---- Mask paint path (Photoshop-like) ----
+    if (m_PaintTarget == PaintTarget::LayerMask) {
+        if (!layer.hasMask) {
+            // Lazy create white mask if UI switched to mask without CreateLayerMask.
+            EnsureActiveLayerMaskAllocated();
+        }
+        if (phase == StrokePhase::Begin) {
+            m_IsStrokeActive = true;
+            m_StrokeDistanceAccumulator = 0.0f;
+            m_LastDabX = currRawX;
+            m_LastDabY = currRawY;
+            m_PrevStabilizedX = currRawX;
+            m_PrevStabilizedY = currRawY;
+            // Default mask brush: white (reveal). Eraser paints black.
+            if (!activeBrush.erase) {
+                activeBrush.color[0] = activeBrush.color[1] = activeBrush.color[2] = 1.f;
+            }
+            PaintMaskStamp(currRawX, currRawY, activeBrush);
+            if (m_MirrorHorizontal) PaintMaskStamp((float)m_Width - currRawX, currRawY, activeBrush);
+            if (m_MirrorVertical) PaintMaskStamp(currRawX, (float)m_Height - currRawY, activeBrush);
+            if (m_MirrorHorizontal && m_MirrorVertical)
+                PaintMaskStamp((float)m_Width - currRawX, (float)m_Height - currRawY, activeBrush);
+        } else if (phase == StrokePhase::Update && m_IsStrokeActive) {
+            float weight = 1.0f / static_cast<float>(std::max(1, activeBrush.stabilization));
+            float sx = m_PrevStabilizedX + weight * (currRawX - m_PrevStabilizedX);
+            float sy = m_PrevStabilizedY + weight * (currRawY - m_PrevStabilizedY);
+            if (!activeBrush.erase) {
+                activeBrush.color[0] = activeBrush.color[1] = activeBrush.color[2] = 1.f;
+            }
+            // Space stamps along segment (same idea as stroke spacing).
+            float dx = sx - m_LastDabX, dy = sy - m_LastDabY;
+            float dist = std::sqrt(dx * dx + dy * dy);
+            float step = std::max(1.f, activeBrush.radius * std::max(0.05f, activeBrush.spacing));
+            while (m_StrokeDistanceAccumulator + dist >= step) {
+                float t = (step - m_StrokeDistanceAccumulator) / std::max(dist, 1e-4f);
+                float px = m_LastDabX + dx * t;
+                float py = m_LastDabY + dy * t;
+                PaintMaskStamp(px, py, activeBrush);
+                if (m_MirrorHorizontal) PaintMaskStamp((float)m_Width - px, py, activeBrush);
+                if (m_MirrorVertical) PaintMaskStamp(px, (float)m_Height - py, activeBrush);
+                if (m_MirrorHorizontal && m_MirrorVertical)
+                    PaintMaskStamp((float)m_Width - px, (float)m_Height - py, activeBrush);
+                m_LastDabX = px; m_LastDabY = py;
+                m_StrokeDistanceAccumulator = 0.f;
+                dx = sx - m_LastDabX; dy = sy - m_LastDabY;
+                dist = std::sqrt(dx * dx + dy * dy);
+            }
+            m_StrokeDistanceAccumulator += dist;
+            m_LastDabX = sx; m_LastDabY = sy;
+            m_PrevStabilizedX = sx; m_PrevStabilizedY = sy;
+        } else if (phase == StrokePhase::End) {
+            m_IsStrokeActive = false;
+            m_IsDocumentModified = true;
+        }
+        return;
     }
 
     int numTilesX = (m_Width + 255) / 256;
@@ -1429,13 +1584,17 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 ID3D11ShaderResourceView* nullSRV = nullptr;
                 context->PSSetShaderResources(1, 1, &nullSRV);
             }
-            // Bind current composite as t2 for blend mode sampling
-            // Must unbind RT first to avoid DX warning, then rebind after draw
-            context->OMSetRenderTargets(0, nullptr, nullptr); // unbind RT temporarily
-            context->PSSetShaderResources(2, 1, &m_CompositeSRV);
-            context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr); // rebind RT
+            // Blend modes need previous composite as t2. Never bind m_CompositeSRV
+            // while m_CompositeRTV is the RT — copy to history texture first.
+            if (layer.blendMode != BlendMode::Normal && m_CompositeHistoryTexture && m_CompositeHistorySRV) {
+                context->CopyResource(m_CompositeHistoryTexture, m_CompositeTexture);
+                context->PSSetShaderResources(2, 1, &m_CompositeHistorySRV);
+            } else {
+                ID3D11ShaderResourceView* nullHist = nullptr;
+                context->PSSetShaderResources(2, 1, &nullHist);
+            }
+            context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr);
             context->DrawIndexed(6, 0, 0);
-            // Unbind composite SRV from t2
             ID3D11ShaderResourceView* nullSRV2 = nullptr;
             context->PSSetShaderResources(2, 1, &nullSRV2);
 
@@ -1660,7 +1819,7 @@ bool Canvas::ExtractAndSetICCProfile(const std::string& pngPath) {
     return false;
 }
 
-bool Canvas::OpenDocument(ID3D11Device* device, const std::string& filepath) {
+bool Canvas::OpenDocument(ID3D11Device* device, const std::string& filepath, LoadProgressFn progress) {
     std::string ext;
     size_t dotPos = filepath.find_last_of('.');
     if (dotPos != std::string::npos) {
@@ -1668,17 +1827,23 @@ bool Canvas::OpenDocument(ID3D11Device* device, const std::string& filepath) {
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     }
 
+    if (progress) progress(0.f, "start");
     if (ext == "rayp") {
         Logger::Get().InfoTag("io", "OpenDocument: .rayp project → LoadCanvasRayp: " + filepath);
-        return LoadCanvasRayp(filepath, device);
+        bool ok = LoadCanvasRayp(filepath, device, progress);
+        if (progress) progress(ok ? 1.f : 0.f, ok ? "done" : "error");
+        return ok;
     }
     Logger::Get().InfoTag("io", "OpenDocument: image import → LoadImageToLayer: " + filepath);
-    return LoadImageToLayer(device, filepath);
+    bool ok = LoadImageToLayer(device, filepath, progress);
+    if (progress) progress(ok ? 1.f : 0.f, ok ? "done" : "error");
+    return ok;
 }
 
-bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath) {
+bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath, LoadProgressFn progress) {
     ScopedTimer loadTimer("LoadImageToLayer " + filepath);
     MemoryStats::LogSnapshot("before_LoadImageToLayer");
+    if (progress) progress(0.05f, "open");
 
     std::string ext;
     size_t dotPos = filepath.find_last_of('.');
@@ -1700,12 +1865,14 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     std::unique_ptr<TileCache> loadedTileCache;
 
     if (ext == "dds") {
+        if (progress) progress(0.1f, "decode_dds");
         loadedTileCache = std::make_unique<TileCache>();
         if (!DdsHelper::LoadDDSToTileCache(filepath, *loadedTileCache, imgWidth, imgHeight, loadedDdsFormat)) {
             Logger::Get().ErrorTag("io", "LoadDDSToTileCache failed: " + filepath);
             MemoryStats::LogSnapshot("after_LoadDDS_fail");
             return false;
         }
+        if (progress) progress(0.7f, "decoded");
         MemoryStats::LogSnapshot("after_LoadDDSToTileCache");
         if (loadedTileCache) {
             const size_t tiles = loadedTileCache->GetTileCount();
@@ -1809,6 +1976,7 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     }
     imported.tileCache->MarkAllDirty();
 
+    if (progress) progress(0.85f, "gpu_upload");
     RecreateLayerTexture(device, imported);
     if (!imported.texture) {
         Logger::Get().ErrorTag("gpu",
@@ -1818,9 +1986,11 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath)
     }
     m_Layers.push_back(std::move(imported));
     m_ActiveLayerIdx = (int)m_Layers.size() - 1;
+    m_PaintTarget = PaintTarget::LayerContent;
     m_CompositeDirty = true;
 
     ResetView();
+    if (progress) progress(0.95f, "finalize");
     MemoryStats::LogSnapshot("after_LoadImageToLayer_success");
     Logger::Get().Info("Successfully imported layer from: " + filepath);
     return true;
@@ -2286,8 +2456,9 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
     }
 }
 
-bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
+bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, LoadProgressFn progress) {
     try {
+        if (progress) progress(0.02f, "open");
         // 1. Open binary file for reading
 #ifdef _WIN32
         std::ifstream in(UTF8ToWString(filepath), std::ios::binary);
@@ -2354,9 +2525,15 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
         if (metadata.contains("export_png_color_space")) m_ExportPngColorSpace = metadata["export_png_color_space"].get<std::string>();
 
         CreateCompositeResources(device);
+        if (progress) progress(0.15f, "metadata");
 
         auto layersArray = metadata["layers"];
-        for (size_t idx = 0; idx < layersArray.size(); ++idx) {
+        const size_t layerCount = layersArray.size();
+        for (size_t idx = 0; idx < layerCount; ++idx) {
+            if (progress && layerCount > 0) {
+                float t = 0.15f + 0.75f * ((float)idx / (float)layerCount);
+                progress(t, "layer");
+            }
             Layer layer;
             LayerFromJson(layer, layersArray[idx]);
 
@@ -2405,6 +2582,8 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device) {
         m_UndoRedoManager.Clear();
         m_IsDocumentModified = false;
         m_CurrentProjectFilePath = filepath;
+        m_PaintTarget = PaintTarget::LayerContent;
+        if (progress) progress(0.98f, "finalize");
         MemoryStats::LogSnapshot("after_LoadCanvasRayp");
         Logger::Get().Info("Successfully loaded project from " + filepath +
             " (RAYP v" + std::to_string(version) +
