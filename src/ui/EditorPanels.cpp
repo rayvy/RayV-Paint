@@ -151,42 +151,107 @@ namespace UI {
         }).detach();
     }
 
-    static void ReorderLayer(std::vector<Layer>& layers, int fromIdx, int toIdx) {
-        if (fromIdx == toIdx || fromIdx < 0 || fromIdx >= (int)layers.size() || toIdx < 0 || toIdx >= (int)layers.size()) return;
+    // Map a pre-reorder index to its post-reorder index after moving fromIdx → toIdx.
+    static int MapIndexAfterReorder(int j, int fromIdx, int toIdx) {
+        if (fromIdx == toIdx) return j;
+        if (fromIdx < toIdx) {
+            if (j == fromIdx) return toIdx;
+            if (j > fromIdx && j <= toIdx) return j - 1;
+            return j;
+        }
+        if (j == fromIdx) return toIdx;
+        if (j >= toIdx && j < fromIdx) return j + 1;
+        return j;
+    }
 
-        // Remember the original parent pointers by address
-        std::vector<Layer*> parents(layers.size(), nullptr);
-        for (size_t i = 0; i < layers.size(); ++i) {
-            int pid = layers[i].parentGroupId;
-            if (pid >= 0 && pid < (int)layers.size()) {
-                parents[i] = &layers[pid];
-            }
+    // Reorder layer stack. parentGroupId is an index — remapped via stable identities
+    // (NOT Layer* pointers: std::rotate moves objects, so address remapping is wrong).
+    // Returns the new index of the moved layer.
+    static int ReorderLayer(std::vector<Layer>& layers, int fromIdx, int toIdx) {
+        if (fromIdx == toIdx || fromIdx < 0 || fromIdx >= (int)layers.size() ||
+            toIdx < 0 || toIdx >= (int)layers.size()) {
+            return fromIdx;
         }
 
-        // Shift the layer in the vector
+        const int n = (int)layers.size();
+        // identity[i] = original index of the layer currently at slot i
+        std::vector<int> identity(n);
+        // parentIdent[i] = original index of parent of the layer at slot i (-1 = none)
+        std::vector<int> parentIdent(n, -1);
+        for (int i = 0; i < n; ++i) {
+            identity[i] = i;
+            int pid = layers[i].parentGroupId;
+            parentIdent[i] = (pid >= 0 && pid < n) ? pid : -1;
+        }
+
         if (fromIdx < toIdx) {
             std::rotate(layers.begin() + fromIdx, layers.begin() + fromIdx + 1, layers.begin() + toIdx + 1);
-            std::rotate(parents.begin() + fromIdx, parents.begin() + fromIdx + 1, parents.begin() + toIdx + 1);
+            std::rotate(identity.begin() + fromIdx, identity.begin() + fromIdx + 1, identity.begin() + toIdx + 1);
+            std::rotate(parentIdent.begin() + fromIdx, parentIdent.begin() + fromIdx + 1, parentIdent.begin() + toIdx + 1);
         } else {
             std::rotate(layers.begin() + toIdx, layers.begin() + fromIdx, layers.begin() + fromIdx + 1);
-            std::rotate(parents.begin() + toIdx, parents.begin() + fromIdx, parents.begin() + fromIdx + 1);
+            std::rotate(identity.begin() + toIdx, identity.begin() + fromIdx, identity.begin() + fromIdx + 1);
+            std::rotate(parentIdent.begin() + toIdx, parentIdent.begin() + fromIdx, parentIdent.begin() + fromIdx + 1);
         }
 
-        // Re-map parent pointers back to the new indices
-        for (size_t i = 0; i < layers.size(); ++i) {
-            if (parents[i] == nullptr) {
-                layers[i].parentGroupId = -1;
-            } else {
-                int newPid = -1;
-                for (size_t j = 0; j < layers.size(); ++j) {
-                    if (&layers[j] == parents[i]) {
-                        newPid = (int)j;
-                        break;
-                    }
-                }
-                layers[i].parentGroupId = newPid;
-            }
+        std::vector<int> identToNew(n, -1);
+        for (int i = 0; i < n; ++i)
+            identToNew[identity[i]] = i;
+
+        for (int i = 0; i < n; ++i) {
+            int pIdent = parentIdent[i];
+            layers[i].parentGroupId = (pIdent >= 0) ? identToNew[pIdent] : -1;
         }
+
+        return identToNew[fromIdx]; // original fromIdx identity → new slot
+    }
+
+    // True if `maybeAncestor` is parent/ancestor of `layerIdx` (cycle guard).
+    static bool IsGroupAncestorOf(const std::vector<Layer>& layers, int maybeAncestor, int layerIdx) {
+        int p = layers[layerIdx].parentGroupId;
+        int guard = 0;
+        while (p >= 0 && p < (int)layers.size() && guard++ < 64) {
+            if (p == maybeAncestor) return true;
+            p = layers[p].parentGroupId;
+        }
+        return false;
+    }
+
+    static void DrawLayerDropHighlight(const ImVec2& rmin, const ImVec2& rmax, bool intoGroup) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (intoGroup) {
+            dl->AddRectFilled(rmin, rmax, IM_COL32(60, 140, 255, 55));
+            dl->AddRect(rmin, rmax, IM_COL32(80, 160, 255, 220), 0.0f, 0, 2.0f);
+        } else {
+            float y = rmax.y;
+            dl->AddLine(ImVec2(rmin.x, y), ImVec2(rmax.x, y), IM_COL32(80, 160, 255, 255), 2.5f);
+        }
+    }
+
+    // Drop layer into group: reparent + place directly under group header in the list.
+    // Returns new index of the dragged layer.
+    static int DropLayerIntoGroup(std::vector<Layer>& layers, int draggedIdx, int groupIdx) {
+        if (draggedIdx < 0 || draggedIdx >= (int)layers.size() ||
+            groupIdx < 0 || groupIdx >= (int)layers.size()) return draggedIdx;
+        if (draggedIdx == groupIdx) return draggedIdx;
+        if (!layers[groupIdx].isGroup) return draggedIdx;
+        if (layers[draggedIdx].isGroup) return draggedIdx; // no nested groups for now
+        if (IsGroupAncestorOf(layers, draggedIdx, groupIdx)) return draggedIdx;
+
+        // UI lists high index first (top of stack). Child should sit just under group header.
+        // Moving down onto group: land at groupIdx → group shifts to groupIdx+1.
+        // Moving up toward group: land at groupIdx-1 → group stays put.
+        int targetIdx = (draggedIdx > groupIdx)
+            ? groupIdx
+            : ((groupIdx > 0) ? groupIdx - 1 : 0);
+
+        int newLayerIdx = ReorderLayer(layers, draggedIdx, targetIdx);
+        int newGroupIdx = MapIndexAfterReorder(groupIdx, draggedIdx, targetIdx);
+        if (newGroupIdx >= 0 && newGroupIdx < (int)layers.size() && layers[newGroupIdx].isGroup)
+            layers[newLayerIdx].parentGroupId = newGroupIdx;
+        else
+            layers[newLayerIdx].parentGroupId = -1;
+        return newLayerIdx;
     }
 
     bool IsSelectTool(ActiveTool tool) {
@@ -1822,28 +1887,23 @@ namespace UI {
                             if (ImGui::IsItemHovered()) {
                                 ImGui::SetTooltip("Group Folder (Drop layer here to group)");
                             }
-                            
-                            // Drag target (add to group)
                             if (ImGui::BeginDragDropTarget()) {
-                                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("LAYER_INDEX")) {
+                                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
+                                        "LAYER_INDEX",
+                                        ImGuiDragDropFlags_AcceptBeforeDelivery |
+                                        ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
                                     int draggedIdx = *(const int*)payload->Data;
-                                    if (draggedIdx != i) {
-                                        canvas.AddLayerToGroup(draggedIdx, i);
-                                        // Reorder it to be directly below/inside the group header (index i - 1)
-                                        int targetIdx = i - 1;
-                                        if (targetIdx < 0) targetIdx = 0;
-                                        
-                                        Layer* draggedLayer = &layers[draggedIdx];
-                                        ReorderLayer(layers, draggedIdx, targetIdx);
-                                        
-                                        // Update active layer index
-                                        for (int k = 0; k < (int)layers.size(); ++k) {
-                                            if (&layers[k] == draggedLayer) {
-                                                canvas.SetActiveLayerIndex(k);
-                                                break;
-                                            }
+                                    bool ok = draggedIdx >= 0 && draggedIdx < (int)layers.size() &&
+                                              draggedIdx != i &&
+                                              !layers[draggedIdx].isGroup &&
+                                              !IsGroupAncestorOf(layers, draggedIdx, i);
+                                    if (ok) {
+                                        DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), true);
+                                        if (payload->IsDelivery()) {
+                                            int newIdx = DropLayerIntoGroup(layers, draggedIdx, i);
+                                            canvas.SetActiveLayerIndex(newIdx);
+                                            canvas.MarkCompositeDirty();
                                         }
-                                        canvas.MarkCompositeDirty();
                                     }
                                 }
                                 ImGui::EndDragDropTarget();
@@ -1900,36 +1960,44 @@ namespace UI {
                             canvas.SetActiveLayerIndex(i);
                         }
 
-                        // Drag source
+                        // Drag source (whole label)
                         if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoDisableHover)) {
                             ImGui::SetDragDropPayload("LAYER_INDEX", &i, sizeof(int));
-                            ImGui::Text("Move %s", layer.name.c_str());
+                            ImGui::Text("%s %s", layer.isGroup ? "Group:" : "Layer:", layer.name.c_str());
                             ImGui::EndDragDropSource();
                         }
 
-                        // Drag target (reorder / parent)
+                        // Drag target: drop ON a group name → into group; drop on layer → reorder as sibling
                         if (ImGui::BeginDragDropTarget()) {
-                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("LAYER_INDEX")) {
+                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(
+                                    "LAYER_INDEX",
+                                    ImGuiDragDropFlags_AcceptBeforeDelivery |
+                                    ImGuiDragDropFlags_AcceptNoDrawDefaultRect)) {
                                 int draggedIdx = *(const int*)payload->Data;
-                                if (draggedIdx != i) {
-                                    int targetParent = layer.parentGroupId;
-                                    Layer* draggedLayer = &layers[draggedIdx];
-                                    
-                                    ReorderLayer(layers, draggedIdx, i);
-                                    
-                                    // Update active layer index
-                                    int newIdx = -1;
-                                    for (int k = 0; k < (int)layers.size(); ++k) {
-                                        if (&layers[k] == draggedLayer) {
-                                            newIdx = k;
-                                            break;
+                                if (draggedIdx >= 0 && draggedIdx < (int)layers.size() && draggedIdx != i) {
+                                    const bool intoGroup = layer.isGroup && !layers[draggedIdx].isGroup &&
+                                                           !IsGroupAncestorOf(layers, draggedIdx, i);
+                                    DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), intoGroup);
+
+                                    if (payload->IsDelivery()) {
+                                        if (intoGroup) {
+                                            int newIdx = DropLayerIntoGroup(layers, draggedIdx, i);
+                                            canvas.SetActiveLayerIndex(newIdx);
+                                        } else {
+                                            // Reorder as sibling of target (same parent as target)
+                                            int targetParentOrig = layer.parentGroupId;
+                                            int newIdx = ReorderLayer(layers, draggedIdx, i);
+                                            int newParent = MapIndexAfterReorder(targetParentOrig, draggedIdx, i);
+                                            // Don't parent a layer to itself / invalid
+                                            if (newParent == newIdx || newParent < 0 || newParent >= (int)layers.size())
+                                                newParent = -1;
+                                            if (newParent >= 0 && !layers[newParent].isGroup)
+                                                newParent = -1;
+                                            layers[newIdx].parentGroupId = newParent;
+                                            canvas.SetActiveLayerIndex(newIdx);
                                         }
+                                        canvas.MarkCompositeDirty();
                                     }
-                                    if (newIdx != -1) {
-                                        layers[newIdx].parentGroupId = targetParent;
-                                        canvas.SetActiveLayerIndex(newIdx);
-                                    }
-                                    canvas.MarkCompositeDirty();
                                 }
                             }
                             ImGui::EndDragDropTarget();
