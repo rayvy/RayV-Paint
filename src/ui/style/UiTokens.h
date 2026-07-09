@@ -58,6 +58,15 @@ struct UiTokens {
     float holdThresholdSec = 0.18f;
     float dropdownPanelAlpha = 0.94f;
 
+    // Tooltip
+    float tooltipDelaySec = 1.0f;
+
+    // Modal/popup scrim (darken, not bleach)
+    float scrimDarken = 0.45f; // ~45% black overlay (~user asked ~15% blur + darken)
+
+    // Global press motion (default on)
+    bool pressMotionEnabled = true;
+
     bool isDark = true;
 
     void ApplyDark();

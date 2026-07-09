@@ -29,26 +29,23 @@ static IconButtonResult IconButtonImpl(const char* id, const SvgIcon* icon,
     bool clicked = enabled && ImGui::IsItemClicked(ImGuiMouseButton_Left);
     res.clicked = clicked;
 
-    // Motion: press / release bounce
-    if (down) {
-        st.scale.SetTarget(T.pressScale, T.durFast * 0.85f, EaseKind::EaseOutCubic);
-        st.wasDown = true;
-    } else if (st.wasDown) {
-        // release bounce
-        st.scale.SetTarget(T.bounceOvershoot, T.durFast, EaseKind::EaseOutBack);
-        st.wasDown = false;
-        // then settle to 1 via second retarget after overshoot — simple chain:
-        // if currently going to overshoot and not active, we'll snap follow-up in update
-    } else if (!st.scale.active && std::fabs(st.scale.value - 1.f) > 0.01f) {
-        st.scale.SetTarget(1.f, T.durFast, EaseKind::EaseOutCubic);
-    } else if (!st.scale.active && st.scale.value > 1.001f) {
-        st.scale.SetTarget(1.f, T.durMed * 0.6f, EaseKind::EaseOutCubic);
+    // Motion: press / release bounce (global toggle)
+    if (T.pressMotionEnabled) {
+        if (down) {
+            st.scale.SetTarget(T.pressScale, T.durFast * 0.85f, EaseKind::EaseOutCubic);
+            st.wasDown = true;
+        } else if (st.wasDown) {
+            st.scale.SetTarget(T.bounceOvershoot, 0.10f, EaseKind::EaseOutBack);
+            st.wasDown = false;
+        } else if (!st.scale.active && std::fabs(st.scale.value - 1.f) > 0.01f) {
+            st.scale.SetTarget(1.f, T.durFast, EaseKind::EaseOutCubic);
+        }
+        if (!down && !st.scale.active && st.scale.value > 1.001f)
+            st.scale.SetTarget(1.f, T.durFast, EaseKind::EaseOutCubic);
+        st.scale.Update(dt);
+    } else {
+        st.scale.Snap(1.f);
     }
-    // After EaseOutBack lands above 1, pull back
-    if (!down && !st.scale.active && st.scale.value > 1.001f)
-        st.scale.SetTarget(1.f, T.durFast, EaseKind::EaseOutCubic);
-
-    st.scale.Update(dt);
     float sc = st.scale.value;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();

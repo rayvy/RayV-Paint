@@ -136,6 +136,10 @@ set(SOURCES
     src/ui/widgets/UiVisualSlider.h
     src/ui/widgets/UiPanel.cpp
     src/ui/widgets/UiPanel.h
+    src/ui/widgets/UiPathField.cpp
+    src/ui/widgets/UiPathField.h
+    src/ui/widgets/UiTooltip.cpp
+    src/ui/widgets/UiTooltip.h
 )
 
 # Shaders

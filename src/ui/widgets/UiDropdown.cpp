@@ -114,9 +114,10 @@ static bool DropdownCore(const char* id, bool triggerDown, bool triggerHovered,
 
         ImU32 bg = ImGui::ColorConvertFloat4ToU32(ImVec4(T.bgElevated.x, T.bgElevated.y, T.bgElevated.z, alpha));
         ImU32 stroke = ImGui::ColorConvertFloat4ToU32(ImVec4(T.strokeHairline.x, T.strokeHairline.y, T.strokeHairline.z, alpha * 1.2f));
-        // Soft scrim behind panel for readability
-        if (p > 0.2f) {
-            ImU32 scrim = ImGui::ColorConvertFloat4ToU32(ImVec4(T.scrim.x, T.scrim.y, T.scrim.z, T.scrim.w * 0.35f * p));
+        // Darken scrim (not bleach) with ease
+        if (p > 0.05f) {
+            float sa = T.scrimDarken * Ease(EaseKind::EaseOutCubic, p);
+            ImU32 scrim = IM_COL32(0, 0, 0, (int)(sa * 255.f));
             dl->AddRectFilled(vp->WorkPos, ImVec2(vp->WorkPos.x + vp->WorkSize.x, vp->WorkPos.y + vp->WorkSize.y), scrim);
         }
         dl->AddRectFilled(p1, p2, bg, T.rMd);
@@ -207,7 +208,8 @@ bool DropdownChip(const char* id, const char* previewLabel,
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(T.accent.x, T.accent.y, T.accent.z, 0.50f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, T.rSm);
     char buf[256];
-    std::snprintf(buf, sizeof(buf), "%s  ▾", previewLabel ? previewLabel : "…");
+    // ASCII caret only — avoid missing-glyph diamond/tofu on some fonts
+    std::snprintf(buf, sizeof(buf), "%s  v", previewLabel ? previewLabel : "...");
     ImGui::Button(buf);
     bool held = ImGui::IsItemActive();
     ImVec2 tmin = ImGui::GetItemRectMin();

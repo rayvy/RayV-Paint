@@ -347,6 +347,10 @@ void ApplyTheme(const std::string& themeName) {
     style.TabBorderSize = 0.0f;
     style.ScrollbarSize = 13.0f;
     style.GrabMinSize = 10.0f;
+    // Tooltips: only after ~1s stationary hover (pair with DelayNormal flags where used)
+    style.HoverDelayNormal = Ui::Tokens().tooltipDelaySec;
+    style.HoverDelayShort = Ui::Tokens().tooltipDelaySec;
+    style.HoverStationaryDelay = 0.15f;
 
     if (themeName == "Classic") {
         ImGui::StyleColorsClassic();
