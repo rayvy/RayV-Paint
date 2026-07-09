@@ -27,7 +27,51 @@ static inline void WritePixelRaw(uint8_t* p, CanvasPixelFormat fmt, const float 
 }
 
 // ---------------------------------------------------------------------------
+// Tip sampling helpers
+// ---------------------------------------------------------------------------
+static float SampleTipBilinear(const BrushTip& tip, float u, float v) {
+    const int s = tip.size;
+    if (s <= 0 || tip.pixels.empty()) return 0.f;
+    const float maxC = (float)(s - 1);
+    u = std::clamp(u, 0.f, maxC);
+    v = std::clamp(v, 0.f, maxC);
+    int x0 = (int)std::floor(u);
+    int y0 = (int)std::floor(v);
+    int x1 = std::min(x0 + 1, s - 1);
+    int y1 = std::min(y0 + 1, s - 1);
+    float tx = u - (float)x0;
+    float ty = v - (float)y0;
+    auto at = [&](int x, int y) -> float {
+        return tip.pixels[(size_t)y * s + x] / 255.0f;
+    };
+    float a = at(x0, y0), b = at(x1, y0), c = at(x0, y1), d = at(x1, y1);
+    return a * (1.f - tx) * (1.f - ty) + b * tx * (1.f - ty)
+         + c * (1.f - tx) * ty       + d * tx * ty;
+}
+
+// Deterministic hash → [0,1) for scatter / angle jitter (stable per dab position)
+static float Hash01(uint32_t x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return (x & 0xFFFFFFu) / 16777216.0f;
+}
+
+static float SoftFalloff(float dist, float r, float hardness) {
+    if (dist >= r) return 0.f;
+    if (hardness >= 0.999f) return 1.f;
+    float core = r * hardness;
+    if (dist <= core) return 1.f;
+    float denom = r - core;
+    if (denom < 1e-6f) return 1.f;
+    return 1.f - (dist - core) / denom;
+}
+
+// ---------------------------------------------------------------------------
 // Internal: single stamp at (px, py) into TileCache
+// Supports tip rotation (rotationDeg) and hardness envelope on tips.
 // ---------------------------------------------------------------------------
 static void StampAt(TileCache& cache, float px, float py,
                     const BrushSettings& brush,
@@ -37,8 +81,15 @@ static void StampAt(TileCache& cache, float px, float py,
     CanvasPixelFormat fmt = cache.GetFormat();
     int bytesPerPixel = cache.GetBytesPerPixel();
     float r  = brush.radius;
+    if (r < 0.5f) r = 0.5f;
     float h  = std::clamp(brush.hardness, 0.0f, 1.0f);
     float op = std::clamp(brush.opacity,  0.0f, 1.0f);
+
+    // Effective tip rotation (radians). Pressure-rotation is folded into rotationDeg by Canvas.
+    const float ang = brush.rotationDeg * (3.14159265358979323846f / 180.0f);
+    const float cosA = std::cos(ang);
+    const float sinA = std::sin(ang);
+    const bool doRotate = std::fabs(ang) > 1e-5f;
 
     int startX = std::max(0, (int)std::floor(px - r));
     int endX   = std::min(width  - 1, (int)std::ceil(px + r));
@@ -51,6 +102,12 @@ static void StampAt(TileCache& cache, float px, float py,
     int endTileX   = endX / TILE_SIZE;
     int startTileY = startY / TILE_SIZE;
     int endTileY   = endY / TILE_SIZE;
+
+    const float r2 = r * r;
+    const bool useTip = brush.tip && brush.tip->size > 0 &&
+                        (int)brush.tip->pixels.size() >= brush.tip->size * brush.tip->size;
+    const int tipSize = useTip ? brush.tip->size : 0;
+    const float tipMax = useTip ? (float)(tipSize - 1) : 0.f;
 
     for (int ty = startTileY; ty <= endTileY; ++ty) {
         int tileY0 = ty * TILE_SIZE;
@@ -66,11 +123,6 @@ static void StampAt(TileCache& cache, float px, float py,
 
             uint8_t* raw = cache.LockTile(tx, ty);
 
-            const float r2 = r * r;
-            const bool useTip = brush.tip && brush.tip->size > 0 &&
-                                (int)brush.tip->pixels.size() >= brush.tip->size * brush.tip->size;
-            const int tipSize = useTip ? brush.tip->size : 0;
-
             for (int y = py0; y <= py1; ++y) {
                 int ly = y - tileY0;
                 uint8_t* row = raw + ((size_t)ly * TILE_SIZE) * bytesPerPixel;
@@ -83,21 +135,30 @@ static void StampAt(TileCache& cache, float px, float py,
 
                     float intensity = 1.0f;
                     if (useTip) {
-                        // Map stamp disk to tip texture
-                        float u = (dx / r + 1.0f) * 0.5f * (float)(tipSize - 1);
-                        float v = (dy / r + 1.0f) * 0.5f * (float)(tipSize - 1);
-                        int ix = std::clamp((int)std::lround(u), 0, tipSize - 1);
-                        int iy = std::clamp((int)std::lround(v), 0, tipSize - 1);
-                        intensity = brush.tip->pixels[(size_t)iy * tipSize + ix] / 255.0f;
-                        if (intensity <= 0.0f) continue;
-                    } else if (h < 1.0f) {
-                        float dist = std::sqrt(dist2);
-                        float core = r * h;
-                        if (dist > core) {
-                            float denom = (r - core);
-                            if (denom > 1e-6f) {
-                                intensity = 1.0f - (dist - core) / denom;
-                            }
+                        // Inverse-rotate offset into tip local space, then map to texture.
+                        float lx = dx, ly2 = dy;
+                        if (doRotate) {
+                            lx  =  dx * cosA + dy * sinA;
+                            ly2 = -dx * sinA + dy * cosA;
+                        }
+                        float u = (lx  / r + 1.0f) * 0.5f * tipMax;
+                        float v = (ly2 / r + 1.0f) * 0.5f * tipMax;
+                        // Outside tip square after rotation → no stamp
+                        if (u < -0.5f || v < -0.5f || u > tipMax + 0.5f || v > tipMax + 0.5f)
+                            continue;
+                        intensity = SampleTipBilinear(*brush.tip, u, v);
+                        if (intensity <= 1e-4f) continue;
+                        // Soft hardness envelope on top of tip (A2)
+                        if (h < 0.999f) {
+                            float env = SoftFalloff(std::sqrt(dist2), r, h);
+                            intensity *= env;
+                            if (intensity <= 1e-4f) continue;
+                        }
+                    } else {
+                        // Procedural soft circle — rotation is a no-op (radial).
+                        if (h < 1.0f) {
+                            intensity = SoftFalloff(std::sqrt(dist2), r, h);
+                            if (intensity <= 1e-4f) continue;
                         }
                     }
 
@@ -110,8 +171,8 @@ static void StampAt(TileCache& cache, float px, float py,
                     float stampAlpha = brush.color[3] * op * intensity * selVal;
                     if (stampAlpha <= 0.0f) continue;
 
-                    int lx = x - tileX0;
-                    uint8_t* p = row + (size_t)lx * bytesPerPixel;
+                    int lxPix = x - tileX0;
+                    uint8_t* p = row + (size_t)lxPix * bytesPerPixel;
 
                     float dest[4];
                     ReadPixelRaw(p, fmt, dest);
@@ -191,13 +252,38 @@ void PaintEngine::DrawStrokeSegment(TileCache& cache,
     float dirX    = dx / segLen, dirY = dy / segLen;
     float traveled = 0.0f;
 
+    const float scatter = std::clamp(brush.scatter, 0.f, 1.f);
+    const float angJit  = std::clamp(brush.angleJitter, 0.f, 1.f);
+    const bool needDynamics = (scatter > 1e-4f) || (angJit > 1e-4f);
+
     while (traveled <= segLen) {
         float needed = spacing - distanceAccumulator;
         if (traveled + needed <= segLen) {
             traveled += needed;
             float dabX = x0 + dirX * traveled;
             float dabY = y0 + dirY * traveled;
-            DrawStamp(cache, dabX, dabY, brush, mirrorH, mirrorV, selectionMask);
+
+            if (needDynamics) {
+                // Deterministic noise from dab position (stable under same path).
+                uint32_t hx = (uint32_t)std::lround(dabX * 64.f) * 73856093u
+                            ^ (uint32_t)std::lround(dabY * 64.f) * 19349663u
+                            ^ (uint32_t)std::lround(traveled * 32.f) * 83492791u;
+                BrushSettings dab = brush;
+                if (scatter > 1e-4f) {
+                    float rx = Hash01(hx) * 2.f - 1.f;
+                    float ry = Hash01(hx + 0x9E3779B9u) * 2.f - 1.f;
+                    float rad = brush.radius * scatter;
+                    dabX += rx * rad;
+                    dabY += ry * rad;
+                }
+                if (angJit > 1e-4f) {
+                    float j = Hash01(hx + 0x85EBCA6Bu) * 2.f - 1.f; // [-1,1]
+                    dab.rotationDeg = brush.rotationDeg + j * angJit * 180.f;
+                }
+                DrawStamp(cache, dabX, dabY, dab, mirrorH, mirrorV, selectionMask);
+            } else {
+                DrawStamp(cache, dabX, dabY, brush, mirrorH, mirrorV, selectionMask);
+            }
             lastDabX = dabX;
             lastDabY = dabY;
             distanceAccumulator = 0.0f;

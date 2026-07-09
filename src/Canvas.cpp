@@ -5,6 +5,7 @@
 #include "core/ImageManager.h"
 #include "core/IccProfiles.h"
 #include "core/PathUtil.h"
+// Prefer PathUtil for all disk paths (UTF-8 / wide on Windows).
 #include <opencv2/imgproc.hpp>
 #include "core/ConfigManager.h"
 #include "core/TexconvHelper.h"
@@ -24,11 +25,7 @@
 #ifdef _WIN32
 #include <windows.h>
 static std::wstring UTF8ToWString(const std::string& str) {
-    if (str.empty()) return L"";
-    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
-    std::wstring wstrTo(size_needed, 0);
-    MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
-    return wstrTo;
+    return PathUtil::Utf8ToWide(str);
 }
 #endif
 
@@ -1276,6 +1273,14 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     if (brush.pressureOpacity) {
         activeBrush.opacity = brush.opacity * g_PenPressure;
     }
+    // Pressure → rotation: fold into rotationDeg before paint engine (Phase A).
+    // pressure 0 → -90°, 0.5 → base angle, 1 → +90° from base.
+    if (brush.pressureRotation) {
+        activeBrush.rotationDeg = brush.rotationDeg + (g_PenPressure - 0.5f) * 180.0f;
+        // Keep in a reasonable range for tip UV (wrap not required for cos/sin).
+    }
+    // Expand effective backup radius when scatter is active
+    const float paintRadius = activeBrush.radius * (1.0f + std::clamp(activeBrush.scatter, 0.f, 1.f));
 
     // ---- Mask paint path (Photoshop-like) ----
     if (m_PaintTarget == PaintTarget::LayerMask) {
@@ -1364,16 +1369,16 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         m_PrevStabilizedY = currRawY;
         m_ActiveStrokeDeltas.clear();
 
-        // Backup tiles covered by the first stamp (and its symmetries)
-        backupSymmetricTiles(currRawX, currRawY, activeBrush.radius);
+        // Backup tiles covered by the first stamp (and its symmetries); expand for scatter
+        backupSymmetricTiles(currRawX, currRawY, paintRadius);
         if (m_MirrorHorizontal) {
-            backupSymmetricTiles(static_cast<float>(m_Width) - currRawX, currRawY, activeBrush.radius);
+            backupSymmetricTiles(static_cast<float>(m_Width) - currRawX, currRawY, paintRadius);
         }
         if (m_MirrorVertical) {
-            backupSymmetricTiles(currRawX, static_cast<float>(m_Height) - currRawY, activeBrush.radius);
+            backupSymmetricTiles(currRawX, static_cast<float>(m_Height) - currRawY, paintRadius);
         }
         if (m_MirrorHorizontal && m_MirrorVertical) {
-            backupSymmetricTiles(static_cast<float>(m_Width) - currRawX, static_cast<float>(m_Height) - currRawY, activeBrush.radius);
+            backupSymmetricTiles(static_cast<float>(m_Width) - currRawX, static_cast<float>(m_Height) - currRawY, paintRadius);
         }
 
         // Lazy-allocate TileCache on first paint
@@ -1398,10 +1403,10 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
 
         // Backup tiles covered by the stroke segment (and its symmetries)
         auto backupSegment = [&](float x0, float y0, float x1, float y1) {
-            float minX = std::min(x0, x1) - activeBrush.radius;
-            float maxX = std::max(x0, x1) + activeBrush.radius;
-            float minY = std::min(y0, y1) - activeBrush.radius;
-            float maxY = std::max(y0, y1) + activeBrush.radius;
+            float minX = std::min(x0, x1) - paintRadius;
+            float maxX = std::max(x0, x1) + paintRadius;
+            float minY = std::min(y0, y1) - paintRadius;
+            float maxY = std::max(y0, y1) + paintRadius;
 
             int minTileX = std::max(0, static_cast<int>(minX) / 256);
             int maxTileX = std::max(0, static_cast<int>(maxX) / 256);
@@ -1861,7 +1866,7 @@ void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float vie
 
 static bool ExtractICCFromPNG(const std::string& pngPath, std::vector<uint8_t>& outIccData, std::string& outProfileName) {
 #ifdef _WIN32
-    std::ifstream file(UTF8ToWString(pngPath), std::ios::binary);
+    std::ifstream file(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(pngPath)), std::ios::binary);
 #else
     std::ifstream file(pngPath, std::ios::binary);
 #endif
@@ -1926,7 +1931,7 @@ bool Canvas::ExtractAndSetICCProfile(const std::string& pngPath) {
             iccPath += ".icc";
         }
 #ifdef _WIN32
-        std::ofstream outFile(UTF8ToWString(iccPath), std::ios::binary);
+        std::ofstream outFile(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(iccPath)), std::ios::binary);
 #else
         std::ofstream outFile(iccPath, std::ios::binary);
 #endif
@@ -2630,7 +2635,7 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         std::string metadataStr = metadata.dump();
 
 #ifdef _WIN32
-        std::ofstream out(UTF8ToWString(filepath), std::ios::binary);
+        std::ofstream out(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filepath)), std::ios::binary);
 #else
         std::ofstream out(filepath, std::ios::binary);
 #endif
@@ -2689,7 +2694,7 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
         if (progress) progress(0.02f, "open");
         // 1. Open binary file for reading
 #ifdef _WIN32
-        std::ifstream in(UTF8ToWString(filepath), std::ios::binary);
+        std::ifstream in(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filepath)), std::ios::binary);
 #else
         std::ifstream in(filepath, std::ios::binary);
 #endif
@@ -2878,7 +2883,7 @@ static bool SaveCanvasRaypFromSnapshots(
 
         std::string metadataStr = metadata.dump();
 #ifdef _WIN32
-        std::ofstream out(UTF8ToWString(filepath), std::ios::binary);
+        std::ofstream out(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filepath)), std::ios::binary);
 #else
         std::ofstream out(filepath, std::ios::binary);
 #endif
@@ -5427,7 +5432,7 @@ ID3D11ShaderResourceView* Canvas::GetChannelPreviewSRV(ID3D11Device* device, Cha
 // ---------------------------------------------------------------------------
 bool Canvas::ImportSvgAsSmartObject(ID3D11Device* device, const std::string& filepath) {
 #ifdef _WIN32
-    std::ifstream in(UTF8ToWString(filepath), std::ios::binary);
+    std::ifstream in(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filepath)), std::ios::binary);
 #else
     std::ifstream in(filepath, std::ios::binary);
 #endif

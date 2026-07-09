@@ -1,5 +1,6 @@
 #include "ImageManager.h"
 #include "Logger.h"
+#include "PathUtil.h"
 #include <algorithm>
 #include <fstream>
 #include <cstring>
@@ -42,17 +43,6 @@ static void WriteBigEndian32(uint8_t* dest, uint32_t val) {
     dest[3] = static_cast<uint8_t>(val & 0xFF);
 }
 
-#ifdef _WIN32
-#include <windows.h>
-static std::wstring UTF8ToWString(const std::string& str) {
-    if (str.empty()) return L"";
-    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
-    std::wstring wstrTo(size_needed, 0);
-    MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
-    return wstrTo;
-}
-#endif
-
 struct SaveContext {
     std::vector<uint8_t> bytes;
 };
@@ -64,28 +54,21 @@ static void stbi_write_func_vector(void* context, void* data, int size) {
 }
 
 bool ImageManager::LoadImageFromFile(const std::string& filepath, std::vector<uint8_t>& outPixels, int& outWidth, int& outHeight) {
-    std::vector<char> buffer;
-#ifdef _WIN32
-    std::wstring wpath = UTF8ToWString(filepath);
-    std::ifstream file(wpath, std::ios::binary | std::ios::ate);
-#else
-    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
-#endif
-    if (!file.is_open()) {
-        Logger::Get().Error("Failed to open image file for loading: " + filepath);
+    // Normalize to UTF-8 then read via wide _wfopen (Cyrillic/CJK-safe on Windows).
+    const std::string path = PathUtil::NormalizeToUtf8Path(filepath);
+    std::vector<uint8_t> buffer;
+    bool readOk = PathUtil::ReadFileBytes(path, buffer);
+    if (!readOk)
+        readOk = PathUtil::ReadFileBytes(filepath, buffer);
+    if (!readOk || buffer.empty()) {
+        Logger::Get().Error("Failed to open image file for loading: " + filepath
+            + " (normalized=" + path + ")");
         return false;
     }
-    std::streamsize size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    buffer.resize(size);
-    if (!file.read(buffer.data(), size)) {
-        Logger::Get().Error("Failed to read image file contents: " + filepath);
-        return false;
-    }
-    file.close();
 
     int channels = 0;
-    stbi_uc* data = stbi_load_from_memory(reinterpret_cast<const stbi_uc*>(buffer.data()), static_cast<int>(size), &outWidth, &outHeight, &channels, 4);
+    stbi_uc* data = stbi_load_from_memory(
+        buffer.data(), static_cast<int>(buffer.size()), &outWidth, &outHeight, &channels, 4);
     if (!data) {
         Logger::Get().Error("Failed to decode image file (STB): " + filepath);
         return false;
@@ -96,7 +79,8 @@ bool ImageManager::LoadImageFromFile(const std::string& filepath, std::vector<ui
     std::memcpy(outPixels.data(), data, numPixels * 4);
 
     stbi_image_free(data);
-    Logger::Get().Info("Image loaded successfully (" + std::to_string(outWidth) + "x" + std::to_string(outHeight) + "): " + filepath);
+    Logger::Get().Info("Image loaded successfully (" + std::to_string(outWidth) + "x" +
+                       std::to_string(outHeight) + "): " + path);
     return true;
 }
 
@@ -145,18 +129,11 @@ static bool InjectIccBytesIntoPng(std::vector<uint8_t>& pngBytes,
 
 static bool InjectIccIntoPng(std::vector<uint8_t>& pngBytes, const std::string& iccProfilePath) {
     if (iccProfilePath.empty()) return true;
-#ifdef _WIN32
-    std::ifstream iccFile(UTF8ToWString(iccProfilePath), std::ios::binary);
-#else
-    std::ifstream iccFile(iccProfilePath, std::ios::binary);
-#endif
-    if (!iccFile.is_open()) {
+    std::vector<uint8_t> profileData;
+    if (!PathUtil::ReadFileBytes(PathUtil::NormalizeToUtf8Path(iccProfilePath), profileData)) {
         Logger::Get().Error("Failed to open ICC profile file: " + iccProfilePath);
         return false;
     }
-    std::vector<uint8_t> profileData((std::istreambuf_iterator<char>(iccFile)),
-                                     std::istreambuf_iterator<char>());
-    iccFile.close();
     if (profileData.empty()) return true;
 
     std::string profileName = "sRGB";
@@ -212,17 +189,11 @@ bool ImageManager::SaveRGBA8ToFile(const std::string& filepath, const uint8_t* r
         InjectIccIntoPng(saveCtx.bytes, iccProfilePath);
     }
 
-#ifdef _WIN32
-    std::ofstream outFile(UTF8ToWString(targetPath), std::ios::binary);
-#else
-    std::ofstream outFile(targetPath, std::ios::binary);
-#endif
-    if (!outFile.is_open()) {
+    if (!PathUtil::WriteFileBytes(PathUtil::NormalizeToUtf8Path(targetPath),
+                                  saveCtx.bytes.data(), saveCtx.bytes.size())) {
         Logger::Get().Error("Failed to open image file for writing: " + targetPath);
         return false;
     }
-    outFile.write(reinterpret_cast<const char*>(saveCtx.bytes.data()), (std::streamsize)saveCtx.bytes.size());
-    outFile.close();
 
     Logger::Get().Info("Image saved successfully: " + targetPath);
     return true;
@@ -271,17 +242,11 @@ bool ImageManager::SaveRGBA8ToFile(const std::string& filepath, const uint8_t* r
         InjectIccBytesIntoPng(saveCtx.bytes, iccBytes, iccSize, iccProfileName);
     }
 
-#ifdef _WIN32
-    std::ofstream outFile(UTF8ToWString(targetPath), std::ios::binary);
-#else
-    std::ofstream outFile(targetPath, std::ios::binary);
-#endif
-    if (!outFile.is_open()) {
+    if (!PathUtil::WriteFileBytes(PathUtil::NormalizeToUtf8Path(targetPath),
+                                  saveCtx.bytes.data(), saveCtx.bytes.size())) {
         Logger::Get().Error("Failed to open image file for writing: " + targetPath);
         return false;
     }
-    outFile.write(reinterpret_cast<const char*>(saveCtx.bytes.data()), (std::streamsize)saveCtx.bytes.size());
-    outFile.close();
     Logger::Get().Info("Image saved successfully: " + targetPath);
     return true;
 }

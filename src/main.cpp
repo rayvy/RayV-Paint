@@ -35,6 +35,7 @@
 #include "core/KeymapManager.h"
 #include "core/ClipboardHelper.h"
 #include "core/BrushLibrary.h"
+#include "core/PathUtil.h"
 #include "ui/EditorPanels.h"
 #include "ui/style/UiTokens.h"
 
@@ -231,7 +232,8 @@ static bool GetGizmoGeometry(Canvas& canvas, const std::function<ImVec2(float, f
 }
 static void CustomDropCallback(GLFWwindow* window, int count, const char** paths) {
     if (count <= 0) return;
-    std::string path = paths[0];
+    // GLFW may hand UTF-8 or legacy ACP on Windows — normalize before any I/O.
+    std::string path = PathUtil::NormalizeToUtf8Path(paths[0] ? paths[0] : "");
 
     size_t dot = path.find_last_of('.');
     std::string ext;

@@ -2,22 +2,12 @@
 #include "TileCache.h"
 #include "Logger.h"
 #include "MemoryStats.h"
+#include "PathUtil.h"
 #include <fstream>
 #include <cstring>
 #include <algorithm>
 #include <vector>
 #include <chrono>
-
-#ifdef _WIN32
-#include <windows.h>
-static std::wstring UTF8ToWString(const std::string& str) {
-    if (str.empty()) return L"";
-    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
-    std::wstring wstrTo(size_needed, 0);
-    MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
-    return wstrTo;
-}
-#endif
 
 
 #define BCDEC_IMPLEMENTATION
@@ -110,11 +100,12 @@ static float HalfToFloat(uint16_t h) {
 }
 
 bool DdsHelper::LoadDDS(const std::string& filename, DdsImage& outImage) {
-#ifdef _WIN32
-    std::ifstream file(UTF8ToWString(filename), std::ios::binary);
-#else
-    std::ifstream file(filename, std::ios::binary);
-#endif
+    // filesystem::path + wide open — UTF-8/Cyrillic safe on Windows
+    std::ifstream file(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filename)), std::ios::binary);
+    if (!file.is_open()) {
+        // ACP fallback path
+        file.open(PathUtil::FromUtf8(filename), std::ios::binary);
+    }
     if (!file.is_open()) {
         Logger::Get().Error("Failed to open DDS file for reading: " + filename);
         return false;
@@ -386,11 +377,9 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
     Logger::Get().InfoTag("io", "LoadDDSToTileCache begin: " + filename);
     MemoryStats::LogSnapshot("dds_open_start");
 
-#ifdef _WIN32
-    std::ifstream file(UTF8ToWString(filename), std::ios::binary);
-#else
-    std::ifstream file(filename, std::ios::binary);
-#endif
+    std::ifstream file(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filename)), std::ios::binary);
+    if (!file.is_open())
+        file.open(PathUtil::FromUtf8(filename), std::ios::binary);
     if (!file.is_open()) {
         Logger::Get().Error("Failed to open DDS file for reading: " + filename);
         return false;
@@ -825,7 +814,7 @@ static uint16_t FloatToHalf(float f) {
 
 bool DdsHelper::SaveDDS(const std::string& filename, const DdsImage& image) {
 #ifdef _WIN32
-    std::ofstream file(UTF8ToWString(filename), std::ios::binary);
+    std::ofstream file(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filename)), std::ios::binary);
 #else
     std::ofstream file(filename, std::ios::binary);
 #endif

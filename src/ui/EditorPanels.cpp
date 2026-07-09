@@ -42,21 +42,9 @@ extern std::vector<float> Canvas_BuildSplineLUT(const std::vector<std::pair<floa
 #include <commdlg.h>
 #pragma comment(lib, "comdlg32.lib")
 
-static std::wstring UTF8ToWString(const std::string& str) {
-    if (str.empty()) return L"";
-    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
-    std::wstring wstrTo(size_needed, 0);
-    MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
-    return wstrTo;
-}
-
-static std::string WStringToUTF8(const std::wstring& wstr) {
-    if (wstr.empty()) return "";
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
-    std::string strTo(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
-    return strTo;
-}
+#include "../core/PathUtil.h"
+static std::wstring UTF8ToWString(const std::string& str) { return PathUtil::Utf8ToWide(str); }
+static std::string WStringToUTF8(const std::wstring& wstr) { return PathUtil::WideToUtf8(wstr); }
 
 static std::wstring ConvertFilterToWString(const char* filter) {
     if (!filter) return L"";
@@ -146,10 +134,13 @@ namespace UI {
 
     void TriggerBackgroundOpenDocument(const std::string& filepath, ID3D11Device* device, Canvas& canvas) {
         if (g_LoadingState.isLoading) return;
+
+        // Always store/load UTF-8 paths (dialogs/drops may arrive as ACP).
+        const std::string pathUtf8 = PathUtil::NormalizeToUtf8Path(filepath);
         
         g_LoadingState.isLoading = true;
         g_LoadingState.progress = 0.0f;
-        g_LoadingState.filepath = filepath;
+        g_LoadingState.filepath = pathUtf8;
         g_LoadingState.completed = false;
         g_LoadingState.success = false;
         {
@@ -157,9 +148,9 @@ namespace UI {
             g_LoadingState.stage = "Initializing";
         }
 
-        std::thread([filepath, device, &canvas]() {
-            Logger::Get().Info("Starting background load of: " + filepath);
-            bool ok = canvas.OpenDocument(device, filepath, [](float progress, const char* stage) {
+        std::thread([pathUtf8, device, &canvas]() {
+            Logger::Get().Info("Starting background load of: " + pathUtf8);
+            bool ok = canvas.OpenDocument(device, pathUtf8, [](float progress, const char* stage) {
                 g_LoadingState.progress = progress;
                 if (stage) {
                     std::lock_guard<std::mutex> lock(g_LoadingState.mutex);
@@ -420,11 +411,11 @@ namespace UI {
 
                 ImGui::Separator();
                 ImGui::Text("Rotation / dynamics");
-                ImGui::TextDisabled("(rotation/scatter not in paint engine yet — saved in preset)");
-                ImGui::SliderFloat("Rotation", &brush.rotationDeg, 0.f, 360.f, "%.0f°  [placeholder]");
-                ImGui::Checkbox("Pressure → Rotation [placeholder]", &brush.pressureRotation);
-                ImGui::SliderFloat("Scatter", &brush.scatter, 0.f, 1.f, "%.2f  [placeholder]");
-                ImGui::SliderFloat("Angle jitter", &brush.angleJitter, 0.f, 1.f, "%.2f  [placeholder]");
+                ImGui::TextDisabled("Applied in paint engine (tip rotation + dab scatter/jitter)");
+                ImGui::SliderFloat("Rotation", &brush.rotationDeg, 0.f, 360.f, "%.0f°");
+                ImGui::Checkbox("Pressure → Rotation", &brush.pressureRotation);
+                ImGui::SliderFloat("Scatter", &brush.scatter, 0.f, 1.f, "%.2f");
+                ImGui::SliderFloat("Angle jitter", &brush.angleJitter, 0.f, 1.f, "%.2f");
 
                 ImGui::Separator();
                 ImGui::BeginDisabled(!has || meta.isBuiltin);
