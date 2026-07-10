@@ -3044,7 +3044,9 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         metadata["width"] = m_Width;
         metadata["height"] = m_Height;
         metadata["active_layer"] = m_ActiveLayerIdx;
-        metadata["project_type"] = (m_ProjectType == ProjectType::Simple) ? "simple" : "advanced";
+        metadata["project_type"] =
+            (m_ProjectType == ProjectType::Simple) ? "simple" :
+            (m_ProjectType == ProjectType::AdvancedModMode) ? "advanced_mod" : "advanced";
         metadata["document_bit_depth"] = (m_DocumentBitDepth == DocumentBitDepth::F32) ? "f32"
             : (m_DocumentBitDepth == DocumentBitDepth::F16) ? "f16" : "u8";
         metadata["format_features"] = "blend_filters_mask_groups";
@@ -3184,7 +3186,9 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
 
         if (metadata.contains("project_type")) {
             std::string pt = metadata["project_type"].get<std::string>();
-            m_ProjectType = (pt == "simple") ? ProjectType::Simple : ProjectType::Advanced;
+            if (pt == "simple") m_ProjectType = ProjectType::Simple;
+            else if (pt == "advanced_mod") m_ProjectType = ProjectType::AdvancedModMode;
+            else m_ProjectType = ProjectType::Advanced;
         } else {
             m_ProjectType = ProjectType::Advanced;
         }
@@ -3359,7 +3363,9 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
     int width = m_Width;
     int height = m_Height;
     int activeLayer = m_ActiveLayerIdx;
-    std::string projectType = (m_ProjectType == ProjectType::Simple) ? "simple" : "advanced";
+    std::string projectType =
+        (m_ProjectType == ProjectType::Simple) ? "simple" :
+        (m_ProjectType == ProjectType::AdvancedModMode) ? "advanced_mod" : "advanced";
 
     json exportMeta;
     exportMeta["export_path"] = m_ExportPath;

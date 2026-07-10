@@ -16,6 +16,7 @@
 #include "widgets/UiPathField.h"
 #include "widgets/UiTooltip.h"
 #include "../core/BrushLibrary.h"
+#include "../core/ProjectManager.h"
 #include <stb_image.h>
 #include <thread>
 #include <imgui_internal.h>
@@ -132,6 +133,7 @@ static bool ShowSaveFileWin32(char* outPath, size_t maxLen, const char* filter =
 namespace UI {
 
     DocumentLoadingState g_LoadingState;
+    ProjectTabCloseRequest g_ProjectTabCloseRequest;
 
     void TriggerBackgroundOpenDocument(const std::string& filepath, ID3D11Device* device, Canvas& canvas) {
         if (g_LoadingState.isLoading) return;
@@ -740,6 +742,9 @@ namespace UI {
         // 1. Persistent Header (Main Menu Bar)
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
+                if (ImGui::MenuItem("New Project Tab", "Ctrl+T")) {
+                    ProjectManager::Get().CreateEmptyProject();
+                }
                 if (ImGui::MenuItem("Open Project (.rayp)", KeymapManager::Get().GetActionShortcutString("OpenProject").c_str())) {
                     state.openLoadRaypModal = true;
                 }
@@ -893,6 +898,107 @@ namespace UI {
                 ImGui::EndMenu();
             }
             ImGui::EndMainMenuBar();
+        }
+
+        // ---- Project tabs (hard-wired under menu bar — Photoshop-style documents) ----
+        {
+            const float tabBarH = 28.0f;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 3.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 4.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 0.0f));
+            ImGui::BeginViewportSideBar("##ProjectTabBar", mainViewport, ImGuiDir_Up, tabBarH,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings);
+
+            auto tabs = ProjectManager::Get().ListTabs();
+            for (const auto& tab : tabs) {
+                ImGui::PushID(tab.id);
+                std::string label = tab.title;
+                if (tab.dirty) label += " *";
+
+                // Active tab: slightly brighter button
+                if (tab.active) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                }
+                if (ImGui::Button(label.c_str())) {
+                    if (!tab.active)
+                        ProjectManager::Get().SwitchTo(tab.id);
+                }
+                if (tab.active)
+                    ImGui::PopStyleColor(2);
+
+                // Middle-click close
+                if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+                    if (!ProjectManager::Get().CloseProject(tab.id, false)) {
+                        g_ProjectTabCloseRequest.projectId = tab.id;
+                        g_ProjectTabCloseRequest.pending = true;
+                    }
+                }
+
+                // Close X on same line
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 4.0f));
+                if (ImGui::SmallButton("x")) {
+                    if (!ProjectManager::Get().CloseProject(tab.id, false)) {
+                        g_ProjectTabCloseRequest.projectId = tab.id;
+                        g_ProjectTabCloseRequest.pending = true;
+                    }
+                }
+                ImGui::PopStyleVar();
+
+                if (ImGui::BeginPopupContextItem("##proj_tab_ctx")) {
+                    if (ImGui::MenuItem("Close")) {
+                        if (!ProjectManager::Get().CloseProject(tab.id, false)) {
+                            g_ProjectTabCloseRequest.projectId = tab.id;
+                            g_ProjectTabCloseRequest.pending = true;
+                        }
+                    }
+                    if (ImGui::MenuItem("Close Others")) {
+                        auto all = ProjectManager::Get().ListTabs();
+                        for (const auto& o : all) {
+                            if (o.id == tab.id) continue;
+                            ProjectManager::Get().CloseProject(o.id, true);
+                        }
+                        ProjectManager::Get().SwitchTo(tab.id);
+                    }
+                    ImGui::EndPopup();
+                }
+
+                ImGui::SameLine();
+                ImGui::PopID();
+            }
+
+            // New project tab
+            if (ImGui::Button("+")) {
+                ProjectManager::Get().CreateEmptyProject();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip("New project tab");
+
+            ImGui::End();
+            ImGui::PopStyleVar(3);
+        }
+
+        // Dirty close confirm
+        if (g_ProjectTabCloseRequest.pending) {
+            ImGui::OpenPopup("Close Project?##dirty");
+            g_ProjectTabCloseRequest.pending = false;
+        }
+        if (ImGui::BeginPopupModal("Close Project?##dirty", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("This project has unsaved changes.");
+            ImGui::Text("Close anyway?");
+            ImGui::Spacing();
+            if (ImGui::Button("Close Without Saving", ImVec2(180, 0))) {
+                ProjectManager::Get().CloseProject(g_ProjectTabCloseRequest.projectId, true);
+                g_ProjectTabCloseRequest.projectId = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+                g_ProjectTabCloseRequest.projectId = -1;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
         }
 
         // ---- Image Adjustment Modals ----
@@ -1682,7 +1788,28 @@ namespace UI {
             }
             ImGui::Separator();
             if (ImGui::Button("Load", ImVec2(120, 0))) {
-                TriggerBackgroundOpenDocument(loadPath, device, canvas);
+                // Open as new project tab (or activate if already open)
+                const std::string path = PathUtil::NormalizeToUtf8Path(loadPath);
+                const int id = ProjectManager::Get().ActivateOrPrepareOpen(path);
+                if (id >= 0) {
+                    if (Project* p = ProjectManager::Get().FindProject(id)) {
+                        if (p->canvas) {
+                            // Reload if blank / different; skip if already this file loaded
+                            bool already = false;
+                            if (!p->IsBlank() && !p->canvas->GetCurrentProjectFilePath().empty()) {
+                                auto lower = [](std::string s) {
+                                    std::transform(s.begin(), s.end(), s.begin(),
+                                        [](unsigned char c) { return (char)std::tolower(c); });
+                                    return s;
+                                };
+                                already = lower(PathUtil::NormalizeToUtf8Path(p->canvas->GetCurrentProjectFilePath()))
+                                       == lower(path);
+                            }
+                            if (!already)
+                                TriggerBackgroundOpenDocument(path, device, *p->canvas);
+                        }
+                    }
+                }
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
@@ -2007,10 +2134,18 @@ namespace UI {
             Ui::BeginDockPanel("Properties", &state.showProperties);
             
             ImGui::Text("Project Properties:");
-            int pType = (canvas.GetProjectType() == Canvas::ProjectType::Simple) ? 0 : 1;
-            const char* pTypeNames[] = { "Simple Project", "Advanced Project (.rayp)" };
+            int pType =
+                (canvas.GetProjectType() == Canvas::ProjectType::Simple) ? 0 :
+                (canvas.GetProjectType() == Canvas::ProjectType::AdvancedModMode) ? 2 : 1;
+            const char* pTypeNames[] = {
+                "Simple Project",
+                "Advanced Project (.rayp)",
+                "Advanced Mod Mode (.rayp)"
+            };
             if (UiCombo("##cmb_pType", &pType, pTypeNames, IM_ARRAYSIZE(pTypeNames), "Project Type")) {
-                canvas.SetProjectType((pType == 0) ? Canvas::ProjectType::Simple : Canvas::ProjectType::Advanced);
+                if (pType == 0) canvas.SetProjectType(Canvas::ProjectType::Simple);
+                else if (pType == 2) canvas.SetProjectType(Canvas::ProjectType::AdvancedModMode);
+                else canvas.SetProjectType(Canvas::ProjectType::Advanced);
             }
 
             ImGui::Text("Document Bit Depth:");

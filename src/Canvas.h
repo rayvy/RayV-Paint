@@ -198,6 +198,7 @@ public:
     bool IsInIsolationMode() const { return m_IsIsolatedMode; }
     int GetActiveLayerIndex() const { return m_ActiveLayerIdx; }
     std::vector<Layer>& GetLayers() { return m_Layers; }
+    const std::vector<Layer>& GetLayers() const { return m_Layers; }
     size_t GetActiveLayerTileCount() const {
         if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return 0;
         const auto& layer = m_Layers[m_ActiveLayerIdx];
@@ -395,7 +396,8 @@ public:
 
     enum class ProjectType {
         Simple,
-        Advanced
+        Advanced,
+        AdvancedModMode  // XXMI/mod multi-map + optional 3D preview (meta in .rayp)
     };
 
     // Document color bit depth (Photoshop-like). Global working space for all channels.

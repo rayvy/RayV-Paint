@@ -29,6 +29,13 @@ namespace UI {
 
     void TriggerBackgroundOpenDocument(const std::string& filepath, ID3D11Device* device, Canvas& canvas);
 
+    // Project tabs (header): close request when dirty — main/UI handles confirm.
+    struct ProjectTabCloseRequest {
+        int projectId = -1;
+        bool pending = false;
+    };
+    extern ProjectTabCloseRequest g_ProjectTabCloseRequest;
+
     bool IsSelectTool(ActiveTool tool);
     bool IsLassoTool(ActiveTool tool);
     bool IsWandTool(ActiveTool tool);

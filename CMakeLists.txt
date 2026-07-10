@@ -118,6 +118,10 @@ set(SOURCES
     src/core/KeymapManager.h
     src/core/ClipboardHelper.cpp
     src/core/ClipboardHelper.h
+    src/core/ProjectManager.cpp
+    src/core/ProjectManager.h
+    src/core/SingleInstance.cpp
+    src/core/SingleInstance.h
     src/scripting/ScriptingEngine.cpp
     src/scripting/ScriptingEngine.h
     src/ui/EditorPanels.cpp

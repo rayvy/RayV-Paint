@@ -13,6 +13,8 @@
 #include <fcntl.h>
 #include <io.h>
 #include <filesystem>
+#include <algorithm>
+#include <cctype>
 
 // GLFW
 #define GLFW_EXPOSE_NATIVE_WIN32
@@ -36,6 +38,8 @@
 #include "core/ClipboardHelper.h"
 #include "core/BrushLibrary.h"
 #include "core/PathUtil.h"
+#include "core/ProjectManager.h"
+#include "core/SingleInstance.h"
 #include "ui/EditorPanels.h"
 #include "ui/style/UiTokens.h"
 
@@ -49,6 +53,17 @@ static WNDPROC g_OriginalWndProc = nullptr;
 
 LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
+        case WM_COPYDATA: {
+            // Second instance → open path in this process (new project tab).
+            auto* cds = reinterpret_cast<COPYDATASTRUCT*>(lParam);
+            std::string path = SingleInstance::ParseCopyData(cds);
+            if (!path.empty()) {
+                ProjectManager::Get().EnqueueOpenPath(path);
+                SingleInstance::FocusWindow(hWnd);
+                return TRUE;
+            }
+            return FALSE;
+        }
         case WM_LBUTTONDOWN:
         case WM_MOUSEMOVE: {
             // Only reset if this is a genuine mouse event, not a synthesized one from a pen/tablet
@@ -112,8 +127,11 @@ static ID3D11ShaderResourceView* g_canvasSRV = nullptr;
 static float                     g_canvasRTWidth = 0.0f;
 static float                     g_canvasRTHeight = 0.0f;
 
-// Canvas Instance
-static Canvas g_Canvas;
+// Active project canvas (ProjectManager owns N Canvas instances — one D3D device).
+static Canvas& ActiveCanvas() {
+    return ProjectManager::Get().ActiveCanvas();
+}
+static HANDLE g_SingleInstanceMutex = nullptr;
 static ImVec2 g_LastDragDelta = ImVec2(0.0f, 0.0f);
 
 // Global startup time
@@ -136,11 +154,11 @@ static int g_LayerPreviewRefreshFrames = 0;
 
 static void EndBrushStrokeIfNeeded() {
     if (g_IsPainting) {
-        g_Canvas.PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
+        ActiveCanvas().PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
         g_IsPainting = false;
         // Double-refresh layer thumbs (preview can lag one frame behind GPU upload)
         g_LayerPreviewRefreshFrames = 2;
-        g_Canvas.MarkCompositeDirty();
+        ActiveCanvas().MarkCompositeDirty();
     }
 }
 
@@ -235,6 +253,27 @@ static bool GetGizmoGeometry(Canvas& canvas, const std::function<ImVec2(float, f
     outGeo.center = transformCorner(cx, cy);
     return true;
 }
+static void OpenPathAsNewProject(const std::string& path) {
+    if (path.empty() || !g_pd3dDevice) return;
+    const int id = ProjectManager::Get().ActivateOrPrepareOpen(path);
+    if (id < 0) return;
+    Project* proj = ProjectManager::Get().FindProject(id);
+    if (!proj || !proj->canvas) return;
+    // Already open & loaded → just switched.
+    if (!proj->IsBlank() && !proj->canvas->GetCurrentProjectFilePath().empty()) {
+        std::string a = PathUtil::NormalizeToUtf8Path(proj->canvas->GetCurrentProjectFilePath());
+        std::string b = PathUtil::NormalizeToUtf8Path(path);
+        auto lower = [](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            return s;
+        };
+        if (lower(a) == lower(b))
+            return;
+    }
+    UI::TriggerBackgroundOpenDocument(path, g_pd3dDevice, *proj->canvas);
+}
+
 static void CustomDropCallback(GLFWwindow* window, int count, const char** paths) {
     if (count <= 0) return;
     // GLFW may hand UTF-8 or legacy ACP on Windows — normalize before any I/O.
@@ -247,22 +286,20 @@ static void CustomDropCallback(GLFWwindow* window, int count, const char** paths
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
     }
 
-    // .rayp is always a full project document — never import as a flat image layer.
+    // .rayp is always a full project document — new tab (or activate existing).
     if (ext == "rayp") {
-        UI::TriggerBackgroundOpenDocument(path, g_pd3dDevice, g_Canvas);
+        OpenPathAsNewProject(path);
         return;
     }
 
+    // Drop onto viewport/layers → import into *current* project as image layer.
     if (g_IsViewportHovered || g_IsLayersHovered) {
-        UI::TriggerBackgroundOpenDocument(path, g_pd3dDevice, g_Canvas);
-    } else {
-        g_Canvas.ClearUndoHistory();
-        g_Canvas.GetLayers().clear();
-        g_Canvas.SetActiveLayerIndex(-1);
-        g_Canvas.SetCurrentProjectFilePath("");
-
-        UI::TriggerBackgroundOpenDocument(path, g_pd3dDevice, g_Canvas);
+        UI::TriggerBackgroundOpenDocument(path, g_pd3dDevice, ActiveCanvas());
+        return;
     }
+
+    // Drop elsewhere → new project tab (Photoshop-like).
+    OpenPathAsNewProject(path);
 }
 
 // Forward declarations
@@ -277,20 +314,20 @@ void RedirectIOToConsole();
 
 // Core API bindings exported to Scripting Engine
 void TriggerCanvasResize(int w, int h) {
-    g_Canvas.ResizeCanvas(g_pd3dDevice, w, h);
+    ActiveCanvas().ResizeCanvas(g_pd3dDevice, w, h);
     Logger::Get().Info("Canvas resized to: " + std::to_string(w) + "x" + std::to_string(h));
 }
-float GetCanvasZoom() { return g_Canvas.GetZoom(); }
-void SetCanvasZoom(float zoom) { g_Canvas.SetZoom(zoom); }
-void SetCanvasPan(float x, float y) { g_Canvas.SetPan(DirectX::XMFLOAT2(x, y)); }
-void ResetCanvasView() { g_Canvas.ResetView(); }
+float GetCanvasZoom() { return ActiveCanvas().GetZoom(); }
+void SetCanvasZoom(float zoom) { ActiveCanvas().SetZoom(zoom); }
+void SetCanvasPan(float x, float y) { ActiveCanvas().SetPan(DirectX::XMFLOAT2(x, y)); }
+void ResetCanvasView() { ActiveCanvas().ResetView(); }
 bool LoadCanvasImage(const std::string& filepath) {
     // Python / automation: open documents by type (.rayp or image).
-    return g_Canvas.OpenDocument(g_pd3dDevice, filepath);
+    return ActiveCanvas().OpenDocument(g_pd3dDevice, filepath);
 }
-int GetCanvasWidth() { return g_Canvas.GetWidth(); }
-int GetCanvasHeight() { return g_Canvas.GetHeight(); }
-size_t GetActiveLayerTileCount() { return g_Canvas.GetActiveLayerTileCount(); }
+int GetCanvasWidth() { return ActiveCanvas().GetWidth(); }
+int GetCanvasHeight() { return ActiveCanvas().GetHeight(); }
+size_t GetActiveLayerTileCount() { return ActiveCanvas().GetActiveLayerTileCount(); }
 double GetProcessWorkingSetMiB() {
     auto info = MemoryStats::QueryProcess();
     return static_cast<double>(info.workingSetBytes) / (1024.0 * 1024.0);
@@ -303,10 +340,10 @@ bool SaveCanvasDDS(const std::string& filepath, int formatChoice) {
     else if (formatChoice == 4) fmt = DdsFormat::R8_UNORM;
     else if (formatChoice == 5) fmt = DdsFormat::R16_FLOAT;
     else if (formatChoice == 6) fmt = DdsFormat::R32_FLOAT;
-    return g_Canvas.SaveCanvas(filepath, fmt);
+    return ActiveCanvas().SaveCanvas(filepath, fmt);
 }
 bool SaveCanvasStandard(const std::string& filepath, const std::string& iccProfilePath) {
-    return g_Canvas.SaveCanvasStandard(filepath, iccProfilePath);
+    return ActiveCanvas().SaveCanvasStandard(filepath, iccProfilePath);
 }
 
 
@@ -456,6 +493,7 @@ int main(int argc, char* argv[]) {
     bool testBrushes = false;
     bool forceConsole = false;
     bool test16kMode = false;
+    bool allowMultiInstance = false;
     std::string scriptPath = "";
     std::string configPath = "";
     std::string startupImagePath = "";
@@ -477,6 +515,8 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--headless") {
             headlessMode = true;
             testMode = true; // Headless implies auto-testing behavior
+        } else if (arg == "--allow-multi-instance") {
+            allowMultiInstance = true;
         } else if (arg == "--console") {
             forceConsole = true;
         } else if (arg == "--version") {
@@ -495,9 +535,16 @@ int main(int argc, char* argv[]) {
     // Force console if in test mode or headless mode
     if (testMode || headlessMode) {
         forceConsole = true;
+        // Tests/headless may run parallel processes — allow multi unless user wants single.
+        allowMultiInstance = true;
     }
 
     SetupConsole(forceConsole);
+
+    // Photoshop-style single instance (one D3D11 device). Second launch forwards paths & exits.
+    if (!SingleInstance::GuardStartup(argc, argv, allowMultiInstance, g_SingleInstanceMutex)) {
+        return 0;
+    }
 
     // If configPath was not overridden by CLI, resolve to the user directory config
     if (configPath.empty()) {
@@ -585,8 +632,9 @@ int main(int argc, char* argv[]) {
         SendMessage(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
     }
 
-    // Subclass window procedure for high-precision pointer/tablet messages
+    // Subclass window procedure for high-precision pointer/tablet messages + single-instance IPC
     g_OriginalWndProc = (WNDPROC)SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)SubclassedWndProc);
+    SingleInstance::RegisterMainWindow(hWnd);
 
     // Initialize KeymapManager (requires GLFW initialized and window created for scancode resolution)
     KeymapManager::Get().Initialize();
@@ -633,29 +681,31 @@ int main(int argc, char* argv[]) {
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
     log_step("ImGui Context & Backend Init");
 
-    // 8. Initialize Canvas Renderer
-    if (!g_Canvas.Initialize(g_pd3dDevice)) {
-        Logger::Get().Error("Failed to initialize Canvas renderer");
+    // 8. ProjectManager — first empty project + Canvas GPU init (one device for all tabs)
+    if (!ProjectManager::Get().Initialize(g_pd3dDevice)) {
+        Logger::Get().Error("Failed to initialize ProjectManager / Canvas renderer");
         CleanupDeviceD3D();
         glfwDestroyWindow(window);
         glfwTerminate();
         return 1;
     }
-    log_step("Canvas Renderer D3D Init (including Shader Loading/Compiling)");
+    log_step("ProjectManager + Canvas Renderer D3D Init");
 
     // Check for crash recovery / autosave restore
     std::string backupDir = ConfigManager::Get().GetBackupDir();
     std::string backupPath = backupDir + "/autosave_backup.rayp";
     bool showRecoveryModal = std::filesystem::exists(backupPath);
 
-    // Load startup document if specified on CLI (image or .rayp project)
+    // Load startup document if specified on CLI (image or .rayp project) → new/reuse project tab
     if (!startupImagePath.empty()) {
         if (!scriptPath.empty()) {
-            if (!g_Canvas.OpenDocument(g_pd3dDevice, startupImagePath)) {
+            // Headless/automation: synchronous open into prepared project tab
+            ProjectManager::Get().ActivateOrPrepareOpen(startupImagePath);
+            if (!ActiveCanvas().OpenDocument(g_pd3dDevice, startupImagePath)) {
                 Logger::Get().Error("Failed to open startup document: " + startupImagePath);
             }
         } else {
-            UI::TriggerBackgroundOpenDocument(startupImagePath, g_pd3dDevice, g_Canvas);
+            OpenPathAsNewProject(startupImagePath);
         }
     }
 
@@ -704,10 +754,17 @@ int main(int argc, char* argv[]) {
         // Merge async brush disk scan (non-blocking)
         BrushLibrary::Get().PollAsyncDiskLoad();
 
+        // Paths from second instance (WM_COPYDATA) → new project tabs
+        ProjectManager::Get().DrainPendingOpens(
+            [](const std::string& path, Canvas& canvas) {
+                if (g_pd3dDevice)
+                    UI::TriggerBackgroundOpenDocument(path, g_pd3dDevice, canvas);
+            });
+
         // Handle completed background loading
         if (UI::g_LoadingState.isLoading && UI::g_LoadingState.completed) {
             UI::g_LoadingState.isLoading = false;
-            g_Canvas.MarkCompositeDirty();
+            ActiveCanvas().MarkCompositeDirty();
             if (UI::g_LoadingState.success) {
                 Logger::Get().Info("Background document load successful: " + UI::g_LoadingState.filepath);
             } else {
@@ -738,21 +795,21 @@ int main(int argc, char* argv[]) {
 
         // Layer preview double-refresh (paint/edit may leave thumbs one frame stale)
         if (g_LayerPreviewRefreshFrames > 0) {
-            g_Canvas.MarkCompositeDirty();
+            ActiveCanvas().MarkCompositeDirty();
             --g_LayerPreviewRefreshFrames;
         }
 
         // Render all UI Panels and Modals (Toolbar, Properties, Layers, Brush settings, Console logs, Colors)
-        UI::RenderAll(uiState, g_Canvas, g_Brush, g_ActiveTool, g_pd3dDevice, g_pd3dDeviceContext, window);
+        UI::RenderAll(uiState, ActiveCanvas(), g_Brush, g_ActiveTool, g_pd3dDevice, g_pd3dDeviceContext, window);
 
         // Keyboard Shortcuts Handler (Layout-Independent via KeymapManager)
         ImGuiIO& io = ImGui::GetIO();
         if (!io.WantTextInput) {
             if (KeymapManager::Get().ConsumeActionTrigger("Undo")) {
-                g_Canvas.Undo();
+                ActiveCanvas().Undo();
             }
             if (KeymapManager::Get().ConsumeActionTrigger("Redo")) {
-                g_Canvas.Redo();
+                ActiveCanvas().Redo();
             }
             if (KeymapManager::Get().ConsumeActionTrigger("SaveProject")) {
                 uiState.openSaveRaypModal = true;
@@ -814,43 +871,43 @@ int main(int argc, char* argv[]) {
                 g_ActiveTool = ActiveTool::Smudge;
             }
             if (KeymapManager::Get().ConsumeActionTrigger("SelectAll")) {
-                g_Canvas.SelectAll();
+                ActiveCanvas().SelectAll();
             }
             if (KeymapManager::Get().ConsumeActionTrigger("DuplicateLayer")) {
                 if (!uiState.selectedLayers.empty()) {
-                    g_Canvas.DuplicateLayers(g_pd3dDevice, uiState.selectedLayers);
+                    ActiveCanvas().DuplicateLayers(g_pd3dDevice, uiState.selectedLayers);
                     // Refresh selection to new clones is best-effort: leave active as set by core
                     uiState.selectedLayers.clear();
-                    if (g_Canvas.GetActiveLayerIndex() >= 0)
-                        uiState.selectedLayers.push_back(g_Canvas.GetActiveLayerIndex());
-                } else if (g_Canvas.GetActiveLayerIndex() >= 0) {
-                    int neu = g_Canvas.DuplicateLayer(g_pd3dDevice, g_Canvas.GetActiveLayerIndex());
+                    if (ActiveCanvas().GetActiveLayerIndex() >= 0)
+                        uiState.selectedLayers.push_back(ActiveCanvas().GetActiveLayerIndex());
+                } else if (ActiveCanvas().GetActiveLayerIndex() >= 0) {
+                    int neu = ActiveCanvas().DuplicateLayer(g_pd3dDevice, ActiveCanvas().GetActiveLayerIndex());
                     uiState.selectedLayers.clear();
                     if (neu >= 0) uiState.selectedLayers.push_back(neu);
                 }
             }
             if (KeymapManager::Get().ConsumeActionTrigger("CropToSelection")) {
-                if (g_Canvas.HasSelection()) {
-                    g_Canvas.CropCanvasToSelection(g_pd3dDevice);
+                if (ActiveCanvas().HasSelection()) {
+                    ActiveCanvas().CropCanvasToSelection(g_pd3dDevice);
                 }
             }
             if (KeymapManager::Get().ConsumeActionTrigger("InvertSelection")) {
-                g_Canvas.InvertSelection();
+                ActiveCanvas().InvertSelection();
             }
             if (KeymapManager::Get().ConsumeActionTrigger("InvertColors")) {
-                g_Canvas.InvertColors();
+                ActiveCanvas().InvertColors();
             }
             if (KeymapManager::Get().ConsumeActionTrigger("InvertAlpha")) {
-                g_Canvas.InvertAlpha();
+                ActiveCanvas().InvertAlpha();
             }
             if (KeymapManager::Get().ConsumeActionTrigger("AdjustHSV")) {
                 uiState.showHSVModal = true;
             }
             if (KeymapManager::Get().ConsumeActionTrigger("QuickExport") || uiState.openQuickExportTrigger) {
                 uiState.openQuickExportTrigger = false;
-                std::string path = g_Canvas.GetExportPath();
+                std::string path = ActiveCanvas().GetExportPath();
                 if (path.empty()) {
-                    std::string proj = g_Canvas.GetCurrentProjectFilePath();
+                    std::string proj = ActiveCanvas().GetCurrentProjectFilePath();
                     if (!proj.empty()) {
                         size_t dot = proj.find_last_of('.');
                         if (dot != std::string::npos) {
@@ -861,7 +918,7 @@ int main(int argc, char* argv[]) {
                     } else {
                         path = "export.png";
                     }
-                    g_Canvas.SetExportPath(path);
+                    ActiveCanvas().SetExportPath(path);
                 }
                 
                 size_t dot = path.find_last_of('.');
@@ -873,18 +930,18 @@ int main(int argc, char* argv[]) {
                 
                 if (ext == "dds") {
                     // Same pipeline as Advanced Export (texconv + user format/mips/quality)
-                    if (g_Canvas.SaveCanvasCompressed(
+                    if (ActiveCanvas().SaveCanvasCompressed(
                             path,
-                            g_Canvas.GetExportFormat(),
-                            g_Canvas.GetExportGenerateMipMaps(),
-                            g_Canvas.GetExportMipFilter(),
-                            g_Canvas.GetExportCompressionSpeed())) {
+                            ActiveCanvas().GetExportFormat(),
+                            ActiveCanvas().GetExportGenerateMipMaps(),
+                            ActiveCanvas().GetExportMipFilter(),
+                            ActiveCanvas().GetExportCompressionSpeed())) {
                         Logger::Get().Info("Quick exported DDS successfully to: " + path);
                     } else {
                         Logger::Get().Error("Quick export DDS failed for path: " + path);
                     }
                 } else {
-                    if (g_Canvas.SaveCanvasStandard(path, g_Canvas.GetExportIccPreset())) {
+                    if (ActiveCanvas().SaveCanvasStandard(path, ActiveCanvas().GetExportIccPreset())) {
                         Logger::Get().Info("Quick exported image successfully to: " + path);
                     } else {
                         Logger::Get().Error("Quick export image failed for path: " + path);
@@ -895,28 +952,28 @@ int main(int argc, char* argv[]) {
                 uiState.openExportAdvancedModal = true;
             }
             if (KeymapManager::Get().ConsumeActionTrigger("FillSecondary")) {
-                if (g_Canvas.HasSelection() || g_Canvas.GetActiveLayerIndex() >= 0)
-                    g_Canvas.FillSelection(g_SecondaryColor);
+                if (ActiveCanvas().HasSelection() || ActiveCanvas().GetActiveLayerIndex() >= 0)
+                    ActiveCanvas().FillSelection(g_SecondaryColor);
             }
             if (KeymapManager::Get().ConsumeActionTrigger("DeleteContent")) {
-                g_Canvas.DeleteSelectionContent();
+                ActiveCanvas().DeleteSelectionContent();
             }
             if (KeymapManager::Get().ConsumeActionTrigger("CopyLayers")) {
                 std::vector<int> idxs = uiState.selectedLayers;
-                if (idxs.empty() && g_Canvas.GetActiveLayerIndex() >= 0)
-                    idxs.push_back(g_Canvas.GetActiveLayerIndex());
-                g_Canvas.CopyLayersToClipboard(idxs);
+                if (idxs.empty() && ActiveCanvas().GetActiveLayerIndex() >= 0)
+                    idxs.push_back(ActiveCanvas().GetActiveLayerIndex());
+                ActiveCanvas().CopyLayersToClipboard(idxs);
             }
             if (KeymapManager::Get().ConsumeActionTrigger("Copy")) {
                 // Selection or active layer content → system + internal content clipboard
-                if (!g_Canvas.CopyContentToClipboard()) {
+                if (!ActiveCanvas().CopyContentToClipboard()) {
                     // Fallback: merged composite (legacy)
-                    std::vector<float> composite = g_Canvas.GetCompositePixels();
-                    ClipboardHelper::CopyImageToClipboard(composite, g_Canvas.GetWidth(), g_Canvas.GetHeight());
+                    std::vector<float> composite = ActiveCanvas().GetCompositePixels();
+                    ClipboardHelper::CopyImageToClipboard(composite, ActiveCanvas().GetWidth(), ActiveCanvas().GetHeight());
                 }
             }
             if (KeymapManager::Get().ConsumeActionTrigger("PasteAsNewLayer")) {
-                if (!g_Canvas.PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
+                if (!ActiveCanvas().PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
                     Logger::Get().Warn("PasteAsNewLayer: no image on clipboard");
             }
             if (KeymapManager::Get().ConsumeActionTrigger("Paste")) {
@@ -929,17 +986,17 @@ int main(int argc, char* argv[]) {
                 if (externalImage) {
                     // Mask paint target → stamp into mask (UV layout → mask workflow).
                     // Otherwise always new layer so transparency is preserved cleanly.
-                    if (g_Canvas.IsEditingLayerMask()) {
-                        if (!g_Canvas.PasteContentIntoActive(g_pd3dDevice))
+                    if (ActiveCanvas().IsEditingLayerMask()) {
+                        if (!ActiveCanvas().PasteContentIntoActive(g_pd3dDevice))
                             Logger::Get().Warn("Paste: failed to paste into mask");
-                    } else if (!g_Canvas.PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer")) {
+                    } else if (!ActiveCanvas().PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer")) {
                         Logger::Get().Warn("Paste: failed to paste system image as layer");
                     }
-                } else if (g_Canvas.HasLayerClipboard()) {
-                    g_Canvas.PasteLayersFromClipboard(g_pd3dDevice);
-                } else if (!g_Canvas.PasteContentIntoActive(g_pd3dDevice)) {
+                } else if (ActiveCanvas().HasLayerClipboard()) {
+                    ActiveCanvas().PasteLayersFromClipboard(g_pd3dDevice);
+                } else if (!ActiveCanvas().PasteContentIntoActive(g_pd3dDevice)) {
                     // Fallback: system image as new layer (first paste / no internal content)
-                    if (!g_Canvas.PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
+                    if (!ActiveCanvas().PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
                         Logger::Get().Warn("Paste: clipboard has no pasteable image");
                 }
             }
@@ -948,14 +1005,14 @@ int main(int argc, char* argv[]) {
         // Background Auto-Save trigger
         static bool s_IsAutoSaving = false;
         int autoSaveInterval = ConfigManager::Get().GetAutoSaveIntervalMinutes();
-        if (autoSaveInterval > 0 && g_Canvas.IsDocumentModified() && !s_IsAutoSaving) {
+        if (autoSaveInterval > 0 && ActiveCanvas().IsDocumentModified() && !s_IsAutoSaving) {
             auto currentTime = std::chrono::steady_clock::now();
             auto elapsedMinutes = std::chrono::duration_cast<std::chrono::minutes>(currentTime - lastAutoSaveTime).count();
             if (elapsedMinutes >= autoSaveInterval) {
                 s_IsAutoSaving = true;
                 std::filesystem::create_directories(uiState.backupDir);
                 Logger::Get().Info("Triggering background auto-save to " + uiState.backupPath);
-                g_Canvas.SaveCanvasRaypAsync(uiState.backupPath, [](bool success) {
+                ActiveCanvas().SaveCanvasRaypAsync(uiState.backupPath, [](bool success) {
                     s_IsAutoSaving = false;
                     if (success) {
                         Logger::Get().Info("Background auto-save completed successfully.");
@@ -996,18 +1053,18 @@ int main(int argc, char* argv[]) {
             bool isHovered = ImGui::IsItemHovered() && !UI::g_LoadingState.isLoading;
 
             // Map mouse coordinates to Canvas pixel coordinates using floored origin matching the vertex shader
-            float screenOriginX = std::floor(g_Canvas.GetPan().x + static_cast<float>(viewportWidth) * 0.5f);
-            float screenOriginY = std::floor(g_Canvas.GetPan().y + static_cast<float>(viewportHeight) * 0.5f);
+            float screenOriginX = std::floor(ActiveCanvas().GetPan().x + static_cast<float>(viewportWidth) * 0.5f);
+            float screenOriginY = std::floor(ActiveCanvas().GetPan().y + static_cast<float>(viewportHeight) * 0.5f);
 
-            float rotatedX = (localMouseX - screenOriginX) / g_Canvas.GetZoom();
-            float rotatedY = (localMouseY - screenOriginY) / g_Canvas.GetZoom();
+            float rotatedX = (localMouseX - screenOriginX) / ActiveCanvas().GetZoom();
+            float rotatedY = (localMouseY - screenOriginY) / ActiveCanvas().GetZoom();
 
-            float angle = g_Canvas.GetRotationAngle();
+            float angle = ActiveCanvas().GetRotationAngle();
             float cosA = std::cos(angle);
             float sinA = std::sin(angle);
             
-            float centerX = g_Canvas.GetWidth() * 0.5f;
-            float centerY = g_Canvas.GetHeight() * 0.5f;
+            float centerX = ActiveCanvas().GetWidth() * 0.5f;
+            float centerY = ActiveCanvas().GetHeight() * 0.5f;
             
             float relX = rotatedX - centerX;
             float relY = rotatedY - centerY;
@@ -1015,16 +1072,16 @@ int main(int argc, char* argv[]) {
             float canvasX = relX * cosA + relY * sinA + centerX;
             float canvasY = -relX * sinA + relY * cosA + centerY;
 
-            if (g_Canvas.GetViewportFlipH()) {
-                canvasX = (float)g_Canvas.GetWidth() - canvasX;
+            if (ActiveCanvas().GetViewportFlipH()) {
+                canvasX = (float)ActiveCanvas().GetWidth() - canvasX;
             }
-            if (g_Canvas.GetViewportFlipV()) {
-                canvasY = (float)g_Canvas.GetHeight() - canvasY;
+            if (ActiveCanvas().GetViewportFlipV()) {
+                canvasY = (float)ActiveCanvas().GetHeight() - canvasY;
             }
 
             // Check if cursor is within active canvas boundary
-            bool isInsideCanvas = (canvasX >= 0.0f && canvasX < (float)g_Canvas.GetWidth() &&
-                                   canvasY >= 0.0f && canvasY < (float)g_Canvas.GetHeight());
+            bool isInsideCanvas = (canvasX >= 0.0f && canvasX < (float)ActiveCanvas().GetWidth() &&
+                                   canvasY >= 0.0f && canvasY < (float)ActiveCanvas().GetHeight());
 
             // Smudge is NOT brush-like: must not paint with brush.color / accent color.
             bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser);
@@ -1037,8 +1094,8 @@ int main(int argc, char* argv[]) {
             if (g_ActiveTool != g_PrevActiveTool) {
                 EndBrushStrokeIfNeeded();
                 // Contract: cancel in-progress quick-select stroke on tool switch (no undo/selection change)
-                if (g_PrevActiveTool == ActiveTool::QuickSelect && g_Canvas.IsQuickSelectStrokeActive()) {
-                    g_Canvas.CancelQuickSelectStroke();
+                if (g_PrevActiveTool == ActiveTool::QuickSelect && ActiveCanvas().IsQuickSelectStrokeActive()) {
+                    ActiveCanvas().CancelQuickSelectStroke();
                     g_IsSelectionDragging = false;
                     g_LassoPoints.clear();
                 }
@@ -1083,7 +1140,7 @@ int main(int argc, char* argv[]) {
                 } else if (wantRotate) {
                     if (!s_IsDraggingRotation) {
                         s_IsDraggingRotation = true;
-                        s_StartRotationAngle = g_Canvas.GetRotationAngle();
+                        s_StartRotationAngle = ActiveCanvas().GetRotationAngle();
                     }
                     ImGuiMouseButton rotateButton = ImGui::IsMouseDragging(ImGuiMouseButton_Right) ? ImGuiMouseButton_Right : ImGuiMouseButton_Left;
                     ImVec2 drag = ImGui::GetMouseDragDelta(rotateButton);
@@ -1095,7 +1152,7 @@ int main(int argc, char* argv[]) {
                         float snapStep = 45.0f * (3.14159265f / 180.0f);
                         targetAngle = std::round(targetAngle / snapStep) * snapStep;
                     }
-                    g_Canvas.SetRotationAngle(targetAngle);
+                    ActiveCanvas().SetRotationAngle(targetAngle);
                     isRotating = true;
                 } else {
                     s_IsDraggingRotation = false;
@@ -1123,7 +1180,7 @@ int main(int argc, char* argv[]) {
             const bool brushOrEraser = isBrushLikeTool;
             const float maxBrushR = std::max(10.f, ConfigManager::Get().GetMaxBrushRadius());
             ImGuiIO& ioRmb = ImGui::GetIO();
-            const float brushZoom = std::max(0.001f, g_Canvas.GetZoom());
+            const float brushZoom = std::max(0.001f, ActiveCanvas().GetZoom());
             const bool modsResize = brushOrEraser && ioRmb.KeyCtrl && ioRmb.KeyAlt
                 && (isHovered || ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem));
 
@@ -1282,7 +1339,7 @@ int main(int argc, char* argv[]) {
                 // Draw custom outline circle + rotation direction at mouse position
                 ImDrawList* drawList = ImGui::GetForegroundDrawList();
                 float cursorRadius = isSmudgeTool ? uiState.smudge.radius : g_Brush.radius;
-                float screenRadius = cursorRadius * g_Canvas.GetZoom();
+                float screenRadius = cursorRadius * ActiveCanvas().GetZoom();
                 float hScreen = screenRadius * g_Brush.hardness;
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(0, 0, 0, 255), 32, 1.5f);
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(255, 255, 255, 255), 32, 1.0f);
@@ -1303,13 +1360,13 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            float zoom = g_Canvas.GetZoom();
-            float cw = (float)g_Canvas.GetWidth();
-            float ch = (float)g_Canvas.GetHeight();
+            float zoom = ActiveCanvas().GetZoom();
+            float cw = (float)ActiveCanvas().GetWidth();
+            float ch = (float)ActiveCanvas().GetHeight();
 
             auto canvasToScreen = [&](float cx, float cy) -> ImVec2 {
-                if (g_Canvas.GetViewportFlipH()) cx = cw - cx;
-                if (g_Canvas.GetViewportFlipV()) cy = ch - cy;
+                if (ActiveCanvas().GetViewportFlipH()) cx = cw - cx;
+                if (ActiveCanvas().GetViewportFlipV()) cy = ch - cy;
                 float rx = cx - cw * 0.5f;
                 float ry = cy - ch * 0.5f;
                 float rotX = rx * cosA - ry * sinA;
@@ -1364,7 +1421,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Draw Symmetrical Guidelines
-            if (g_Canvas.GetMirrorHorizontal() || g_Canvas.GetMirrorVertical()) {
+            if (ActiveCanvas().GetMirrorHorizontal() || ActiveCanvas().GetMirrorVertical()) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 auto drawDashedLine = [](ImDrawList* drawList, ImVec2 p1, ImVec2 p2, ImU32 col, float thickness, float dashLength) {
                     ImVec2 d = ImVec2(p2.x - p1.x, p2.y - p1.y);
@@ -1391,14 +1448,14 @@ int main(int argc, char* argv[]) {
                 // Push clip rect to ensure guides don't draw outside viewport boundaries
                 dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
 
-                if (g_Canvas.GetMirrorHorizontal()) {
+                if (ActiveCanvas().GetMirrorHorizontal()) {
                     ImVec2 h1 = canvasToScreen(cw * 0.5f, -ch * 5.0f);
                     ImVec2 h2 = canvasToScreen(cw * 0.5f, cw * 0.5f); // Wait! Let's check the original line: h2 was canvasToScreen(cw * 0.5f, ch * 6.0f)!
                     // Let's make sure it's ch * 6.0f!
                     h2 = canvasToScreen(cw * 0.5f, ch * 6.0f);
                     drawDashedLine(dl, h1, h2, IM_COL32(235, 64, 52, 180), 1.5f, 6.0f);
                 }
-                if (g_Canvas.GetMirrorVertical()) {
+                if (ActiveCanvas().GetMirrorVertical()) {
                     ImVec2 v1 = canvasToScreen(-cw * 5.0f, ch * 0.5f);
                     ImVec2 v2 = canvasToScreen(cw * 6.0f, ch * 0.5f);
                     drawDashedLine(dl, v1, v2, IM_COL32(235, 64, 52, 180), 1.5f, 6.0f);
@@ -1425,7 +1482,7 @@ int main(int argc, char* argv[]) {
             static bool s_PipetteHasPreview = false;
             if (isHovered && isInsideCanvas && isEyedropperMode && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
-                UI::SampleCanvasColor(g_Canvas, canvasX, canvasY, s_PipettePreview);
+                UI::SampleCanvasColor(ActiveCanvas(), canvasX, canvasY, s_PipettePreview);
                 s_PipetteHasPreview = true;
                 if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                     g_Brush.color[0] = s_PipettePreview[0];
@@ -1444,8 +1501,8 @@ int main(int argc, char* argv[]) {
                     g_IsPainting = true;
                     if (isShiftHeld && g_HasLastStrokeEnd) {
                         // Draw line from last stroke end to current mouse at an arbitrary angle (NO axis lock)
-                        g_Canvas.PaintOnActiveLayer(g_LastStrokeEndX, g_LastStrokeEndY, StrokePhase::Begin, g_Brush);
-                        g_Canvas.PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Update, g_Brush);
+                        ActiveCanvas().PaintOnActiveLayer(g_LastStrokeEndX, g_LastStrokeEndY, StrokePhase::Begin, g_Brush);
+                        ActiveCanvas().PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Update, g_Brush);
                         
                         g_StrokeStartX = canvasX;
                         g_StrokeStartY = canvasY;
@@ -1455,7 +1512,7 @@ int main(int argc, char* argv[]) {
                         g_LockAxis = LockAxis::None;
                     } else {
                         // Normal start
-                        g_Canvas.PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, g_Brush);
+                        ActiveCanvas().PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, g_Brush);
                         g_StrokeStartX = canvasX;
                         g_StrokeStartY = canvasY;
                         g_LockAxisSelected = false;
@@ -1495,7 +1552,7 @@ int main(int argc, char* argv[]) {
                         g_LockAxis = LockAxis::None;
                     }
                     
-                    g_Canvas.PaintOnActiveLayer(targetX, targetY, StrokePhase::Update, g_Brush);
+                    ActiveCanvas().PaintOnActiveLayer(targetX, targetY, StrokePhase::Update, g_Brush);
                     g_LastStrokeEndX = targetX;
                     g_LastStrokeEndY = targetY;
                     g_HasLastStrokeEnd = true;
@@ -1503,17 +1560,17 @@ int main(int argc, char* argv[]) {
             }
 
             if (g_IsPainting && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
-                g_Canvas.PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
+                ActiveCanvas().PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
                 g_IsPainting = false;
             }
 
             // Smudge End
             if (g_ActiveTool == ActiveTool::Smudge && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
-                g_Canvas.SmudgeOnActiveLayer(0, 0, StrokePhase::End, uiState.smudge);
+                ActiveCanvas().SmudgeOnActiveLayer(0, 0, StrokePhase::End, uiState.smudge);
             }
 
             // Commit / Cancel Move Pixels (keyboard or Tool Settings panel buttons)
-            if (g_Canvas.IsMovingPixels()) {
+            if (ActiveCanvas().IsMovingPixels()) {
                 bool doCommit = uiState.commitTransform ||
                     (!ImGui::GetIO().WantTextInput && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)));
                 bool doCancel = uiState.cancelTransform ||
@@ -1522,20 +1579,20 @@ int main(int argc, char* argv[]) {
                 uiState.cancelTransform = false;
 
                 if (doCommit) {
-                    g_Canvas.CommitMovePixels(g_pd3dDevice);
+                    ActiveCanvas().CommitMovePixels(g_pd3dDevice);
                     g_MoveAccumulatedOffsetX = 0;
                     g_MoveAccumulatedOffsetY = 0;
                 }
                 else if (doCancel) {
-                    g_Canvas.CancelMovePixels(g_pd3dDevice);
+                    ActiveCanvas().CancelMovePixels(g_pd3dDevice);
                     g_MoveAccumulatedOffsetX = 0;
                     g_MoveAccumulatedOffsetY = 0;
                 }
             }
 
             // Auto-commit Move Pixels if tool switched
-            if (g_ActiveTool != ActiveTool::MovePixels && g_Canvas.IsMovingPixels()) {
-                g_Canvas.CommitMovePixels(g_pd3dDevice);
+            if (g_ActiveTool != ActiveTool::MovePixels && ActiveCanvas().IsMovingPixels()) {
+                ActiveCanvas().CommitMovePixels(g_pd3dDevice);
                 g_MoveAccumulatedOffsetX = 0;
                 g_MoveAccumulatedOffsetY = 0;
             }
@@ -1543,8 +1600,8 @@ int main(int argc, char* argv[]) {
             // Keyboard shortcuts (like Ctrl+D)
             if ((ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) && !ImGui::GetIO().WantTextInput) {
                 if (ImGui::IsKeyPressed(ImGuiKey_D)) {
-                    g_Canvas.ClearSelection();
-                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                    ActiveCanvas().ClearSelection();
+                    ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
                 }
             }
 
@@ -1583,15 +1640,15 @@ int main(int argc, char* argv[]) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && isInsideCanvas) {
                         bool add = selAdd();
                         bool subtract = selSub();
-                        int sx = std::clamp((int)std::floor(canvasX), 0, g_Canvas.GetWidth() - 1);
-                        int sy = std::clamp((int)std::floor(canvasY), 0, g_Canvas.GetHeight() - 1);
-                        g_Canvas.ApplyMagicWandSelection(g_pd3dDevice, sx, sy, uiState.magicWandTolerance, add, subtract, uiState.magicWandContiguous);
+                        int sx = std::clamp((int)std::floor(canvasX), 0, ActiveCanvas().GetWidth() - 1);
+                        int sy = std::clamp((int)std::floor(canvasY), 0, ActiveCanvas().GetHeight() - 1);
+                        ActiveCanvas().ApplyMagicWandSelection(g_pd3dDevice, sx, sy, uiState.magicWandTolerance, add, subtract, uiState.magicWandContiguous);
                     }
                 }
                 // Bucket Fill
                 else if (g_ActiveTool == ActiveTool::BucketFill) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        g_Canvas.ApplyBucketFill((int)canvasX, (int)canvasY, uiState.bucketFillTolerance, g_Brush.color, true);
+                        ActiveCanvas().ApplyBucketFill((int)canvasX, (int)canvasY, uiState.bucketFillTolerance, g_Brush.color, true);
                     }
                 }
                 // Gradient (drag to define vector)
@@ -1605,22 +1662,22 @@ int main(int argc, char* argv[]) {
                 // Smudge Tool
                 else if (g_ActiveTool == ActiveTool::Smudge) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        g_Canvas.SmudgeOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, uiState.smudge);
+                        ActiveCanvas().SmudgeOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, uiState.smudge);
                     } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-                        g_Canvas.SmudgeOnActiveLayer(canvasX, canvasY, StrokePhase::Update, uiState.smudge);
+                        ActiveCanvas().SmudgeOnActiveLayer(canvasX, canvasY, StrokePhase::Update, uiState.smudge);
                     }
                 }
                 else if (g_ActiveTool == ActiveTool::MovePixels) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        if (!g_Canvas.IsMovingPixels()) {
-                            g_Canvas.StartMovePixels(g_pd3dDevice);
+                        if (!ActiveCanvas().IsMovingPixels()) {
+                            ActiveCanvas().StartMovePixels(g_pd3dDevice);
                             g_ActiveGizmoHandle = TransformGizmoHandle::Move;
                             g_IsMoveDragging = true;
                             g_MoveDragStartX = canvasX;
                             g_MoveDragStartY = canvasY;
                         } else {
                             GizmoScreenGeometry geo;
-                            if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                            if (GetGizmoGeometry(ActiveCanvas(), canvasToScreen, geo)) {
                                 float threshSq = 64.0f; // 8px radius
                                 ImVec2 mousePos = ImGui::GetMousePos();
                                 if (distSq(mousePos, geo.p1) <= threshSq) g_ActiveGizmoHandle = TransformGizmoHandle::Scale_TL;
@@ -1638,7 +1695,7 @@ int main(int argc, char* argv[]) {
                                     float distToCenter = std::sqrt(distSq(mousePos, geo.center));
                                     if (distToCenter < diag + 80.0f) {
                                         g_ActiveGizmoHandle = TransformGizmoHandle::Rotate;
-                                        g_GizmoDragStartRotation = g_Canvas.GetFloatingRotation();
+                                        g_GizmoDragStartRotation = ActiveCanvas().GetFloatingRotation();
                                         g_GizmoDragStartMouseAngle = std::atan2(mousePos.y - geo.center.y, mousePos.x - geo.center.x);
                                     } else {
                                         g_ActiveGizmoHandle = TransformGizmoHandle::None;
@@ -1649,8 +1706,8 @@ int main(int argc, char* argv[]) {
                                     g_IsMoveDragging = true;
                                     g_MoveDragStartX = canvasX;
                                     g_MoveDragStartY = canvasY;
-                                    g_GizmoDragStartScaleX = g_Canvas.GetFloatingScaleX();
-                                    g_GizmoDragStartScaleY = g_Canvas.GetFloatingScaleY();
+                                    g_GizmoDragStartScaleX = ActiveCanvas().GetFloatingScaleX();
+                                    g_GizmoDragStartScaleY = ActiveCanvas().GetFloatingScaleY();
                                     g_GizmoDragStartDist = std::sqrt(distSq(mousePos, geo.center));
                                     if (g_GizmoDragStartDist < 5.0f) g_GizmoDragStartDist = 5.0f;
                                     // Per-axis start distances for free (non-uniform) scale
@@ -1675,7 +1732,7 @@ int main(int argc, char* argv[]) {
                         g_LassoPoints.clear();
                         g_LassoPoints.push_back({ (int)canvasX, (int)canvasY });
                         if (g_ActiveTool == ActiveTool::QuickSelect) {
-                            g_Canvas.BeginQuickSelectStroke();
+                            ActiveCanvas().BeginQuickSelectStroke();
                         }
                     }
                 }
@@ -1688,8 +1745,8 @@ int main(int argc, char* argv[]) {
                             g_PolygonalLassoPoints.pop_back(); // double-click also emits a single click vertex
                         }
                         if (g_PolygonalLassoPoints.size() >= 3) {
-                            g_Canvas.ApplyPolygonalLassoSelection(g_PolygonalLassoPoints, add, subtract);
-                            g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                            ActiveCanvas().ApplyPolygonalLassoSelection(g_PolygonalLassoPoints, add, subtract);
+                            ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
                         }
                         g_PolygonalLassoPoints.clear();
                     }
@@ -1705,8 +1762,8 @@ int main(int argc, char* argv[]) {
                 bool subtract = selSub();
                 if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) {
                     if (g_PolygonalLassoPoints.size() >= 3) {
-                        g_Canvas.ApplyPolygonalLassoSelection(g_PolygonalLassoPoints, add, subtract);
-                        g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                        ActiveCanvas().ApplyPolygonalLassoSelection(g_PolygonalLassoPoints, add, subtract);
+                        ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
                     }
                     g_PolygonalLassoPoints.clear();
                 }
@@ -1718,8 +1775,8 @@ int main(int argc, char* argv[]) {
             // Quick Select: Esc mid-stroke → CancelQuickSelectStroke (no selection/undo change)
             if (g_ActiveTool == ActiveTool::QuickSelect && !ImGui::GetIO().WantTextInput &&
                 ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-                if (g_Canvas.IsQuickSelectStrokeActive()) {
-                    g_Canvas.CancelQuickSelectStroke();
+                if (ActiveCanvas().IsQuickSelectStrokeActive()) {
+                    ActiveCanvas().CancelQuickSelectStroke();
                 }
                 g_IsSelectionDragging = false;
                 g_LassoPoints.clear();
@@ -1732,7 +1789,7 @@ int main(int argc, char* argv[]) {
                 if (g_LassoPoints.empty() || g_LassoPoints.back() != std::make_pair(cx, cy)) {
                     g_LassoPoints.push_back({ cx, cy });
                     if (g_ActiveTool == ActiveTool::QuickSelect) {
-                        g_Canvas.StrokeQuickSelect(g_LassoPoints, g_Brush.radius, ImGui::GetIO().KeyAlt);
+                        ActiveCanvas().StrokeQuickSelect(g_LassoPoints, g_Brush.radius, ImGui::GetIO().KeyAlt);
                     }
                 }
             }
@@ -1754,24 +1811,24 @@ int main(int argc, char* argv[]) {
                 int y2 = (int)fy2;
 
                 if (g_ActiveTool == ActiveTool::RectSelect) {
-                    g_Canvas.ApplyRectSelection(x1, y1, x2, y2, add, subtract);
-                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                    ActiveCanvas().ApplyRectSelection(x1, y1, x2, y2, add, subtract);
+                    ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
                 }
                 else if (g_ActiveTool == ActiveTool::EllipseSelect) {
-                    g_Canvas.ApplyEllipseSelection(x1, y1, x2, y2, add, subtract);
-                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                    ActiveCanvas().ApplyEllipseSelection(x1, y1, x2, y2, add, subtract);
+                    ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
                 }
                 else if (g_ActiveTool == ActiveTool::LassoSelect) {
-                    g_Canvas.ApplyLassoSelection(g_LassoPoints, add, subtract);
-                    g_Canvas.UpdateSelectionMaskTexture(g_pd3dDevice);
+                    ActiveCanvas().ApplyLassoSelection(g_LassoPoints, add, subtract);
+                    ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
                 }
                 else if (g_ActiveTool == ActiveTool::SmartSelect) {
-                    g_Canvas.ApplySmartSelectSelection(g_pd3dDevice, g_LassoPoints, add, subtract);
+                    ActiveCanvas().ApplySmartSelectSelection(g_pd3dDevice, g_LassoPoints, add, subtract);
                 }
                 else if (g_ActiveTool == ActiveTool::QuickSelect) {
                     // Skip if already cancelled via Esc
-                    if (g_Canvas.IsQuickSelectStrokeActive())
-                        g_Canvas.EndQuickSelectStroke(g_pd3dDevice, add, subtract);
+                    if (ActiveCanvas().IsQuickSelectStrokeActive())
+                        ActiveCanvas().EndQuickSelectStroke(g_pd3dDevice, add, subtract);
                 }
                 g_LassoPoints.clear();
             }
@@ -1782,15 +1839,15 @@ int main(int argc, char* argv[]) {
                 if (g_ActiveGizmoHandle == TransformGizmoHandle::Move) {
                     int dx = (int)floor(canvasX - g_MoveDragStartX);
                     int dy = (int)floor(canvasY - g_MoveDragStartY);
-                    g_Canvas.UpdateMovePixels(g_pd3dDevice, g_MoveAccumulatedOffsetX + dx, g_MoveAccumulatedOffsetY + dy);
+                    ActiveCanvas().UpdateMovePixels(g_pd3dDevice, g_MoveAccumulatedOffsetX + dx, g_MoveAccumulatedOffsetY + dy);
                 }
                 else if (g_ActiveGizmoHandle == TransformGizmoHandle::Rotate) {
                     GizmoScreenGeometry geo;
-                    if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                    if (GetGizmoGeometry(ActiveCanvas(), canvasToScreen, geo)) {
                         float currentAngle = std::atan2(mousePos.y - geo.center.y, mousePos.x - geo.center.x);
                         float deltaAngle = currentAngle - g_GizmoDragStartMouseAngle;
-                        g_Canvas.SetFloatingRotation(g_GizmoDragStartRotation + deltaAngle);
-                        g_Canvas.MarkCompositeDirty();
+                        ActiveCanvas().SetFloatingRotation(g_GizmoDragStartRotation + deltaAngle);
+                        ActiveCanvas().MarkCompositeDirty();
                     }
                 }
                 else if (g_ActiveGizmoHandle == TransformGizmoHandle::Scale_TL ||
@@ -1798,54 +1855,54 @@ int main(int argc, char* argv[]) {
                          g_ActiveGizmoHandle == TransformGizmoHandle::Scale_BR ||
                          g_ActiveGizmoHandle == TransformGizmoHandle::Scale_BL) {
                     GizmoScreenGeometry geo;
-                    if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                    if (GetGizmoGeometry(ActiveCanvas(), canvasToScreen, geo)) {
                         // Shift: uniform scale (preserve pre-transform aspect ratio)
                         // without Shift: free scale per axis
                         if (ImGui::GetIO().KeyShift) {
                             float currentDist = std::sqrt(distSq(mousePos, geo.center));
                             float factor = currentDist / g_GizmoDragStartDist;
-                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
-                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                            ActiveCanvas().SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                            ActiveCanvas().SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
                         } else {
                             float fx = std::fabs(mousePos.x - geo.center.x) / g_GizmoDragStartDistX;
                             float fy = std::fabs(mousePos.y - geo.center.y) / g_GizmoDragStartDistY;
                             fx = std::max(0.01f, fx);
                             fy = std::max(0.01f, fy);
-                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * fx);
-                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * fy);
+                            ActiveCanvas().SetFloatingScaleX(g_GizmoDragStartScaleX * fx);
+                            ActiveCanvas().SetFloatingScaleY(g_GizmoDragStartScaleY * fy);
                         }
-                        g_Canvas.MarkCompositeDirty();
+                        ActiveCanvas().MarkCompositeDirty();
                     }
                 }
                 else if (g_ActiveGizmoHandle == TransformGizmoHandle::Scale_T ||
                          g_ActiveGizmoHandle == TransformGizmoHandle::Scale_B) {
                     GizmoScreenGeometry geo;
-                    if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                    if (GetGizmoGeometry(ActiveCanvas(), canvasToScreen, geo)) {
                         float currentDist = std::sqrt(distSq(mousePos, geo.center));
                         float factor = currentDist / g_GizmoDragStartDist;
                         if (ImGui::GetIO().KeyShift) {
                             // Lock aspect: scale both axes uniformly
-                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
-                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                            ActiveCanvas().SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                            ActiveCanvas().SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
                         } else {
-                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                            ActiveCanvas().SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
                         }
-                        g_Canvas.MarkCompositeDirty();
+                        ActiveCanvas().MarkCompositeDirty();
                     }
                 }
                 else if (g_ActiveGizmoHandle == TransformGizmoHandle::Scale_L ||
                          g_ActiveGizmoHandle == TransformGizmoHandle::Scale_R) {
                     GizmoScreenGeometry geo;
-                    if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
+                    if (GetGizmoGeometry(ActiveCanvas(), canvasToScreen, geo)) {
                         float currentDist = std::sqrt(distSq(mousePos, geo.center));
                         float factor = currentDist / g_GizmoDragStartDist;
                         if (ImGui::GetIO().KeyShift) {
-                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
-                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                            ActiveCanvas().SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                            ActiveCanvas().SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
                         } else {
-                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                            ActiveCanvas().SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
                         }
-                        g_Canvas.MarkCompositeDirty();
+                        ActiveCanvas().MarkCompositeDirty();
                     }
                 }
             }
@@ -1863,7 +1920,7 @@ int main(int argc, char* argv[]) {
             // Gradient drag release
             if (g_ActiveTool == ActiveTool::Gradient && g_IsGradientDragging && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
                 g_IsGradientDragging = false;
-                g_Canvas.ApplyGradient((int)g_SelectionDragStartX, (int)g_SelectionDragStartY, (int)canvasX, (int)canvasY, g_Brush.color, g_SecondaryColor);
+                ActiveCanvas().ApplyGradient((int)g_SelectionDragStartX, (int)g_SelectionDragStartY, (int)canvasX, (int)canvasY, g_Brush.color, g_SecondaryColor);
             }
 
             // Draw interactive shape outline during drag/selection
@@ -1948,17 +2005,17 @@ int main(int argc, char* argv[]) {
             }
 
             // Draw Move Pixels Gizmo
-            if (g_Canvas.IsMovingPixels()) {
+            if (ActiveCanvas().IsMovingPixels()) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
-                g_Canvas.DrawMoveGizmo(dl, canvasToScreen);
+                ActiveCanvas().DrawMoveGizmo(dl, canvasToScreen);
                 dl->PopClipRect();
             }
 
             // Magic Wand seed crosshair (sticky sample point)
-            if (g_ActiveTool == ActiveTool::MagicWand && g_Canvas.HasWandSeed()) {
+            if (g_ActiveTool == ActiveTool::MagicWand && ActiveCanvas().HasWandSeed()) {
                 int sx = 0, sy = 0;
-                g_Canvas.GetWandSeed(sx, sy);
+                ActiveCanvas().GetWandSeed(sx, sy);
                 ImVec2 sp = canvasToScreen((float)sx + 0.5f, (float)sy + 0.5f);
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
@@ -2015,7 +2072,7 @@ int main(int argc, char* argv[]) {
                 dl->AddLine(ImVec2(mp.x, mp.y - arm), ImVec2(mp.x, mp.y + arm), IM_COL32(255, 255, 255, 230), 1.0f);
 
                 // Info chip: float docs → linear float; U8 → HEX + 0..255
-                const bool floatDoc = (g_Canvas.GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8);
+                const bool floatDoc = (ActiveCanvas().GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8);
                 char line0[64], line1[72], line2[48];
                 if (floatDoc) {
                     std::snprintf(line0, sizeof(line0), "R %.5f", pr);
@@ -2046,7 +2103,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Draw Smart Select background process progress & cancel option UI
-            if (g_Canvas.IsSmartSelectInProgress()) {
+            if (ActiveCanvas().IsSmartSelectInProgress()) {
                 ImGui::SetCursorScreenPos(ImVec2(imageMin.x + 20.0f, imageMin.y + 20.0f));
                 ImGui::BeginChild("SmartSelectProgress", ImVec2(320.0f, 90.0f), true, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
                 ImGui::Text("Smart Select (GrabCut) is running...");
@@ -2055,12 +2112,12 @@ int main(int argc, char* argv[]) {
                 sprintf(buf, "Processing...");
                 ImGui::ProgressBar(t, ImVec2(-1.0f, 0.0f), buf);
                 if (ImGui::Button("Cancel")) {
-                    g_Canvas.CancelSmartSelect();
+                    ActiveCanvas().CancelSmartSelect();
                 }
                 ImGui::EndChild();
             }
 
-            g_Canvas.Update(viewportWidth, viewportHeight, isHovered, localMouseX, localMouseY, isPanning, dragDx, dragDy, wheelDelta);
+            ActiveCanvas().Update(viewportWidth, viewportHeight, isHovered, localMouseX, localMouseY, isPanning, dragDx, dragDy, wheelDelta);
 
             // Brush preset picker (RMB click on Brush/Eraser)
             UI::DrawBrushPickerPopup(s_WantBrushPopup, s_BrushPopupPos, g_Brush);
@@ -2125,7 +2182,7 @@ int main(int argc, char* argv[]) {
     } catch (...) {}
 
     // Cleanup Subsystems in reverse order
-    g_Canvas.Shutdown();
+    ProjectManager::Get().Shutdown();
     CleanupCanvasRenderTarget();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplGlfw_Shutdown();
@@ -2133,10 +2190,17 @@ int main(int argc, char* argv[]) {
 
     CleanupRenderTarget();
     CleanupDeviceD3D();
+    SingleInstance::UnregisterMainWindow(hWnd);
     if (g_OriginalWndProc) {
         SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)g_OriginalWndProc);
         g_OriginalWndProc = nullptr;
     }
+    if (g_SingleInstanceMutex) {
+        ReleaseMutex(g_SingleInstanceMutex);
+        CloseHandle(g_SingleInstanceMutex);
+        g_SingleInstanceMutex = nullptr;
+    }
+
     glfwDestroyWindow(window);
     glfwTerminate();
 
@@ -2270,7 +2334,7 @@ void RenderCanvasToTexture(int width, int height) {
 
     g_pd3dDeviceContext->OMSetRenderTargets(1, &g_canvasRTV, nullptr);
 
-    g_Canvas.Render(g_pd3dDeviceContext, static_cast<float>(width), static_cast<float>(height));
+    ActiveCanvas().Render(g_pd3dDeviceContext, static_cast<float>(width), static_cast<float>(height));
 
     ID3D11RenderTargetView* nullRTV = nullptr;
     g_pd3dDeviceContext->OMSetRenderTargets(1, &nullRTV, nullptr);
