@@ -104,11 +104,8 @@ float4 PSOutlineZZZ(VSOut i) : SV_Target
     if (dot(albedo, 1.0) < 0.001)
         albedo = float3(0.12, 0.12, 0.14);
 
-    // LightMap.R often shadowramp / outline colour config — darken diffuse toward it
-    float2 uvL = i.uvL;
-    if (dot(uvL, uvL) < 1e-10)
-        uvL = i.uv0;
-    float ramp = texLight.Sample(sampLin, uvL).r;
+    // LightMap.R shadowramp / outline config — sample on UV0 (character atlas)
+    float ramp = texLight.Sample(sampLin, i.uv0).r;
 
     float3 col;
     if (outlineTint.w > 0.5)

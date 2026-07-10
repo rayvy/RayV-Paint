@@ -391,12 +391,15 @@ bool PreviewRenderer::Initialize(ID3D11Device* device) {
 
 ID3D11ShaderResourceView* PreviewRenderer::GetOrLoadSRV(ID3D11Device* device, const std::string& path) {
     if (path.empty()) return m_FallbackSRV;
-    auto it = m_TexCache.find(path);
+    // Normalize cache key so the same file never gets two entries / wrong hit
+    const std::string key = PathUtil::NormalizeToUtf8Path(path);
+    auto it = m_TexCache.find(key);
     if (it != m_TexCache.end()) return it->second;
 
     DdsImage img;
-    if (!DdsHelper::LoadDDS(path, img) || img.width <= 0 || img.pixels.empty()) {
-        m_TexCache[path] = m_FallbackSRV;
+    if (!DdsHelper::LoadDDS(key, img) || img.width <= 0 || img.pixels.empty()) {
+        Logger::Get().Warn("Preview DDS load failed: " + key);
+        m_TexCache[key] = m_FallbackSRV;
         if (m_FallbackSRV) m_FallbackSRV->AddRef();
         return m_FallbackSRV;
     }
@@ -432,13 +435,16 @@ ID3D11ShaderResourceView* PreviewRenderer::GetOrLoadSRV(ID3D11Device* device, co
     ID3D11Texture2D* tex = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
     if (FAILED(device->CreateTexture2D(&td, &sinit, &tex))) {
-        m_TexCache[path] = m_FallbackSRV;
+        m_TexCache[key] = m_FallbackSRV;
         if (m_FallbackSRV) m_FallbackSRV->AddRef();
         return m_FallbackSRV;
     }
     device->CreateShaderResourceView(tex, nullptr, &srv);
     tex->Release();
-    m_TexCache[path] = srv;
+    m_TexCache[key] = srv;
+    Logger::Get().Info("Preview DDS loaded " + key + " "
+        + std::to_string(ow) + "x" + std::to_string(oh)
+        + " avgRGB=" + std::to_string((rgba[0] + rgba[1] + rgba[2]) / 3));
     return srv;
 }
 
@@ -487,13 +493,18 @@ bool PreviewRenderer::LoadScene(ID3D11Device* device, const modio::ModScene& sce
                 item.material = GuessPresetForPart(c.name, p.name + " " + bat.name);
                 item.presetId = item.material.id;
 
+                // Resolve binds: last matching slot wins; do not require exists flag
+                // (Exists can fail on path quirks while file is still loadable.)
                 for (int mi = 0; mi < 4; ++mi) {
+                    item.paths[mi].clear();
+                    item.resNames[mi].clear();
+                    item.srvs[mi] = nullptr;
                     modio::MaterialSlot slot = SlotForMapIndex(mi);
                     for (const auto& t : bat.textures) {
-                        if (t.slot == slot && t.exists) {
-                            item.paths[mi] = t.absolutePath;
-                            break;
-                        }
+                        if (t.slot != slot) continue;
+                        if (t.absolutePath.empty() && t.resourceName.empty()) continue;
+                        item.paths[mi] = t.absolutePath;
+                        item.resNames[mi] = t.resourceName;
                     }
                 }
 
@@ -503,8 +514,13 @@ bool PreviewRenderer::LoadScene(ID3D11Device* device, const modio::ModScene& sce
                     ++failCount;
                     continue;
                 }
-                for (int mi = 0; mi < 4; ++mi)
+                for (int mi = 0; mi < 4; ++mi) {
                     item.srvs[mi] = GetOrLoadSRV(device, item.paths[mi]);
+                    // Log bind table so we can catch path/name mismatches
+                    Logger::Get().Info("  bind " + item.partName + " [" + std::to_string(mi) + "] "
+                        + item.resNames[mi] + " => " +
+                        (item.paths[mi].empty() ? std::string("(empty)") : item.paths[mi]));
+                }
 
                 m_Items.push_back(std::move(item));
                 ++okCount;

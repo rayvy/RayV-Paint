@@ -54,6 +54,7 @@ struct PartDrawItem {
     bool visible = true;
 
     std::string paths[4];
+    std::string resNames[4]; // Resource* names for diagnostics
     ID3D11ShaderResourceView* srvs[4] = {};
 
     MaterialConfig material;

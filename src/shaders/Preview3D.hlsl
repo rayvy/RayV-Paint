@@ -108,11 +108,10 @@ float EvalChannel(float4 pack, float2 uv0, float2 uvL)
     if (mapIdx < -0.5)
         return scale;
 
-    // LightMap often uses light UV; others use uv0
-    float2 uv = (mapIdx > 1.5 && mapIdx < 2.5) ? uvL : uv0;
-    // if light UV zero, fall back
-    if (dot(uvL, uvL) < 1e-8)
-        uv = uv0;
+    // ZZZ character materials: ALL maps authored on UV0 (primary atlas).
+    // Sampling LightMap with TEXCOORD2 looked like "wrong DDS" (dark islands).
+    // uvL kept in signature for future optional secondary-UV mode.
+    float2 uv = uv0 + uvL * 0.0; // silence unused without C++ (void) cast
 
     float4 t = SampleMapRGBA((int)mapIdx, uv);
     float v = 0.0;
@@ -226,10 +225,12 @@ float4 PSMain(VSOut i) : SV_Target
         return float4(shadowM.xxx, 1);
     if (dbg > 5.5 && dbg < 6.5) // material pack viz
         return float4(metal, rough, ao, 1);
-    if (dbg > 6.5 && dbg < 7.5) // lightmap raw
-        return float4(texLight.Sample(sampLin, uvL).rgb, 1);
+    if (dbg > 6.5 && dbg < 7.5) // lightmap raw — UV0 (same as diffuse atlas)
+        return float4(texLight.Sample(sampLin, uv).rgb, 1);
     if (dbg > 7.5 && dbg < 8.5) // materialmap raw
         return float4(texMaterial.Sample(sampLin, uv).rgb, 1);
+    if (dbg > 8.5 && dbg < 9.5) // lightmap with UV2 (diagnose secondary UV)
+        return float4(texLight.Sample(sampLin, uvL).rgb, 1);
 
     float3 L = normalize(-lightDirIntensity.xyz);
     float3 V = normalize(cameraPos.xyz - i.worldPos);
@@ -251,11 +252,9 @@ float4 PSMain(VSOut i) : SV_Target
     float litFactor = ndl * lerp(0.55, 1.0, shadowM);
     float shade = saturate((litFactor - thr) / soft + 0.5);
     float toon = smoothstep(0.0, 1.0, shade);
-    // Slight LightMap RGB as color grading (helps jacket/cloth match game)
-    float3 lmRgb = texLight.Sample(sampLin, uvL).rgb;
-    if (dot(uvL, uvL) < 1e-8)
-        lmRgb = texLight.Sample(sampLin, uv).rgb;
-    float3 albedoTint = albedo * lerp(float3(1, 1, 1), saturate(lmRgb * 1.15 + 0.15), 0.35);
+    // LightMap as soft color grade on UV0 (ZZZ character atlas)
+    float3 lmRgb = texLight.Sample(sampLin, uv).rgb;
+    float3 albedoTint = albedo * lerp(float3(1, 1, 1), saturate(lmRgb * 1.15 + 0.15), 0.25);
     float shadowTint = style0.z;
     float3 diffuseLit = albedoTint * lerp(shadowTint, 1.0, toon);
 

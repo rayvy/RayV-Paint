@@ -4125,17 +4125,22 @@ namespace UI {
                                 auto& it = items[s_SelPart];
                                 for (int mi = 0; mi < 4; ++mi) {
                                     bool ok = !it.paths[mi].empty();
+                                    // basename of path
+                                    std::string base = it.paths[mi];
+                                    size_t sl = base.find_last_of("/\\");
+                                    if (sl != std::string::npos) base = base.substr(sl + 1);
                                     ImGui::TextColored(
                                         ok ? ImVec4(0.4f, 0.9f, 0.5f, 1.f) : ImVec4(0.95f, 0.45f, 0.3f, 1.f),
-                                        "%s: %s", slotN[mi],
-                                        ok ? it.paths[mi].c_str() : "(missing — fallback grey)");
+                                        "%s:", slotN[mi]);
+                                    ImGui::SameLine();
+                                    ImGui::TextWrapped("%s\n  file: %s",
+                                        it.resNames[mi].empty() ? "?" : it.resNames[mi].c_str(),
+                                        ok ? base.c_str() : "(missing — grey fallback)");
                                 }
                                 ImGui::TextDisabled(
-                                    "ZZZ default remap:\n"
-                                    "  LightMap R=Shadow  G=Metal  B=Gloss\n"
-                                    "  Material R=Opacity G=None   B=Spec\n"
-                                    "  Normal   R/G=N     B=AO\n"
-                                    "  Vtx COLOR.r=Outline thick");
+                                    "LightMap debug uses UV0 now (not UV2).\n"
+                                    "If still wrong: check basename matches expected DDS.\n"
+                                    "ZZZ: LM R=Shadow G=Metal B=Gloss | Mat R=Opac B=Spec | N.B=AO");
                                 ImGui::TreePop();
                             }
 
@@ -4244,7 +4249,8 @@ namespace UI {
                         int dbg = s_Preview.GetDebugMode();
                         const char* modes[] = {
                             "Shaded (multipass)", "UV0", "Normals", "VertexColor", "OutlineUV pack",
-                            "Shadow mask", "Metal/Rough/AO", "LightMap", "MaterialMap"
+                            "Shadow mask", "Metal/Rough/AO", "LightMap UV0", "MaterialMap",
+                            "LightMap UV2 (diag)"
                         };
                         if (ImGui::Combo("View mode", &dbg, modes, IM_ARRAYSIZE(modes)))
                             s_Preview.SetDebugMode(dbg);
