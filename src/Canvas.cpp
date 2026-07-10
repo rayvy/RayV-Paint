@@ -3642,7 +3642,17 @@ bool Canvas::ApplyModIniParse() {
 
     try {
         m_ModScene = modio::ModIniParser::ParseFile(m_ModIniPath);
+        // Optional dump: real formats + semantic roles (TEXCOORD1 ≠ UV, etc.)
+        if (!m_ModDumpPath.empty()) {
+            modio::ModIniParser::ApplyDumpPath(m_ModScene, m_ModDumpPath, m_ModScene.gameHint);
+        }
         m_ModParseSummary = modio::FormatSceneSummary(m_ModScene);
+        // Append layout summary
+        if (!m_ModScene.components.empty()) {
+            m_ModParseSummary += "\n--- Layouts (roles) ---\n";
+            m_ModParseSummary += modio::FormatLayoutSummary(m_ModScene.components[0].positionLayout);
+            m_ModParseSummary += modio::FormatLayoutSummary(m_ModScene.components[0].texcoordLayout);
+        }
         if (!m_ModScene.ok) {
             Logger::Get().Warn("Mod INI parse failed: " + m_ModScene.error);
             return false;
@@ -3662,6 +3672,24 @@ bool Canvas::ApplyModIniParse() {
         Logger::Get().Error(m_ModParseSummary);
         return false;
     }
+}
+
+bool Canvas::ApplyModDumpParse() {
+    if (m_ModDumpPath.empty()) {
+        m_ModParseSummary = "No dump path set.";
+        return false;
+    }
+    if (!m_ModScene.ok && m_ModScene.components.empty()) {
+        // Try ini first if available
+        if (!m_ModIniPath.empty())
+            ApplyModIniParse();
+    }
+    bool ok = modio::ModIniParser::ApplyDumpPath(m_ModScene, m_ModDumpPath, m_ModScene.gameHint);
+    m_ModParseSummary = modio::FormatSceneSummary(m_ModScene);
+    if (m_ModScene.dumpTexcoordLayout.valid)
+        m_ModParseSummary += "\n" + modio::FormatLayoutSummary(m_ModScene.dumpTexcoordLayout);
+    m_IsDocumentModified = true;
+    return ok;
 }
 
 bool Canvas::SaveProjectAuto() {

@@ -126,6 +126,12 @@ set(SOURCES
     src/modio/ModTypes.h
     src/modio/ModIniParser.cpp
     src/modio/ModIniParser.h
+    src/modio/VertexLayout.cpp
+    src/modio/VertexLayout.h
+    src/preview3d/MeshGpu.cpp
+    src/preview3d/MeshGpu.h
+    src/preview3d/PreviewRenderer.cpp
+    src/preview3d/PreviewRenderer.h
     src/scripting/ScriptingEngine.cpp
     src/scripting/ScriptingEngine.h
     src/ui/EditorPanels.cpp
@@ -155,6 +161,7 @@ set(SOURCES
 # Shaders
 set(SHADER_FILES
     src/shaders/Canvas.hlsl
+    src/shaders/Preview3D.hlsl
 )
 set_source_files_properties(${SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "VertexLayout.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -89,6 +91,10 @@ struct ModComponent {
     int vertexCountHint = 0;   // from draw= N,0 on blend section
     std::vector<ModPart> parts;
     bool visible = true;
+
+    // Vertex layouts — preset / dump / manual roles (UV_Outline ≠ UV0, etc.)
+    BufferLayout positionLayout;
+    BufferLayout texcoordLayout;
 };
 
 struct ParseWarning {
@@ -98,10 +104,22 @@ struct ParseWarning {
 struct ModScene {
     std::string iniPath;
     std::string iniDirectory;
+    std::string dumpPath;              // frame analysis / component dump folder
+    GameLayoutHint gameHint = GameLayoutHint::ZZZ;
+
     std::vector<ModResource> resources;
     std::vector<ModComponent> components;
     std::vector<ModPart> orphanParts; // texture overrides that couldn't attach to a component
     std::vector<ParseWarning> warnings;
+
+    // Global default layouts (applied to components without overrides)
+    BufferLayout defaultPositionLayout;
+    BufferLayout defaultTexcoordLayout;
+    // Last dump parse (full interleaved + split)
+    BufferLayout dumpFullLayout;
+    BufferLayout dumpPositionLayout;
+    BufferLayout dumpTexcoordLayout;
+
     bool ok = false;
     std::string error;
 

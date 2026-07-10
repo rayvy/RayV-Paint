@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -647,6 +649,9 @@ ModScene ModIniParser::ParseText(const std::string& iniText, const std::string& 
         scene.ok = true;
     }
 
+    // Default layouts from stride presets (roles are defaults — user/dump can override)
+    AssignLayouts(scene, scene.gameHint);
+
     Logger::Get().Info("ModIniParser: " + scene.iniPath +
                        " components=" + std::to_string(scene.components.size()) +
                        " parts=" + std::to_string(scene.PartCount()) +
@@ -656,6 +661,182 @@ ModScene ModIniParser::ParseText(const std::string& iniText, const std::string& 
                        (scene.ok ? " OK" : " FAIL: " + scene.error));
 
     return scene;
+}
+
+static std::string LowerCopy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+
+void ModIniParser::AssignLayouts(ModScene& scene, GameLayoutHint game) {
+    scene.gameHint = game;
+    scene.defaultPositionLayout = PresetForPositionStride(40, game);
+    // Most common texcoord; per-component may differ
+    scene.defaultTexcoordLayout = PresetForTexcoordStride(20, game);
+
+    for (auto& c : scene.components) {
+        // Preserve manual role locks if layouts already present
+        BufferLayout prevPos = c.positionLayout;
+        BufferLayout prevTex = c.texcoordLayout;
+
+        c.positionLayout = PresetForPositionStride(
+            c.positionStride > 0 ? c.positionStride : 40, game);
+        c.texcoordLayout = PresetForTexcoordStride(
+            c.texcoordStride > 0 ? c.texcoordStride : 20, game);
+
+        // Re-apply manual roles by semantic match
+        auto mergeManual = [](BufferLayout& dst, const BufferLayout& prev) {
+            if (prev.elements.empty()) return;
+            for (auto& e : dst.elements) {
+                for (const auto& p : prev.elements) {
+                    if (p.roleManual &&
+                        LowerCopy(p.dumpSemanticName) == LowerCopy(e.dumpSemanticName) &&
+                        p.dumpSemanticIndex == e.dumpSemanticIndex) {
+                        e.role = p.role;
+                        e.roleManual = true;
+                    }
+                }
+            }
+        };
+        mergeManual(c.positionLayout, prevPos);
+        mergeManual(c.texcoordLayout, prevTex);
+
+        if (!c.positionLayout.valid) {
+            scene.warnings.push_back({
+                "Component '" + c.name + "': " + c.positionLayout.error
+            });
+        }
+        if (!c.texcoordLayout.valid) {
+            scene.warnings.push_back({
+                "Component '" + c.name + "': " + c.texcoordLayout.error +
+                " — set dump path or edit semantics manually"
+            });
+        }
+    }
+}
+
+bool ModIniParser::ApplyDumpPath(ModScene& scene, const std::string& dumpPath,
+                                 GameLayoutHint game) {
+    scene.dumpPath = PathUtil::NormalizeToUtf8Path(dumpPath);
+    scene.gameHint = game;
+
+    if (scene.dumpPath.empty()) {
+        scene.warnings.push_back({ "Empty dump path" });
+        return false;
+    }
+    if (!PathUtil::Exists(scene.dumpPath)) {
+        scene.warnings.push_back({ "Dump path does not exist: " + scene.dumpPath });
+        return false;
+    }
+
+    // Find first usable vb0 layout text
+    std::string bestDump;
+    try {
+        namespace fs = std::filesystem;
+        auto root = PathUtil::FromUtf8(scene.dumpPath);
+        if (fs::is_regular_file(root)) {
+            bestDump = scene.dumpPath;
+        } else if (fs::is_directory(root)) {
+            for (auto it = fs::recursive_directory_iterator(root);
+                 it != fs::recursive_directory_iterator(); ++it) {
+                if (!it->is_regular_file()) continue;
+                auto name = PathUtil::WideToUtf8(it->path().filename().wstring());
+                std::string low = name;
+                std::transform(low.begin(), low.end(), low.begin(),
+                               [](unsigned char c) { return (char)std::tolower(c); });
+                // Prefer *-vb0=*.txt or *vb0*.txt
+                if (low.find("vb0") != std::string::npos &&
+                    (low.size() >= 4 && low.compare(low.size() - 4, 4, ".txt") == 0)) {
+                    bestDump = PathUtil::WideToUtf8(it->path().wstring());
+                    // Prefer larger / character dumps over tiny ones — keep first with "stride:"
+                    // Try open quickly
+                    break;
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        scene.warnings.push_back({ std::string("Dump scan failed: ") + e.what() });
+        return false;
+    }
+
+    if (bestDump.empty()) {
+        scene.warnings.push_back({
+            "No vb0 layout .txt found under dump path (need 3DMigoto frame analysis header)"
+        });
+        return false;
+    }
+
+    scene.dumpFullLayout = ParseDumpVbLayoutHeader(bestDump);
+    if (!scene.dumpFullLayout.valid) {
+        scene.warnings.push_back({ "Dump parse failed: " + scene.dumpFullLayout.error });
+        return false;
+    }
+
+    AssignSuggestedRoles(scene.dumpFullLayout, game);
+    SplitDumpLayoutByInputSlot(scene.dumpFullLayout,
+                               scene.dumpPositionLayout,
+                               scene.dumpTexcoordLayout);
+    AssignSuggestedRoles(scene.dumpPositionLayout, game);
+    AssignSuggestedRoles(scene.dumpTexcoordLayout, game);
+
+    scene.defaultPositionLayout = scene.dumpPositionLayout;
+    scene.defaultTexcoordLayout = scene.dumpTexcoordLayout;
+
+    // Apply to components (keep manual locks)
+    for (auto& c : scene.components) {
+        BufferLayout prevPos = c.positionLayout;
+        BufferLayout prevTex = c.texcoordLayout;
+
+        // Prefer dump texcoord if stride matches component, else keep preset for that stride
+        if (scene.dumpPositionLayout.valid) {
+            c.positionLayout = scene.dumpPositionLayout;
+            if (c.positionStride > 0)
+                c.positionLayout.stride = c.positionStride;
+        }
+        if (scene.dumpTexcoordLayout.valid) {
+            if (c.texcoordStride <= 0 ||
+                c.texcoordStride == scene.dumpTexcoordLayout.stride ||
+                std::abs(c.texcoordStride - scene.dumpTexcoordLayout.stride) <= 4) {
+                c.texcoordLayout = scene.dumpTexcoordLayout;
+                if (c.texcoordStride > 0)
+                    c.texcoordLayout.stride = c.texcoordStride;
+            } else {
+                // stride mismatch — keep preset for component stride, but copy roles from dump by semantic
+                c.texcoordLayout = PresetForTexcoordStride(c.texcoordStride, game);
+                for (auto& e : c.texcoordLayout.elements) {
+                    for (const auto& d : scene.dumpTexcoordLayout.elements) {
+                        if (LowerCopy(d.dumpSemanticName) == LowerCopy(e.dumpSemanticName) &&
+                            d.dumpSemanticIndex == e.dumpSemanticIndex) {
+                            e.role = d.role;
+                        }
+                    }
+                }
+            }
+        }
+
+        auto mergeManual = [](BufferLayout& dst, const BufferLayout& prev) {
+            for (auto& e : dst.elements) {
+                for (const auto& p : prev.elements) {
+                    if (p.roleManual &&
+                        LowerCopy(p.dumpSemanticName) == LowerCopy(e.dumpSemanticName) &&
+                        p.dumpSemanticIndex == e.dumpSemanticIndex) {
+                        e.role = p.role;
+                        e.roleManual = true;
+                    }
+                }
+            }
+        };
+        mergeManual(c.positionLayout, prevPos);
+        mergeManual(c.texcoordLayout, prevTex);
+        c.positionLayout.valid = !c.positionLayout.elements.empty();
+        c.texcoordLayout.valid = !c.texcoordLayout.elements.empty();
+    }
+
+    Logger::Get().Info("Dump layouts applied from " + bestDump + "\n" +
+                       FormatLayoutSummary(scene.dumpPositionLayout) +
+                       FormatLayoutSummary(scene.dumpTexcoordLayout));
+    return true;
 }
 
 void ModIniParser::RefreshExistence(ModScene& scene) {

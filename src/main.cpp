@@ -40,6 +40,8 @@
 #include "core/PathUtil.h"
 #include "core/ProjectManager.h"
 #include "core/SingleInstance.h"
+#include "modio/VertexLayout.h"
+#include "preview3d/MeshGpu.h"
 #include "ui/EditorPanels.h"
 #include "ui/style/UiTokens.h"
 
@@ -716,10 +718,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Smoke: parse XXMI/3DMigoto character ini (no mesh load yet)
+    // Smoke: parse XXMI/3DMigoto character ini (+ optional mesh decode)
     if (!parseModIniPath.empty()) {
         ActiveCanvas().SetProjectType(Canvas::ProjectType::AdvancedModMode);
         ActiveCanvas().SetModIniPath(parseModIniPath);
+        // Optional: --parse-mod-ini path -- also try sibling DUMP via env-less default
         bool ok = ActiveCanvas().ApplyModIniParse();
         const std::string summary = ActiveCanvas().GetModParseSummary();
         Logger::Get().Info("---- ModIni parse summary ----\n" + summary);
@@ -733,6 +736,32 @@ int main(int argc, char* argv[]) {
                 Logger::Get().Error("ModIni parse OK but empty scene");
                 processExitCode = 4;
             } else {
+                // Layout smoke: texcoord must have roles; UV_Outline should exist for ZZZ presets
+                if (!sc.components.empty()) {
+                    const auto& tl = sc.components[0].texcoordLayout;
+                    std::cout << modio::FormatLayoutSummary(tl);
+                    Logger::Get().Info(modio::FormatLayoutSummary(tl));
+                    bool hasUV0 = tl.HasRole(modio::AttrRole::UV0);
+                    if (!hasUV0)
+                        Logger::Get().Warn("Layout has no UV0 role — check dump/manual mapping");
+                }
+                // Mesh decode smoke (CPU) for first geo part
+                for (const auto& c : sc.components) {
+                    for (const auto& p : c.parts) {
+                        if (!p.hasGeometry) continue;
+                        std::vector<preview3d::PreviewVertex> verts;
+                        std::string err;
+                        if (preview3d::DecodeComponentVertices(c, verts, err)) {
+                            Logger::Get().Info("Mesh decode " + c.name + ": " +
+                                std::to_string(verts.size()) + " verts OK");
+                            std::cout << "Mesh decode " << c.name << ": " << verts.size() << " verts\n";
+                        } else {
+                            Logger::Get().Warn("Mesh decode " + c.name + ": " + err);
+                        }
+                        goto mesh_done;
+                    }
+                }
+            mesh_done:
                 Logger::Get().Info("ModIni parse smoke PASS");
             }
         }

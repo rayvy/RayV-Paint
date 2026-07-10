@@ -59,6 +59,8 @@ namespace UI {
         bool showColors = true;
         bool showToolSettings = true;
         bool showRulers = true;
+        bool showPreview3D = false;    // optional detachable 3D mod preview
+        bool preview3DNeedReload = false;
         bool openAboutModal = false;
         int  layerEffectsFocusIdx = -1; // selected FX in Layer Effects panel
         int  layerPreviewRefreshFrames = 0; // double-refresh after paint/edit

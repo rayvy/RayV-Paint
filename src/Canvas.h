@@ -437,6 +437,8 @@ public:
 
     // Re-parse INI → updates GetModScene(). Soft-fail (returns false + fills warnings).
     bool ApplyModIniParse();
+    // Apply dump folder (vb0 layout headers) → overrides formats/roles (keeps manual locks).
+    bool ApplyModDumpParse();
     const modio::ModScene& GetModScene() const { return m_ModScene; }
     modio::ModScene& GetModScene() { return m_ModScene; }
     const std::string& GetModParseSummary() const { return m_ModParseSummary; }

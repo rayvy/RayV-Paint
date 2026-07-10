@@ -1,11 +1,12 @@
 # Advanced Mod Mode · ProjectManager · Cross-Texture · 3D Preview
 
-**Date:** 2026-07-11 (rev 4)  
+**Date:** 2026-07-11 (rev 5)  
 **Status:**
-- Plan −1 shell: **done** (ProjectManager + single instance + header tabs)
-- Plan 1.A meta + 1.D/E INI parser + binds: **done** (`modio`, Belle.ini smoke PASS)
-- Plan 1 remaining: Document multi-map / ITextureProvider
-- Plan 2: 3D viewport not started  
+- Plan −1 shell: **done**
+- Plan 1 INI + **VertexLayout semantics** (preset / dump / manual Role incl. None): **done**
+- MeshGpu decode + optional **3D Preview window** (shaded/UV/outline debug): **MVP scaffold done**
+- Belle: Mesh decode 20174 verts OK; TEXCOORD1 → UV_Outline by default
+- Remaining: multi-pass outline, live paint SRV, layout JSON in .rayp, better dump matching per-component  
 **References:**
 - `research/xxmi_research.md` — INI / `.buf` / `.ib` geometry
 - `research/zzz-materials/` — ZZZ character pipeline + decompiled HLSL

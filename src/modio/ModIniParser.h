@@ -20,6 +20,15 @@ public:
 
     // Optional: re-check file existence on disk for an existing scene
     static void RefreshExistence(ModScene& scene);
+
+    // Assign position/texcoord BufferLayouts to every component (presets by stride).
+    // Call after ParseFile. Dump path overrides presets when a matching vb*.txt is found.
+    static void AssignLayouts(ModScene& scene, GameLayoutHint game = GameLayoutHint::ZZZ);
+
+    // Scan dumpPath for *-vb0=*.txt (or any *vb0*.txt), parse header, split →
+    // default + per-component layouts. Soft-fail if none found.
+    static bool ApplyDumpPath(ModScene& scene, const std::string& dumpPath,
+                              GameLayoutHint game = GameLayoutHint::ZZZ);
 };
 
 // Human-readable dump for console / UI diagnostics

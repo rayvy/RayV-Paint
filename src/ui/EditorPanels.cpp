@@ -17,6 +17,7 @@
 #include "widgets/UiTooltip.h"
 #include "../core/BrushLibrary.h"
 #include "../core/ProjectManager.h"
+#include "../preview3d/PreviewRenderer.h"
 #include <stb_image.h>
 #include <thread>
 #include <imgui_internal.h>
@@ -881,6 +882,9 @@ namespace UI {
                 ImGui::MenuItem("Console logs", nullptr, &state.showConsole);
                 ImGui::Separator();
                 ImGui::MenuItem("Rulers", nullptr, &state.showRulers);
+                if (ImGui::MenuItem("3D Preview", nullptr, &state.showPreview3D)) {
+                    /* toggle */
+                }
                 if (ImGui::MenuItem("Reset View")) {
                     canvas.ResetView();
                 }
@@ -2195,6 +2199,12 @@ namespace UI {
 
                 if (ImGui::Button("Apply INI##mod_apply", ImVec2(140, 0))) {
                     canvas.ApplyModIniParse();
+                    state.preview3DNeedReload = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Apply Dump##mod_dump", ImVec2(140, 0))) {
+                    canvas.ApplyModDumpParse();
+                    state.preview3DNeedReload = true;
                 }
                 ImGui::SameLine();
                 if (canvas.IsModParseOk()) {
@@ -2205,11 +2215,80 @@ namespace UI {
                     ImGui::TextDisabled("Not parsed");
                 }
 
-                const auto& scene = canvas.GetModScene();
+                ImGui::TextWrapped(
+                    "Semantics: TEXCOORD ≠ always UV. Outline packing / backface can be remapped. "
+                    "Dump provides real formats (F16/F32). Role=None ignores the attribute.");
+
+                auto& sceneMut = canvas.GetModScene();
+                const auto& scene = sceneMut;
                 if (scene.ok || !scene.components.empty()) {
                     ImGui::Text("Components: %d  Parts: %d  Draws: %d  Binds: %d",
                         (int)scene.components.size(), scene.PartCount(),
                         scene.DrawCount(), scene.TextureBindCount());
+
+                    // ---- Vertex attribute role editor (per first selected / each component) ----
+                    if (ImGui::TreeNode("Vertex semantics (roles)##mod_sem")) {
+                        ImGui::TextDisabled(
+                            "Maps StructuredBuffer fields → unified shader inputs. "
+                            "UV_Outline is NOT sampled as a texture UV.");
+                        int roleCount = 0;
+                        const char* const* roleNames = modio::AttrRoleNameTable(roleCount);
+
+                        auto drawLayoutEditor = [&](const char* label, modio::BufferLayout& layout) {
+                            if (!ImGui::TreeNode(label)) return;
+                            ImGui::Text("stride=%d  source=%d  %s",
+                                layout.stride, (int)layout.source,
+                                layout.valid ? "valid" : "invalid");
+                            if (ImGui::BeginTable("##lay", 5,
+                                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+                                ImGui::TableSetupColumn("i", ImGuiTableColumnFlags_WidthFixed, 28);
+                                ImGui::TableSetupColumn("Dump", ImGuiTableColumnFlags_WidthStretch);
+                                ImGui::TableSetupColumn("Format", ImGuiTableColumnFlags_WidthStretch);
+                                ImGui::TableSetupColumn("Off", ImGuiTableColumnFlags_WidthFixed, 40);
+                                ImGui::TableSetupColumn("Role → shader", ImGuiTableColumnFlags_WidthStretch);
+                                ImGui::TableHeadersRow();
+                                for (auto& el : layout.elements) {
+                                    ImGui::TableNextRow();
+                                    ImGui::TableNextColumn();
+                                    ImGui::Text("%d", el.index);
+                                    ImGui::TableNextColumn();
+                                    if (el.dumpSemanticIndex > 0)
+                                        ImGui::Text("%s%d", el.dumpSemanticName.c_str(), el.dumpSemanticIndex);
+                                    else
+                                        ImGui::TextUnformatted(el.dumpSemanticName.c_str());
+                                    ImGui::TableNextColumn();
+                                    ImGui::TextUnformatted(modio::AttrFormatName(el.format));
+                                    ImGui::TableNextColumn();
+                                    ImGui::Text("%d", el.offset);
+                                    ImGui::TableNextColumn();
+                                    int role = (int)el.role;
+                                    ImGui::PushID(el.index + layout.stride * 100 + (int)layout.kind * 10000);
+                                    if (ImGui::Combo("##role", &role, roleNames, roleCount)) {
+                                        modio::SetElementRole(layout, el.index, static_cast<modio::AttrRole>(role));
+                                        canvas.SetDocumentModified(true);
+                                        state.preview3DNeedReload = true;
+                                    }
+                                    if (el.roleManual) {
+                                        ImGui::SameLine();
+                                        ImGui::TextDisabled("M");
+                                    }
+                                    ImGui::PopID();
+                                }
+                                ImGui::EndTable();
+                            }
+                            ImGui::TreePop();
+                        };
+
+                        for (auto& c : sceneMut.components) {
+                            if (ImGui::TreeNode(c.name.c_str())) {
+                                drawLayoutEditor("Position layout", c.positionLayout);
+                                drawLayoutEditor("Texcoord layout", c.texcoordLayout);
+                                ImGui::TreePop();
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+
                     if (ImGui::TreeNode("Component tree##mod_tree")) {
                         for (const auto& c : scene.components) {
                             if (ImGui::TreeNode(c.name.c_str())) {
@@ -2248,6 +2327,11 @@ namespace UI {
                         for (const auto& w : scene.warnings)
                             ImGui::TextWrapped("%s", w.message.c_str());
                         ImGui::TreePop();
+                    }
+
+                    if (ImGui::Button("Open 3D Preview##mod_3d")) {
+                        state.showPreview3D = true;
+                        state.preview3DNeedReload = true;
                     }
                 } else if (!canvas.GetModParseSummary().empty()) {
                     ImGui::TextWrapped("%s", canvas.GetModParseSummary().c_str());
@@ -3781,6 +3865,115 @@ namespace UI {
                 }
                 ImGui::EndPopup();
             }
+        }
+
+        // ---- Optional 3D Preview (detached window, Advanced Mod Mode) ----
+        if (state.showPreview3D) {
+            static preview3d::PreviewRenderer s_Preview;
+            static bool s_PreviewInit = false;
+            static ID3D11Texture2D* s_RT = nullptr;
+            static ID3D11RenderTargetView* s_RTV = nullptr;
+            static ID3D11ShaderResourceView* s_SRV = nullptr;
+            static ID3D11Texture2D* s_Depth = nullptr;
+            static ID3D11DepthStencilView* s_DSV = nullptr;
+            static int s_RTw = 0, s_RTh = 0;
+
+            if (!s_PreviewInit && device) {
+                s_PreviewInit = s_Preview.Initialize(device);
+            }
+
+            if (state.preview3DNeedReload && device && canvas.IsModParseOk()) {
+                s_Preview.LoadScene(device, canvas.GetModScene());
+                state.preview3DNeedReload = false;
+            }
+
+            ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("3D Preview (optional)", &state.showPreview3D)) {
+                ImGui::TextUnformatted(s_Preview.Status().c_str());
+                if (!s_Preview.LastError().empty())
+                    ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "%s", s_Preview.LastError().c_str());
+
+                int dbg = s_Preview.GetDebugMode();
+                const char* modes[] = { "Shaded", "UV0", "Normals", "VertexColor", "OutlineUV (not tex)" };
+                if (ImGui::Combo("Debug##p3d", &dbg, modes, IM_ARRAYSIZE(modes)))
+                    s_Preview.SetDebugMode(dbg);
+                ImGui::SameLine();
+                if (ImGui::Button("Reload Scene##p3d"))
+                    state.preview3DNeedReload = true;
+
+                // Part visibility
+                if (ImGui::TreeNode("Parts##p3d")) {
+                    for (auto& it : s_Preview.Items()) {
+                        ImGui::Checkbox((it.componentName + "/" + it.partName).c_str(), &it.visible);
+                    }
+                    ImGui::TreePop();
+                }
+
+                ImGui::TextDisabled("LMB drag orbit · Wheel zoom · Preview only (no 3D paint)");
+
+                ImVec2 avail = ImGui::GetContentRegionAvail();
+                int tw = std::max(64, (int)avail.x);
+                int th = std::max(64, (int)avail.y - 4);
+
+                auto releaseRT = [&]() {
+                    if (s_SRV) { s_SRV->Release(); s_SRV = nullptr; }
+                    if (s_RTV) { s_RTV->Release(); s_RTV = nullptr; }
+                    if (s_RT) { s_RT->Release(); s_RT = nullptr; }
+                    if (s_DSV) { s_DSV->Release(); s_DSV = nullptr; }
+                    if (s_Depth) { s_Depth->Release(); s_Depth = nullptr; }
+                    s_RTw = s_RTh = 0;
+                };
+
+                if (device && (tw != s_RTw || th != s_RTh || !s_RTV)) {
+                    releaseRT();
+                    D3D11_TEXTURE2D_DESC td{};
+                    td.Width = tw; td.Height = th;
+                    td.MipLevels = td.ArraySize = 1;
+                    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                    td.SampleDesc.Count = 1;
+                    td.Usage = D3D11_USAGE_DEFAULT;
+                    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+                    if (SUCCEEDED(device->CreateTexture2D(&td, nullptr, &s_RT))) {
+                        device->CreateRenderTargetView(s_RT, nullptr, &s_RTV);
+                        device->CreateShaderResourceView(s_RT, nullptr, &s_SRV);
+                    }
+                    D3D11_TEXTURE2D_DESC dd = td;
+                    dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+                    dd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+                    if (SUCCEEDED(device->CreateTexture2D(&dd, nullptr, &s_Depth)))
+                        device->CreateDepthStencilView(s_Depth, nullptr, &s_DSV);
+                    s_RTw = tw; s_RTh = th;
+                }
+
+                // Orbit / zoom when hovering image
+                ImVec2 imgPos = ImGui::GetCursorScreenPos();
+                if (s_SRV && s_RTV && context) {
+                    D3D11_VIEWPORT vp{};
+                    vp.Width = (float)s_RTw; vp.Height = (float)s_RTh;
+                    vp.MaxDepth = 1.f;
+                    context->RSSetViewports(1, &vp);
+                    s_Preview.Render(context, s_RTV, s_DSV, (float)s_RTw / (float)std::max(1, s_RTh));
+                    ImGui::Image((ImTextureID)s_SRV, ImVec2((float)s_RTw, (float)s_RTh));
+                    if (ImGui::IsItemHovered()) {
+                        auto& cam = s_Preview.Camera();
+                        ImGuiIO& io = ImGui::GetIO();
+                        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                            cam.yaw += io.MouseDelta.x * 0.01f;
+                            cam.pitch += io.MouseDelta.y * 0.01f;
+                            cam.pitch = std::clamp(cam.pitch, -1.4f, 1.4f);
+                        }
+                        if (io.MouseWheel != 0.f) {
+                            cam.distance *= (io.MouseWheel > 0 ? 0.9f : 1.1f);
+                            cam.distance = std::clamp(cam.distance, 0.3f, 50.f);
+                        }
+                    }
+                } else {
+                    ImGui::Dummy(ImVec2((float)tw, (float)th));
+                    ImGui::TextDisabled("Initialize preview / Apply INI first");
+                }
+                (void)imgPos;
+            }
+            ImGui::End();
         }
 
         Ui::TooltipEndFrame();
