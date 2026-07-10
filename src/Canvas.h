@@ -145,7 +145,7 @@ public:
     bool CropCanvasToSelection(ID3D11Device* device);
     bool CropCanvasToRect(ID3D11Device* device, int x, int y, int w, int h);
 
-    enum class IccPreset : uint8_t { None = 0, sRGB = 1, DisplayP3 = 2, AdobeRGB = 3 };
+    enum class IccPreset : uint8_t { None = 0, sRGB = 1, DisplayP3 = 2, AdobeRGB = 3, Linear = 4 };
     static const char* IccPresetName(IccPreset p);
     static IccPreset IccPresetFromName(const std::string& name);
     void SetExportIccPreset(IccPreset p);
@@ -369,6 +369,16 @@ public:
         Advanced
     };
 
+    // Document color bit depth (Photoshop-like). Storage + brush quantize policy.
+    // Export remains free (any DDS/PNG target). Default U8 keeps current perf.
+    enum class DocumentBitDepth : uint8_t {
+        U8  = 0,  // 8-bit/channel storage (RGBA8 tiles)
+        F16 = 1,  // 16-bit float (stored as RGBA32F for now; quantize optional later)
+        F32 = 2   // 32-bit float (RGBA32F tiles)
+    };
+    DocumentBitDepth GetDocumentBitDepth() const { return m_DocumentBitDepth; }
+    void SetDocumentBitDepth(DocumentBitDepth d); // converts storage when needed (P2)
+
     float GetRotationAngle() const { return m_RotationAngle; }
     void SetRotationAngle(float angle) { m_RotationAngle = angle; }
     bool GetMirrorHorizontal() const { return m_MirrorHorizontal; }
@@ -546,6 +556,7 @@ private:
     bool m_ViewportFlipH = false;
     bool m_ViewportFlipV = false;
     ProjectType m_ProjectType = ProjectType::Advanced;
+    DocumentBitDepth m_DocumentBitDepth = DocumentBitDepth::U8;
 
     // Selection State
     bool m_HasSelection = false;

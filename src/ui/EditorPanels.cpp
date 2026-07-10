@@ -497,7 +497,8 @@ namespace UI {
             Canvas::IccPreset::None,
             Canvas::IccPreset::sRGB,
             Canvas::IccPreset::DisplayP3,
-            Canvas::IccPreset::AdobeRGB
+            Canvas::IccPreset::AdobeRGB,
+            Canvas::IccPreset::Linear
         };
         int cur = 1; // sRGB default
         Canvas::IccPreset p = canvas.GetExportIccPreset();
@@ -508,7 +509,8 @@ namespace UI {
             Canvas::IccPresetName(Canvas::IccPreset::None),
             Canvas::IccPresetName(Canvas::IccPreset::sRGB),
             Canvas::IccPresetName(Canvas::IccPreset::DisplayP3),
-            Canvas::IccPresetName(Canvas::IccPreset::AdobeRGB)
+            Canvas::IccPresetName(Canvas::IccPreset::AdobeRGB),
+            Canvas::IccPresetName(Canvas::IccPreset::Linear)
         };
         if (UiCombo("##icc_preset", &cur, names, IM_ARRAYSIZE(names), label)) {
             canvas.SetExportIccPreset(kPresets[cur]);
@@ -1283,8 +1285,27 @@ namespace UI {
             if (ext == "dds") {
                 ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "DDS Export Settings (Subprocess Compressed)");
                 
-                const char* formats[] = { "BC7_UNORM_SRGB", "BC7_UNORM", "BC3_UNORM", "BC1_UNORM", "RGBA8_UNORM", "RGBA16_FLOAT" };
-                static int currentFormatIdx = 0;
+                // Full Paint.NET-style list (testfield/full_list.txt) — mapped by TexconvHelper
+                static const char* formats[] = {
+                    "BC1 (Linear, DXT1)", "BC1 (sRGB, DX 10+)",
+                    "BC2 (Linear, DXT3)", "BC2 (sRGB, DX 10+)",
+                    "BC3 (Linear, DXT5)", "BC3 (sRGB, DX 10+)", "BC3 (Linear, RXGB)",
+                    "BC4 (Linear, Unsigned)", "BC4 (Linear, Unsigned, ATI1)",
+                    "BC5 (Linear, Unsigned)", "BC5 (Linear, Unsigned, ATI2)", "BC5 (Linear, Signed)",
+                    "BC6H (Linear, Unsigned, DX 11+)",
+                    "BC7 (Linear, DX 11+)", "BC7 (sRGB, DX 11+)",
+                    "B8G8R8A8 (Linear, A8R8G8B8)", "B8G8R8A8 (sRGB, DX 10+)",
+                    "B8G8R8X8 (Linear, X8R8G8B8)", "B8G8R8X8 (sRGB, DX 10+)",
+                    "R8G8B8A8 (Linear, A8B8G8R8)", "R8G8B8A8 (sRGB, DX 10+)",
+                    "R8G8B8X8 (Linear, X8B8G8R8)",
+                    "B5G5R5A1 (Linear, A1R5G5B5)", "B4G4R4A4 (Linear, A4R4G4B4)",
+                    "B5G6R5 (Linear, R5G6B5)", "B8G8R8 (Linear, R8G8B8)",
+                    "R8 (Linear, Unsigned, L8)",
+                    "R8G8 (Linear, Unsigned, A8L8)", "R8G8 (Linear, Signed, V8U8)",
+                    "R32 (Linear, Float)",
+                    "RGBA16_FLOAT", "RGBA32_FLOAT", "RGBA8_UNORM"
+                };
+                static int currentFormatIdx = 14; // BC7 sRGB
                 std::string currentFmt = canvas.GetExportFormat();
                 for (int i = 0; i < IM_ARRAYSIZE(formats); ++i) {
                     if (currentFmt == formats[i]) currentFormatIdx = i;
@@ -1299,7 +1320,7 @@ namespace UI {
                 }
                 
                 if (mips) {
-                    const char* filters[] = { "Point", "Box", "Linear", "Cubic" };
+                    const char* filters[] = { "Point", "Box", "Linear", "Cubic", "Fant", "Lanczos" };
                     static int currentFilterIdx = 3;
                     std::string currentFilter = canvas.GetExportMipFilter();
                     for (int i = 0; i < IM_ARRAYSIZE(filters); ++i) {
@@ -2008,7 +2029,12 @@ namespace UI {
             }
 
             if (ext == "dds") {
-                const char* formats[] = { "BC7_UNORM_SRGB", "BC7_UNORM", "BC3_UNORM", "BC1_UNORM", "RGBA8_UNORM", "RGBA16_FLOAT" };
+                static const char* formats[] = {
+                    "BC7 (sRGB, DX 11+)", "BC7 (Linear, DX 11+)",
+                    "BC3 (Linear, DXT5)", "BC1 (Linear, DXT1)",
+                    "BC5 (Linear, Unsigned)", "R8G8B8A8 (Linear, A8B8G8R8)",
+                    "RGBA16_FLOAT", "RGBA32_FLOAT", "R32 (Linear, Float)"
+                };
                 int currentFormatIdx = 0;
                 std::string currentFmt = canvas.GetExportFormat();
                 for (int i = 0; i < IM_ARRAYSIZE(formats); ++i) {

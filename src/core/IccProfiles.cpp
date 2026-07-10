@@ -213,6 +213,7 @@ const char* Name(Preset p) {
     case Preset::sRGB: return "sRGB";
     case Preset::DisplayP3: return "Display P3";
     case Preset::AdobeRGB: return "Adobe RGB";
+    case Preset::Linear: return "Linear";
     }
     return "sRGB";
 }
@@ -221,14 +222,19 @@ const char* ProfileTagName(Preset p) {
     return Name(p);
 }
 
+// Profile bytes unused for PNG path (we use standard chunks). Keep API.
 const std::vector<uint8_t>& GetProfileBytes(Preset p) {
     switch (p) {
-    case Preset::None: return Empty();
-    case Preset::sRGB: return Srgb();
-    case Preset::DisplayP3: return DisplayP3();
-    case Preset::AdobeRGB: return AdobeRGB();
+    case Preset::None:
+    case Preset::Linear:
+        return Empty();
+    case Preset::sRGB:
+    case Preset::DisplayP3:
+    case Preset::AdobeRGB:
+    default:
+        // Intentionally empty: ImageManager tags via sRGB/cHRM/gAMA, not synthetic iCCP
+        return Empty();
     }
-    return Srgb();
 }
 
 } // namespace IccProfiles

@@ -872,8 +872,13 @@ int main(int argc, char* argv[]) {
                 }
                 
                 if (ext == "dds") {
-                    DdsFormat fmt = DdsFormat::RGBA8_UNORM;
-                    if (g_Canvas.SaveCanvas(path, fmt)) {
+                    // Same pipeline as Advanced Export (texconv + user format/mips/quality)
+                    if (g_Canvas.SaveCanvasCompressed(
+                            path,
+                            g_Canvas.GetExportFormat(),
+                            g_Canvas.GetExportGenerateMipMaps(),
+                            g_Canvas.GetExportMipFilter(),
+                            g_Canvas.GetExportCompressionSpeed())) {
                         Logger::Get().Info("Quick exported DDS successfully to: " + path);
                     } else {
                         Logger::Get().Error("Quick export DDS failed for path: " + path);

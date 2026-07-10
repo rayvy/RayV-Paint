@@ -10,7 +10,8 @@ enum class Preset : uint8_t {
     None = 0,
     sRGB = 1,
     DisplayP3 = 2,
-    AdobeRGB = 3
+    AdobeRGB = 3,
+    Linear = 4   // scene-linear / gamma 1.0 (no sRGB transfer)
 };
 
 const char* Name(Preset p);

@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <vector>
 #include <chrono>
+#include <cmath>
+#include <limits>
 
 
 #define BCDEC_IMPLEMENTATION
@@ -67,6 +69,31 @@ struct DDS_HEADER_DXT10 {
 
 static uint8_t FloatToU8(float v) {
     return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+// DXGI_FORMAT_R11G11B10_FLOAT (26) — packed RGB float, no sign bit
+static void DecodeR11G11B10Float(uint32_t p, float& r, float& g, float& b) {
+    auto decodeChannel = [](uint32_t raw, int mantBits, int expBits) -> float {
+        const uint32_t mantMask = (1u << mantBits) - 1u;
+        const uint32_t expMask  = (1u << expBits) - 1u;
+        uint32_t m = raw & mantMask;
+        uint32_t e = (raw >> mantBits) & expMask;
+        if (e == 0) {
+            if (m == 0) return 0.f;
+            // subnormal
+            float f = (float)m / (float)(1u << mantBits);
+            return std::ldexp(f, 1 - ((int)(1u << (expBits - 1)) - 1));
+        }
+        if (e == expMask) {
+            return m ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity();
+        }
+        int bias = (1 << (expBits - 1)) - 1;
+        float fmant = 1.f + (float)m / (float)(1u << mantBits);
+        return std::ldexp(fmant, (int)e - bias);
+    };
+    r = decodeChannel(p & 0x7FFu, 6, 5);
+    g = decodeChannel((p >> 11) & 0x7FFu, 6, 5);
+    b = decodeChannel((p >> 22) & 0x3FFu, 5, 5);
 }
 
 static float HalfToFloat(uint16_t h) {
@@ -404,7 +431,6 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
     Logger::Get().InfoTag("io",
         "DDS header " + std::to_string(outWidth) + "x" + std::to_string(outHeight) +
         " estRGBA8=" + MemoryStats::FormatBytes(MemoryStats::EstimateImageBytes(outWidth, outHeight, 4)));
-    outCache.Init(outWidth, outHeight, CanvasPixelFormat::RGBA8);
 
     bool isDX10 = (header.ddspf.dwFlags & 0x4) && (header.ddspf.dwFourCC == MAKEFOURCC('D', 'X', '1', '0'));
 
@@ -421,26 +447,43 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
     CompressionFormat compFormat = CompressionFormat::None;
     size_t blockSize = 0;
     uint32_t dxgiFormat = 0;
+    bool useFloatCache = false; // HDR / float sources → RGBA32F tiles
 
     if (isDX10) {
         DDS_HEADER_DXT10 dxt10Header;
         file.read(reinterpret_cast<char*>(&dxt10Header), sizeof(dxt10Header));
         dxgiFormat = dxt10Header.dxgiFormat;
 
-        if (dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM) {
+        if (dxgiFormat == DXGI_FORMAT_R8G8B8A8_UNORM || dxgiFormat == 28 /*R8G8B8A8_UNORM*/ ||
+            dxgiFormat == 29 /*R8G8B8A8_UNORM_SRGB*/) {
             outFormat = DdsFormat::RGBA8_UNORM;
-        } else if (dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT) {
+        } else if (dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT || dxgiFormat == 2) {
             outFormat = DdsFormat::RGBA32_FLOAT;
-        } else if (dxgiFormat == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            useFloatCache = true;
+        } else if (dxgiFormat == DXGI_FORMAT_R16G16B16A16_FLOAT || dxgiFormat == 10) {
             outFormat = DdsFormat::RGBA16_FLOAT;
-        } else if (dxgiFormat == DXGI_FORMAT_R16G16B16A16_UNORM) {
+            useFloatCache = true;
+        } else if (dxgiFormat == DXGI_FORMAT_R16G16B16A16_UNORM || dxgiFormat == 11) {
             outFormat = DdsFormat::RGBA16_UNORM;
-        } else if (dxgiFormat == DXGI_FORMAT_R32_FLOAT) {
+        } else if (dxgiFormat == DXGI_FORMAT_R32_FLOAT || dxgiFormat == 41) {
             outFormat = DdsFormat::R32_FLOAT;
-        } else if (dxgiFormat == DXGI_FORMAT_R16_FLOAT) {
+            useFloatCache = true;
+        } else if (dxgiFormat == DXGI_FORMAT_R16_FLOAT || dxgiFormat == 54) {
             outFormat = DdsFormat::R16_FLOAT;
-        } else if (dxgiFormat == DXGI_FORMAT_R8_UNORM) {
+            useFloatCache = true;
+        } else if (dxgiFormat == DXGI_FORMAT_R8_UNORM || dxgiFormat == 61) {
             outFormat = DdsFormat::R8_UNORM;
+        } else if (dxgiFormat == 26) { // R11G11B10_FLOAT
+            outFormat = DdsFormat::RGBA16_FLOAT;
+            useFloatCache = true;
+        } else if (dxgiFormat == 20) { // D32_FLOAT_S8X24_UINT — depth dump
+            outFormat = DdsFormat::R32_FLOAT;
+            useFloatCache = true;
+        } else if (dxgiFormat == 40) { // D32_FLOAT
+            outFormat = DdsFormat::R32_FLOAT;
+            useFloatCache = true;
+        } else if (dxgiFormat == 24) { // R10G10B10A2_UNORM
+            outFormat = DdsFormat::RGBA8_UNORM; // expand 10-bit → 8 for now; full 10-bit later
         } else if (dxgiFormat == 71 || dxgiFormat == 72) {
             compFormat = CompressionFormat::BC1;
             blockSize = 8;
@@ -461,6 +504,9 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             compFormat = CompressionFormat::BC5;
             blockSize = 16;
             outFormat = DdsFormat::RGBA8_UNORM;
+        } else if (dxgiFormat == 95 || dxgiFormat == 96) { // BC6H
+            Logger::Get().Error("BC6H open not yet decoded (use texconv preprocess). DXGI=" + std::to_string(dxgiFormat));
+            return false;
         } else if (dxgiFormat == 98 || dxgiFormat == 99) {
             compFormat = CompressionFormat::BC7;
             blockSize = 16;
@@ -508,34 +554,102 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
         }
     }
 
+    outCache.Init(outWidth, outHeight,
+                  useFloatCache ? CanvasPixelFormat::RGBA32F : CanvasPixelFormat::RGBA8);
+
     auto writeRowRGBA8 = [&](const std::vector<uint8_t>& row, int y) {
         if (y >= 0 && y < outHeight) {
             outCache.ImportRGBA8(row.data(), outWidth, 1, 0, y);
         }
     };
+    auto writeRowRGBA32F = [&](const std::vector<float>& row, int y) {
+        if (y >= 0 && y < outHeight) {
+            outCache.ImportRGBA32F(row.data(), outWidth, 1, 0, y);
+        }
+    };
 
-    if (isDX10 && dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT) {
+    // --- HDR / unusual DXGI paths (float cache) ---
+    if (isDX10 && dxgiFormat == 26) { // R11G11B10_FLOAT
+        std::vector<uint32_t> rowPk((size_t)outWidth);
+        std::vector<float> rowF((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowPk.data()), (std::streamsize)rowPk.size() * 4);
+            if (!file) {
+                Logger::Get().Error("Failed reading R11G11B10 row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                float r, g, b;
+                DecodeR11G11B10Float(rowPk[(size_t)x], r, g, b);
+                size_t d = (size_t)x * 4;
+                rowF[d + 0] = r; rowF[d + 1] = g; rowF[d + 2] = b; rowF[d + 3] = 1.f;
+            }
+            writeRowRGBA32F(rowF, y);
+        }
+        Logger::Get().InfoTag("io", "Loaded R11G11B10_FLOAT as float RGBA");
+        return true;
+    }
+    if (isDX10 && (dxgiFormat == 20 || dxgiFormat == 40)) {
+        // D32_FLOAT_S8X24_UINT (20): 8 bytes/px — float depth + 8-bit stencil in low byte of next dword
+        // D32_FLOAT (40): 4 bytes/px
+        // Preserve stencil as alpha when present. Depth clear (0 or ~1 / non-finite) → A=0
+        // so empty buffer regions stay transparent instead of opaque black.
+        const bool withStencil = (dxgiFormat == 20);
+        const size_t stride = withStencil ? 8 : 4;
+        std::vector<uint8_t> rowRaw((size_t)outWidth * stride);
+        std::vector<float> rowF((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowRaw.data()), (std::streamsize)rowRaw.size());
+            if (!file) {
+                Logger::Get().Error("Failed reading depth row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                float depth = 0.f;
+                std::memcpy(&depth, rowRaw.data() + (size_t)x * stride, sizeof(float));
+                float alpha = 1.f;
+                if (!std::isfinite(depth)) {
+                    depth = 0.f;
+                    alpha = 0.f;
+                } else if (depth <= 0.f || depth >= 0.999999f) {
+                    // cleared / far-plane samples → transparent (both standard-Z and reverse-Z extremes)
+                    alpha = 0.f;
+                }
+                if (withStencil) {
+                    uint32_t pad = 0;
+                    std::memcpy(&pad, rowRaw.data() + (size_t)x * stride + 4, 4);
+                    uint8_t st = (uint8_t)(pad & 0xFFu);
+                    // If stencil is used as a coverage mask, prefer it when non-zero;
+                    // if entire buffer has stencil=0, keep depth-based alpha above.
+                    if (st > 0)
+                        alpha = st / 255.f;
+                }
+                size_t d = (size_t)x * 4;
+                rowF[d + 0] = depth;
+                rowF[d + 1] = depth;
+                rowF[d + 2] = depth;
+                rowF[d + 3] = alpha;
+            }
+            writeRowRGBA32F(rowF, y);
+        }
+        Logger::Get().InfoTag("io", "Loaded depth DXGI " + std::to_string(dxgiFormat) +
+            " as float mono (clear→transparent)");
+        return true;
+    }
+
+    if (isDX10 && (dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT || dxgiFormat == 2)) {
         std::vector<float> rowFloats((size_t)outWidth * 4);
-        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
             file.read(reinterpret_cast<char*>(rowFloats.data()), (std::streamsize)rowFloats.size() * (std::streamsize)sizeof(float));
             if (!file) {
                 Logger::Get().Error("Failed reading RGBA32F pixel row from: " + filename);
                 return false;
             }
-            for (int x = 0; x < outWidth; ++x) {
-                size_t src = (size_t)x * 4;
-                size_t dst = src;
-                rowRGBA[dst + 0] = FloatToU8(rowFloats[src + 0]);
-                rowRGBA[dst + 1] = FloatToU8(rowFloats[src + 1]);
-                rowRGBA[dst + 2] = FloatToU8(rowFloats[src + 2]);
-                rowRGBA[dst + 3] = FloatToU8(rowFloats[src + 3]);
-            }
-            writeRowRGBA8(rowRGBA, y);
+            writeRowRGBA32F(rowFloats, y);
         }
-    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+    } else if (isDX10 && (dxgiFormat == DXGI_FORMAT_R16G16B16A16_FLOAT || dxgiFormat == 10)) {
         std::vector<uint16_t> rowHalf((size_t)outWidth * 4);
-        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        std::vector<float> rowF((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
             file.read(reinterpret_cast<char*>(rowHalf.data()), (std::streamsize)rowHalf.size() * (std::streamsize)sizeof(uint16_t));
             if (!file) {
@@ -544,13 +658,12 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             }
             for (int x = 0; x < outWidth; ++x) {
                 size_t src = (size_t)x * 4;
-                size_t dst = src;
-                rowRGBA[dst + 0] = FloatToU8(HalfToFloat(rowHalf[src + 0]));
-                rowRGBA[dst + 1] = FloatToU8(HalfToFloat(rowHalf[src + 1]));
-                rowRGBA[dst + 2] = FloatToU8(HalfToFloat(rowHalf[src + 2]));
-                rowRGBA[dst + 3] = FloatToU8(HalfToFloat(rowHalf[src + 3]));
+                rowF[src + 0] = HalfToFloat(rowHalf[src + 0]);
+                rowF[src + 1] = HalfToFloat(rowHalf[src + 1]);
+                rowF[src + 2] = HalfToFloat(rowHalf[src + 2]);
+                rowF[src + 3] = HalfToFloat(rowHalf[src + 3]);
             }
-            writeRowRGBA8(rowRGBA, y);
+            writeRowRGBA32F(rowF, y);
         }
     } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R16G16B16A16_UNORM) {
         std::vector<uint16_t> rowU16((size_t)outWidth * 4);

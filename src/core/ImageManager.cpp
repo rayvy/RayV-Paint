@@ -84,47 +84,103 @@ bool ImageManager::LoadImageFromFile(const std::string& filepath, std::vector<ui
     return true;
 }
 
-static bool InjectIccBytesIntoPng(std::vector<uint8_t>& pngBytes,
-                                  const uint8_t* profileData, size_t profileSize,
-                                  const char* profileNameIn) {
-    if (!profileData || profileSize == 0) return true;
+// Append a PNG chunk after IHDR (offset 33). type is 4 chars; data is chunk payload only.
+static void InsertPngChunkAfterIHDR(std::vector<uint8_t>& pngBytes,
+                                    const char type[4],
+                                    const uint8_t* data, size_t dataLen) {
+    if (pngBytes.size() < 33) return;
+    // CRC over type + data
+    std::vector<uint8_t> crcBuf;
+    crcBuf.insert(crcBuf.end(), type, type + 4);
+    if (data && dataLen) crcBuf.insert(crcBuf.end(), data, data + dataLen);
+    uint32_t crc = CalculateCRC32(crcBuf.data(), crcBuf.size());
 
-    int compressedSize = 0;
-    unsigned char* compressedData = stbi_zlib_compress(
-        const_cast<uint8_t*>(profileData), static_cast<int>(profileSize), &compressedSize, 8);
-    if (!compressedData) {
-        Logger::Get().Error("Failed to compress ICC profile data");
+    std::vector<uint8_t> block(4 + 4 + dataLen + 4);
+    WriteBigEndian32(block.data(), (uint32_t)dataLen);
+    std::memcpy(block.data() + 4, type, 4);
+    if (dataLen) std::memcpy(block.data() + 8, data, dataLen);
+    WriteBigEndian32(block.data() + 8 + dataLen, crc);
+    pngBytes.insert(pngBytes.begin() + 33, block.begin(), block.end());
+}
+
+// PNG colorimetry via standard chunks only (no synthetic iCCP — those caused white images).
+// Insert order: each call inserts at offset 33, so call reverse of desired final order.
+static void WriteChrm(std::vector<uint8_t>& png,
+                      uint32_t wx, uint32_t wy,
+                      uint32_t rx, uint32_t ry,
+                      uint32_t gx, uint32_t gy,
+                      uint32_t bx, uint32_t by) {
+    uint8_t d[32];
+    auto be = [](uint8_t* p, uint32_t v) {
+        p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+        p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+    };
+    be(d + 0, wx); be(d + 4, wy);
+    be(d + 8, rx); be(d + 12, ry);
+    be(d + 16, gx); be(d + 20, gy);
+    be(d + 24, bx); be(d + 28, by);
+    InsertPngChunkAfterIHDR(png, "cHRM", d, 32);
+}
+
+static void WriteGama(std::vector<uint8_t>& png, uint32_t gama100000) {
+    uint8_t d[4];
+    WriteBigEndian32(d, gama100000);
+    InsertPngChunkAfterIHDR(png, "gAMA", d, 4);
+}
+
+static bool InjectPngColorimetryByName(std::vector<uint8_t>& pngBytes, const std::string& name) {
+    if (pngBytes.size() < 33 ||
+        pngBytes[0] != 0x89 || pngBytes[1] != 0x50 || pngBytes[2] != 0x4E || pngBytes[3] != 0x47) {
         return false;
     }
+    if (name == "None" || name == "none" || name.empty())
+        return true;
 
-    if (pngBytes.size() >= 33 &&
-        pngBytes[0] == 0x89 && pngBytes[1] == 0x50 && pngBytes[2] == 0x4E && pngBytes[3] == 0x47) {
-
-        std::vector<uint8_t> chunkBytes;
-        chunkBytes.push_back('i');
-        chunkBytes.push_back('C');
-        chunkBytes.push_back('C');
-        chunkBytes.push_back('P');
-
-        std::string profileName = profileNameIn ? profileNameIn : "Embedded";
-        if (profileName.size() > 79) profileName = profileName.substr(0, 79);
-        if (profileName.empty()) profileName = "Embedded";
-
-        for (char c : profileName) chunkBytes.push_back(static_cast<uint8_t>(c));
-        chunkBytes.push_back(0); // null terminator for name
-        chunkBytes.push_back(0); // compression method zlib
-        chunkBytes.insert(chunkBytes.end(), compressedData, compressedData + compressedSize);
-
-        uint32_t crc = CalculateCRC32(chunkBytes.data(), chunkBytes.size());
-        std::vector<uint8_t> iCCPBlock(4 + chunkBytes.size() + 4);
-        uint32_t chunkDataLen = static_cast<uint32_t>(chunkBytes.size() - 4);
-        WriteBigEndian32(iCCPBlock.data(), chunkDataLen);
-        std::memcpy(iCCPBlock.data() + 4, chunkBytes.data(), chunkBytes.size());
-        WriteBigEndian32(iCCPBlock.data() + 4 + chunkBytes.size(), crc);
-        pngBytes.insert(pngBytes.begin() + 33, iCCPBlock.begin(), iCCPBlock.end());
+    // Linear scene-referred: gamma 1.0, sRGB primaries (common "Linear sRGB" tagging)
+    if (name == "Linear" || name == "linear") {
+        WriteChrm(pngBytes, 31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000);
+        WriteGama(pngBytes, 100000); // gamma = 1.0
+        return true;
     }
-    free(compressedData);
+
+    // Display P3 primaries + D65 white + ~sRGB transfer (no sRGB chunk — different primaries)
+    if (name == "Display P3" || name == "DisplayP3" || name == "P3") {
+        // x,y * 100000
+        WriteChrm(pngBytes,
+                  31270, 32900,   // D65
+                  68000, 32000,   // P3 R
+                  26500, 69000,   // P3 G
+                  15000,  6000);  // P3 B
+        WriteGama(pngBytes, 45455); // ≈ 1/2.2
+        return true;
+    }
+
+    // Adobe RGB (1998)
+    if (name == "Adobe RGB" || name == "AdobeRGB") {
+        WriteChrm(pngBytes,
+                  31270, 32900,
+                  64000, 33000,
+                  21000, 71000,
+                  15000,  6000);
+        WriteGama(pngBytes, 45455);
+        return true;
+    }
+
+    // Default sRGB
+    WriteChrm(pngBytes, 31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000);
+    WriteGama(pngBytes, 45455);
+    {
+        uint8_t intent = 0;
+        InsertPngChunkAfterIHDR(pngBytes, "sRGB", &intent, 1);
+    }
     return true;
+}
+
+static bool InjectIccBytesIntoPng(std::vector<uint8_t>& pngBytes,
+                                  const uint8_t* /*profileData*/, size_t /*profileSize*/,
+                                  const char* profileNameIn) {
+    // Never use broken synthetic iCCP. Tag via standard chunks by preset name.
+    return InjectPngColorimetryByName(pngBytes, profileNameIn ? profileNameIn : "sRGB");
 }
 
 static bool InjectIccIntoPng(std::vector<uint8_t>& pngBytes, const std::string& iccProfilePath) {

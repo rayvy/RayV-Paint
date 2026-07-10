@@ -2082,7 +2082,16 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
         m_Width  = imgWidth;
         m_Height = imgHeight;
         m_CanvasFormat = CanvasPixelFormat::RGBA8;
-        Logger::Get().Info("Canvas format: RGBA8");
+        // Document storage depth from source (float DDS → RGBA32F tiles)
+        if (loadedTileCache && loadedTileCache->GetFormat() == CanvasPixelFormat::RGBA32F) {
+            m_CanvasFormat = CanvasPixelFormat::RGBA32F;
+            m_DocumentBitDepth = DocumentBitDepth::F32;
+            Logger::Get().Info("Canvas format: RGBA32F (HDR/float source)");
+        } else {
+            m_CanvasFormat = CanvasPixelFormat::RGBA8;
+            m_DocumentBitDepth = DocumentBitDepth::U8;
+            Logger::Get().Info("Canvas format: RGBA8");
+        }
 
         CreateCompositeResources(device);
         m_Layers.clear();
@@ -2096,8 +2105,8 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
             else if (loadedDdsFormat == DdsFormat::RGBA16_FLOAT) m_ExportFormat = "RGBA16_FLOAT";
             else if (loadedDdsFormat == DdsFormat::R8_UNORM)     m_ExportFormat = "R8_UNORM";
             else if (loadedDdsFormat == DdsFormat::R16_FLOAT)    m_ExportFormat = "R16_FLOAT";
-            else if (loadedDdsFormat == DdsFormat::R32_FLOAT)    m_ExportFormat = "R32_FLOAT";
-            else m_ExportFormat = "RGBA8_UNORM";
+            else if (loadedDdsFormat == DdsFormat::R32_FLOAT)    m_ExportFormat = "R32 (Linear, Float)";
+            else m_ExportFormat = "BC7 (sRGB, DX 11+)";
             Logger::Get().Info("Auto-configured DDS export format: " + m_ExportFormat);
         } else if (ext == "png") {
             ExtractAndSetICCProfile(filepath);
@@ -2610,6 +2619,8 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         metadata["height"] = m_Height;
         metadata["active_layer"] = m_ActiveLayerIdx;
         metadata["project_type"] = (m_ProjectType == ProjectType::Simple) ? "simple" : "advanced";
+        metadata["document_bit_depth"] = (m_DocumentBitDepth == DocumentBitDepth::F32) ? "f32"
+            : (m_DocumentBitDepth == DocumentBitDepth::F16) ? "f16" : "u8";
         metadata["format_features"] = "blend_filters_mask_groups";
 
         metadata["export_path"] = m_ExportPath;
@@ -2748,6 +2759,14 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
             m_ProjectType = (pt == "simple") ? ProjectType::Simple : ProjectType::Advanced;
         } else {
             m_ProjectType = ProjectType::Advanced;
+        }
+        if (metadata.contains("document_bit_depth")) {
+            std::string bd = metadata["document_bit_depth"].get<std::string>();
+            if (bd == "f32") m_DocumentBitDepth = DocumentBitDepth::F32;
+            else if (bd == "f16") m_DocumentBitDepth = DocumentBitDepth::F16;
+            else m_DocumentBitDepth = DocumentBitDepth::U8;
+            m_CanvasFormat = (m_DocumentBitDepth == DocumentBitDepth::U8)
+                ? CanvasPixelFormat::RGBA8 : CanvasPixelFormat::RGBA32F;
         }
 
         if (metadata.contains("export_path")) m_ExportPath = metadata["export_path"].get<std::string>();
@@ -5555,6 +5574,7 @@ Canvas::IccPreset Canvas::IccPresetFromName(const std::string& name) {
     if (name == "None" || name == "none") return IccPreset::None;
     if (name == "Display P3" || name == "DisplayP3" || name == "P3") return IccPreset::DisplayP3;
     if (name == "Adobe RGB" || name == "AdobeRGB") return IccPreset::AdobeRGB;
+    if (name == "Linear" || name == "linear" || name == "Linear RGB") return IccPreset::Linear;
     if (name == "sRGB" || name == "srgb") return IccPreset::sRGB;
     // Legacy free-text path → treat as sRGB default (UI no longer exposes path)
     return IccPreset::sRGB;
@@ -5567,6 +5587,16 @@ const std::vector<uint8_t>& Canvas::GetIccPresetBytes(IccPreset p) {
 void Canvas::SetExportIccPreset(IccPreset p) {
     m_ExportIccPreset = p;
     m_ExportPngColorSpace = IccPresetName(p);
+}
+
+void Canvas::SetDocumentBitDepth(DocumentBitDepth d) {
+    if (d == m_DocumentBitDepth) return;
+    // P2: full conversion pipeline. For now switch policy + format for new tiles.
+    m_DocumentBitDepth = d;
+    m_CanvasFormat = (d == DocumentBitDepth::U8) ? CanvasPixelFormat::RGBA8 : CanvasPixelFormat::RGBA32F;
+    Logger::Get().Info(std::string("DocumentBitDepth set to ") +
+        (d == DocumentBitDepth::F32 ? "F32" : d == DocumentBitDepth::F16 ? "F16" : "U8") +
+        " (existing layers keep storage until re-save/convert)");
 }
 
 void Canvas::SetCustomBrushTip(int size, const std::vector<uint8_t>& pixels) {
