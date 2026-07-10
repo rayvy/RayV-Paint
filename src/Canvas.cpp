@@ -2755,12 +2755,15 @@ void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name
     newLayer.name = name;
     newLayer.visible = true;
     newLayer.opacity = 1.0f;
+    // First layer = document base (rewrite ON); pasted/extra = decal (A = coverage).
+    newLayer.alphaRewrite = m_Layers.empty();
     newLayer.tileCache = std::make_unique<TileCache>();
     newLayer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
 
     if (width == m_Width && height == m_Height) {
         newLayer.tileCache->ImportRGBA32F(pixels.data(), width, height);
     } else {
+        // Center paste; keep source alpha (transparent PNG / UV layout).
         std::vector<float> resizedPixels((size_t)m_Width * m_Height * 4, 0.0f);
         int offsetX = (m_Width - width) / 2;
         int offsetY = (m_Height - height) / 2;
@@ -2796,7 +2799,8 @@ void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name
 
     ClearUndoHistory();
     m_IsDocumentModified = true;
-    Logger::Get().Info("Created new layer from clipboard/drop: " + name);
+    Logger::Get().Info("Created new layer from clipboard/drop: " + name +
+        " " + std::to_string(width) + "x" + std::to_string(height));
 }
 
 bool Canvas::Undo() {
@@ -3856,17 +3860,36 @@ bool Canvas::PasteLayersFromClipboard(ID3D11Device* device) {
     return true;
 }
 
+// Resolve paste pixels: system clipboard wins when another app overwrote it
+// (PNG with alpha from Blender/Chrome/PS). Internal buffer used only when we still own it.
+static bool ResolvePastePixels(bool contentValid, const std::vector<float>& contentRgba,
+                               int contentW, int contentH,
+                               std::vector<float>& pixels, int& pw, int& ph) {
+    const bool hasInternal = contentValid && !contentRgba.empty() && contentW > 0 && contentH > 0;
+    const bool hasSystem = ClipboardHelper::HasClipboardImage();
+    const bool systemNewer = ClipboardHelper::IsSystemClipboardNewerThanLastCopy();
+
+    if (hasSystem && (systemNewer || !hasInternal)) {
+        if (ClipboardHelper::PasteImageFromClipboard(pixels, pw, ph))
+            return true;
+    }
+    if (hasInternal) {
+        pixels = contentRgba;
+        pw = contentW;
+        ph = contentH;
+        return true;
+    }
+    if (hasSystem)
+        return ClipboardHelper::PasteImageFromClipboard(pixels, pw, ph);
+    return false;
+}
+
 bool Canvas::PasteContentIntoActive(ID3D11Device* device) {
-    // Prefer internal content; fallback to system clipboard
     std::vector<float> pixels;
     int pw = 0, ph = 0;
-    if (m_ContentClipboardValid && !m_ContentClipRGBA.empty()) {
-        pixels = m_ContentClipRGBA;
-        pw = m_ContentClipW;
-        ph = m_ContentClipH;
-    } else {
-        if (!ClipboardHelper::PasteImageFromClipboard(pixels, pw, ph)) return false;
-    }
+    if (!ResolvePastePixels(m_ContentClipboardValid, m_ContentClipRGBA, m_ContentClipW, m_ContentClipH,
+                            pixels, pw, ph))
+        return false;
     if (pixels.empty() || pw <= 0 || ph <= 0) return false;
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return false;
     Layer& layer = m_Layers[m_ActiveLayerIdx];
@@ -3900,10 +3923,16 @@ bool Canvas::PasteContentIntoActive(ID3D11Device* device) {
             }
         }
         layer.maskNeedsUpload = true;
+        // Full mask changed — force full GPU upload (dirty rect invalid).
+        layer.maskDirtyX0 = 0;
+        layer.maskDirtyY0 = 0;
+        layer.maskDirtyX1 = m_Width - 1;
+        layer.maskDirtyY1 = m_Height - 1;
         if (device) UpdateLayerMaskTexture(device, m_ActiveLayerIdx);
         m_CompositeDirty = true;
         m_IsDocumentModified = true;
-        Logger::Get().Info("PasteContentIntoActive (mask)");
+        Logger::Get().Info("PasteContentIntoActive (mask) " +
+            std::to_string(pw) + "x" + std::to_string(ph));
         return true;
     }
 
@@ -3939,14 +3968,10 @@ bool Canvas::PasteContentIntoActive(ID3D11Device* device) {
 bool Canvas::PasteContentAsNewLayer(ID3D11Device* device, const std::string& name) {
     std::vector<float> pixels;
     int pw = 0, ph = 0;
-    if (m_ContentClipboardValid && !m_ContentClipRGBA.empty()) {
-        pixels = m_ContentClipRGBA;
-        pw = m_ContentClipW;
-        ph = m_ContentClipH;
-    } else if (!ClipboardHelper::PasteImageFromClipboard(pixels, pw, ph)) {
+    if (!ResolvePastePixels(m_ContentClipboardValid, m_ContentClipRGBA, m_ContentClipW, m_ContentClipH,
+                            pixels, pw, ph))
         return false;
-    }
-    if (pixels.empty()) return false;
+    if (pixels.empty() || pw <= 0 || ph <= 0) return false;
     CreateLayerFromPixels(device, name, pixels, pw, ph);
     return true;
 }
@@ -4130,14 +4155,14 @@ void Canvas::ApplyLassoSelection(const std::vector<std::pair<int, int>>& points,
 }
 
 void Canvas::InvalidateWandSourceCache() {
-    m_WandSourceRGB.clear();
+    m_WandSourceRGBA.clear();
     m_WandSourceW = m_WandSourceH = 0;
     m_WandSourceLayerIdx = -1;
 }
 
 void Canvas::EnsureWandSourceCache() {
     if (m_WandSourceW == m_Width && m_WandSourceH == m_Height &&
-        m_WandSourceLayerIdx == m_ActiveLayerIdx && !m_WandSourceRGB.empty()) {
+        m_WandSourceLayerIdx == m_ActiveLayerIdx && !m_WandSourceRGBA.empty()) {
         return;
     }
     std::vector<float> srcPixels;
@@ -4147,11 +4172,13 @@ void Canvas::EnsureWandSourceCache() {
     } else {
         srcPixels = GetCompositePixels();
     }
-    m_WandSourceRGB.resize((size_t)m_Width * m_Height * 3);
+    // Full RGBA — empty/transparent pixels must not collapse to RGB black for wand.
+    m_WandSourceRGBA.resize((size_t)m_Width * m_Height * 4);
     for (int i = 0; i < m_Width * m_Height; ++i) {
-        m_WandSourceRGB[i * 3 + 0] = (uint8_t)(std::clamp(srcPixels[i * 4 + 0], 0.f, 1.f) * 255.f + 0.5f);
-        m_WandSourceRGB[i * 3 + 1] = (uint8_t)(std::clamp(srcPixels[i * 4 + 1], 0.f, 1.f) * 255.f + 0.5f);
-        m_WandSourceRGB[i * 3 + 2] = (uint8_t)(std::clamp(srcPixels[i * 4 + 2], 0.f, 1.f) * 255.f + 0.5f);
+        m_WandSourceRGBA[i * 4 + 0] = (uint8_t)(std::clamp(srcPixels[i * 4 + 0], 0.f, 1.f) * 255.f + 0.5f);
+        m_WandSourceRGBA[i * 4 + 1] = (uint8_t)(std::clamp(srcPixels[i * 4 + 1], 0.f, 1.f) * 255.f + 0.5f);
+        m_WandSourceRGBA[i * 4 + 2] = (uint8_t)(std::clamp(srcPixels[i * 4 + 2], 0.f, 1.f) * 255.f + 0.5f);
+        m_WandSourceRGBA[i * 4 + 3] = (uint8_t)(std::clamp(srcPixels[i * 4 + 3], 0.f, 1.f) * 255.f + 0.5f);
     }
     m_WandSourceW = m_Width;
     m_WandSourceH = m_Height;
@@ -4166,44 +4193,77 @@ void Canvas::RunMagicWand(ID3D11Device* device, int startX, int startY, float to
     bool oldHasSelection = m_HasSelection;
 
     EnsureWandSourceCache();
-    cv::Mat mat(m_Height, m_Width, CV_8UC3, m_WandSourceRGB.data());
-    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    if (m_WandSourceRGBA.size() != (size_t)m_Width * m_Height * 4) return;
 
-    const float tol = std::clamp(tolerance, 0.0f, 1.0f);
+    const uint8_t* src = m_WandSourceRGBA.data();
+    const uint8_t* seed = src + ((size_t)startY * m_Width + startX) * 4;
+    // Photoshop-like: tolerance is max per-channel delta in 0..255.
+    const int tol8 = std::max(0, std::min(255, (int)std::lround(std::clamp(tolerance, 0.f, 1.f) * 255.f)));
+
+    // Clicked empty/transparent: match by alpha only (RGB of A=0 tiles is often 0,0,0
+    // and must NOT select opaque dark paint).
+    const bool seedIsTransparent = seed[3] <= tol8;
+
+    auto matches = [&](int x, int y) -> bool {
+        const uint8_t* p = src + ((size_t)y * m_Width + x) * 4;
+        if (seedIsTransparent) {
+            return std::abs((int)p[3] - (int)seed[3]) <= tol8;
+        }
+        // Opaque/semi seed: all channels including alpha (transparent holes stop the fill).
+        int dr = std::abs((int)p[0] - (int)seed[0]);
+        int dg = std::abs((int)p[1] - (int)seed[1]);
+        int db = std::abs((int)p[2] - (int)seed[2]);
+        int da = std::abs((int)p[3] - (int)seed[3]);
+        return std::max(std::max(dr, dg), std::max(db, da)) <= tol8;
+    };
+
+    std::vector<uint8_t> temp((size_t)m_Width * m_Height, 0);
+
     if (contiguous) {
-        // floodFill stops at color boundary — no full-scene scan beyond connected region.
-        cv::Mat mask = cv::Mat::zeros(m_Height + 2, m_Width + 2, CV_8UC1);
-        cv::Scalar loDiff(tol * 255.0f, tol * 255.0f, tol * 255.0f);
-        cv::Scalar upDiff(tol * 255.0f, tol * 255.0f, tol * 255.0f);
-        cv::floodFill(mat, mask, cv::Point(startX, startY), cv::Scalar(255), nullptr,
-                      loDiff, upDiff, 4 | cv::FLOODFILL_MASK_ONLY | (255 << 8));
-        temp = mask(cv::Range(1, m_Height + 1), cv::Range(1, m_Width + 1)).clone();
+        std::vector<uint8_t> visited((size_t)m_Width * m_Height, 0);
+        std::vector<std::pair<int, int>> q;
+        q.reserve(1024);
+        q.push_back({ startX, startY });
+        visited[(size_t)startY * m_Width + startX] = 1;
+        size_t head = 0;
+        const int ndx[4] = { 1, -1, 0, 0 };
+        const int ndy[4] = { 0, 0, 1, -1 };
+        while (head < q.size()) {
+            auto [x, y] = q[head++];
+            if (!matches(x, y)) continue;
+            temp[(size_t)y * m_Width + x] = 255;
+            for (int n = 0; n < 4; ++n) {
+                int nx = x + ndx[n], ny = y + ndy[n];
+                if (nx < 0 || ny < 0 || nx >= m_Width || ny >= m_Height) continue;
+                size_t ni = (size_t)ny * m_Width + nx;
+                if (visited[ni]) continue;
+                visited[ni] = 1;
+                if (matches(nx, ny))
+                    q.push_back({ nx, ny });
+            }
+        }
     } else {
-        // Non-contiguous: inRange in RGB around seed (OpenCV-optimized).
-        cv::Vec3b seed = mat.at<cv::Vec3b>(startY, startX);
-        int d = std::max(0, std::min(255, (int)std::lround(tol * 255.0f * std::sqrt(3.0f))));
-        cv::Scalar lo(std::max(0, seed[0] - d), std::max(0, seed[1] - d), std::max(0, seed[2] - d));
-        cv::Scalar hi(std::min(255, seed[0] + d), std::min(255, seed[1] + d), std::min(255, seed[2] + d));
-        cv::inRange(mat, lo, hi, temp);
+        for (int y = 0; y < m_Height; ++y)
+            for (int x = 0; x < m_Width; ++x)
+                if (matches(x, y))
+                    temp[(size_t)y * m_Width + x] = 255;
     }
 
-    cv::Mat current(m_Height, m_Width, CV_8UC1);
-    if (!m_SelectionMask.empty() && (int)m_SelectionMask.size() == m_Width * m_Height) {
-        std::memcpy(current.data, m_SelectionMask.data(), m_SelectionMask.size());
-    } else {
-        current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-    }
-    cv::Mat combined;
-    if (add) {
-        cv::bitwise_or(current, temp, combined);
-    } else if (subtract) {
-        cv::bitwise_and(current, ~temp, combined);
-    } else {
-        combined = temp;
-    }
+    std::vector<uint8_t> current((size_t)m_Width * m_Height, 0);
+    if (!m_SelectionMask.empty() && (int)m_SelectionMask.size() == m_Width * m_Height)
+        current = m_SelectionMask;
 
     m_SelectionMask.resize((size_t)m_Width * m_Height);
-    std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
+    if (add) {
+        for (size_t i = 0; i < m_SelectionMask.size(); ++i)
+            m_SelectionMask[i] = (uint8_t)(current[i] | temp[i]);
+    } else if (subtract) {
+        for (size_t i = 0; i < m_SelectionMask.size(); ++i)
+            m_SelectionMask[i] = (uint8_t)(current[i] & (uint8_t)~temp[i]);
+    } else {
+        m_SelectionMask = std::move(temp);
+    }
+
     m_HasSelection = false;
     for (uint8_t val : m_SelectionMask) {
         if (val > 0) { m_HasSelection = true; break; }
@@ -4213,7 +4273,8 @@ void Canvas::RunMagicWand(ID3D11Device* device, int startX, int startY, float to
 
     if (pushUndo) {
         m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
-            "Magic Wand", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
+            seedIsTransparent ? "Magic Wand (Transparent)" : "Magic Wand",
+            std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
     }
 }
 
@@ -5189,6 +5250,32 @@ void Canvas::SelectOpaquePixels(int layerIdx) {
     Logger::Get().Info("SelectOpaquePixels layer=" + std::to_string(layerIdx));
 }
 
+void Canvas::SelectFromLayerMask(int layerIdx) {
+    if (layerIdx < 0) layerIdx = m_ActiveLayerIdx;
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[layerIdx];
+    if (layer.isGroup || !layer.hasMask || layer.mask.empty()) return;
+
+    const size_t need = (size_t)m_Width * (size_t)m_Height;
+    if (layer.mask.size() != need) {
+        Logger::Get().Warn("SelectFromLayerMask: mask size mismatch");
+        return;
+    }
+
+    std::vector<uint8_t> oldMask = m_SelectionMask;
+    bool oldHas = m_HasSelection;
+    // White / high mask value = selected (PS: load selection from mask).
+    m_SelectionMask = layer.mask;
+    m_HasSelection = false;
+    for (uint8_t v : m_SelectionMask) {
+        if (v > 0) { m_HasSelection = true; break; }
+    }
+    m_SelectionMaskNeedsUpload = true;
+    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
+        "Select From Mask", std::move(oldMask), oldHas, m_SelectionMask, m_HasSelection));
+    Logger::Get().Info("SelectFromLayerMask layer=" + std::to_string(layerIdx));
+}
+
 void Canvas::InvertSelection() {
     std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHas = m_HasSelection;
@@ -5620,9 +5707,10 @@ void Canvas::StrokeQuickSelect(const std::vector<std::pair<int, int>>& points, f
                 }
                 // Seed pixel
                 m_QuickSelectMask[idx] = 255;
-                float rf = m_WandSourceRGB[idx * 3 + 0] / 255.f;
-                float gf = m_WandSourceRGB[idx * 3 + 1] / 255.f;
-                float bf = m_WandSourceRGB[idx * 3 + 2] / 255.f;
+                if (m_WandSourceRGBA.size() < (idx + 1) * 4) continue;
+                float rf = m_WandSourceRGBA[idx * 4 + 0] / 255.f;
+                float gf = m_WandSourceRGBA[idx * 4 + 1] / 255.f;
+                float bf = m_WandSourceRGBA[idx * 4 + 2] / 255.f;
                 float L, a, b;
                 RgbToLabApprox(rf, gf, bf, L, a, b);
                 int n = m_QuickSelectSampleCount;
@@ -5674,9 +5762,10 @@ void Canvas::StrokeQuickSelect(const std::vector<std::pair<int, int>>& points, f
             if (m_QuickSelectMask[nidx]) continue;
             float edge = m_QuickSelectEdge.empty() ? 0.f : m_QuickSelectEdge[nidx] / 255.f;
             if (edge >= edgeStop) continue; // sticky edge
-            float rf = m_WandSourceRGB[nidx * 3 + 0] / 255.f;
-            float gf = m_WandSourceRGB[nidx * 3 + 1] / 255.f;
-            float bf = m_WandSourceRGB[nidx * 3 + 2] / 255.f;
+            if (m_WandSourceRGBA.size() < (nidx + 1) * 4) continue;
+            float rf = m_WandSourceRGBA[nidx * 4 + 0] / 255.f;
+            float gf = m_WandSourceRGBA[nidx * 4 + 1] / 255.f;
+            float bf = m_WandSourceRGBA[nidx * 4 + 2] / 255.f;
             float L, a, b;
             RgbToLabApprox(rf, gf, bf, L, a, b);
             float dL = L - m_QuickSelectLabMean[0];

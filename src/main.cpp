@@ -916,24 +916,31 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (KeymapManager::Get().ConsumeActionTrigger("PasteAsNewLayer")) {
-                if (!g_Canvas.PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer")) {
-                    // try system clipboard via CreateLayerFromPixels path inside
-                    std::vector<float> pastedPixels;
-                    int pastedW = 0, pastedH = 0;
-                    if (ClipboardHelper::PasteImageFromClipboard(pastedPixels, pastedW, pastedH))
-                        g_Canvas.CreateLayerFromPixels(g_pd3dDevice, "Pasted Layer", pastedPixels, pastedW, pastedH);
-                }
+                if (!g_Canvas.PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
+                    Logger::Get().Warn("PasteAsNewLayer: no image on clipboard");
             }
             if (KeymapManager::Get().ConsumeActionTrigger("Paste")) {
-                // Prefer layer clipboard if present; else paste content into active layer/mask
-                if (g_Canvas.HasLayerClipboard()) {
+                // External image (Chrome/Blender/PS PNG) takes priority over internal
+                // layer/content clipboard when the system clipboard was overwritten.
+                const bool externalImage =
+                    ClipboardHelper::HasClipboardImage() &&
+                    ClipboardHelper::IsSystemClipboardNewerThanLastCopy();
+
+                if (externalImage) {
+                    // Mask paint target → stamp into mask (UV layout → mask workflow).
+                    // Otherwise always new layer so transparency is preserved cleanly.
+                    if (g_Canvas.IsEditingLayerMask()) {
+                        if (!g_Canvas.PasteContentIntoActive(g_pd3dDevice))
+                            Logger::Get().Warn("Paste: failed to paste into mask");
+                    } else if (!g_Canvas.PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer")) {
+                        Logger::Get().Warn("Paste: failed to paste system image as layer");
+                    }
+                } else if (g_Canvas.HasLayerClipboard()) {
                     g_Canvas.PasteLayersFromClipboard(g_pd3dDevice);
                 } else if (!g_Canvas.PasteContentIntoActive(g_pd3dDevice)) {
-                    // No internal content: paste system clipboard as new layer
-                    std::vector<float> pastedPixels;
-                    int pastedW = 0, pastedH = 0;
-                    if (ClipboardHelper::PasteImageFromClipboard(pastedPixels, pastedW, pastedH))
-                        g_Canvas.CreateLayerFromPixels(g_pd3dDevice, "Pasted Layer", pastedPixels, pastedW, pastedH);
+                    // Fallback: system image as new layer (first paste / no internal content)
+                    if (!g_Canvas.PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
+                        Logger::Get().Warn("Paste: clipboard has no pasteable image");
                 }
             }
         }

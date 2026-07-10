@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
@@ -2374,10 +2375,19 @@ namespace UI {
                             ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
                         }
                         if (ImGui::ImageButton("##mask", (ImTextureID)layer.maskSRV, ImVec2(thumb, thumb), ImVec2(0,0), ImVec2(1,1))) {
+                            ImGuiIO& io = ImGui::GetIO();
                             canvas.SetActiveLayerIndex(i);
                             canvas.SetPaintTarget(PaintTarget::LayerMask);
+                            setSoleSelection(i);
+                            // Alt+Click: load mask → selection (PS-like "load selection from mask")
+                            if (io.KeyAlt) {
+                                canvas.SelectFromLayerMask(i);
+                                canvas.UpdateSelectionMaskTexture(device);
+                            }
                         }
-                        if (ImGui::IsItemHovered()) Ui::Tooltip("Layer Mask\nRight-click: Apply / Delete");
+                        if (ImGui::IsItemHovered()) {
+                            Ui::Tooltip("Layer Mask\nClick: edit mask  ·  Alt+Click: load mask as selection\nRight-click: Apply / Delete");
+                        }
                         if (ImGui::BeginPopupContextItem("##maskctx")) {
                             if (ImGui::MenuItem("Apply Mask")) canvas.ApplyLayerMask(i);
                             if (ImGui::MenuItem("Delete Mask")) canvas.DeleteLayerMask(i);
@@ -3292,6 +3302,125 @@ namespace UI {
                 }
             }
 
+            // ---- Exact color control: RGB 0..255 + HEX (seam matching across texture sets) ----
+            {
+                ImGui::Spacing();
+                auto toU8 = [](float v) -> int {
+                    return (int)std::lround(std::clamp(v, 0.f, 1.f) * 255.f);
+                };
+                auto fromU8 = [](int v) -> float {
+                    return std::clamp(v, 0, 255) / 255.f;
+                };
+
+                int rgb[4] = { toU8(editCol[0]), toU8(editCol[1]), toU8(editCol[2]), toU8(editCol[3]) };
+                ImGui::SetNextItemWidth(svW);
+                if (ImGui::DragInt4("##rgb255", rgb, 1.f, 0, 255, "%d")) {
+                    editCol[0] = fromU8(rgb[0]);
+                    editCol[1] = fromU8(rgb[1]);
+                    editCol[2] = fromU8(rgb[2]);
+                    editCol[3] = fromU8(rgb[3]);
+                    // Refresh HSV from new RGB
+                    ImGui::ColorConvertRGBtoHSV(
+                        std::clamp(editCol[0], 0.f, 1.f),
+                        std::clamp(editCol[1], 0.f, 1.f),
+                        std::clamp(editCol[2], 0.f, 1.f), h, s, v);
+                }
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("RGBA 0–255\nExact values for matching seams across texture sets");
+
+                // HEX field — keep buffer in sync when color changes from picker/sliders
+                static char s_HexBuf[16] = "#FFFFFF";
+                static float s_LastHexCol[4] = { -1.f, -1.f, -1.f, -1.f };
+                const bool colChanged =
+                    s_LastHexCol[0] != editCol[0] || s_LastHexCol[1] != editCol[1] ||
+                    s_LastHexCol[2] != editCol[2] || s_LastHexCol[3] != editCol[3];
+                if (colChanged && !ImGui::IsItemActive()) {
+                    // Don't overwrite while user is typing in HEX field (checked below).
+                }
+                // Rebuild HEX when color changed and HEX input is not focused
+                bool hexFocused = false;
+                {
+                    // Format without alpha if fully opaque (shorter, PS-like); with AA if needed
+                    int r = toU8(editCol[0]), g = toU8(editCol[1]), b = toU8(editCol[2]), a = toU8(editCol[3]);
+                    // Defer write until we know if ##hex is active — use previous frame flag
+                    static bool s_HexWasActive = false;
+                    if (colChanged && !s_HexWasActive) {
+                        if (a >= 255)
+                            std::snprintf(s_HexBuf, sizeof(s_HexBuf), "#%02X%02X%02X", r, g, b);
+                        else
+                            std::snprintf(s_HexBuf, sizeof(s_HexBuf), "#%02X%02X%02X%02X", r, g, b, a);
+                        s_LastHexCol[0] = editCol[0];
+                        s_LastHexCol[1] = editCol[1];
+                        s_LastHexCol[2] = editCol[2];
+                        s_LastHexCol[3] = editCol[3];
+                    }
+
+                    ImGui::SetNextItemWidth(std::max(90.f, svW - 70.f));
+                    // Allow '#' + hex digits (CharsHexadecimal would block '#').
+                    if (ImGui::InputText("##hex", s_HexBuf, sizeof(s_HexBuf),
+                            ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_AutoSelectAll)) {
+                        // Parse #RGB #RRGGBB #RRGGBBAA (optional leading #)
+                        char raw[16] = {};
+                        const char* p = s_HexBuf;
+                        if (*p == '#') ++p;
+                        size_t n = 0;
+                        while (p[n] && n < 8) {
+                            char c = p[n];
+                            if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))
+                                raw[n++] = c;
+                            else
+                                break;
+                        }
+                        raw[n] = 0;
+                        auto hexNibble = [](char c) -> int {
+                            if (c >= '0' && c <= '9') return c - '0';
+                            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                            return 0;
+                        };
+                        auto hexByte = [&](const char* s) -> int {
+                            return (hexNibble(s[0]) << 4) | hexNibble(s[1]);
+                        };
+                        if (n == 3 || n == 4) {
+                            // #RGB or #RGBA short form
+                            int rr = hexNibble(raw[0]) * 17;
+                            int gg = hexNibble(raw[1]) * 17;
+                            int bb = hexNibble(raw[2]) * 17;
+                            int aa = (n == 4) ? hexNibble(raw[3]) * 17 : 255;
+                            editCol[0] = fromU8(rr);
+                            editCol[1] = fromU8(gg);
+                            editCol[2] = fromU8(bb);
+                            editCol[3] = fromU8(aa);
+                        } else if (n == 6 || n == 8) {
+                            editCol[0] = fromU8(hexByte(raw + 0));
+                            editCol[1] = fromU8(hexByte(raw + 2));
+                            editCol[2] = fromU8(hexByte(raw + 4));
+                            editCol[3] = (n == 8) ? fromU8(hexByte(raw + 6)) : editCol[3];
+                            if (n == 6) { /* keep existing alpha */ }
+                        }
+                        ImGui::ColorConvertRGBtoHSV(
+                            std::clamp(editCol[0], 0.f, 1.f),
+                            std::clamp(editCol[1], 0.f, 1.f),
+                            std::clamp(editCol[2], 0.f, 1.f), h, s, v);
+                        s_LastHexCol[0] = editCol[0];
+                        s_LastHexCol[1] = editCol[1];
+                        s_LastHexCol[2] = editCol[2];
+                        s_LastHexCol[3] = editCol[3];
+                    }
+                    s_HexWasActive = ImGui::IsItemActive();
+                    hexFocused = s_HexWasActive;
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip("HEX color\n#RGB  #RRGGBB  #RRGGBBAA\nMatch exact seam colors across sets");
+
+                    ImGui::SameLine(0, 6);
+                    if (ImGui::SmallButton("Copy##hex")) {
+                        ImGui::SetClipboardText(s_HexBuf);
+                    }
+                    if (ImGui::IsItemHovered()) Ui::Tooltip("Copy HEX to clipboard");
+                    (void)hexFocused;
+                }
+            }
+
             if (floatDoc) {
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "Float color (no 0..1 clamp)");
@@ -3336,7 +3465,7 @@ namespace UI {
                 }
                 if (ImGui::IsItemHovered()) Ui::Tooltip(floatDoc
                     ? "Primary (display clamped 0..1)\nUse float RGBA fields for HDR values"
-                    : "Primary\nClick to edit");
+                    : "Primary\nClick to edit · HEX/RGB fields for exact match");
 
                 ImGui::SetCursorScreenPos(ImVec2(base.x + 56.f, base.y + 8.f));
                 if (ImGui::SmallButton("X##sw")) {

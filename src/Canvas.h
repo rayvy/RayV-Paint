@@ -225,6 +225,8 @@ public:
     // Destructive image adjustments (operate on active layer, respect selection mask)
     void SelectAll();                       // full canvas selection (with undo)
     void SelectOpaquePixels(int layerIdx = -1); // alpha-as-mask; -1 = active layer
+    // Load layer mask into selection (white/high = selected). Alt+Click on mask thumb.
+    void SelectFromLayerMask(int layerIdx = -1);
     void InvertSelection();
     void InvertAlpha();
     // Invert RGB (keeps alpha). Respects selection; uses existing mutation/undo path.
@@ -605,8 +607,8 @@ private:
     bool m_WandSeedValid = false;
     int  m_WandSeedX = 0;
     int  m_WandSeedY = 0;
-    // Cached RGB8 source for live tolerance scrub (invalidated on layer edit).
-    std::vector<uint8_t> m_WandSourceRGB;
+    // Cached RGBA8 source for wand / quick-select (alpha matters — transparent ≠ black).
+    std::vector<uint8_t> m_WandSourceRGBA;
     int m_WandSourceW = 0, m_WandSourceH = 0;
     int m_WandSourceLayerIdx = -1;
 
