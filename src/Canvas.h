@@ -369,15 +369,16 @@ public:
         Advanced
     };
 
-    // Document color bit depth (Photoshop-like). Storage + brush quantize policy.
-    // Export remains free (any DDS/PNG target). Default U8 keeps current perf.
+    // Document color bit depth (Photoshop-like). Global working space for all channels.
+    // Export remains free (any DDS/PNG packing target). Default U8 keeps current perf.
     enum class DocumentBitDepth : uint8_t {
-        U8  = 0,  // 8-bit/channel storage (RGBA8 tiles)
-        F16 = 1,  // 16-bit float (stored as RGBA32F for now; quantize optional later)
-        F32 = 2   // 32-bit float (RGBA32F tiles)
+        U8  = 0,  // 8-bit/channel → RGBA8 tiles (4 B/px)
+        F16 = 1,  // 16-bit float → RGBA16F tiles (8 B/px)
+        F32 = 2   // 32-bit float → RGBA32F tiles (16 B/px)
     };
     DocumentBitDepth GetDocumentBitDepth() const { return m_DocumentBitDepth; }
-    void SetDocumentBitDepth(DocumentBitDepth d); // converts storage when needed (P2)
+    void SetDocumentBitDepth(DocumentBitDepth d); // converts all layer tiles + GPU
+    static CanvasPixelFormat FormatForBitDepth(DocumentBitDepth d);
 
     float GetRotationAngle() const { return m_RotationAngle; }
     void SetRotationAngle(float angle) { m_RotationAngle = angle; }

@@ -1,7 +1,9 @@
 #include "TileCache.h"
+#include "HalfFloat.h"
 #include <cstring>
 #include <limits>
 #include <unordered_set>
+#include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -151,16 +153,17 @@ void TileCache::GetPixelF(int x, int y, float rgba[4]) const {
     int    lx  = x % TILE_SIZE;
     int    ly  = y % TILE_SIZE;
     size_t off = ((size_t)ly * TILE_SIZE + lx) * m_BytesPerPixel;
-    const uint8_t* base = t->data->pixels.data();
+    const uint8_t* base = t->data->pixels.data() + off;
 
     if (m_Format == CanvasPixelFormat::RGBA8) {
-        const uint8_t* p = base + off;
-        rgba[0] = p[0] / 255.0f;
-        rgba[1] = p[1] / 255.0f;
-        rgba[2] = p[2] / 255.0f;
-        rgba[3] = p[3] / 255.0f;
+        rgba[0] = base[0] / 255.0f;
+        rgba[1] = base[1] / 255.0f;
+        rgba[2] = base[2] / 255.0f;
+        rgba[3] = base[3] / 255.0f;
+    } else if (m_Format == CanvasPixelFormat::RGBA16F) {
+        HalfFloat::LoadRGBA16F(base, rgba);
     } else {
-        const float* p = reinterpret_cast<const float*>(base + off);
+        const float* p = reinterpret_cast<const float*>(base);
         rgba[0] = p[0]; rgba[1] = p[1]; rgba[2] = p[2]; rgba[3] = p[3];
     }
 }
@@ -172,40 +175,37 @@ void TileCache::SetPixelF(int x, int y, const float rgba[4]) {
     int lx   = x % TILE_SIZE;
     int ly   = y % TILE_SIZE;
     size_t off = ((size_t)ly * TILE_SIZE + lx) * m_BytesPerPixel;
-    uint8_t* base = t.data->pixels.data();
+    uint8_t* base = t.data->pixels.data() + off;
 
     if (m_Format == CanvasPixelFormat::RGBA8) {
-        uint8_t* p = base + off;
-        p[0] = (uint8_t)(std::clamp(rgba[0], 0.0f, 1.0f) * 255.0f + 0.5f);
-        p[1] = (uint8_t)(std::clamp(rgba[1], 0.0f, 1.0f) * 255.0f + 0.5f);
-        p[2] = (uint8_t)(std::clamp(rgba[2], 0.0f, 1.0f) * 255.0f + 0.5f);
-        p[3] = (uint8_t)(std::clamp(rgba[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+        base[0] = HalfFloat::FloatToU8(rgba[0]);
+        base[1] = HalfFloat::FloatToU8(rgba[1]);
+        base[2] = HalfFloat::FloatToU8(rgba[2]);
+        base[3] = HalfFloat::FloatToU8(rgba[3]);
+    } else if (m_Format == CanvasPixelFormat::RGBA16F) {
+        HalfFloat::StoreRGBA16F(base, rgba);
     } else {
-        float* p = reinterpret_cast<float*>(base + off);
+        float* p = reinterpret_cast<float*>(base);
         p[0] = rgba[0]; p[1] = rgba[1]; p[2] = rgba[2]; p[3] = rgba[3];
     }
     t.dirty = true;
 }
 
 void TileCache::GetPixelU8(int x, int y, uint8_t rgba[4]) const {
-    if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) {
-        rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0; return;
-    }
-    const Tile* t = FindTile(x / TILE_SIZE, y / TILE_SIZE);
-    if (!t || !t->data) { rgba[0] = rgba[1] = rgba[2] = rgba[3] = 0; return; }
-    size_t off = ((size_t)(y % TILE_SIZE) * TILE_SIZE + (x % TILE_SIZE)) * 4;
-    const uint8_t* p = t->data->pixels.data() + off;
-    rgba[0] = p[0]; rgba[1] = p[1]; rgba[2] = p[2]; rgba[3] = p[3];
+    float f[4];
+    GetPixelF(x, y, f);
+    rgba[0] = HalfFloat::FloatToU8(f[0]);
+    rgba[1] = HalfFloat::FloatToU8(f[1]);
+    rgba[2] = HalfFloat::FloatToU8(f[2]);
+    rgba[3] = HalfFloat::FloatToU8(f[3]);
 }
 
 void TileCache::SetPixelU8(int x, int y, const uint8_t rgba[4]) {
-    if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) return;
-    Tile& t = GetOrCreateTile(x / TILE_SIZE, y / TILE_SIZE);
-    EnsureWritable(t);
-    size_t off = ((size_t)(y % TILE_SIZE) * TILE_SIZE + (x % TILE_SIZE)) * 4;
-    uint8_t* p = t.data->pixels.data() + off;
-    p[0] = rgba[0]; p[1] = rgba[1]; p[2] = rgba[2]; p[3] = rgba[3];
-    t.dirty = true;
+    float f[4] = {
+        rgba[0] / 255.0f, rgba[1] / 255.0f,
+        rgba[2] / 255.0f, rgba[3] / 255.0f
+    };
+    SetPixelF(x, y, f);
 }
 
 const uint8_t* TileCache::GetTileData(int tileX, int tileY) const {
@@ -239,13 +239,16 @@ void TileCache::Fill(const float rgba[4]) {
             uint8_t* data = LockTile(tx, ty);
             size_t pixels = (size_t)TILE_SIZE * TILE_SIZE;
             if (m_Format == CanvasPixelFormat::RGBA8) {
-                uint8_t r = (uint8_t)(std::clamp(rgba[0],0.f,1.f)*255.f+.5f);
-                uint8_t g = (uint8_t)(std::clamp(rgba[1],0.f,1.f)*255.f+.5f);
-                uint8_t b = (uint8_t)(std::clamp(rgba[2],0.f,1.f)*255.f+.5f);
-                uint8_t a = (uint8_t)(std::clamp(rgba[3],0.f,1.f)*255.f+.5f);
+                uint8_t r = HalfFloat::FloatToU8(rgba[0]);
+                uint8_t g = HalfFloat::FloatToU8(rgba[1]);
+                uint8_t b = HalfFloat::FloatToU8(rgba[2]);
+                uint8_t a = HalfFloat::FloatToU8(rgba[3]);
                 for (size_t i = 0; i < pixels; ++i) {
                     data[i*4+0]=r; data[i*4+1]=g; data[i*4+2]=b; data[i*4+3]=a;
                 }
+            } else if (m_Format == CanvasPixelFormat::RGBA16F) {
+                for (size_t i = 0; i < pixels; ++i)
+                    HalfFloat::StoreRGBA16F(data + i * 8, rgba);
             } else {
                 float* fp = reinterpret_cast<float*>(data);
                 for (size_t i = 0; i < pixels; ++i) {
@@ -276,13 +279,18 @@ void TileCache::FillRect(int x0, int y0, int x1, int y1, const float rgba[4]) {
             int ly1 = std::min(y1, (ty+1)*TILE_SIZE - 1) - ty * TILE_SIZE;
             for (int ly = ly0; ly <= ly1; ++ly) {
                 if (m_Format == CanvasPixelFormat::RGBA8) {
-                    uint8_t r=(uint8_t)(std::clamp(rgba[0],0.f,1.f)*255.f+.5f);
-                    uint8_t g=(uint8_t)(std::clamp(rgba[1],0.f,1.f)*255.f+.5f);
-                    uint8_t b=(uint8_t)(std::clamp(rgba[2],0.f,1.f)*255.f+.5f);
-                    uint8_t a=(uint8_t)(std::clamp(rgba[3],0.f,1.f)*255.f+.5f);
+                    uint8_t r=HalfFloat::FloatToU8(rgba[0]);
+                    uint8_t g=HalfFloat::FloatToU8(rgba[1]);
+                    uint8_t b=HalfFloat::FloatToU8(rgba[2]);
+                    uint8_t a=HalfFloat::FloatToU8(rgba[3]);
                     for (int lx = lx0; lx <= lx1; ++lx) {
                         size_t off = ((size_t)ly*TILE_SIZE+lx)*4;
                         raw[off]=r; raw[off+1]=g; raw[off+2]=b; raw[off+3]=a;
+                    }
+                } else if (m_Format == CanvasPixelFormat::RGBA16F) {
+                    for (int lx = lx0; lx <= lx1; ++lx) {
+                        size_t off = ((size_t)ly*TILE_SIZE+lx)*8;
+                        HalfFloat::StoreRGBA16F(raw + off, rgba);
                     }
                 } else {
                     float* fp = reinterpret_cast<float*>(raw);
@@ -372,6 +380,13 @@ void TileCache::ImportRGBA8(const uint8_t* data, int srcWidth, int srcHeight,
                     uint8_t* dp = raw + ((size_t)ly * TILE_SIZE + lx) * 4;
                     dp[0]=sp[0]; dp[1]=sp[1]; dp[2]=sp[2]; dp[3]=sp[3];
                 }
+            } else if (m_Format == CanvasPixelFormat::RGBA16F) {
+                for (int lx = lx0; lx <= lx1; ++lx) {
+                    int srcCol = (tx*TILE_SIZE + lx) - dstX;
+                    const uint8_t* sp = data + ((size_t)row * srcWidth + srcCol) * 4;
+                    float f[4] = { sp[0]/255.f, sp[1]/255.f, sp[2]/255.f, sp[3]/255.f };
+                    HalfFloat::StoreRGBA16F(raw + ((size_t)ly * TILE_SIZE + lx) * 8, f);
+                }
             } else {
                 float* fp = reinterpret_cast<float*>(raw);
                 for (int lx = lx0; lx <= lx1; ++lx) {
@@ -410,15 +425,21 @@ void TileCache::ImportRGBA32F(const float* data, int srcWidth, int srcHeight,
                     size_t off = ((size_t)ly * TILE_SIZE + lx) * 4;
                     fp[off+0]=sp[0]; fp[off+1]=sp[1]; fp[off+2]=sp[2]; fp[off+3]=sp[3];
                 }
+            } else if (m_Format == CanvasPixelFormat::RGBA16F) {
+                for (int lx = lx0; lx <= lx1; ++lx) {
+                    int srcCol = (tx*TILE_SIZE + lx) - dstX;
+                    const float* sp = data + ((size_t)row * srcWidth + srcCol) * 4;
+                    HalfFloat::StoreRGBA16F(raw + ((size_t)ly * TILE_SIZE + lx) * 8, sp);
+                }
             } else {
                 for (int lx = lx0; lx <= lx1; ++lx) {
                     int srcCol = (tx*TILE_SIZE + lx) - dstX;
                     const float* sp = data + ((size_t)row * srcWidth + srcCol) * 4;
                     size_t off = ((size_t)ly * TILE_SIZE + lx) * 4;
-                    raw[off+0]=(uint8_t)(std::clamp(sp[0],0.f,1.f)*255.f+.5f);
-                    raw[off+1]=(uint8_t)(std::clamp(sp[1],0.f,1.f)*255.f+.5f);
-                    raw[off+2]=(uint8_t)(std::clamp(sp[2],0.f,1.f)*255.f+.5f);
-                    raw[off+3]=(uint8_t)(std::clamp(sp[3],0.f,1.f)*255.f+.5f);
+                    raw[off+0]=HalfFloat::FloatToU8(sp[0]);
+                    raw[off+1]=HalfFloat::FloatToU8(sp[1]);
+                    raw[off+2]=HalfFloat::FloatToU8(sp[2]);
+                    raw[off+3]=HalfFloat::FloatToU8(sp[3]);
                 }
             }
         }
@@ -446,16 +467,28 @@ void TileCache::ExportRGBA8(uint8_t* outData, int outWidth, int outHeight) const
             if (m_Format == CanvasPixelFormat::RGBA8) {
                 const uint8_t* srcRow = t->data->pixels.data() + ((size_t)ly * TILE_SIZE) * 4;
                 std::memcpy(dstRow + ((size_t)x0 * 4), srcRow, (size_t)(x1 - x0) * 4);
+            } else if (m_Format == CanvasPixelFormat::RGBA16F) {
+                const uint8_t* base = t->data->pixels.data();
+                for (int cx = x0; cx < x1; ++cx) {
+                    int lx = cx - x0;
+                    float f[4];
+                    HalfFloat::LoadRGBA16F(base + ((size_t)ly * TILE_SIZE + lx) * 8, f);
+                    size_t di = (size_t)cx * 4;
+                    dstRow[di + 0] = HalfFloat::FloatToU8(f[0]);
+                    dstRow[di + 1] = HalfFloat::FloatToU8(f[1]);
+                    dstRow[di + 2] = HalfFloat::FloatToU8(f[2]);
+                    dstRow[di + 3] = HalfFloat::FloatToU8(f[3]);
+                }
             } else {
                 const float* fp = reinterpret_cast<const float*>(t->data->pixels.data());
                 for (int cx = x0; cx < x1; ++cx) {
                     int lx = cx - x0;
                     size_t si = ((size_t)ly * TILE_SIZE + lx) * 4;
                     size_t di = ((size_t)cx) * 4;
-                    dstRow[di + 0] = (uint8_t)(std::clamp(fp[si + 0], 0.f, 1.f) * 255.f + .5f);
-                    dstRow[di + 1] = (uint8_t)(std::clamp(fp[si + 1], 0.f, 1.f) * 255.f + .5f);
-                    dstRow[di + 2] = (uint8_t)(std::clamp(fp[si + 2], 0.f, 1.f) * 255.f + .5f);
-                    dstRow[di + 3] = (uint8_t)(std::clamp(fp[si + 3], 0.f, 1.f) * 255.f + .5f);
+                    dstRow[di + 0] = HalfFloat::FloatToU8(fp[si + 0]);
+                    dstRow[di + 1] = HalfFloat::FloatToU8(fp[si + 1]);
+                    dstRow[di + 2] = HalfFloat::FloatToU8(fp[si + 2]);
+                    dstRow[di + 3] = HalfFloat::FloatToU8(fp[si + 3]);
                 }
             }
         }
@@ -484,6 +517,13 @@ void TileCache::ExportRGBA32F(float* outData, int outWidth, int outHeight) const
                 const float* fp = reinterpret_cast<const float*>(t->data->pixels.data());
                 std::memcpy(dstRow + ((size_t)x0 * 4), fp + ((size_t)ly * TILE_SIZE) * 4,
                             (size_t)(x1 - x0) * 4 * sizeof(float));
+            } else if (m_Format == CanvasPixelFormat::RGBA16F) {
+                const uint8_t* base = t->data->pixels.data();
+                for (int cx = x0; cx < x1; ++cx) {
+                    int lx = cx - x0;
+                    HalfFloat::LoadRGBA16F(base + ((size_t)ly * TILE_SIZE + lx) * 8,
+                                           dstRow + (size_t)cx * 4);
+                }
             } else {
                 for (int cx = x0; cx < x1; ++cx) {
                     int lx = cx - x0;
@@ -497,6 +537,69 @@ void TileCache::ExportRGBA32F(float* outData, int outWidth, int outHeight) const
             }
         }
     }
+}
+
+bool TileCache::ConvertFormat(CanvasPixelFormat target) {
+    if (target == m_Format) return true;
+    if (m_Width <= 0 || m_Height <= 0) {
+        m_Format = target;
+        m_BytesPerPixel = BytesPerPixel(target);
+        return true;
+    }
+
+    // Tile-wise: read each existing tile as float, re-encode into new blob.
+    // Preserves sparse layout — empty tiles stay empty.
+    const int oldBpp = m_BytesPerPixel;
+    const CanvasPixelFormat oldFmt = m_Format;
+    std::unordered_map<uint32_t, TileDataPtr> converted;
+    converted.reserve(m_Tiles.size());
+
+    for (const auto& [key, tile] : m_Tiles) {
+        if (!tile.data) continue;
+        const uint8_t* src = tile.data->pixels.data();
+        auto out = std::make_shared<TileData>((size_t)TILE_SIZE * TILE_SIZE * BytesPerPixel(target));
+        uint8_t* dst = out->pixels.data();
+        const size_t n = (size_t)TILE_SIZE * TILE_SIZE;
+        for (size_t i = 0; i < n; ++i) {
+            float rgba[4];
+            if (oldFmt == CanvasPixelFormat::RGBA8) {
+                const uint8_t* p = src + i * 4;
+                rgba[0] = p[0] / 255.f; rgba[1] = p[1] / 255.f;
+                rgba[2] = p[2] / 255.f; rgba[3] = p[3] / 255.f;
+            } else if (oldFmt == CanvasPixelFormat::RGBA16F) {
+                HalfFloat::LoadRGBA16F(src + i * 8, rgba);
+            } else {
+                const float* p = reinterpret_cast<const float*>(src + i * 16);
+                rgba[0] = p[0]; rgba[1] = p[1]; rgba[2] = p[2]; rgba[3] = p[3];
+            }
+
+            if (target == CanvasPixelFormat::RGBA8) {
+                uint8_t* p = dst + i * 4;
+                p[0] = HalfFloat::FloatToU8(rgba[0]);
+                p[1] = HalfFloat::FloatToU8(rgba[1]);
+                p[2] = HalfFloat::FloatToU8(rgba[2]);
+                p[3] = HalfFloat::FloatToU8(rgba[3]);
+            } else if (target == CanvasPixelFormat::RGBA16F) {
+                HalfFloat::StoreRGBA16F(dst + i * 8, rgba);
+            } else {
+                float* p = reinterpret_cast<float*>(dst + i * 16);
+                p[0] = rgba[0]; p[1] = rgba[1]; p[2] = rgba[2]; p[3] = rgba[3];
+            }
+        }
+        converted[key] = std::move(out);
+        (void)oldBpp;
+    }
+
+    m_Format = target;
+    m_BytesPerPixel = BytesPerPixel(target);
+    for (auto& [key, tile] : m_Tiles) {
+        auto it = converted.find(key);
+        if (it != converted.end()) {
+            tile.data = std::move(it->second);
+            tile.dirty = true;
+        }
+    }
+    return true;
 }
 
 // ---- Dirty tracking ----

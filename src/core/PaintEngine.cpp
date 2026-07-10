@@ -1,5 +1,6 @@
 #include "PaintEngine.h"
 #include "TileCache.h"
+#include "HalfFloat.h"
 #include <cmath>
 #include <algorithm>
 #include <cstring>
@@ -10,6 +11,8 @@ static inline void ReadPixelRaw(const uint8_t* p, CanvasPixelFormat fmt, float o
         out[1] = p[1] / 255.0f;
         out[2] = p[2] / 255.0f;
         out[3] = p[3] / 255.0f;
+    } else if (fmt == CanvasPixelFormat::RGBA16F) {
+        HalfFloat::LoadRGBA16F(p, out);
     } else {
         std::memcpy(out, p, 4 * sizeof(float));
     }
@@ -17,10 +20,13 @@ static inline void ReadPixelRaw(const uint8_t* p, CanvasPixelFormat fmt, float o
 
 static inline void WritePixelRaw(uint8_t* p, CanvasPixelFormat fmt, const float in[4]) {
     if (fmt == CanvasPixelFormat::RGBA8) {
-        p[0] = (uint8_t)(std::clamp(in[0], 0.0f, 1.0f) * 255.0f + 0.5f);
-        p[1] = (uint8_t)(std::clamp(in[1], 0.0f, 1.0f) * 255.0f + 0.5f);
-        p[2] = (uint8_t)(std::clamp(in[2], 0.0f, 1.0f) * 255.0f + 0.5f);
-        p[3] = (uint8_t)(std::clamp(in[3], 0.0f, 1.0f) * 255.0f + 0.5f);
+        // Only U8 clamps to 0..1 — float docs preserve HDR / height values.
+        p[0] = HalfFloat::FloatToU8(in[0]);
+        p[1] = HalfFloat::FloatToU8(in[1]);
+        p[2] = HalfFloat::FloatToU8(in[2]);
+        p[3] = HalfFloat::FloatToU8(in[3]);
+    } else if (fmt == CanvasPixelFormat::RGBA16F) {
+        HalfFloat::StoreRGBA16F(p, in);
     } else {
         std::memcpy(p, in, 4 * sizeof(float));
     }

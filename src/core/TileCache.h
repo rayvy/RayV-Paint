@@ -9,15 +9,21 @@
 
 // ---- Pixel format for the canvas document ----
 enum class CanvasPixelFormat {
-    RGBA8,   // uint8_t x4,  4 bytes/pixel — color, albedo, masks
-    RGBA32F, // float   x4, 16 bytes/pixel — height maps, HDR, precision work
+    RGBA8,   // uint8_t x4,   4 bytes/pixel — color, albedo, masks (default)
+    RGBA16F, // half    x4,   8 bytes/pixel — HDR / height mid precision
+    RGBA32F, // float   x4,  16 bytes/pixel — full float height / HDR
 };
 
 inline int BytesPerPixel(CanvasPixelFormat fmt) {
-    return (fmt == CanvasPixelFormat::RGBA8) ? 4 : 16;
+    switch (fmt) {
+        case CanvasPixelFormat::RGBA8:   return 4;
+        case CanvasPixelFormat::RGBA16F: return 8;
+        case CanvasPixelFormat::RGBA32F: return 16;
+    }
+    return 4;
 }
 
-// Tile side: 256 pixels. One RGBA8 tile = 256KB, RGBA32F tile = 1MB.
+// Tile side: 256. RGBA8=256KB, RGBA16F=512KB, RGBA32F=1MB per dense tile.
 static constexpr int TILE_SIZE = 256;
 
 // ---------------------------------------------------------------------------
@@ -103,6 +109,10 @@ public:
 
     void ExportRGBA8(uint8_t* outData, int outWidth, int outHeight) const;
     void ExportRGBA32F(float* outData, int outWidth, int outHeight) const;
+
+    // Convert this cache to another pixel format (tile-wise; preserves sparse layout).
+    // No-op if already `target`. Returns false on invalid state.
+    bool ConvertFormat(CanvasPixelFormat target);
 
     // ---- Dirty / GPU clear tracking ----
     void MarkDirty(int tileX, int tileY);

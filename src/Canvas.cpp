@@ -958,9 +958,21 @@ void Canvas::UpdateLayerMaskTexture(ID3D11Device* device, int index) {
 }
 
 DXGI_FORMAT Canvas::GetLayerDxgiFormat() const {
-    return (m_CanvasFormat == CanvasPixelFormat::RGBA32F)
-        ? DXGI_FORMAT_R32G32B32A32_FLOAT
-        : DXGI_FORMAT_R8G8B8A8_UNORM;
+    switch (m_CanvasFormat) {
+        case CanvasPixelFormat::RGBA32F: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+        case CanvasPixelFormat::RGBA16F: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case CanvasPixelFormat::RGBA8:
+        default:                         return DXGI_FORMAT_R8G8B8A8_UNORM;
+    }
+}
+
+CanvasPixelFormat Canvas::FormatForBitDepth(DocumentBitDepth d) {
+    switch (d) {
+        case DocumentBitDepth::F32: return CanvasPixelFormat::RGBA32F;
+        case DocumentBitDepth::F16: return CanvasPixelFormat::RGBA16F;
+        case DocumentBitDepth::U8:
+        default:                    return CanvasPixelFormat::RGBA8;
+    }
 }
 
 void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
@@ -2084,16 +2096,25 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
     if (isFirst) {
         m_Width  = imgWidth;
         m_Height = imgHeight;
+        // Promote document depth only for explicit float/HDR sources.
+        // BC7/RGBA8/depth-view/R8G8 stay U8 (default, fast).
         m_CanvasFormat = CanvasPixelFormat::RGBA8;
-        // Document storage depth from source (float DDS → RGBA32F tiles)
-        if (loadedTileCache && loadedTileCache->GetFormat() == CanvasPixelFormat::RGBA32F) {
-            m_CanvasFormat = CanvasPixelFormat::RGBA32F;
-            m_DocumentBitDepth = DocumentBitDepth::F32;
-            Logger::Get().Info("Canvas format: RGBA32F (HDR/float source)");
+        m_DocumentBitDepth = DocumentBitDepth::U8;
+        if (loadedTileCache) {
+            const auto lf = loadedTileCache->GetFormat();
+            if (lf == CanvasPixelFormat::RGBA32F) {
+                m_CanvasFormat = CanvasPixelFormat::RGBA32F;
+                m_DocumentBitDepth = DocumentBitDepth::F32;
+                Logger::Get().Info("Canvas format: RGBA32F / DocumentBitDepth F32 (float source)");
+            } else if (lf == CanvasPixelFormat::RGBA16F) {
+                m_CanvasFormat = CanvasPixelFormat::RGBA16F;
+                m_DocumentBitDepth = DocumentBitDepth::F16;
+                Logger::Get().Info("Canvas format: RGBA16F / DocumentBitDepth F16 (half/HDR source)");
+            } else {
+                Logger::Get().Info("Canvas format: RGBA8 / DocumentBitDepth U8");
+            }
         } else {
-            m_CanvasFormat = CanvasPixelFormat::RGBA8;
-            m_DocumentBitDepth = DocumentBitDepth::U8;
-            Logger::Get().Info("Canvas format: RGBA8");
+            Logger::Get().Info("Canvas format: RGBA8 / DocumentBitDepth U8");
         }
 
         CreateCompositeResources(device);
@@ -2771,8 +2792,7 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
             if (bd == "f32") m_DocumentBitDepth = DocumentBitDepth::F32;
             else if (bd == "f16") m_DocumentBitDepth = DocumentBitDepth::F16;
             else m_DocumentBitDepth = DocumentBitDepth::U8;
-            m_CanvasFormat = (m_DocumentBitDepth == DocumentBitDepth::U8)
-                ? CanvasPixelFormat::RGBA8 : CanvasPixelFormat::RGBA32F;
+            m_CanvasFormat = FormatForBitDepth(m_DocumentBitDepth);
         }
 
         if (metadata.contains("export_path")) m_ExportPath = metadata["export_path"].get<std::string>();
@@ -5596,13 +5616,44 @@ void Canvas::SetExportIccPreset(IccPreset p) {
 }
 
 void Canvas::SetDocumentBitDepth(DocumentBitDepth d) {
-    if (d == m_DocumentBitDepth) return;
-    // P2: full conversion pipeline. For now switch policy + format for new tiles.
+    if (d == m_DocumentBitDepth && FormatForBitDepth(d) == m_CanvasFormat) return;
+
+    const DocumentBitDepth prev = m_DocumentBitDepth;
+    const CanvasPixelFormat target = FormatForBitDepth(d);
+    size_t tilesConverted = 0;
+    size_t bytesEst = 0;
+
+    for (auto& layer : m_Layers) {
+        if (layer.isGroup) continue;
+        if (layer.tileCache) {
+            tilesConverted += layer.tileCache->GetTileCount();
+            layer.tileCache->ConvertFormat(target);
+            layer.tileCache->MarkAllDirty();
+            layer.needsUpload = true;
+            bytesEst += layer.tileCache->EstimateUniquePixelBytes();
+        }
+        if (layer.filteredCache) {
+            layer.filteredCache->ConvertFormat(target);
+            layer.filteredCache->MarkAllDirty();
+            layer.filtersDirty = true;
+        }
+        // Drop GPU textures — recreated on next compose with new DXGI format.
+        if (layer.texture) { layer.texture->Release(); layer.texture = nullptr; }
+        if (layer.srv)     { layer.srv->Release();     layer.srv = nullptr; }
+    }
+
     m_DocumentBitDepth = d;
-    m_CanvasFormat = (d == DocumentBitDepth::U8) ? CanvasPixelFormat::RGBA8 : CanvasPixelFormat::RGBA32F;
-    Logger::Get().Info(std::string("DocumentBitDepth set to ") +
+    m_CanvasFormat = target;
+    m_CompositeDirty = true;
+
+    // Composite RT is always U8 proxy; no rebuild required for bit depth alone.
+    Logger::Get().Info(std::string("DocumentBitDepth ") +
+        (prev == DocumentBitDepth::F32 ? "F32" : prev == DocumentBitDepth::F16 ? "F16" : "U8") +
+        " → " +
         (d == DocumentBitDepth::F32 ? "F32" : d == DocumentBitDepth::F16 ? "F16" : "U8") +
-        " (existing layers keep storage until re-save/convert)");
+        " tiles=" + std::to_string(tilesConverted) +
+        " estCPU=" + MemoryStats::FormatBytes(bytesEst) +
+        " storage=" + std::to_string(BytesPerPixel(target)) + "B/px");
 }
 
 void Canvas::SetCustomBrushTip(int size, const std::vector<uint8_t>& pixels) {

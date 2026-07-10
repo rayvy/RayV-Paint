@@ -1,5 +1,6 @@
 #include "DdsHelper.h"
 #include "TileCache.h"
+#include "HalfFloat.h"
 #include "Logger.h"
 #include "MemoryStats.h"
 #include "PathUtil.h"
@@ -98,35 +99,7 @@ static void DecodeR11G11B10Float(uint32_t p, float& r, float& g, float& b) {
     b = decodeChannel((p >> 22) & 0x3FFu, 5, 5);
 }
 
-static float HalfToFloat(uint16_t h) {
-    uint32_t sign = (uint32_t(h) & 0x8000u) << 16;
-    uint32_t exp  = (uint32_t(h) & 0x7C00u) >> 10;
-    uint32_t mant = uint32_t(h) & 0x03FFu;
-
-    uint32_t bits = 0;
-    if (exp == 0) {
-        if (mant == 0) {
-            bits = sign;
-        } else {
-            // Normalize subnormal value.
-            exp = 1;
-            while ((mant & 0x0400u) == 0) {
-                mant <<= 1;
-                --exp;
-            }
-            mant &= 0x03FFu;
-            bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
-        }
-    } else if (exp == 0x1F) {
-        bits = sign | 0x7F800000u | (mant << 13);
-    } else {
-        bits = sign | ((exp + 127 - 15) << 23) | (mant << 13);
-    }
-
-    float out;
-    std::memcpy(&out, &bits, sizeof(out));
-    return out;
-}
+static float HalfToFloat(uint16_t h) { return HalfFloat::ToFloat(h); }
 
 bool DdsHelper::LoadDDS(const std::string& filename, DdsImage& outImage) {
     // filesystem::path + wide open — UTF-8/Cyrillic safe on Windows
@@ -449,7 +422,8 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
     CompressionFormat compFormat = CompressionFormat::None;
     size_t blockSize = 0;
     uint32_t dxgiFormat = 0;
-    bool useFloatCache = false; // HDR / float sources → RGBA32F tiles
+    // Load storage: U8 default; F16 for half/HDR mid; F32 only for full float sources.
+    CanvasPixelFormat loadStorage = CanvasPixelFormat::RGBA8;
 
     if (isDX10) {
         DDS_HEADER_DXT10 dxt10Header;
@@ -461,28 +435,28 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             outFormat = DdsFormat::RGBA8_UNORM;
         } else if (dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT || dxgiFormat == 2) {
             outFormat = DdsFormat::RGBA32_FLOAT;
-            useFloatCache = true;
+            loadStorage = CanvasPixelFormat::RGBA32F;
         } else if (dxgiFormat == DXGI_FORMAT_R16G16B16A16_FLOAT || dxgiFormat == 10) {
             outFormat = DdsFormat::RGBA16_FLOAT;
-            useFloatCache = true;
+            loadStorage = CanvasPixelFormat::RGBA16F;
         } else if (dxgiFormat == DXGI_FORMAT_R16G16B16A16_UNORM || dxgiFormat == 11) {
             outFormat = DdsFormat::RGBA16_UNORM;
         } else if (dxgiFormat == DXGI_FORMAT_R32_FLOAT || dxgiFormat == 41) {
             outFormat = DdsFormat::R32_FLOAT;
-            useFloatCache = true;
+            loadStorage = CanvasPixelFormat::RGBA32F;
         } else if (dxgiFormat == DXGI_FORMAT_R16_FLOAT || dxgiFormat == 54) {
             outFormat = DdsFormat::R16_FLOAT;
-            useFloatCache = true;
+            loadStorage = CanvasPixelFormat::RGBA16F;
         } else if (dxgiFormat == DXGI_FORMAT_R8_UNORM || dxgiFormat == 61) {
             outFormat = DdsFormat::R8_UNORM;
         } else if (dxgiFormat == 26) { // R11G11B10_FLOAT
             outFormat = DdsFormat::RGBA16_FLOAT;
-            useFloatCache = true;
+            loadStorage = CanvasPixelFormat::RGBA16F;
         } else if (dxgiFormat == 20 || dxgiFormat == 40) {
             // D32_FLOAT_S8X24_UINT (20) / D32_FLOAT (40) — match DirectXTex/PDN convert:
             // Depth → RGB grayscale, Stencil → Alpha. Stay U8 (no R32 project).
             outFormat = DdsFormat::RGBA8_UNORM;
-            useFloatCache = false;
+            loadStorage = CanvasPixelFormat::RGBA8;
         } else if (dxgiFormat == 49 || dxgiFormat == 50) { // R8G8_UNORM / R8G8_SNORM
             outFormat = DdsFormat::R8G8_UNORM;
         } else if (dxgiFormat == 24) { // R10G10B10A2_UNORM
@@ -588,8 +562,7 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
         }
     }
 
-    outCache.Init(outWidth, outHeight,
-                  useFloatCache ? CanvasPixelFormat::RGBA32F : CanvasPixelFormat::RGBA8);
+    outCache.Init(outWidth, outHeight, loadStorage);
 
     auto writeRowRGBA8 = [&](const std::vector<uint8_t>& row, int y) {
         if (y >= 0 && y < outHeight) {
@@ -597,6 +570,7 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
         }
     };
     auto writeRowRGBA32F = [&](const std::vector<float>& row, int y) {
+        // ImportRGBA32F quantizes into U8/F16/F32 storage as needed.
         if (y >= 0 && y < outHeight) {
             outCache.ImportRGBA32F(row.data(), outWidth, 1, 0, y);
         }
@@ -1025,26 +999,7 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
     return true;
 }
 
-static uint16_t FloatToHalf(float f) {
-    uint32_t x;
-    std::memcpy(&x, &f, sizeof(float));
-    uint32_t sign = (x >> 16) & 0x8000;
-    int32_t exponent = ((x >> 23) & 0xFF) - 127;
-    uint32_t mantissa = x & 0x007FFFFF;
-
-    if (exponent == -127) { // Zero or subnormal
-        return (uint16_t)sign;
-    }
-    if (exponent > 15) { // Overflow, map to infinity
-        return (uint16_t)(sign | 0x7C00);
-    }
-    if (exponent < -14) { // Underflow, map to zero
-        return (uint16_t)sign;
-    }
-    exponent += 15;
-    mantissa >>= 13;
-    return (uint16_t)(sign | (exponent << 10) | mantissa);
-}
+static uint16_t FloatToHalf(float f) { return HalfFloat::FromFloat(f); }
 
 bool DdsHelper::SaveDDS(const std::string& filename, const DdsImage& image) {
 #ifdef _WIN32

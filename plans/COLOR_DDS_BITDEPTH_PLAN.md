@@ -77,11 +77,13 @@ Export ALWAYS free (any DDS/PNG target regardless of project depth)
 
 ### P2 — Document bit depth
 
-7. `DocumentBitDepth` in Canvas + .rayp meta  
-8. TileCache: add **RGBA16F** storage (or F16 as RGBA32F with quantize policy)  
-9. Brush: paint float then quantize by depth  
-10. Color UI: float RGB when depth > U8 (pickers)  
-11. Convert project depth dialog  
+7. `DocumentBitDepth` in Canvas + .rayp meta — **done** (scaffold + real convert)  
+8. TileCache: **RGBA16F** storage — **done** (`HalfFloat.h`, 8 B/px)  
+9. Brush: paint float; U8 quantize only — **done** (core); UI HDR pickers later  
+10. Color UI: float RGB when depth > U8 (pickers) — **TODO UI**  
+11. Convert project depth dialog — API `SetDocumentBitDepth` **done**; menu later  
+
+See also `plans/P2_BITDEPTH.md`.
 
 ### P3 — Perf guards
 
