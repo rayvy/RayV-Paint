@@ -21,9 +21,30 @@ Date: 2026-07-10
 - Open policy promotes only explicit float/half sources
 - .rayp `document_bit_depth` maps to real F16 format
 
-## Next (P2.2 / P2.3)
+## Done (P2.2 / P2.3 UI)
 
-- Color picker / brush values outside 0–1 when depth ≠ U8 (UI)
-- Optional height mono brush helper
-- Minimal Document → 8/16f/32f menu
+- **Image → Document Bit Depth** menu (U8 / F16 / F32)
+- **Properties** combo + B/px readout
+- Status bar: `U8|F16|F32 (NB/px)`
+- **Colors** panel when float doc: DragFloat4 (no clamp), Mono R→RGB, R-only paint
+- HSV/swatches still 0..1 display (clamped preview)
+
+## Tools float support (2026-07-10)
+
+| Tool | Float F16/F32 |
+|------|----------------|
+| Brush / eraser | Yes (PaintEngine raw float) |
+| Smudge | Yes (GetPixelF/SetPixelF) |
+| Gradient | Yes (float lerp + SetLayerPixelsF) |
+| Bucket | Yes (float flood-fill, no OpenCV 8-bit) |
+| Pipette sample | Yes — active layer raw; HUD shows float |
+| Status bar | Brush RGBA as float when float doc |
+
+**Depth dump note:** D32 opens as **U8 view** (by design) → pipette 0..255 is expected. Convert to F32 or open true R32 height for float readout.
+
+## Next (optional)
+
 - Undo for bit-depth convert
+- Tone-map HDR viewport preview
+- Height-specific tool preset
+- Optional: open depth dumps as F32 storage for full Z range

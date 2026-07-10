@@ -198,6 +198,21 @@ static inline void BlendLayerPixelU8(uint8_t* dest, float sr, float sg, float sb
     dest[3] = (uint8_t)(std::clamp(sa + da * inv, 0.f, 1.f) * 255.f + 0.5f);
 }
 
+// Float composite blend — no 0..1 clamp on RGB (HDR / height values preserved).
+static inline void BlendLayerPixelF(float* dest, float sr, float sg, float sb, float sa, BlendMode mode) {
+    if (sa <= 0.f) return;
+    float dr = dest[0], dg = dest[1], db = dest[2], da = dest[3];
+    float br = sr, bg = sg, bb = sb;
+    if (mode != BlendMode::Normal) {
+        ApplyBlendModeRGB(mode, sr, sg, sb, dr, dg, db, br, bg, bb);
+    }
+    const float inv = 1.f - sa;
+    dest[0] = br * sa + dr * inv;
+    dest[1] = bg * sa + dg * inv;
+    dest[2] = bb * sa + db * inv;
+    dest[3] = sa + da * inv;
+}
+
 static bool LayerEffectivelyVisible(const std::vector<Layer>& layers, const Layer& layer) {
     if (layer.isGroup || !layer.visible) return false;
     if (layer.parentGroupId >= 0 && layer.parentGroupId < (int)layers.size()) {
@@ -2300,6 +2315,16 @@ std::vector<float> Canvas::GetCompositePixels() const {
     return ComposeVisibleLayers(m_Layers, m_Width, m_Height);
 }
 
+void Canvas::SampleActiveLayerPixel(int x, int y, float outColor[4]) const {
+    outColor[0] = outColor[1] = outColor[2] = 0.f;
+    outColor[3] = 0.f;
+    if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) return;
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    const Layer& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.isGroup || !layer.tileCache) return;
+    layer.tileCache->GetPixelF(x, y, outColor);
+}
+
 void Canvas::SampleCompositePixel(int x, int y, float outColor[4]) const {
     outColor[0] = 0.0f;
     outColor[1] = 0.0f;
@@ -2314,6 +2339,33 @@ void Canvas::SampleCompositePixel(int x, int y, float outColor[4]) const {
         if (LayerEffectivelyVisible(m_Layers, layer)) vis.push_back(&layer);
     }
     if (vis.empty()) return;
+
+    // Float docs (and any non-U8 storage): blend in float so HDR/height values survive.
+    // U8 docs keep the legacy U8-quantize path for display parity with the viewport.
+    const bool floatSample = (m_DocumentBitDepth != DocumentBitDepth::U8) ||
+                             (m_CanvasFormat != CanvasPixelFormat::RGBA8);
+
+    if (floatSample) {
+        float dp[4] = { 0.f, 0.f, 0.f, 0.f };
+        for (const Layer* layer : vis) {
+            const TileCache* cache = layer->tileCache.get();
+            if (!cache) continue;
+            const bool useMask = layer->hasMask && layer->mask.size() == (size_t)m_Width * m_Height;
+            const float opacity = layer->opacity;
+            const BlendMode mode = layer->blendMode;
+            float rgba[4] = { 0.f, 0.f, 0.f, 0.f };
+            cache->GetPixelF(x, y, rgba);
+            float sa = rgba[3] * opacity;
+            if (useMask) sa *= layer->mask[(size_t)y * m_Width + x] / 255.f;
+            if (sa <= 0.f) continue;
+            BlendLayerPixelF(dp, rgba[0], rgba[1], rgba[2], sa, mode);
+        }
+        outColor[0] = dp[0];
+        outColor[1] = dp[1];
+        outColor[2] = dp[2];
+        outColor[3] = dp[3];
+        return;
+    }
 
     uint8_t dp[4] = { 0, 0, 0, 0 };
 
@@ -3974,27 +4026,70 @@ void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const floa
     auto& layer = m_Layers[m_ActiveLayerIdx];
     std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
 
-    cv::Mat mat = ImageManager::PixelsToMat8UC3(layerPixels, m_Width, m_Height);
     cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
+    const bool floatDoc = (m_DocumentBitDepth != DocumentBitDepth::U8);
 
-    if (contiguous) {
-        cv::Mat mask = cv::Mat::zeros(m_Height + 2, m_Width + 2, CV_8UC1);
-        cv::Scalar loDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
-        cv::Scalar upDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
-        cv::floodFill(mat, mask, cv::Point(startX, startY), cv::Scalar(255), nullptr, loDiff, upDiff, 4 | cv::FLOODFILL_MASK_ONLY | (255 << 8));
-        temp = mask(cv::Range(1, m_Height + 1), cv::Range(1, m_Width + 1)).clone();
+    if (floatDoc) {
+        // Float flood-fill: compare linear RGB (no 8-bit quantize). Tolerance is
+        // max channel abs-diff (same units as color, not 0..255).
+        const size_t seedIdx = ((size_t)startY * m_Width + startX) * 4;
+        const float seedR = layerPixels[seedIdx + 0];
+        const float seedG = layerPixels[seedIdx + 1];
+        const float seedB = layerPixels[seedIdx + 2];
+        const float tol = std::max(0.f, tolerance); // user 0..1 scales poorly for HDR;
+        // Map UI tolerance 0..1 → absolute float threshold; expand for HDR docs.
+        const float thr = (tol <= 1.f) ? (tol * 0.05f + tol * tol * 0.5f) : tol;
+        auto inRange = [&](int x, int y) {
+            size_t i = ((size_t)y * m_Width + x) * 4;
+            float dr = std::fabs(layerPixels[i + 0] - seedR);
+            float dg = std::fabs(layerPixels[i + 1] - seedG);
+            float db = std::fabs(layerPixels[i + 2] - seedB);
+            return (dr <= thr && dg <= thr && db <= thr);
+        };
+        if (contiguous) {
+            std::vector<uint8_t> visited((size_t)m_Width * m_Height, 0);
+            std::vector<std::pair<int,int>> stack;
+            stack.push_back({startX, startY});
+            while (!stack.empty()) {
+                auto [x, y] = stack.back();
+                stack.pop_back();
+                if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) continue;
+                size_t vi = (size_t)y * m_Width + x;
+                if (visited[vi]) continue;
+                if (!inRange(x, y)) continue;
+                visited[vi] = 1;
+                temp.at<uint8_t>(y, x) = 255;
+                stack.push_back({x + 1, y});
+                stack.push_back({x - 1, y});
+                stack.push_back({x, y + 1});
+                stack.push_back({x, y - 1});
+            }
+        } else {
+            for (int y = 0; y < m_Height; ++y)
+                for (int x = 0; x < m_Width; ++x)
+                    if (inRange(x, y)) temp.at<uint8_t>(y, x) = 255;
+        }
     } else {
-        cv::Vec3b seedColor = mat.at<cv::Vec3b>(startY, startX);
-        for (int y = 0; y < m_Height; ++y) {
-            for (int x = 0; x < m_Width; ++x) {
-                cv::Vec3b colorVal = mat.at<cv::Vec3b>(y, x);
-                float diff = std::sqrt(
-                    std::pow(static_cast<float>(colorVal[0]) - seedColor[0], 2) +
-                    std::pow(static_cast<float>(colorVal[1]) - seedColor[1], 2) +
-                    std::pow(static_cast<float>(colorVal[2]) - seedColor[2], 2)
-                ) / 255.0f;
-                if (diff <= tolerance * std::sqrt(3.0f)) {
-                    temp.at<uint8_t>(y, x) = 255;
+        cv::Mat mat = ImageManager::PixelsToMat8UC3(layerPixels, m_Width, m_Height);
+        if (contiguous) {
+            cv::Mat mask = cv::Mat::zeros(m_Height + 2, m_Width + 2, CV_8UC1);
+            cv::Scalar loDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
+            cv::Scalar upDiff(tolerance * 255.0f, tolerance * 255.0f, tolerance * 255.0f);
+            cv::floodFill(mat, mask, cv::Point(startX, startY), cv::Scalar(255), nullptr, loDiff, upDiff, 4 | cv::FLOODFILL_MASK_ONLY | (255 << 8));
+            temp = mask(cv::Range(1, m_Height + 1), cv::Range(1, m_Width + 1)).clone();
+        } else {
+            cv::Vec3b seedColor = mat.at<cv::Vec3b>(startY, startX);
+            for (int y = 0; y < m_Height; ++y) {
+                for (int x = 0; x < m_Width; ++x) {
+                    cv::Vec3b colorVal = mat.at<cv::Vec3b>(y, x);
+                    float diff = std::sqrt(
+                        std::pow(static_cast<float>(colorVal[0]) - seedColor[0], 2) +
+                        std::pow(static_cast<float>(colorVal[1]) - seedColor[1], 2) +
+                        std::pow(static_cast<float>(colorVal[2]) - seedColor[2], 2)
+                    ) / 255.0f;
+                    if (diff <= tolerance * std::sqrt(3.0f)) {
+                        temp.at<uint8_t>(y, x) = 255;
+                    }
                 }
             }
         }

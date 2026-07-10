@@ -516,8 +516,43 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
                 compFormat = CompressionFormat::BC5;
                 blockSize = 16;
                 outFormat = DdsFormat::RGBA8_UNORM;
+            } else if (fourCC == 111) {
+                // D3DFMT_R16F — NVIDIA/Photoshop DDS plugin, D3DX
+                outFormat = DdsFormat::R16_FLOAT;
+                loadStorage = CanvasPixelFormat::RGBA16F;
+                Logger::Get().InfoTag("io", "Legacy FourCC D3DFMT_R16F (111)");
+            } else if (fourCC == 112) {
+                // D3DFMT_G16R16F → expand to RG float
+                outFormat = DdsFormat::RGBA16_FLOAT;
+                loadStorage = CanvasPixelFormat::RGBA16F;
+                dxgiFormat = 34; // R16G16_FLOAT (reuse decode helper below via outFormat)
+                Logger::Get().InfoTag("io", "Legacy FourCC D3DFMT_G16R16F (112)");
+            } else if (fourCC == 113) {
+                // D3DFMT_A16B16G16R16F
+                outFormat = DdsFormat::RGBA16_FLOAT;
+                loadStorage = CanvasPixelFormat::RGBA16F;
+                Logger::Get().InfoTag("io", "Legacy FourCC D3DFMT_A16B16G16R16F (113)");
+            } else if (fourCC == 114) {
+                // D3DFMT_R32F — common PS / NVIDIA Texture Tools height maps
+                outFormat = DdsFormat::R32_FLOAT;
+                loadStorage = CanvasPixelFormat::RGBA32F;
+                Logger::Get().InfoTag("io", "Legacy FourCC D3DFMT_R32F (114)");
+            } else if (fourCC == 115) {
+                // D3DFMT_G32R32F
+                outFormat = DdsFormat::RGBA32_FLOAT;
+                loadStorage = CanvasPixelFormat::RGBA32F;
+                dxgiFormat = 16; // R32G32_FLOAT marker for RG32 path
+                Logger::Get().InfoTag("io", "Legacy FourCC D3DFMT_G32R32F (115)");
+            } else if (fourCC == 116) {
+                // D3DFMT_A32B32G32R32F
+                outFormat = DdsFormat::RGBA32_FLOAT;
+                loadStorage = CanvasPixelFormat::RGBA32F;
+                Logger::Get().InfoTag("io", "Legacy FourCC D3DFMT_A32B32G32R32F (116)");
             } else {
-                Logger::Get().Error("Unsupported legacy FourCC format in DDS file: " + filename);
+                char fcbuf[48];
+                std::snprintf(fcbuf, sizeof(fcbuf), "Unsupported legacy FourCC %u (0x%08X) in DDS file: ",
+                              fourCC, fourCC);
+                Logger::Get().Error(std::string(fcbuf) + filename);
                 return false;
             }
         } else {
@@ -537,7 +572,12 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
                 return rM == r && gM == g && bM == b && aM == a;
             };
 
-            if ((isRGB || (pf & 0x41) == 0x41) && bits == 32) {
+            if (isRGB && bits == 32 && isMask(0xffffffffu, 0, 0, 0)) {
+                // D3DX R32F without FourCC (rare)
+                outFormat = DdsFormat::R32_FLOAT;
+                loadStorage = CanvasPixelFormat::RGBA32F;
+                Logger::Get().InfoTag("io", "Legacy RGB mask R32F (0xFFFFFFFF)");
+            } else if ((isRGB || (pf & 0x41) == 0x41) && bits == 32) {
                 outFormat = DdsFormat::RGBA8_UNORM;
             } else if ((isLum || isRGB || isBump) && bits == 16 &&
                        (isMask(0x00ff, 0, 0, 0xff00) || isMask(0xff, 0, 0, 0xff00))) {
@@ -676,7 +716,10 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
         return true;
     }
 
-    if (isDX10 && (dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT || dxgiFormat == 2)) {
+    // Float paths: DX10 DXGI *or* legacy D3DFMT FourCC 111–116 / RGB-mask R32F
+    if ((isDX10 && (dxgiFormat == DXGI_FORMAT_R32G32B32A32_FLOAT || dxgiFormat == 2)) ||
+        (!isDX10 && outFormat == DdsFormat::RGBA32_FLOAT && loadStorage == CanvasPixelFormat::RGBA32F &&
+         dxgiFormat != 16 /* not RG32 */)) {
         std::vector<float> rowFloats((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
             file.read(reinterpret_cast<char*>(rowFloats.data()), (std::streamsize)rowFloats.size() * (std::streamsize)sizeof(float));
@@ -686,7 +729,28 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             }
             writeRowRGBA32F(rowFloats, y);
         }
-    } else if (isDX10 && (dxgiFormat == DXGI_FORMAT_R16G16B16A16_FLOAT || dxgiFormat == 10)) {
+    } else if (!isDX10 && dxgiFormat == 16 && outFormat == DdsFormat::RGBA32_FLOAT) {
+        // D3DFMT_G32R32F — two float32 channels
+        std::vector<float> rowRG((size_t)outWidth * 2);
+        std::vector<float> rowF((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowRG.data()), (std::streamsize)rowRG.size() * sizeof(float));
+            if (!file) {
+                Logger::Get().Error("Failed reading G32R32F row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                size_t s = (size_t)x * 2, d = (size_t)x * 4;
+                float r = rowRG[s + 0], g = rowRG[s + 1];
+                if (!std::isfinite(r)) r = 0.f;
+                if (!std::isfinite(g)) g = 0.f;
+                rowF[d + 0] = r; rowF[d + 1] = g; rowF[d + 2] = 0.f; rowF[d + 3] = 1.f;
+            }
+            writeRowRGBA32F(rowF, y);
+        }
+    } else if ((isDX10 && (dxgiFormat == DXGI_FORMAT_R16G16B16A16_FLOAT || dxgiFormat == 10)) ||
+               (!isDX10 && outFormat == DdsFormat::RGBA16_FLOAT && loadStorage == CanvasPixelFormat::RGBA16F &&
+                dxgiFormat != 34 /* not RG16 */)) {
         std::vector<uint16_t> rowHalf((size_t)outWidth * 4);
         std::vector<float> rowF((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
@@ -701,6 +765,25 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
                 rowF[src + 1] = HalfToFloat(rowHalf[src + 1]);
                 rowF[src + 2] = HalfToFloat(rowHalf[src + 2]);
                 rowF[src + 3] = HalfToFloat(rowHalf[src + 3]);
+            }
+            writeRowRGBA32F(rowF, y);
+        }
+    } else if (!isDX10 && dxgiFormat == 34 && outFormat == DdsFormat::RGBA16_FLOAT) {
+        // D3DFMT_G16R16F
+        std::vector<uint16_t> rowRG((size_t)outWidth * 2);
+        std::vector<float> rowF((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowRG.data()), (std::streamsize)rowRG.size() * sizeof(uint16_t));
+            if (!file) {
+                Logger::Get().Error("Failed reading G16R16F row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                size_t s = (size_t)x * 2, d = (size_t)x * 4;
+                float r = HalfToFloat(rowRG[s + 0]), g = HalfToFloat(rowRG[s + 1]);
+                if (!std::isfinite(r)) r = 0.f;
+                if (!std::isfinite(g)) g = 0.f;
+                rowF[d + 0] = r; rowF[d + 1] = g; rowF[d + 2] = 0.f; rowF[d + 3] = 1.f;
             }
             writeRowRGBA32F(rowF, y);
         }
@@ -723,8 +806,9 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             }
             writeRowRGBA8(rowRGBA, y);
         }
-    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R32_FLOAT) {
-        // True mono float HDR — keep float tiles (opaque grayscale). Not used for depth dumps.
+    } else if (outFormat == DdsFormat::R32_FLOAT && loadStorage == CanvasPixelFormat::RGBA32F) {
+        // True mono float HDR — DX10 R32_FLOAT or legacy D3DFMT_R32F (114).
+        // Only base mip is consumed; remaining mips (if any) are ignored.
         std::vector<float> rowFloats((size_t)outWidth);
         std::vector<float> rowF((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
@@ -744,7 +828,8 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             }
             writeRowRGBA32F(rowF, y);
         }
-    } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R16_FLOAT) {
+        Logger::Get().InfoTag("io", "Loaded R32F mono as float grayscale (F32 document)");
+    } else if (outFormat == DdsFormat::R16_FLOAT && loadStorage == CanvasPixelFormat::RGBA16F) {
         std::vector<uint16_t> rowHalf((size_t)outWidth);
         std::vector<float> rowF((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
@@ -764,6 +849,7 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             }
             writeRowRGBA32F(rowF, y);
         }
+        Logger::Get().InfoTag("io", "Loaded R16F mono as half grayscale (F16 document)");
     } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R8_UNORM) {
         std::vector<uint8_t> rowR((size_t)outWidth);
         std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);

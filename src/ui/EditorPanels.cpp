@@ -187,7 +187,14 @@ namespace UI {
     void SampleCanvasColor(Canvas& canvas, float canvasX, float canvasY, float outColor[4]) {
         int cx = std::clamp((int)canvasX, 0, canvas.GetWidth() - 1);
         int cy = std::clamp((int)canvasY, 0, canvas.GetHeight() - 1);
-        canvas.SampleCompositePixel(cx, cy, outColor);
+        // Float docs: sample active layer raw (height/HDR diagnostics).
+        // U8: composite (matches viewport appearance).
+        if (canvas.GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8 &&
+            canvas.GetActiveLayerIndex() >= 0) {
+            canvas.SampleActiveLayerPixel(cx, cy, outColor);
+        } else {
+            canvas.SampleCompositePixel(cx, cy, outColor);
+        }
     }
 
     // Stroke dab preview (rotation/spacing-aware visual; scatter/dynamics drawn as ghost only)
@@ -832,6 +839,21 @@ namespace UI {
                 }
                 if (ImGui::MenuItem("Add Noise...", nullptr, false, hasLayer))
                     state.showNoiseModal = true;
+                ImGui::Separator();
+                if (ImGui::BeginMenu("Document Bit Depth")) {
+                    using BD = Canvas::DocumentBitDepth;
+                    auto cur = canvas.GetDocumentBitDepth();
+                    if (ImGui::MenuItem("8-bit / channel (U8)", nullptr, cur == BD::U8))
+                        canvas.SetDocumentBitDepth(BD::U8);
+                    if (ImGui::MenuItem("16-bit float (F16)", nullptr, cur == BD::F16))
+                        canvas.SetDocumentBitDepth(BD::F16);
+                    if (ImGui::MenuItem("32-bit float (F32)", nullptr, cur == BD::F32))
+                        canvas.SetDocumentBitDepth(BD::F32);
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Working space only — export packing free.");
+                    ImGui::TextDisabled("U8 default for diffuse/BC7. F16/F32 for height/HDR.");
+                    ImGui::EndMenu();
+                }
                 ImGui::EndMenu();
             }
             // ---- Select Menu ----
@@ -1063,9 +1085,31 @@ namespace UI {
             case ActiveTool::Gradient: toolLabel = "Gradient"; break;
             case ActiveTool::Smudge: toolLabel = "Smudge"; break;
         }
-        ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | Zoom: %.0f%% | Threads: %d | Tool: %s",
-            state.startupTimeMs, state.frameTimeMs, state.fps, canvas.GetWidth(), canvas.GetHeight(), canvas.GetZoom() * 100.0f,
-            ThreadPool::Get().GetThreadCount(), toolLabel);
+        {
+            const char* bdLabel =
+                (canvas.GetDocumentBitDepth() == Canvas::DocumentBitDepth::F32) ? "F32" :
+                (canvas.GetDocumentBitDepth() == Canvas::DocumentBitDepth::F16) ? "F16" : "U8";
+            const int bpp = BytesPerPixel(Canvas::FormatForBitDepth(canvas.GetDocumentBitDepth()));
+            const bool floatDoc = (canvas.GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8);
+            if (floatDoc) {
+                ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | %s (%dB/px) | Brush RGBA %.4f %.4f %.4f %.4f | Zoom: %.0f%% | Tool: %s",
+                    state.startupTimeMs, state.frameTimeMs, state.fps,
+                    canvas.GetWidth(), canvas.GetHeight(),
+                    bdLabel, bpp,
+                    brush.color[0], brush.color[1], brush.color[2], brush.color[3],
+                    canvas.GetZoom() * 100.0f, toolLabel);
+            } else {
+                ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | %s (%dB/px) | RGB %d %d %d | Zoom: %.0f%% | Threads: %d | Tool: %s",
+                    state.startupTimeMs, state.frameTimeMs, state.fps,
+                    canvas.GetWidth(), canvas.GetHeight(),
+                    bdLabel, bpp,
+                    (int)std::lround(std::clamp(brush.color[0], 0.f, 1.f) * 255.f),
+                    (int)std::lround(std::clamp(brush.color[1], 0.f, 1.f) * 255.f),
+                    (int)std::lround(std::clamp(brush.color[2], 0.f, 1.f) * 255.f),
+                    canvas.GetZoom() * 100.0f,
+                    ThreadPool::Get().GetThreadCount(), toolLabel);
+            }
+        }
         
         ImGui::End();
         ImGui::PopStyleVar();
@@ -1967,6 +2011,21 @@ namespace UI {
             if (UiCombo("##cmb_pType", &pType, pTypeNames, IM_ARRAYSIZE(pTypeNames), "Project Type")) {
                 canvas.SetProjectType((pType == 0) ? Canvas::ProjectType::Simple : Canvas::ProjectType::Advanced);
             }
+
+            ImGui::Text("Document Bit Depth:");
+            int bd = (int)canvas.GetDocumentBitDepth();
+            const char* bdNames[] = {
+                "8-bit (U8) — default / diffuse",
+                "16-bit float (F16) — HDR mid",
+                "32-bit float (F32) — height / full float"
+            };
+            if (UiCombo("##cmb_bitDepth", &bd, bdNames, IM_ARRAYSIZE(bdNames),
+                    "Working space for paint storage. Export format stays free.")) {
+                canvas.SetDocumentBitDepth(static_cast<Canvas::DocumentBitDepth>(bd));
+            }
+            ImGui::TextDisabled("Canvas %d x %d · storage %d B/px",
+                canvas.GetWidth(), canvas.GetHeight(),
+                BytesPerPixel(Canvas::FormatForBitDepth(canvas.GetDocumentBitDepth())));
 
             char propProjPath[512] = "";
             std::strncpy(propProjPath, canvas.GetCurrentProjectFilePath().c_str(), sizeof(propProjPath));
@@ -3115,10 +3174,15 @@ namespace UI {
 
             static bool s_EditSecondary = false;
             float* editCol = s_EditSecondary ? g_SecondaryColor : brush.color;
+            const bool floatDoc = (canvas.GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8);
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
+            // HSV picker uses clamped display RGB (HDR channels edited via float fields below).
+            float dispR = std::clamp(editCol[0], 0.f, 1.f);
+            float dispG = std::clamp(editCol[1], 0.f, 1.f);
+            float dispB = std::clamp(editCol[2], 0.f, 1.f);
             float h, s, v;
-            ImGui::ColorConvertRGBtoHSV(editCol[0], editCol[1], editCol[2], h, s, v);
+            ImGui::ColorConvertRGBtoHSV(dispR, dispG, dispB, h, s, v);
 
             float stripH = 22.f;
             float svW = std::max(80.f, avail.x - 4.f);
@@ -3157,6 +3221,7 @@ namespace UI {
                 ImVec2 mp = ImGui::GetIO().MousePos;
                 s = std::clamp((mp.x - sqPos.x) / svW, 0.f, 1.f);
                 v = std::clamp(1.f - (mp.y - sqPos.y) / svH, 0.f, 1.f);
+                // HSV sets 0..1 RGB; preserves HDR only if user uses float fields after.
                 ImGui::ColorConvertHSVtoRGB(h, s, v, editCol[0], editCol[1], editCol[2]);
             }
 
@@ -3165,28 +3230,65 @@ namespace UI {
                 ImGui::ColorConvertHSVtoRGB(h, s, v, editCol[0], editCol[1], editCol[2]);
             }
             ImGui::Spacing();
-            if (Ui::VisualSlider("##alphavis", &editCol[3], ImVec2(svW, stripH),
-                    Ui::VisualSliderSkin::OpacityChecker, editCol, "Opacity / Alpha")) {
+            {
+                float aDisp = std::clamp(editCol[3], 0.f, 1.f);
+                float rgbDisp[4] = {
+                    std::clamp(editCol[0], 0.f, 1.f),
+                    std::clamp(editCol[1], 0.f, 1.f),
+                    std::clamp(editCol[2], 0.f, 1.f),
+                    aDisp
+                };
+                if (Ui::VisualSlider("##alphavis", &aDisp, ImVec2(svW, stripH),
+                        Ui::VisualSliderSkin::OpacityChecker, rgbDisp, "Opacity / Alpha")) {
+                    editCol[3] = aDisp;
+                }
+            }
+
+            if (floatDoc) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "Float color (no 0..1 clamp)");
+                ImGui::SetNextItemWidth(svW);
+                // v_min == v_max → ImGui does not clamp (HDR / height values).
+                ImGui::DragFloat4("##hdr_rgba", editCol, 0.01f, 0.f, 0.f, "%.4f");
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("RGBA linear values for F16/F32 documents.\nHeight maps often use R only with values outside 0..1.");
+                if (ImGui::SmallButton("Mono R→RGB")) {
+                    editCol[1] = editCol[0];
+                    editCol[2] = editCol[0];
+                }
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Copy R into G and B (height visualization)");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("R-only paint")) {
+                    brush.writeR = true; brush.writeG = false;
+                    brush.writeB = false; brush.writeA = false;
+                }
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Channel mask: write R only (height channel)");
             }
 
             ImGui::Spacing();
             // Primary (front) + Secondary (offset) like PS
             {
+                auto clampCol = [](const float* c) {
+                    return ImVec4(std::clamp(c[0], 0.f, 1.f), std::clamp(c[1], 0.f, 1.f),
+                                  std::clamp(c[2], 0.f, 1.f), std::clamp(c[3], 0.f, 1.f));
+                };
                 ImVec2 base = ImGui::GetCursorScreenPos();
                 // Secondary drawn first (behind / offset)
                 ImGui::SetCursorScreenPos(ImVec2(base.x + 14.f, base.y + 14.f));
-                if (ImGui::ColorButton("##sec", ImVec4(g_SecondaryColor[0], g_SecondaryColor[1], g_SecondaryColor[2], g_SecondaryColor[3]),
+                if (ImGui::ColorButton("##sec", clampCol(g_SecondaryColor),
                         ImGuiColorEditFlags_AlphaPreview | (s_EditSecondary ? ImGuiColorEditFlags_None : 0), ImVec2(28, 28))) {
                     s_EditSecondary = true;
                 }
                 if (ImGui::IsItemHovered()) Ui::Tooltip("Secondary\nClick to edit · X: swap");
 
                 ImGui::SetCursorScreenPos(base);
-                if (ImGui::ColorButton("##pri", ImVec4(brush.color[0], brush.color[1], brush.color[2], brush.color[3]),
+                if (ImGui::ColorButton("##pri", clampCol(brush.color),
                         ImGuiColorEditFlags_AlphaPreview, ImVec2(36, 36))) {
                     s_EditSecondary = false;
                 }
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Primary\nClick to edit");
+                if (ImGui::IsItemHovered()) Ui::Tooltip(floatDoc
+                    ? "Primary (display clamped 0..1)\nUse float RGBA fields for HDR values"
+                    : "Primary\nClick to edit");
 
                 ImGui::SetCursorScreenPos(ImVec2(base.x + 56.f, base.y + 8.f));
                 if (ImGui::SmallButton("X##sw")) {

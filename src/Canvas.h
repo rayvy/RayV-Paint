@@ -326,7 +326,10 @@ public:
     bool SaveCanvasStandard(const std::string& filepath, IccPreset preset);
     bool SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed);
     std::vector<float> GetCompositePixels() const;
+    // Composite sample (float-accurate when document is F16/F32; U8 path quantizes).
     void SampleCompositePixel(int x, int y, float outColor[4]) const;
+    // Raw active-layer pixel (no blend) — preferred for height/HDR diagnostics.
+    void SampleActiveLayerPixel(int x, int y, float outColor[4]) const;
     void CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height);
 
     // Pixel Transformations

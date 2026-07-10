@@ -2007,23 +2007,35 @@ int main(int argc, char* argv[]) {
                 dl->AddLine(ImVec2(mp.x - arm, mp.y), ImVec2(mp.x + arm, mp.y), IM_COL32(255, 255, 255, 230), 1.0f);
                 dl->AddLine(ImVec2(mp.x, mp.y - arm), ImVec2(mp.x, mp.y + arm), IM_COL32(255, 255, 255, 230), 1.0f);
 
-                // Info chip: HEX + RGB
-                char hex[16], rgbLine[48];
-                std::snprintf(hex, sizeof(hex), "#%02X%02X%02X", Ri, Gi, Bi);
-                std::snprintf(rgbLine, sizeof(rgbLine), "RGB %d %d %d", Ri, Gi, Bi);
-                ImVec2 chipPos(ringC.x + r + 8.f, ringC.y - 14.f);
-                ImVec2 hexSz = ImGui::CalcTextSize(hex);
-                ImVec2 rgbSz = ImGui::CalcTextSize(rgbLine);
-                float chipW = std::max(hexSz.x, rgbSz.x) + 16.f;
-                float chipH = hexSz.y + rgbSz.y + 14.f;
+                // Info chip: float docs → linear float; U8 → HEX + 0..255
+                const bool floatDoc = (g_Canvas.GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8);
+                char line0[64], line1[72], line2[48];
+                if (floatDoc) {
+                    std::snprintf(line0, sizeof(line0), "R %.5f", pr);
+                    std::snprintf(line1, sizeof(line1), "G %.5f  B %.5f", pg, pb);
+                    std::snprintf(line2, sizeof(line2), "A %.5f", pa);
+                } else {
+                    std::snprintf(line0, sizeof(line0), "#%02X%02X%02X", Ri, Gi, Bi);
+                    std::snprintf(line1, sizeof(line1), "RGB %d %d %d", Ri, Gi, Bi);
+                    std::snprintf(line2, sizeof(line2), "A %d", (int)std::lround(std::clamp(pa, 0.f, 1.f) * 255.f));
+                }
+                ImVec2 chipPos(ringC.x + r + 8.f, ringC.y - 18.f);
+                ImVec2 s0 = ImGui::CalcTextSize(line0);
+                ImVec2 s1 = ImGui::CalcTextSize(line1);
+                ImVec2 s2 = ImGui::CalcTextSize(line2);
+                float chipW = std::max(s0.x, std::max(s1.x, s2.x)) + 20.f;
+                float lineH = s0.y + 1.f;
+                float chipH = lineH * 3.f + 12.f;
                 ImVec2 c0 = chipPos;
                 ImVec2 c1(c0.x + chipW, c0.y + chipH);
                 dl->AddRectFilled(c0, c1, tok.ColU32(ImVec4(tok.bgElevated.x, tok.bgElevated.y, tok.bgElevated.z, 0.92f)), tok.rSm);
                 dl->AddRect(c0, c1, tok.ColU32(tok.strokeHairline), tok.rSm, 0, 1.0f);
-                // Color swatch strip
                 dl->AddRectFilled(ImVec2(c0.x + 4.f, c0.y + 4.f), ImVec2(c0.x + 12.f, c1.y - 4.f), sampleCol, 2.f);
-                dl->AddText(ImVec2(c0.x + 16.f, c0.y + 4.f), tok.ColU32(tok.textPrimary), hex);
-                dl->AddText(ImVec2(c0.x + 16.f, c0.y + 4.f + hexSz.y + 2.f), tok.ColU32(tok.textSecondary), rgbLine);
+                ImU32 tPri = tok.ColU32(tok.textPrimary);
+                ImU32 tSec = tok.ColU32(tok.textSecondary);
+                dl->AddText(ImVec2(c0.x + 16.f, c0.y + 4.f), tPri, line0);
+                dl->AddText(ImVec2(c0.x + 16.f, c0.y + 4.f + lineH), tSec, line1);
+                dl->AddText(ImVec2(c0.x + 16.f, c0.y + 4.f + lineH * 2.f), tSec, line2);
             }
 
             // Draw Smart Select background process progress & cancel option UI
