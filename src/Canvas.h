@@ -257,6 +257,24 @@ public:
     void ApplyBucketFill(int startX, int startY, float tolerance, const float color[4], bool contiguous);
     void ApplyGradient(int x1, int y1, int x2, int y2, const float startColor[4], const float endColor[4]);
 
+    // Selection edit / clipboard (Photoshop-like)
+    // Fill selected pixels with solid color (Backspace → secondary). Respects selection; undo.
+    void FillSelection(const float rgba[4]);
+    // Clear selected pixels (Delete → transparent). On mask target: paint selection black.
+    void DeleteSelectionContent();
+    // Copy: selection content if any, else full active layer. Also system CF_DIB when possible.
+    bool CopyContentToClipboard();
+    // Copy full layers (structure+pixels+mask) to internal layer clipboard.
+    bool CopyLayersToClipboard(const std::vector<int>& indices);
+    bool HasLayerClipboard() const { return m_LayerClipboardValid; }
+    bool HasContentClipboard() const { return m_ContentClipboardValid; }
+    // Paste layers from internal clipboard (inserted after active).
+    bool PasteLayersFromClipboard(ID3D11Device* device);
+    // Paste pixel content into active layer (or mask if paint target is mask). Blends at center.
+    bool PasteContentIntoActive(ID3D11Device* device);
+    // Paste as brand-new layer (always).
+    bool PasteContentAsNewLayer(ID3D11Device* device, const std::string& name = "Pasted Layer");
+
     // Move Pixels operations
     bool IsMovingPixels() const { return m_IsMovingPixels; }
     void StartMovePixels(ID3D11Device* device);
@@ -552,6 +570,28 @@ private:
     std::vector<uint8_t> m_QuickSelectMask; // working mask during stroke
     std::vector<uint8_t> m_QuickSelectEdge; // cached edge strength 0-255
     bool m_QuickSelectEdgeValid = false;
+
+    // Internal content clipboard (pixels)
+    bool m_ContentClipboardValid = false;
+    int m_ContentClipW = 0, m_ContentClipH = 0;
+    std::vector<float> m_ContentClipRGBA; // w*h*4
+
+    // Internal layer clipboard
+    bool m_LayerClipboardValid = false;
+    struct LayerClipboardEntry {
+        std::string name;
+        bool isGroup = false;
+        float opacity = 1.f;
+        BlendMode blendMode = BlendMode::Normal;
+        bool visible = true;
+        std::vector<float> pixels; // full canvas size if !isGroup
+        bool hasMask = false;
+        std::vector<uint8_t> mask;
+        std::vector<uint8_t> smartSourceBytes;
+        std::string smartSourcePath;
+        Layer::Type type = Layer::Type::Raster;
+    };
+    std::vector<LayerClipboardEntry> m_LayerClipboard;
     float m_QuickSelectLabMean[3] = {0,0,0};
     int   m_QuickSelectSampleCount = 0;
 

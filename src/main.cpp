@@ -172,6 +172,8 @@ static float g_GizmoDragStartScaleY = 1.0f;
 static float g_GizmoDragStartRotation = 0.0f;
 static float g_GizmoDragStartMouseAngle = 0.0f;
 static float g_GizmoDragStartDist = 1.0f;
+static float g_GizmoDragStartDistX = 5.0f;
+static float g_GizmoDragStartDistY = 5.0f;
 
 struct GizmoScreenGeometry {
     ImVec2 p1, p2, p3, p4;
@@ -887,15 +889,46 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("AdvancedExport")) {
                 uiState.openExportAdvancedModal = true;
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("FillSecondary")) {
+                if (g_Canvas.HasSelection() || g_Canvas.GetActiveLayerIndex() >= 0)
+                    g_Canvas.FillSelection(g_SecondaryColor);
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("DeleteContent")) {
+                g_Canvas.DeleteSelectionContent();
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("CopyLayers")) {
+                std::vector<int> idxs = uiState.selectedLayers;
+                if (idxs.empty() && g_Canvas.GetActiveLayerIndex() >= 0)
+                    idxs.push_back(g_Canvas.GetActiveLayerIndex());
+                g_Canvas.CopyLayersToClipboard(idxs);
+            }
             if (KeymapManager::Get().ConsumeActionTrigger("Copy")) {
-                std::vector<float> composite = g_Canvas.GetCompositePixels();
-                ClipboardHelper::CopyImageToClipboard(composite, g_Canvas.GetWidth(), g_Canvas.GetHeight());
+                // Selection or active layer content → system + internal content clipboard
+                if (!g_Canvas.CopyContentToClipboard()) {
+                    // Fallback: merged composite (legacy)
+                    std::vector<float> composite = g_Canvas.GetCompositePixels();
+                    ClipboardHelper::CopyImageToClipboard(composite, g_Canvas.GetWidth(), g_Canvas.GetHeight());
+                }
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("PasteAsNewLayer")) {
+                if (!g_Canvas.PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer")) {
+                    // try system clipboard via CreateLayerFromPixels path inside
+                    std::vector<float> pastedPixels;
+                    int pastedW = 0, pastedH = 0;
+                    if (ClipboardHelper::PasteImageFromClipboard(pastedPixels, pastedW, pastedH))
+                        g_Canvas.CreateLayerFromPixels(g_pd3dDevice, "Pasted Layer", pastedPixels, pastedW, pastedH);
+                }
             }
             if (KeymapManager::Get().ConsumeActionTrigger("Paste")) {
-                std::vector<float> pastedPixels;
-                int pastedW = 0, pastedH = 0;
-                if (ClipboardHelper::PasteImageFromClipboard(pastedPixels, pastedW, pastedH)) {
-                    g_Canvas.CreateLayerFromPixels(g_pd3dDevice, "Pasted Layer", pastedPixels, pastedW, pastedH);
+                // Prefer layer clipboard if present; else paste content into active layer/mask
+                if (g_Canvas.HasLayerClipboard()) {
+                    g_Canvas.PasteLayersFromClipboard(g_pd3dDevice);
+                } else if (!g_Canvas.PasteContentIntoActive(g_pd3dDevice)) {
+                    // No internal content: paste system clipboard as new layer
+                    std::vector<float> pastedPixels;
+                    int pastedW = 0, pastedH = 0;
+                    if (ClipboardHelper::PasteImageFromClipboard(pastedPixels, pastedW, pastedH))
+                        g_Canvas.CreateLayerFromPixels(g_pd3dDevice, "Pasted Layer", pastedPixels, pastedW, pastedH);
                 }
             }
         }
@@ -1608,6 +1641,9 @@ int main(int argc, char* argv[]) {
                                     g_GizmoDragStartScaleY = g_Canvas.GetFloatingScaleY();
                                     g_GizmoDragStartDist = std::sqrt(distSq(mousePos, geo.center));
                                     if (g_GizmoDragStartDist < 5.0f) g_GizmoDragStartDist = 5.0f;
+                                    // Per-axis start distances for free (non-uniform) scale
+                                    g_GizmoDragStartDistX = std::max(5.f, std::fabs(mousePos.x - geo.center.x));
+                                    g_GizmoDragStartDistY = std::max(5.f, std::fabs(mousePos.y - geo.center.y));
                                 }
                             } else {
                                 g_ActiveGizmoHandle = TransformGizmoHandle::Move;
@@ -1751,10 +1787,21 @@ int main(int argc, char* argv[]) {
                          g_ActiveGizmoHandle == TransformGizmoHandle::Scale_BL) {
                     GizmoScreenGeometry geo;
                     if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
-                        float currentDist = std::sqrt(distSq(mousePos, geo.center));
-                        float factor = currentDist / g_GizmoDragStartDist;
-                        g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
-                        g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                        // Shift: uniform scale (preserve pre-transform aspect ratio)
+                        // without Shift: free scale per axis
+                        if (ImGui::GetIO().KeyShift) {
+                            float currentDist = std::sqrt(distSq(mousePos, geo.center));
+                            float factor = currentDist / g_GizmoDragStartDist;
+                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                        } else {
+                            float fx = std::fabs(mousePos.x - geo.center.x) / g_GizmoDragStartDistX;
+                            float fy = std::fabs(mousePos.y - geo.center.y) / g_GizmoDragStartDistY;
+                            fx = std::max(0.01f, fx);
+                            fy = std::max(0.01f, fy);
+                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * fx);
+                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * fy);
+                        }
                         g_Canvas.MarkCompositeDirty();
                     }
                 }
@@ -1764,7 +1811,13 @@ int main(int argc, char* argv[]) {
                     if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
                         float currentDist = std::sqrt(distSq(mousePos, geo.center));
                         float factor = currentDist / g_GizmoDragStartDist;
-                        g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                        if (ImGui::GetIO().KeyShift) {
+                            // Lock aspect: scale both axes uniformly
+                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                        } else {
+                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                        }
                         g_Canvas.MarkCompositeDirty();
                     }
                 }
@@ -1774,7 +1827,12 @@ int main(int argc, char* argv[]) {
                     if (GetGizmoGeometry(g_Canvas, canvasToScreen, geo)) {
                         float currentDist = std::sqrt(distSq(mousePos, geo.center));
                         float factor = currentDist / g_GizmoDragStartDist;
-                        g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                        if (ImGui::GetIO().KeyShift) {
+                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                            g_Canvas.SetFloatingScaleY(g_GizmoDragStartScaleY * factor);
+                        } else {
+                            g_Canvas.SetFloatingScaleX(g_GizmoDragStartScaleX * factor);
+                        }
                         g_Canvas.MarkCompositeDirty();
                     }
                 }

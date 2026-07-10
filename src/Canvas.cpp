@@ -5,6 +5,7 @@
 #include "core/ImageManager.h"
 #include "core/IccProfiles.h"
 #include "core/PathUtil.h"
+#include "core/ClipboardHelper.h"
 // Prefer PathUtil for all disk paths (UTF-8 / wide on Windows).
 #include <opencv2/imgproc.hpp>
 #include "core/ConfigManager.h"
@@ -3200,6 +3201,312 @@ void Canvas::ClearSelection() {
     m_SelectionMaskNeedsUpload = true;
 
     m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Deselect", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
+}
+
+void Canvas::FillSelection(const float rgba[4]) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.isGroup) return;
+
+    // Mask paint target: fill selection with grayscale of color (luma)
+    if (m_PaintTarget == PaintTarget::LayerMask && layer.hasMask) {
+        if (layer.mask.empty()) layer.mask.assign((size_t)m_Width * m_Height, 255);
+        float gray = std::clamp(0.2126f * rgba[0] + 0.7152f * rgba[1] + 0.0722f * rgba[2], 0.f, 1.f);
+        uint8_t g8 = (uint8_t)(gray * 255.f + 0.5f);
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
+                if (sel < 1e-4f) continue;
+                size_t i = (size_t)y * m_Width + x;
+                float cur = layer.mask[i] / 255.f;
+                float out = cur * (1.f - sel) + gray * sel;
+                layer.mask[i] = (uint8_t)(std::clamp(out, 0.f, 1.f) * 255.f + 0.5f);
+            }
+        }
+        layer.maskNeedsUpload = true;
+        m_CompositeDirty = true;
+        m_IsDocumentModified = true;
+        Logger::Get().Info("FillSelection (mask)");
+        return;
+    }
+
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    BackupAllActiveLayerTiles();
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
+            if (sel < 1e-4f) continue;
+            size_t idx = ((size_t)y * m_Width + x) * 4;
+            float fa = rgba[3] * sel;
+            float da = pixels[idx + 3];
+            float outA = fa + da * (1.f - fa);
+            if (outA > 1e-6f) {
+                pixels[idx + 0] = (rgba[0] * fa + pixels[idx + 0] * da * (1.f - fa)) / outA;
+                pixels[idx + 1] = (rgba[1] * fa + pixels[idx + 1] * da * (1.f - fa)) / outA;
+                pixels[idx + 2] = (rgba[2] * fa + pixels[idx + 2] * da * (1.f - fa)) / outA;
+                pixels[idx + 3] = outA;
+            }
+        }
+    }
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
+    CommitActiveLayerMutation("Fill");
+    Logger::Get().Info("FillSelection");
+}
+
+void Canvas::DeleteSelectionContent() {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.isGroup) return;
+
+    if (m_PaintTarget == PaintTarget::LayerMask && layer.hasMask) {
+        if (layer.mask.empty()) layer.mask.assign((size_t)m_Width * m_Height, 255);
+        for (int y = 0; y < m_Height; ++y) {
+            for (int x = 0; x < m_Width; ++x) {
+                float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
+                if (sel < 1e-4f) continue;
+                size_t i = (size_t)y * m_Width + x;
+                float cur = layer.mask[i] / 255.f;
+                layer.mask[i] = (uint8_t)(std::clamp(cur * (1.f - sel), 0.f, 1.f) * 255.f + 0.5f);
+            }
+        }
+        layer.maskNeedsUpload = true;
+        m_CompositeDirty = true;
+        m_IsDocumentModified = true;
+        Logger::Get().Info("DeleteSelectionContent (mask)");
+        return;
+    }
+
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    BackupAllActiveLayerTiles();
+    auto pixels = ExportLayerF(layer, m_Width, m_Height);
+    for (int y = 0; y < m_Height; ++y) {
+        for (int x = 0; x < m_Width; ++x) {
+            float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
+            if (sel < 1e-4f) continue;
+            size_t idx = ((size_t)y * m_Width + x) * 4;
+            // Erase toward transparent
+            float keep = 1.f - sel;
+            pixels[idx + 0] *= keep;
+            pixels[idx + 1] *= keep;
+            pixels[idx + 2] *= keep;
+            pixels[idx + 3] *= keep;
+        }
+    }
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
+    CommitActiveLayerMutation("Delete");
+    Logger::Get().Info("DeleteSelectionContent");
+}
+
+bool Canvas::CopyContentToClipboard() {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return false;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.isGroup) return false;
+
+    // Determine AABB: selection bounds or full canvas
+    int x0 = 0, y0 = 0, x1 = m_Width - 1, y1 = m_Height - 1;
+    if (m_HasSelection && !m_SelectionMask.empty()) {
+        x0 = m_Width; y0 = m_Height; x1 = -1; y1 = -1;
+        for (int y = 0; y < m_Height; ++y)
+            for (int x = 0; x < m_Width; ++x)
+                if (m_SelectionMask[(size_t)y * m_Width + x] > 0) {
+                    x0 = std::min(x0, x); y0 = std::min(y0, y);
+                    x1 = std::max(x1, x); y1 = std::max(y1, y);
+                }
+        if (x1 < x0) return false;
+    }
+    int cw = x1 - x0 + 1, ch = y1 - y0 + 1;
+    auto src = ExportLayerF(layer, m_Width, m_Height);
+    m_ContentClipRGBA.assign((size_t)cw * ch * 4, 0.f);
+    for (int y = 0; y < ch; ++y) {
+        for (int x = 0; x < cw; ++x) {
+            int sx = x0 + x, sy = y0 + y;
+            float sel = GetSelWeight(m_SelectionMask, m_Width, sx, sy, m_HasSelection);
+            size_t si = ((size_t)sy * m_Width + sx) * 4;
+            size_t di = ((size_t)y * cw + x) * 4;
+            m_ContentClipRGBA[di + 0] = src[si + 0];
+            m_ContentClipRGBA[di + 1] = src[si + 1];
+            m_ContentClipRGBA[di + 2] = src[si + 2];
+            m_ContentClipRGBA[di + 3] = src[si + 3] * sel;
+        }
+    }
+    m_ContentClipW = cw;
+    m_ContentClipH = ch;
+    m_ContentClipboardValid = true;
+    m_LayerClipboardValid = false; // content copy takes precedence for paste routing
+
+    // Also push to system clipboard for other apps
+    ClipboardHelper::CopyImageToClipboard(m_ContentClipRGBA, cw, ch);
+    Logger::Get().Info("CopyContentToClipboard " + std::to_string(cw) + "x" + std::to_string(ch));
+    return true;
+}
+
+bool Canvas::CopyLayersToClipboard(const std::vector<int>& indices) {
+    if (indices.empty()) return false;
+    m_LayerClipboard.clear();
+    for (int idx : indices) {
+        if (idx < 0 || idx >= (int)m_Layers.size()) continue;
+        const Layer& src = m_Layers[idx];
+        LayerClipboardEntry e;
+        e.name = src.name;
+        e.isGroup = src.isGroup;
+        e.opacity = src.opacity;
+        e.blendMode = src.blendMode;
+        e.visible = src.visible;
+        e.type = src.type;
+        e.smartSourceBytes = src.smartSourceBytes;
+        e.smartSourcePath = src.smartSourcePath;
+        if (!src.isGroup) {
+            e.pixels = ExportLayerF(src, m_Width, m_Height);
+            e.hasMask = src.hasMask;
+            if (src.hasMask) e.mask = src.mask;
+        }
+        m_LayerClipboard.push_back(std::move(e));
+    }
+    if (m_LayerClipboard.empty()) return false;
+    m_LayerClipboardValid = true;
+    // Prefer layer paste when this was intentional layer copy
+    Logger::Get().Info("CopyLayersToClipboard count=" + std::to_string(m_LayerClipboard.size()));
+    return true;
+}
+
+bool Canvas::PasteLayersFromClipboard(ID3D11Device* device) {
+    if (!m_LayerClipboardValid || m_LayerClipboard.empty()) return false;
+    int insertAt = m_ActiveLayerIdx + 1;
+    if (insertAt < 0) insertAt = (int)m_Layers.size();
+    int firstNew = insertAt;
+    for (const auto& e : m_LayerClipboard) {
+        Layer L;
+        L.name = e.name + " copy";
+        L.isGroup = e.isGroup;
+        L.opacity = e.opacity;
+        L.blendMode = e.blendMode;
+        L.visible = e.visible;
+        L.type = e.type;
+        L.smartSourceBytes = e.smartSourceBytes;
+        L.smartSourcePath = e.smartSourcePath;
+        if (!L.isGroup) {
+            L.tileCache = std::make_unique<TileCache>();
+            L.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+            if (!e.pixels.empty())
+                SetLayerPixelsF(L, e.pixels, m_Width, m_Height, m_CanvasFormat);
+            if (e.hasMask && !e.mask.empty()) {
+                L.hasMask = true;
+                L.mask = e.mask;
+                L.maskNeedsUpload = true;
+            }
+            if (device) RecreateLayerTexture(device, L);
+        }
+        m_Layers.insert(m_Layers.begin() + insertAt, std::move(L));
+        for (int i = 0; i < (int)m_Layers.size(); ++i) {
+            if (m_Layers[i].parentGroupId >= insertAt)
+                m_Layers[i].parentGroupId++;
+        }
+        if (device && m_Layers[insertAt].hasMask)
+            UpdateLayerMaskTexture(device, insertAt);
+        insertAt++;
+    }
+    m_ActiveLayerIdx = insertAt - 1;
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    Logger::Get().Info("PasteLayersFromClipboard inserted " + std::to_string(m_LayerClipboard.size()));
+    (void)firstNew;
+    return true;
+}
+
+bool Canvas::PasteContentIntoActive(ID3D11Device* device) {
+    // Prefer internal content; fallback to system clipboard
+    std::vector<float> pixels;
+    int pw = 0, ph = 0;
+    if (m_ContentClipboardValid && !m_ContentClipRGBA.empty()) {
+        pixels = m_ContentClipRGBA;
+        pw = m_ContentClipW;
+        ph = m_ContentClipH;
+    } else {
+        if (!ClipboardHelper::PasteImageFromClipboard(pixels, pw, ph)) return false;
+    }
+    if (pixels.empty() || pw <= 0 || ph <= 0) return false;
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return false;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.isGroup) return false;
+
+    int ox = (m_Width - pw) / 2;
+    int oy = (m_Height - ph) / 2;
+
+    if (m_PaintTarget == PaintTarget::LayerMask) {
+        if (!layer.hasMask) {
+            // allocate white mask
+            layer.hasMask = true;
+            layer.mask.assign((size_t)m_Width * m_Height, 255);
+        }
+        if (layer.mask.empty())
+            layer.mask.assign((size_t)m_Width * m_Height, 255);
+        for (int y = 0; y < ph; ++y) {
+            int dy = y + oy;
+            if (dy < 0 || dy >= m_Height) continue;
+            for (int x = 0; x < pw; ++x) {
+                int dx = x + ox;
+                if (dx < 0 || dx >= m_Width) continue;
+                size_t si = ((size_t)y * pw + x) * 4;
+                float a = pixels[si + 3];
+                if (a < 1e-4f) continue;
+                float gray = 0.2126f * pixels[si] + 0.7152f * pixels[si + 1] + 0.0722f * pixels[si + 2];
+                size_t di = (size_t)dy * m_Width + dx;
+                float cur = layer.mask[di] / 255.f;
+                float out = cur * (1.f - a) + gray * a;
+                layer.mask[di] = (uint8_t)(std::clamp(out, 0.f, 1.f) * 255.f + 0.5f);
+            }
+        }
+        layer.maskNeedsUpload = true;
+        if (device) UpdateLayerMaskTexture(device, m_ActiveLayerIdx);
+        m_CompositeDirty = true;
+        m_IsDocumentModified = true;
+        Logger::Get().Info("PasteContentIntoActive (mask)");
+        return true;
+    }
+
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    BackupAllActiveLayerTiles();
+    auto dest = ExportLayerF(layer, m_Width, m_Height);
+    for (int y = 0; y < ph; ++y) {
+        int dy = y + oy;
+        if (dy < 0 || dy >= m_Height) continue;
+        for (int x = 0; x < pw; ++x) {
+            int dx = x + ox;
+            if (dx < 0 || dx >= m_Width) continue;
+            size_t si = ((size_t)y * pw + x) * 4;
+            size_t di = ((size_t)dy * m_Width + dx) * 4;
+            float sa = pixels[si + 3];
+            if (sa < 1e-4f) continue;
+            float da = dest[di + 3];
+            float outA = sa + da * (1.f - sa);
+            if (outA > 1e-6f) {
+                dest[di + 0] = (pixels[si + 0] * sa + dest[di + 0] * da * (1.f - sa)) / outA;
+                dest[di + 1] = (pixels[si + 1] * sa + dest[di + 1] * da * (1.f - sa)) / outA;
+                dest[di + 2] = (pixels[si + 2] * sa + dest[di + 2] * da * (1.f - sa)) / outA;
+                dest[di + 3] = outA;
+            }
+        }
+    }
+    SetLayerPixelsF(layer, dest, m_Width, m_Height, m_CanvasFormat);
+    CommitActiveLayerMutation("Paste");
+    Logger::Get().Info("PasteContentIntoActive");
+    return true;
+}
+
+bool Canvas::PasteContentAsNewLayer(ID3D11Device* device, const std::string& name) {
+    std::vector<float> pixels;
+    int pw = 0, ph = 0;
+    if (m_ContentClipboardValid && !m_ContentClipRGBA.empty()) {
+        pixels = m_ContentClipRGBA;
+        pw = m_ContentClipW;
+        ph = m_ContentClipH;
+    } else if (!ClipboardHelper::PasteImageFromClipboard(pixels, pw, ph)) {
+        return false;
+    }
+    if (pixels.empty()) return false;
+    CreateLayerFromPixels(device, name, pixels, pw, ph);
+    return true;
 }
 
 void Canvas::SetSelectionMask(const std::vector<uint8_t>& mask) {
