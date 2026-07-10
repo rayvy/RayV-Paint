@@ -25,8 +25,9 @@ struct BrushSettings {
     bool writeG = true;
     bool writeB = true;
     bool writeA = false;
-    // When true: stamp opacity/hardness/color.a only morph RGB; never change dest A.
-    // Used when Channels→Alpha is OFF, or layer Alpha Rewrite is OFF while painting RGB.
+    // When true: stamp blends RGB as straight lerp (opacity×hardness), not premultiplied
+    // src-over. A is still written when writeA is set (coverage / strength fade).
+    // Used when Channels→Alpha is OFF, or layer Alpha Rewrite is OFF.
     bool rgbMorphOnly = false;
 
     bool pressureRadius   = false;

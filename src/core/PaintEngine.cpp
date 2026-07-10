@@ -186,30 +186,31 @@ static void StampAt(TileCache& cache, float px, float py,
                     ReadPixelRaw(p, fmt, dest);
                     float out[4] = { dest[0], dest[1], dest[2], dest[3] };
 
-                    // rgbMorphOnly OR not writing A → stamp is RGB coverage/multiplier only.
+                    // rgbMorphOnly: stamp is straight RGB lerp + optional A coverage
+                    // (used when Channels→Alpha is OFF, or Alpha Rewrite is OFF).
+                    // !writeA alone also uses morph so RGB-only channel locks stay simple.
                     const bool morphRgb = brush.rgbMorphOnly || !brush.writeA;
 
                     if (brush.erase) {
-                        // Erase: pull written channels toward 0. Alpha only if writeA.
+                        // Erase: pull written channels toward 0.
+                        // writeA: fade coverage (rewrite ON) or morph strength (rewrite OFF).
                         float factor = 1.0f - stampAlpha;
                         if (brush.writeR) out[0] *= factor;
                         if (brush.writeG) out[1] *= factor;
                         if (brush.writeB) out[2] *= factor;
                         if (brush.writeA) out[3] *= factor;
                     } else if (morphRgb) {
-                        // Brush: stamp = RGB morph strength; destination A never changes.
-                        // RGB ON + Alpha OFF (Channels): opacity/hardness multiply into RGB only.
+                        // Brush: stamp = opacity×hardness×tip (color.a usually forced 1).
+                        // writeA builds coverage even when Channel A is hidden.
                         const float t = stampAlpha;
                         const float inv = 1.0f - t;
                         if (brush.writeR) out[0] = brush.color[0] * t + dest[0] * inv;
                         if (brush.writeG) out[1] = brush.color[1] * t + dest[1] * inv;
                         if (brush.writeB) out[2] = brush.color[2] * t + dest[2] * inv;
-                        // out[3] stays dest[3] unless writeA (then classic over for A alone)
-                        if (brush.writeA) {
+                        if (brush.writeA)
                             out[3] = stampAlpha + dest[3] * (1.0f - stampAlpha);
-                        }
                     } else {
-                        // Classic src-over including alpha (Alpha Rewrite ON + Channel A ON).
+                        // Classic src-over (Alpha Rewrite ON + Channel A ON).
                         float outA = stampAlpha + dest[3] * (1.0f - stampAlpha);
                         if (outA > 0.0f) {
                             if (brush.writeR) out[0] = (brush.color[0] * stampAlpha + dest[0] * dest[3] * (1.0f - stampAlpha)) / outA;

@@ -1475,24 +1475,46 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     auto& layer = m_Layers[m_ActiveLayerIdx];
 
     BrushSettings activeBrush = brush;
+
+    // --- Channel isolation ---
+    // R/G/B toggles select which color channels tools write.
+    // Channel A is a *view / solo-edit* flag, NOT a transparency lock:
+    //   • A ON alone  → paint only alpha (grayscale coverage)
+    //   • A OFF       → stamp = opacity×hardness×tip (color.a forced 1); tools still
+    //                   establish / erase coverage when Alpha Rewrite is ON
+    // Alpha Rewrite ON  → A is real coverage (brush builds it, eraser punches holes)
+    // Alpha Rewrite OFF → A is RGB morph strength (brush keeps A; eraser fades A)
     activeBrush.writeR = m_ChannelR;
     activeBrush.writeG = m_ChannelG;
     activeBrush.writeB = m_ChannelB;
 
-    // Photoshop-like channel isolation + Alpha Rewrite:
-    // - Channels A OFF → tools use stamp (opacity/hardness) as RGB multiplier only;
-    //   never write A (even on Alpha Rewrite layers).
-    // - Channels A ON + Alpha Rewrite ON → may write A (classic over).
-    // - Channels A ON + Alpha Rewrite OFF → RGB morph only (A is compose strength /
-    //   packing data; keep non-destructive). Solo-A channel can still paint A.
     const bool onlyAlphaChannel = m_ChannelA && !m_ChannelR && !m_ChannelG && !m_ChannelB;
     const bool channelAOff = !m_ChannelA;
-    activeBrush.writeA = m_ChannelA && (layer.alphaRewrite || onlyAlphaChannel);
-    activeBrush.rgbMorphOnly = channelAOff || (!layer.alphaRewrite && !onlyAlphaChannel);
 
-    // When A channel is hidden, stamp strength = opacity×hardness only (ignore brush.color.a).
-    if (channelAOff || activeBrush.rgbMorphOnly) {
-        activeBrush.color[3] = 1.0f;
+    if (onlyAlphaChannel) {
+        activeBrush.writeR = activeBrush.writeG = activeBrush.writeB = false;
+        activeBrush.writeA = true;
+        activeBrush.rgbMorphOnly = false;
+    } else {
+        // All RGB channels off + A off → still paint RGB (A is not a write lock).
+        if (!activeBrush.writeR && !activeBrush.writeG && !activeBrush.writeB) {
+            activeBrush.writeR = activeBrush.writeG = activeBrush.writeB = true;
+        }
+
+        if (layer.alphaRewrite) {
+            // Coverage layer: always write A so brush/eraser work without needing
+            // Channels→Alpha ON. A-off only changes stamp source (opacity×hardness).
+            activeBrush.writeA = true;
+            activeBrush.rgbMorphOnly = channelAOff;
+            if (channelAOff)
+                activeBrush.color[3] = 1.0f;
+        } else {
+            // Strength / decal layer: A multiplies RGB over underlay; never invent A
+            // on brush — only fade it with eraser so the overlay lifts.
+            activeBrush.rgbMorphOnly = true;
+            activeBrush.color[3] = 1.0f;
+            activeBrush.writeA = activeBrush.erase;
+        }
     }
 
     if (brush.pressureRadius) {
@@ -1626,6 +1648,9 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                                m_HasSelection ? m_SelectionMask : std::vector<uint8_t>{});
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
         m_Layers[m_ActiveLayerIdx].filtersDirty = true;
+        m_Layers[m_ActiveLayerIdx].thumbDirty = true;
+        m_CompositeDirty = true;
+        m_ChannelPreviewDirty = true;
     }
     else if (phase == StrokePhase::Update && m_IsStrokeActive) {
         // Apply stabilization
@@ -1679,9 +1704,14 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         m_PrevStabilizedY = stabilizedY;
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
         m_Layers[m_ActiveLayerIdx].filtersDirty = true;
+        m_Layers[m_ActiveLayerIdx].thumbDirty = true;
+        m_CompositeDirty = true; // recompose every dab (A-off RGB view stays live)
+        m_ChannelPreviewDirty = true;
     }
     else if (phase == StrokePhase::End) {
         m_IsStrokeActive = false;
+        m_CompositeDirty = true;
+        m_ChannelPreviewDirty = true;
         if (!m_ActiveStrokeDeltas.empty()) {
             auto& layer = m_Layers[m_ActiveLayerIdx];
             std::vector<TileDelta> deltas;
@@ -6038,7 +6068,8 @@ void Canvas::SetChannelB(bool b) {
 void Canvas::SetChannelA(bool a) {
     if (m_ChannelA == a) return;
     m_ChannelA = a;
-    MarkCompositeDirty(); // PSLayerBlend forces A=1 when off → RGB of A=0 buffers appears
+    // Viewport PSMain: A-off shows composite RGB ignoring coverage (buffer view).
+    MarkCompositeDirty();
 }
 
 // ---------------------------------------------------------------------------
