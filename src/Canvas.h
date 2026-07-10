@@ -58,6 +58,11 @@ struct Layer {
     float opacity = 1.0f;
     BlendMode blendMode = BlendMode::Normal;
 
+    // When true (default for new/open base layers): paint/import may overwrite alpha.
+    // When false (default for imported decals): stamp A is morph strength for RGB only;
+    // destination alpha is preserved.
+    bool alphaRewrite = true;
+
     // Primary pixel data (replaces std::vector<float> pixels).
     // nullptr for group header layers (isGroup == true).
     std::unique_ptr<TileCache> tileCache;
@@ -65,6 +70,12 @@ struct Layer {
     ID3D11Texture2D* texture = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
     bool needsUpload = false; // set true to force full re-upload (fallback)
+
+    // UI list thumb (small RGB, A forced 255 when ignore-alpha / buffer view)
+    ID3D11Texture2D* thumbTex = nullptr;
+    ID3D11ShaderResourceView* thumbSRV = nullptr;
+    bool thumbDirty = true;
+    int thumbSize = 0;
 
     // Non-destructive filters
     std::vector<LayerFilter> filters;
@@ -173,6 +184,11 @@ public:
     void DuplicateLayers(ID3D11Device* device, const std::vector<int>& indices);
     // Delete many (highest index first). Keeps at least one layer if possible.
     void DeleteLayers(const std::vector<int>& indices);
+    // Merge upper layer into the one below (index-1), applying upper blendMode+opacity.
+    // Returns new active index (the surviving lower layer), or -1 on failure.
+    int MergeLayerDown(ID3D11Device* device, int upperIdx);
+    // Merge all selected indices (bottommost survives). Empty/invalid → no-op, returns -1.
+    int MergeLayers(ID3D11Device* device, const std::vector<int>& indices);
     void SetActiveLayerIndex(int idx);
     void ToggleLayerIsolation(int layerIdx);
     void MarkCompositeDirty() { m_CompositeDirty = true; m_ChannelPreviewDirty = true; }
@@ -298,22 +314,28 @@ public:
     void SetFloatingScaleY(float sy) { m_FloatingScaleY = sy; }
     void SetFloatingRotation(float rot) { m_FloatingRotation = rot; }
 
-    // Channel solo controls
+    // Channel solo controls (toggles mark composite dirty — buffer view depends on them)
     bool GetChannelR() const { return m_ChannelR; }
     bool GetChannelG() const { return m_ChannelG; }
     bool GetChannelB() const { return m_ChannelB; }
     bool GetChannelA() const { return m_ChannelA; }
-    void SetChannelR(bool r) { m_ChannelR = r; }
-    void SetChannelG(bool g) { m_ChannelG = g; }
-    void SetChannelB(bool b) { m_ChannelB = b; }
-    void SetChannelA(bool a) { m_ChannelA = a; }
+    void SetChannelR(bool r);
+    void SetChannelG(bool g);
+    void SetChannelB(bool b);
+    void SetChannelA(bool a);
 
     ID3D11ShaderResourceView* GetCompositeSRV() const { return m_CompositeSRV; }
 
-    // Channel preview thumbs (R/G/B/A as grayscale). Built from composite proxy; not full-doc.
-    // Returns nullptr if device/composite unavailable. Caller does not own the SRV.
+    // Channel preview thumbs (R/G/B/A as grayscale). Built from *layer tile data*
+    // (not composite), so RGB is visible even when A=0 (buffer semantics).
+    // Returns nullptr if unavailable. Caller does not own the SRV.
     enum class ChannelPreview : uint8_t { R = 0, G = 1, B = 2, A = 3 };
     ID3D11ShaderResourceView* GetChannelPreviewSRV(ID3D11Device* device, ChannelPreview ch);
+
+    // Layer list thumb: always RGB with A=255 so ImGui doesn't hide A=0 buffers.
+    // When forceOpaque is false and channel A is on, still keeps A=255 for list readability
+    // in tech-art buffer mode (RGB must never vanish).
+    ID3D11ShaderResourceView* GetLayerThumbSRV(ID3D11Device* device, int layerIdx, int size = 48);
 
     // File Import / Export
     // Routes by extension: .rayp → LoadCanvasRayp, else LoadImageToLayer.
@@ -436,7 +458,8 @@ private:
     struct LayerBuffer {
         DirectX::XMFLOAT4 layerParams;     // x: opacity, y: hasMask, zw: translation (uOff, vOff)
         DirectX::XMFLOAT4 transformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
-        DirectX::XMFLOAT4 centerParams;    // x: centerX, y: centerY, z: blendMode (as float uint), w: unused
+        // x,y: center; z: blendMode; w: alphaRewrite (1=overwrite A, 0=A is RGB strength only)
+        DirectX::XMFLOAT4 centerParams;
     };
 
 
@@ -494,6 +517,10 @@ private:
     int m_CompositeHeight = 0;
     bool m_CompositeDirty = true;
     ID3D11BlendState* m_LayerBlendState = nullptr;
+    // RGB: SRC_ALPHA/INV_SRC_ALPHA; Alpha: ZERO/ONE — keeps dest A (Alpha Rewrite OFF)
+    ID3D11BlendState* m_LayerBlendStateAlphaPreserve = nullptr;
+    // Bottom layer init: ONE/ZERO full RGBA replace (RGB survives A=0)
+    ID3D11BlendState* m_LayerBlendStateReplace = nullptr;
     ID3D11RasterizerState* m_RasterizerState = nullptr;
 
     PaintTarget m_PaintTarget = PaintTarget::LayerContent;

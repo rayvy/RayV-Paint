@@ -1,5 +1,6 @@
 #include "Canvas.h"
 #include "core/TileCache.h"
+#include "core/HalfFloat.h"
 #include "core/Logger.h"
 #include "core/MemoryStats.h"
 #include "core/ImageManager.h"
@@ -179,7 +180,9 @@ static void ApplyBlendModeRGB(BlendMode mode,
 }
 
 // Matches D3D layer blend: SRC_ALPHA / INV_SRC_ALPHA after optional RGB blend mode.
-static inline void BlendLayerPixelU8(uint8_t* dest, float sr, float sg, float sb, float sa, BlendMode mode) {
+// alphaRewrite: if false, sa is RGB morph strength only — destination alpha is preserved.
+static inline void BlendLayerPixelU8(uint8_t* dest, float sr, float sg, float sb, float sa, BlendMode mode,
+                                     bool alphaRewrite = true) {
     if (sa <= 0.f) return;
     float dr = dest[0] / 255.f;
     float dg = dest[1] / 255.f;
@@ -195,11 +198,14 @@ static inline void BlendLayerPixelU8(uint8_t* dest, float sr, float sg, float sb
     dest[0] = (uint8_t)(std::clamp(br * sa + dr * inv, 0.f, 1.f) * 255.f + 0.5f);
     dest[1] = (uint8_t)(std::clamp(bg * sa + dg * inv, 0.f, 1.f) * 255.f + 0.5f);
     dest[2] = (uint8_t)(std::clamp(bb * sa + db * inv, 0.f, 1.f) * 255.f + 0.5f);
-    dest[3] = (uint8_t)(std::clamp(sa + da * inv, 0.f, 1.f) * 255.f + 0.5f);
+    if (alphaRewrite)
+        dest[3] = (uint8_t)(std::clamp(sa + da * inv, 0.f, 1.f) * 255.f + 0.5f);
+    // else keep dest[3]
 }
 
 // Float composite blend — no 0..1 clamp on RGB (HDR / height values preserved).
-static inline void BlendLayerPixelF(float* dest, float sr, float sg, float sb, float sa, BlendMode mode) {
+static inline void BlendLayerPixelF(float* dest, float sr, float sg, float sb, float sa, BlendMode mode,
+                                    bool alphaRewrite = true) {
     if (sa <= 0.f) return;
     float dr = dest[0], dg = dest[1], db = dest[2], da = dest[3];
     float br = sr, bg = sg, bb = sb;
@@ -210,7 +216,8 @@ static inline void BlendLayerPixelF(float* dest, float sr, float sg, float sb, f
     dest[0] = br * sa + dr * inv;
     dest[1] = bg * sa + dg * inv;
     dest[2] = bb * sa + db * inv;
-    dest[3] = sa + da * inv;
+    if (alphaRewrite)
+        dest[3] = sa + da * inv;
 }
 
 static bool LayerEffectivelyVisible(const std::vector<Layer>& layers, const Layer& layer) {
@@ -258,7 +265,7 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
     }
     if (vis.empty()) return true;
 
-    // Fast path: one Normal layer, no FX/mask, full opacity.
+    // Fast path: one Normal layer — full RGBA copy (keeps RGB even when A=0).
     if (vis.size() == 1 &&
         vis[0]->blendMode == BlendMode::Normal &&
         vis[0]->opacity >= 0.999f &&
@@ -283,6 +290,7 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
             const int tw = x1 - x0;
             const int th = y1 - y0;
 
+            bool firstLayer = true;
             for (const Layer* layer : vis) {
                 const TileCache* cache = LayerExportCache(*layer);
                 if (!cache) continue;
@@ -297,23 +305,38 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
                     const int y = y0 + ly;
                     for (int lx = 0; lx < tw; ++lx) {
                         const int x = x0 + lx;
-                        float sr, sg, sb, sa;
+                        float sr, sg, sb, saPix;
                         if (tile) {
                             const uint8_t* sp = tile + ((size_t)ly * TILE_SIZE + lx) * 4;
                             sr = sp[0] / 255.f; sg = sp[1] / 255.f; sb = sp[2] / 255.f;
-                            sa = (sp[3] / 255.f) * opacity;
+                            saPix = sp[3] / 255.f;
                         } else {
                             float rgba[4];
                             cache->GetPixelF(x, y, rgba);
                             sr = rgba[0]; sg = rgba[1]; sb = rgba[2];
-                            sa = rgba[3] * opacity;
+                            saPix = rgba[3];
                         }
+                        float sa = saPix * opacity;
                         if (useMask) sa *= layer->mask[(size_t)y * w + x] / 255.f;
-                        if (sa <= 0.f) continue;
                         uint8_t* dp = out.data() + ((size_t)y * w + x) * 4;
-                        BlendLayerPixelU8(dp, sr, sg, sb, sa, mode);
+
+                        if (firstLayer) {
+                            // Initialize document buffer: always keep RGB (even if A=0).
+                            // A is written as real alpha * opacity (may stay 0).
+                            float aWrite = saPix * opacity;
+                            if (useMask) aWrite *= layer->mask[(size_t)y * w + x] / 255.f;
+                            dp[0] = (uint8_t)(std::clamp(sr, 0.f, 1.f) * 255.f + 0.5f);
+                            dp[1] = (uint8_t)(std::clamp(sg, 0.f, 1.f) * 255.f + 0.5f);
+                            dp[2] = (uint8_t)(std::clamp(sb, 0.f, 1.f) * 255.f + 0.5f);
+                            dp[3] = (uint8_t)(std::clamp(aWrite, 0.f, 1.f) * 255.f + 0.5f);
+                        } else {
+                            // sa = morph strength when !alphaRewrite; 0 → no RGB change
+                            if (sa <= 0.f) continue;
+                            BlendLayerPixelU8(dp, sr, sg, sb, sa, mode, layer->alphaRewrite);
+                        }
                     }
                 }
+                firstLayer = false;
             }
         }
         if (ty == 0 || ((ty + 1) % progressStep) == 0 || ty + 1 == tilesY) {
@@ -629,6 +652,30 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
+    // Alpha Rewrite OFF: RGB uses SRC_ALPHA as morph strength; destination A is never written.
+    D3D11_BLEND_DESC blendPreserveA = blendDesc;
+    blendPreserveA.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    blendPreserveA.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    hr = device->CreateBlendState(&blendPreserveA, &m_LayerBlendStateAlphaPreserve);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // First (bottom) layer: replace composite with full RGBA (RGB kept even when A=0).
+    D3D11_BLEND_DESC blendReplace = {};
+    blendReplace.RenderTarget[0].BlendEnable = TRUE;
+    blendReplace.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    blendReplace.RenderTarget[0].DestBlend = D3D11_BLEND_ZERO;
+    blendReplace.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    blendReplace.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    blendReplace.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    blendReplace.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    blendReplace.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    hr = device->CreateBlendState(&blendReplace, &m_LayerBlendStateReplace);
+    if (FAILED(hr)) {
+        return false;
+    }
+
     // Create rasterizer state with CullMode = D3D11_CULL_NONE
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
@@ -661,6 +708,8 @@ void Canvas::Shutdown() {
     if (m_InputLayout) { m_InputLayout->Release(); m_InputLayout = nullptr; }
     if (m_SamplerState) { m_SamplerState->Release(); m_SamplerState = nullptr; }
     if (m_LayerBlendState) { m_LayerBlendState->Release(); m_LayerBlendState = nullptr; }
+    if (m_LayerBlendStateAlphaPreserve) { m_LayerBlendStateAlphaPreserve->Release(); m_LayerBlendStateAlphaPreserve = nullptr; }
+    if (m_LayerBlendStateReplace) { m_LayerBlendStateReplace->Release(); m_LayerBlendStateReplace = nullptr; }
     if (m_RasterizerState) { m_RasterizerState->Release(); m_RasterizerState = nullptr; }
 
     if (m_SelectionMaskTexture) { m_SelectionMaskTexture->Release(); m_SelectionMaskTexture = nullptr; }
@@ -671,6 +720,8 @@ void Canvas::Shutdown() {
         if (layer.srv) layer.srv->Release();
         if (layer.maskTexture) layer.maskTexture->Release();
         if (layer.maskSRV) layer.maskSRV->Release();
+        if (layer.thumbSRV) { layer.thumbSRV->Release(); layer.thumbSRV = nullptr; }
+        if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
     }
     m_Layers.clear();
 }
@@ -1075,6 +1126,8 @@ void Canvas::DeleteLayer(int index) {
     if (m_Layers[index].srv) m_Layers[index].srv->Release();
     if (m_Layers[index].maskTexture) m_Layers[index].maskTexture->Release();
     if (m_Layers[index].maskSRV) m_Layers[index].maskSRV->Release();
+    if (m_Layers[index].thumbSRV) { m_Layers[index].thumbSRV->Release(); m_Layers[index].thumbSRV = nullptr; }
+    if (m_Layers[index].thumbTex) { m_Layers[index].thumbTex->Release(); m_Layers[index].thumbTex = nullptr; }
     
     // Adjust parentGroupId references for remaining layers
     for (auto& l : m_Layers) {
@@ -1096,6 +1149,140 @@ void Canvas::DeleteLayer(int index) {
     m_CompositeDirty = true;
 }
 
+int Canvas::MergeLayerDown(ID3D11Device* device, int upperIdx) {
+    if (upperIdx <= 0 || upperIdx >= (int)m_Layers.size()) return -1;
+    const int lowerIdx = upperIdx - 1;
+    Layer& upper = m_Layers[upperIdx];
+    Layer& lower = m_Layers[lowerIdx];
+    if (upper.isGroup || lower.isGroup) {
+        Logger::Get().Warn("MergeLayerDown: cannot merge groups");
+        return -1;
+    }
+    if (!upper.tileCache || !lower.tileCache) {
+        Logger::Get().Warn("MergeLayerDown: missing tile cache");
+        return -1;
+    }
+
+    // Flatten non-destructive FX into pixels before merge.
+    if (!upper.filters.empty()) {
+        upper.filtersDirty = true;
+        RebuildFilteredPixels(upper);
+    }
+    if (!lower.filters.empty()) {
+        lower.filtersDirty = true;
+        RebuildFilteredPixels(lower);
+    }
+
+    const TileCache* upperCache = LayerExportCache(upper);
+    const TileCache* lowerCache = LayerExportCache(lower);
+    if (!upperCache || !lowerCache) return -1;
+
+    EnsureLayerTileCache(lower, m_Width, m_Height, m_CanvasFormat);
+    // Undo: full-tile backup of the surviving (lower) layer before pixels change.
+    int prevActive = m_ActiveLayerIdx;
+    m_ActiveLayerIdx = lowerIdx;
+    BackupAllActiveLayerTiles();
+
+    const float op = std::clamp(upper.opacity, 0.f, 1.f);
+    const BlendMode mode = upper.blendMode;
+    const bool useMask = upper.hasMask && upper.mask.size() == (size_t)m_Width * m_Height;
+
+    // Tile-wise merge to avoid full-doc float when sparse
+    const int tilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+    const int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX; ++tx) {
+            const bool upperHas = upperCache->HasTile(tx, ty);
+            const bool lowerHas = lowerCache->HasTile(tx, ty);
+            if (!upperHas && !lowerHas) continue;
+
+            const int x0 = tx * TILE_SIZE;
+            const int y0 = ty * TILE_SIZE;
+            const int x1 = std::min(x0 + TILE_SIZE, m_Width);
+            const int y1 = std::min(y0 + TILE_SIZE, m_Height);
+
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    float L[4] = {}, U[4] = {};
+                    lowerCache->GetPixelF(x, y, L);
+                    upperCache->GetPixelF(x, y, U);
+                    float sa = U[3] * op;
+                    if (useMask) sa *= upper.mask[(size_t)y * m_Width + x] / 255.f;
+                    if (sa <= 1e-8f) {
+                        // upper contributes nothing; keep L
+                        lower.tileCache->SetPixelF(x, y, L);
+                        continue;
+                    }
+                    float br, bg, bb;
+                    ApplyBlendModeRGB(mode, U[0], U[1], U[2], L[0], L[1], L[2], br, bg, bb);
+                    // sa = morph strength when !alphaRewrite; always RGB over
+                    const float inv = 1.f - sa;
+                    float out[4];
+                    out[0] = br * sa + L[0] * inv;
+                    out[1] = bg * sa + L[1] * inv;
+                    out[2] = bb * sa + L[2] * inv;
+                    out[3] = upper.alphaRewrite ? (sa + L[3] * inv) : L[3];
+                    lower.tileCache->SetPixelF(x, y, out);
+                }
+            }
+        }
+    }
+
+    lower.filters.clear();
+    lower.filteredCache.reset();
+    lower.filtersDirty = false;
+    lower.needsUpload = true;
+    lower.thumbDirty = true;
+    lower.tileCache->MarkAllDirty();
+
+    // Commit lower mutation for undo, then delete upper
+    m_ActiveLayerIdx = lowerIdx;
+    CommitActiveLayerMutation("Merge Layer Down");
+
+    std::string mergedName = lower.name;
+    if (mergedName.find(" (merged)") == std::string::npos)
+        lower.name = mergedName; // keep lower name
+    Logger::Get().Info("Merged '" + upper.name + "' down into '" + lower.name +
+        "' blend=" + std::to_string((int)mode));
+
+    DeleteLayer(upperIdx);
+    m_ActiveLayerIdx = lowerIdx;
+    if (device) {
+        RecreateLayerTexture(device, m_Layers[lowerIdx]);
+        m_Layers[lowerIdx].needsUpload = true;
+    }
+    m_CompositeDirty = true;
+    m_ChannelPreviewDirty = true;
+    (void)prevActive;
+    return lowerIdx;
+}
+
+int Canvas::MergeLayers(ID3D11Device* device, const std::vector<int>& indices) {
+    if (indices.empty()) return -1;
+    std::vector<int> sorted = indices;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    if (sorted.size() == 1)
+        return MergeLayerDown(device, sorted[0]);
+
+    // Require contiguous stack (bottom..top).
+    for (size_t k = 1; k < sorted.size(); ++k) {
+        if (sorted[k] != sorted[k - 1] + 1) {
+            Logger::Get().Warn("MergeLayers: selection must be a contiguous stack; merging top down only");
+            return MergeLayerDown(device, sorted.back());
+        }
+    }
+    const int bottom = sorted.front();
+    const int count = (int)sorted.size();
+    for (int n = 0; n < count - 1; ++n) {
+        // Always merge the layer immediately above bottom into bottom.
+        int r = MergeLayerDown(device, bottom + 1);
+        if (r < 0) break;
+    }
+    m_ActiveLayerIdx = std::clamp(bottom, 0, (int)m_Layers.size() - 1);
+    return m_ActiveLayerIdx;
+}
+
 int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
     if (index < 0 || index >= (int)m_Layers.size()) return -1;
     const Layer& src = m_Layers[index];
@@ -1105,6 +1292,7 @@ int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
     dup.visible = src.visible;
     dup.opacity = src.opacity;
     dup.blendMode = src.blendMode;
+    dup.alphaRewrite = src.alphaRewrite;
     dup.isGroup = src.isGroup;
     dup.type = src.type;
     dup.parentGroupId = src.parentGroupId;
@@ -1290,7 +1478,8 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     activeBrush.writeR = m_ChannelR;
     activeBrush.writeG = m_ChannelG;
     activeBrush.writeB = m_ChannelB;
-    activeBrush.writeA = m_ChannelA;
+    // Channel A must be on AND layer Alpha Rewrite enabled to overwrite alpha.
+    activeBrush.writeA = m_ChannelA && layer.alphaRewrite;
     if (brush.pressureRadius) {
         activeBrush.radius = brush.radius * g_PenPressure;
         if (activeBrush.radius < 1.0f) activeBrush.radius = 1.0f;
@@ -1665,6 +1854,8 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             }
             if (layerHadUploads || filtersWereDirty || layerNeedsUpload || hadPending) {
                 needsCompositeRebuild = true;
+                layer.thumbDirty = true; // list thumbs + channel previews stale
+                m_ChannelPreviewDirty = true;
             }
 
             if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
@@ -1723,9 +1914,10 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     context->PSSetSamplers(0, 1, &m_SamplerState);
     context->PSSetConstantBuffers(0, 1, &m_ConstantBuffer);
 
-    context->OMSetBlendState(m_LayerBlendState, nullptr, 0xFFFFFFFF);
-
-    // Draw visible layers bottom-to-top
+    // Draw visible layers bottom-to-top.
+    // First layer: REPLACE full RGBA (RGB present even if A=0 — packing / PS-like buffer).
+    // Later layers: SRC_ALPHA; Alpha Rewrite OFF preserves dest A (A = RGB strength only).
+    bool firstVisible = true;
     for (size_t i = 0; i < m_Layers.size(); ++i) {
         Layer& layer = m_Layers[i];
         if (layer.visible && layer.srv) {
@@ -1738,13 +1930,27 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 }
             }
 
+            const bool isFirst = firstVisible && m_LayerBlendStateReplace;
+            ID3D11BlendState* blend = nullptr;
+            if (isFirst) {
+                blend = m_LayerBlendStateReplace;
+            } else if (!layer.alphaRewrite && m_LayerBlendStateAlphaPreserve) {
+                blend = m_LayerBlendStateAlphaPreserve;
+            } else {
+                blend = m_LayerBlendState;
+            }
+            context->OMSetBlendState(blend, nullptr, 0xFFFFFFFF);
+
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
                 LayerBuffer* lb = (LayerBuffer*)mapped.pData;
                 float hasMaskVal = (layer.hasMask && layer.maskSRV) ? 1.0f : 0.0f;
+                // zw = translation only when floating; keep 0 for normal layers
                 lb->layerParams = DirectX::XMFLOAT4(layer.opacity, hasMaskVal, 0.0f, 0.0f);
-                lb->transformParams = DirectX::XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f); // default scale=1, rot=0, non-floating
-                lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, 0.0f);
+                lb->transformParams = DirectX::XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
+                // w flags: +1 alphaRewrite, +2 firstLayer (bottom buffer init)
+                float flags = (layer.alphaRewrite ? 1.f : 0.f) + (isFirst ? 2.f : 0.f);
+                lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
                 context->Unmap(m_LayerConstantBuffer, 0);
             }
             context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -1768,7 +1974,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             context->DrawIndexed(6, 0, 0);
             ID3D11ShaderResourceView* nullSRV2 = nullptr;
             context->PSSetShaderResources(2, 1, &nullSRV2);
-
+            firstVisible = false;
 
             if (m_IsMovingPixels && i == m_StartActiveLayerIdx && m_FloatingSRV) {
                 float uOff = (float)m_FloatingOffsetX / (float)m_Width;
@@ -1793,13 +1999,17 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 float centerX = cx_box / (float)m_Width;
                 float centerY = cy_box / (float)m_Height;
 
+                ID3D11BlendState* fBlend = layer.alphaRewrite
+                    ? m_LayerBlendState
+                    : (m_LayerBlendStateAlphaPreserve ? m_LayerBlendStateAlphaPreserve : m_LayerBlendState);
+                context->OMSetBlendState(fBlend, nullptr, 0xFFFFFFFF);
                 D3D11_MAPPED_SUBRESOURCE fMapped;
                 if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &fMapped))) {
                     LayerBuffer* lb = (LayerBuffer*)fMapped.pData;
                     float hasFMaskVal = m_FloatingMaskSRV ? 1.0f : 0.0f;
                     lb->layerParams = DirectX::XMFLOAT4(layer.opacity, hasFMaskVal, uOff, vOff);
                     lb->transformParams = DirectX::XMFLOAT4(m_FloatingScaleX, m_FloatingScaleY, m_FloatingRotation, 1.0f); // isFloating = 1.0f
-                    lb->centerParams = DirectX::XMFLOAT4(centerX, centerY, 0.0f, 0.0f);
+                    lb->centerParams = DirectX::XMFLOAT4(centerX, centerY, 0.0f, layer.alphaRewrite ? 1.0f : 0.0f);
                     context->Unmap(m_LayerConstantBuffer, 0);
                 }
                 context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -2160,6 +2370,8 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
     imported.name    = filepath.substr(filepath.find_last_of("\\/") + 1);
     imported.visible = true;
     imported.opacity = 1.0f;
+    // Base document open → Alpha Rewrite ON; extra imports (decals) → OFF (A = RGB morph only).
+    imported.alphaRewrite = isFirst;
     if (loadedTileCache) {
         if (loadedTileCache->GetWidth() == m_Width && loadedTileCache->GetHeight() == m_Height) {
             imported.tileCache = std::move(loadedTileCache);
@@ -2345,58 +2557,34 @@ void Canvas::SampleCompositePixel(int x, int y, float outColor[4]) const {
     const bool floatSample = (m_DocumentBitDepth != DocumentBitDepth::U8) ||
                              (m_CanvasFormat != CanvasPixelFormat::RGBA8);
 
-    if (floatSample) {
-        float dp[4] = { 0.f, 0.f, 0.f, 0.f };
+    auto sampleStack = [&](float outF[4]) {
+        outF[0] = outF[1] = outF[2] = outF[3] = 0.f;
+        bool first = true;
         for (const Layer* layer : vis) {
             const TileCache* cache = layer->tileCache.get();
             if (!cache) continue;
             const bool useMask = layer->hasMask && layer->mask.size() == (size_t)m_Width * m_Height;
-            const float opacity = layer->opacity;
-            const BlendMode mode = layer->blendMode;
-            float rgba[4] = { 0.f, 0.f, 0.f, 0.f };
+            float rgba[4] = {};
             cache->GetPixelF(x, y, rgba);
-            float sa = rgba[3] * opacity;
-            if (useMask) sa *= layer->mask[(size_t)y * m_Width + x] / 255.f;
+            float op = layer->opacity;
+            float mask = 1.f;
+            if (useMask) mask = layer->mask[(size_t)y * m_Width + x] / 255.f;
+            if (first) {
+                outF[0] = rgba[0];
+                outF[1] = rgba[1];
+                outF[2] = rgba[2];
+                outF[3] = rgba[3] * op * mask;
+                first = false;
+                continue;
+            }
+            float sa = rgba[3] * op * mask;
             if (sa <= 0.f) continue;
-            BlendLayerPixelF(dp, rgba[0], rgba[1], rgba[2], sa, mode);
+            BlendLayerPixelF(outF, rgba[0], rgba[1], rgba[2], sa, layer->blendMode, layer->alphaRewrite);
         }
-        outColor[0] = dp[0];
-        outColor[1] = dp[1];
-        outColor[2] = dp[2];
-        outColor[3] = dp[3];
-        return;
-    }
+    };
 
-    uint8_t dp[4] = { 0, 0, 0, 0 };
-
-    for (const Layer* layer : vis) {
-        const TileCache* cache = layer->tileCache.get();
-        if (!cache) continue;
-
-        const bool useMask = layer->hasMask && layer->mask.size() == (size_t)m_Width * m_Height;
-        const float opacity = layer->opacity;
-        const BlendMode mode = layer->blendMode;
-
-        float rgba[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        cache->GetPixelF(x, y, rgba);
-
-        float sr = rgba[0];
-        float sg = rgba[1];
-        float sb = rgba[2];
-        float sa = rgba[3] * opacity;
-
-        if (useMask) {
-            sa *= layer->mask[(size_t)y * m_Width + x] / 255.f;
-        }
-
-        if (sa <= 0.f) continue;
-        BlendLayerPixelU8(dp, sr, sg, sb, sa, mode);
-    }
-
-    outColor[0] = dp[0] / 255.f;
-    outColor[1] = dp[1] / 255.f;
-    outColor[2] = dp[2] / 255.f;
-    outColor[3] = dp[3] / 255.f;
+    sampleStack(outColor);
+    (void)floatSample;
 }
 
 void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height) {
@@ -2574,6 +2762,7 @@ static json LayerToJson(const Layer& layer) {
     j["visible"] = layer.visible;
     j["opacity"] = layer.opacity;
     j["blend_mode"] = BlendModeToString(layer.blendMode);
+    j["alpha_rewrite"] = layer.alphaRewrite;
     j["is_group"] = layer.isGroup;
     j["parent_group_id"] = layer.parentGroupId;
     j["group_expanded"] = layer.groupExpanded;
@@ -2608,6 +2797,7 @@ static void LayerFromJson(Layer& layer, const json& j) {
             layer.blendMode = static_cast<BlendMode>(j["blend_mode"].get<int>());
         }
     }
+    if (j.contains("alpha_rewrite")) layer.alphaRewrite = j["alpha_rewrite"].get<bool>();
 
     if (j.contains("is_group")) layer.isGroup = j["is_group"].get<bool>();
     if (j.contains("parent_group_id")) layer.parentGroupId = j["parent_group_id"].get<int>();
@@ -2824,6 +3014,8 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
             if (layer.srv) layer.srv->Release();
             if (layer.maskTexture) layer.maskTexture->Release();
             if (layer.maskSRV) layer.maskSRV->Release();
+            if (layer.thumbSRV) { layer.thumbSRV->Release(); layer.thumbSRV = nullptr; }
+            if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
         }
         m_Layers.clear();
 
@@ -5735,11 +5927,15 @@ void Canvas::SetDocumentBitDepth(DocumentBitDepth d) {
         // Drop GPU textures — recreated on next compose with new DXGI format.
         if (layer.texture) { layer.texture->Release(); layer.texture = nullptr; }
         if (layer.srv)     { layer.srv->Release();     layer.srv = nullptr; }
+        if (layer.thumbSRV) { layer.thumbSRV->Release(); layer.thumbSRV = nullptr; }
+        if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
+        layer.thumbDirty = true;
     }
 
     m_DocumentBitDepth = d;
     m_CanvasFormat = target;
     m_CompositeDirty = true;
+    m_ChannelPreviewDirty = true;
 
     // Composite RT is always U8 proxy; no rebuild required for bit depth alone.
     Logger::Get().Info(std::string("DocumentBitDepth ") +
@@ -5807,7 +6003,31 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, IccPreset preset) {
 }
 
 // ---------------------------------------------------------------------------
-// Channel preview thumbs (proxy composite → grayscale R/G/B/A)
+// Channel solo setters — must rebuild composite (A-off forces opaque RGB compose)
+// ---------------------------------------------------------------------------
+void Canvas::SetChannelR(bool r) {
+    if (m_ChannelR == r) return;
+    m_ChannelR = r;
+    MarkCompositeDirty();
+}
+void Canvas::SetChannelG(bool g) {
+    if (m_ChannelG == g) return;
+    m_ChannelG = g;
+    MarkCompositeDirty();
+}
+void Canvas::SetChannelB(bool b) {
+    if (m_ChannelB == b) return;
+    m_ChannelB = b;
+    MarkCompositeDirty();
+}
+void Canvas::SetChannelA(bool a) {
+    if (m_ChannelA == a) return;
+    m_ChannelA = a;
+    MarkCompositeDirty(); // PSLayerBlend forces A=1 when off → RGB of A=0 buffers appears
+}
+
+// ---------------------------------------------------------------------------
+// Channel preview thumbs — sample *layers* (buffer semantics: RGB visible if A=0)
 // ---------------------------------------------------------------------------
 void Canvas::ReleaseChannelPreviewResources() {
     for (int i = 0; i < 4; ++i) {
@@ -5819,61 +6039,68 @@ void Canvas::ReleaseChannelPreviewResources() {
 }
 
 void Canvas::RebuildChannelPreviews(ID3D11Device* device) {
-    if (!device || m_CompositeWidth <= 0 || m_CompositeHeight <= 0 || !m_CompositeTexture)
+    if (!device || m_Width <= 0 || m_Height <= 0)
         return;
 
-    // Read back composite proxy (small — not full doc)
-    D3D11_TEXTURE2D_DESC desc = {};
-    m_CompositeTexture->GetDesc(&desc);
+    // Proxy size (same as composite) so thumbs stay cheap
+    int w = m_CompositeWidth > 0 ? m_CompositeWidth : 256;
+    int h = m_CompositeHeight > 0 ? m_CompositeHeight : 256;
+    if (w <= 0) w = 256;
+    if (h <= 0) h = 256;
+    w = std::min(w, 512);
+    h = std::min(h, 512);
 
-    D3D11_TEXTURE2D_DESC stagingDesc = desc;
-    stagingDesc.Usage = D3D11_USAGE_STAGING;
-    stagingDesc.BindFlags = 0;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    stagingDesc.MiscFlags = 0;
-
-    ID3D11Texture2D* staging = nullptr;
-    if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)) || !staging)
-        return;
-
-    ID3D11DeviceContext* ctx = nullptr;
-    device->GetImmediateContext(&ctx);
-    if (!ctx) { staging->Release(); return; }
-    ctx->CopyResource(staging, m_CompositeTexture);
-
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
-        staging->Release();
-        ctx->Release();
-        return;
+    std::vector<const Layer*> vis;
+    vis.reserve(m_Layers.size());
+    for (const auto& layer : m_Layers) {
+        if (LayerEffectivelyVisible(m_Layers, layer)) vis.push_back(&layer);
     }
 
-    const int w = (int)desc.Width;
-    const int h = (int)desc.Height;
     std::vector<uint8_t> ch[4];
     for (int c = 0; c < 4; ++c) ch[c].assign((size_t)w * h, 0);
 
-    // Assume RGBA8 composite
+    // Same rules as viewport/export: first layer inits full RGBA (RGB if A=0);
+    // later layers use A as strength; Alpha Rewrite OFF keeps A.
     for (int y = 0; y < h; ++y) {
-        const uint8_t* row = static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch;
+        const int srcY = (int)((int64_t)y * m_Height / h);
         for (int x = 0; x < w; ++x) {
+            const int srcX = (int)((int64_t)x * m_Width / w);
+            float acc[4] = { 0.f, 0.f, 0.f, 0.f };
+            bool first = true;
+            for (const Layer* layer : vis) {
+                const TileCache* cache = LayerExportCache(*layer);
+                if (!cache) continue;
+                float rgba[4] = {};
+                cache->GetPixelF(srcX, srcY, rgba);
+                float op = std::clamp(layer->opacity, 0.f, 1.f);
+                float mask = 1.f;
+                if (layer->hasMask && layer->mask.size() == (size_t)m_Width * m_Height)
+                    mask = layer->mask[(size_t)srcY * m_Width + srcX] / 255.f;
+                if (first) {
+                    acc[0] = rgba[0];
+                    acc[1] = rgba[1];
+                    acc[2] = rgba[2];
+                    acc[3] = rgba[3] * op * mask;
+                    first = false;
+                    continue;
+                }
+                float sa = op * rgba[3] * mask;
+                if (sa <= 0.f) continue;
+                BlendLayerPixelF(acc, rgba[0], rgba[1], rgba[2], sa, layer->blendMode, layer->alphaRewrite);
+            }
+            float accR = acc[0], accG = acc[1], accB = acc[2], accA = acc[3];
             size_t di = (size_t)y * w + x;
-            ch[0][di] = row[x * 4 + 0];
-            ch[1][di] = row[x * 4 + 1];
-            ch[2][di] = row[x * 4 + 2];
-            ch[3][di] = row[x * 4 + 3];
+            ch[0][di] = HalfFloat::FloatToU8(accR);
+            ch[1][di] = HalfFloat::FloatToU8(accG);
+            ch[2][di] = HalfFloat::FloatToU8(accB);
+            ch[3][di] = HalfFloat::FloatToU8(accA);
         }
     }
-    ctx->Unmap(staging, 0);
-    staging->Release();
-    ctx->Release();
 
     ReleaseChannelPreviewResources();
     m_ChannelPreviewW = w;
     m_ChannelPreviewH = h;
 
-    // RGBA8 grayscale (R=G=B=channel, A=255) so ImGui/DX11 samples as visible gray,
-    // not R8 which returns (r,0,0,1) and looks black/near-black when tinted.
     for (int c = 0; c < 4; ++c) {
         std::vector<uint8_t> rgba((size_t)w * h * 4);
         for (int i = 0; i < w * h; ++i) {
@@ -5881,7 +6108,7 @@ void Canvas::RebuildChannelPreviews(ID3D11Device* device) {
             rgba[(size_t)i * 4 + 0] = v;
             rgba[(size_t)i * 4 + 1] = v;
             rgba[(size_t)i * 4 + 2] = v;
-            rgba[(size_t)i * 4 + 3] = 255;
+            rgba[(size_t)i * 4 + 3] = 255; // ImGui must not hide by alpha
         }
 
         D3D11_TEXTURE2D_DESC td = {};
@@ -5908,12 +6135,65 @@ void Canvas::RebuildChannelPreviews(ID3D11Device* device) {
 ID3D11ShaderResourceView* Canvas::GetChannelPreviewSRV(ID3D11Device* device, ChannelPreview ch) {
     if (!device) return nullptr;
     if (m_ChannelPreviewDirty || !m_ChannelPreviewSRV[(int)ch] ||
-        m_ChannelPreviewW != m_CompositeWidth || m_ChannelPreviewH != m_CompositeHeight) {
+        m_ChannelPreviewW <= 0 || m_ChannelPreviewH <= 0) {
         RebuildChannelPreviews(device);
     }
     int idx = (int)ch;
     if (idx < 0 || idx > 3) return nullptr;
     return m_ChannelPreviewSRV[idx];
+}
+
+ID3D11ShaderResourceView* Canvas::GetLayerThumbSRV(ID3D11Device* device, int layerIdx, int size) {
+    if (!device || layerIdx < 0 || layerIdx >= (int)m_Layers.size() || size <= 0)
+        return nullptr;
+    Layer& layer = m_Layers[layerIdx];
+    if (layer.isGroup || !layer.tileCache)
+        return nullptr;
+
+    if (!layer.thumbDirty && layer.thumbSRV && layer.thumbSize == size)
+        return layer.thumbSRV;
+
+    if (layer.thumbSRV) { layer.thumbSRV->Release(); layer.thumbSRV = nullptr; }
+    if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
+
+    const TileCache* cache = LayerExportCache(layer);
+    if (!cache) return nullptr;
+
+    std::vector<uint8_t> rgba((size_t)size * size * 4, 0);
+    for (int y = 0; y < size; ++y) {
+        const int sy = (m_Height > 0) ? (int)((int64_t)y * m_Height / size) : 0;
+        for (int x = 0; x < size; ++x) {
+            const int sx = (m_Width > 0) ? (int)((int64_t)x * m_Width / size) : 0;
+            float f[4] = {};
+            cache->GetPixelF(sx, sy, f);
+            size_t di = ((size_t)y * size + x) * 4;
+            // Always force A=255 so ImGui ImageButton never hides A=0 buffer RGB.
+            // When channel A is on, viewport still uses real alpha; list is diagnostic.
+            rgba[di + 0] = HalfFloat::FloatToU8(f[0]);
+            rgba[di + 1] = HalfFloat::FloatToU8(f[1]);
+            rgba[di + 2] = HalfFloat::FloatToU8(f[2]);
+            rgba[di + 3] = 255;
+        }
+    }
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = size;
+    td.Height = size;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init = {};
+    init.pSysMem = rgba.data();
+    init.SysMemPitch = size * 4;
+    if (FAILED(device->CreateTexture2D(&td, &init, &layer.thumbTex)) || !layer.thumbTex)
+        return nullptr;
+    device->CreateShaderResourceView(layer.thumbTex, nullptr, &layer.thumbSRV);
+    layer.thumbSize = size;
+    layer.thumbDirty = false;
+    return layer.thumbSRV;
 }
 
 // ---------------------------------------------------------------------------

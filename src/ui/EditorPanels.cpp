@@ -2200,6 +2200,20 @@ namespace UI {
                     if (hasFxTop) ImGui::PopStyleColor();
                     if (ImGui::IsItemHovered())
                         Ui::Tooltip(al.isGroup ? "Groups have no pixel FX" : "Layer Effects…");
+
+                    if (!al.isGroup) {
+                        bool ar = al.alphaRewrite;
+                        if (ImGui::Checkbox("Alpha Rewrite##ar_top", &ar)) {
+                            al.alphaRewrite = ar;
+                            canvas.MarkCompositeDirty(); // recompose + paint path
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            Ui::Tooltip(
+                                "ON: this layer may overwrite alpha when painted / composited.\n"
+                                "OFF: layer A is RGB morph strength only — underlay A never changes\n"
+                                "(default for imported decals). Paint keeps layer A non-destructive.");
+                        }
+                    }
                     ImGui::PopID();
                     ImGui::Separator();
                 }
@@ -2276,9 +2290,14 @@ namespace UI {
                     ImGui::SameLine(0, rowPad);
                 }
 
-                // Thumb (fixed size)
+                // Thumb (fixed size) — use opaque RGB thumb so A=0 buffers stay visible
                 alignMid(thumb);
-                if (!layer.isGroup && layer.srv) {
+                ID3D11ShaderResourceView* thumbSrv = nullptr;
+                if (!layer.isGroup)
+                    thumbSrv = canvas.GetLayerThumbSRV(device, (int)i, (int)thumb);
+                if (!thumbSrv && !layer.isGroup)
+                    thumbSrv = layer.srv;
+                if (!layer.isGroup && thumbSrv) {
                     bool isActiveContent = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerContent);
                     if (isActiveContent) {
                         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
@@ -2287,7 +2306,7 @@ namespace UI {
                         ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
                         ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
                     }
-                    if (ImGui::ImageButton("##thumb", (ImTextureID)layer.srv, ImVec2(thumb, thumb), ImVec2(0,0), ImVec2(1,1))) {
+                    if (ImGui::ImageButton("##thumb", (ImTextureID)thumbSrv, ImVec2(thumb, thumb), ImVec2(0,0), ImVec2(1,1))) {
                         ImGuiIO& io = ImGui::GetIO();
                         if (io.KeyAlt) {
                             canvas.SelectOpaquePixels(i);
@@ -2517,6 +2536,20 @@ namespace UI {
                             }
                         }
                         ImGui::Separator();
+                        if (!layer.isGroup && i > 0 && ImGui::MenuItem("Merge Down")) {
+                            int r = canvas.MergeLayerDown(device, i);
+                            if (r >= 0) setSoleSelection(r);
+                        }
+                        if (!layer.isGroup) {
+                            bool ar = layer.alphaRewrite;
+                            if (ImGui::MenuItem("Alpha Rewrite", nullptr, ar)) {
+                                layer.alphaRewrite = !ar;
+                                canvas.MarkCompositeDirty();
+                            }
+                            if (ImGui::IsItemHovered()) {
+                                Ui::Tooltip("OFF: A = RGB strength only; underlay/layer A preserved.");
+                            }
+                        }
                         if (ImGui::MenuItem("Duplicate", "Ctrl+J")) {
                             canvas.DuplicateLayer(device, i);
                             setSoleSelection(canvas.GetActiveLayerIndex());
@@ -2536,7 +2569,7 @@ namespace UI {
             }
             ImGui::EndChild();
 
-            // Bottom action bar (fixed icons) — Add / Group / Duplicate / Delete
+            // Bottom action bar — Add / Group / Duplicate / Merge / Delete
             {
                 ImGui::Separator();
                 const float iconSz = 32.f;
@@ -2554,6 +2587,15 @@ namespace UI {
                     canvas.DuplicateLayers(device, t);
                     setSoleSelection(canvas.GetActiveLayerIndex());
                 };
+                auto doMerge = [&]() {
+                    auto t = targetsForAction();
+                    if (t.empty()) return;
+                    int r = canvas.MergeLayers(device, t);
+                    if (r >= 0) {
+                        sel.clear();
+                        setSoleSelection(r);
+                    }
+                };
                 auto doDel = [&]() {
                     auto t = targetsForAction();
                     if (t.empty()) return;
@@ -2564,7 +2606,7 @@ namespace UI {
                 };
 
                 float gap = 8.f;
-                float total = iconSz * 4 + gap * 3;
+                float total = iconSz * 5 + gap * 4;
                 float startX = std::max(0.f, (ImGui::GetContentRegionAvail().x - total) * 0.5f);
                 ImGui::SetCursorPosX(ImGui::GetCursorPosX() + startX);
 
@@ -2576,6 +2618,12 @@ namespace UI {
                 ImGui::SameLine(0, gap);
                 if (Ui::IconButton("##dup", "layer_duplicate", ImVec2(iconSz, iconSz), "Duplicate (Ctrl+J)").clicked)
                     doDup();
+                ImGui::SameLine(0, gap);
+                // Merge uses text button if no dedicated icon
+                if (ImGui::Button("Mrg##merge", ImVec2(iconSz, iconSz)))
+                    doMerge();
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("Merge Down / Merge selected (blend modes applied)");
                 ImGui::SameLine(0, gap);
                 if (Ui::IconButton("##del", "layer_delete", ImVec2(iconSz, iconSz), "Delete selection / active").clicked)
                     doDel();

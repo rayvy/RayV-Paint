@@ -21,9 +21,12 @@ cbuffer CanvasBuffer : register(b0)
 
 cbuffer LayerBuffer : register(b1)
 {
-    float4 u_LayerParams;     // x: opacity, y: hasMask, zw: translation (uOff, vOff)
+    // x: opacity, y: hasMask, z: firstLayer (1=init buffer, keep RGB if A=0), w: uOff when floating else 0
+    // When isFloating, zw = translation; firstLayer is only used when not floating.
+    float4 u_LayerParams;
     float4 u_TransformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
-    float4 u_CenterParams;    // x: centerX, y: centerY, zw: unused
+    // x,y: center; z: blendMode; w: alphaRewrite (1=overwrite A, 0=A is RGB strength)
+    float4 u_CenterParams;
 };
 
 Texture2D g_Texture : register(t0);
@@ -139,10 +142,12 @@ float4 PSMain(PS_INPUT input) : SV_TARGET
         float3 rgb = float3(r ? texCol.r : 0.0f, g ? texCol.g : 0.0f, b ? texCol.b : 0.0f);
         if (a)
         {
-            finalColor = lerp(checkColor, rgb, texCol.a);
+            // Alpha channel ON: real transparency over checker (A=0 → checker only).
+            finalColor = lerp(checkColor, rgb, saturate(texCol.a));
         }
         else
         {
+            // Alpha channel OFF: pure RGB buffer view (ignore coverage).
             finalColor = rgb;
         }
     }
@@ -208,23 +213,31 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
     }
 
     float4 col = g_Texture.Sample(g_Sampler, uv);
-    
-    // If master Alpha channel is disabled, treat the layer as fully opaque
-    if (u_ChannelMasksAndFlags.w < 0.5f)
-    {
-        col.a = 1.0f;
-    }
-    
-    col.a *= u_LayerParams.x; // Multiply alpha by opacity
 
-    // If layer mask is enabled, sample it and modulate alpha
+    // Pixel A * layer opacity [* mask] = coverage / morph strength for RGB.
+    // Alpha Rewrite OFF: blend state keeps dest A; col.a is strength only.
+    // firstLayer (centerParams.w >= 2): straight RGBA init — RGB kept if A=0.
+    float opacity = u_LayerParams.x;
+    float flags = u_CenterParams.w;
+    bool firstLayer = (flags >= 1.5f);
+
     if (u_LayerParams.y > 0.5f)
     {
         float maskVal = g_LayerMask.Sample(g_Sampler, uv).r;
         col.a *= maskVal;
     }
 
-    // Blend mode (u_CenterParams.z encodes blend mode as float)
+    if (firstLayer)
+    {
+        // Bottom layer: write RGB as-is; A = pixelA * opacity (may be 0).
+        col.a *= opacity;
+        // ONE/ZERO blend → composite stores full buffer (RGB + A).
+        return col;
+    }
+
+    col.a *= opacity; // coverage / strength for subsequent layers
+
+    // Blend mode (u_CenterParams.z)
     uint blendMode = (uint)(u_CenterParams.z + 0.5f);
     if (blendMode > 0u)
     {

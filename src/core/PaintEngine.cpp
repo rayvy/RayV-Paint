@@ -190,13 +190,23 @@ static void StampAt(TileCache& cache, float px, float py,
                         if (brush.writeG) out[1] *= factor;
                         if (brush.writeB) out[2] *= factor;
                         if (brush.writeA) out[3] *= factor;
+                    } else if (!brush.writeA) {
+                        // Alpha Rewrite OFF: stamp A is morph strength for RGB only.
+                        // Destination alpha is never overwritten (decal / pack-friendly).
+                        const float t = stampAlpha;
+                        const float inv = 1.0f - t;
+                        if (brush.writeR) out[0] = brush.color[0] * t + dest[0] * inv;
+                        if (brush.writeG) out[1] = brush.color[1] * t + dest[1] * inv;
+                        if (brush.writeB) out[2] = brush.color[2] * t + dest[2] * inv;
+                        // out[3] stays dest[3]
                     } else {
+                        // Alpha Rewrite ON: classic src-over including alpha write.
                         float outA = stampAlpha + dest[3] * (1.0f - stampAlpha);
                         if (outA > 0.0f) {
                             if (brush.writeR) out[0] = (brush.color[0] * stampAlpha + dest[0] * dest[3] * (1.0f - stampAlpha)) / outA;
                             if (brush.writeG) out[1] = (brush.color[1] * stampAlpha + dest[1] * dest[3] * (1.0f - stampAlpha)) / outA;
                             if (brush.writeB) out[2] = (brush.color[2] * stampAlpha + dest[2] * dest[3] * (1.0f - stampAlpha)) / outA;
-                            if (brush.writeA) out[3] = outA;
+                            out[3] = outA;
                         }
                     }
 
