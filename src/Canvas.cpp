@@ -11,6 +11,7 @@
 #include <opencv2/imgproc.hpp>
 #include "core/ConfigManager.h"
 #include "core/TexconvHelper.h"
+#include "modio/ModIniParser.h"
 #include <chrono>
 #include <sstream>
 #include <d3dcompiler.h>
@@ -3066,6 +3067,15 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
             metadata["brush_tip_custom_pixels"] = m_CustomBrushTipPixels;
         }
 
+        // Advanced Mod Mode — optional paths (3D preview sources). Safe to omit on other types.
+        if (m_ProjectType == ProjectType::AdvancedModMode ||
+            !m_ModIniPath.empty() || !m_ModDumpPath.empty()) {
+            json mod;
+            mod["ini_path"] = m_ModIniPath;
+            mod["dump_path"] = m_ModDumpPath;
+            metadata["mod"] = mod;
+        }
+
         json layersArray = json::array();
         for (const auto& layer : m_Layers) {
             layersArray.push_back(LayerToJson(layer));
@@ -3215,6 +3225,26 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
             m_ExportIccPreset = IccPresetFromName(m_ExportPngColorSpace);
         }
         if (metadata.contains("brush_tip_id")) m_BrushTipId = metadata["brush_tip_id"].get<std::string>();
+
+        // Mod preview sources (soft — never fail the load)
+        m_ModIniPath.clear();
+        m_ModDumpPath.clear();
+        m_ModScene = modio::ModScene{};
+        m_ModParseSummary.clear();
+        if (metadata.contains("mod") && metadata["mod"].is_object()) {
+            const auto& mod = metadata["mod"];
+            try {
+                if (mod.contains("ini_path")) m_ModIniPath = mod["ini_path"].get<std::string>();
+                if (mod.contains("dump_path")) m_ModDumpPath = mod["dump_path"].get<std::string>();
+            } catch (...) {
+                Logger::Get().Warn("RAYP mod block present but unreadable — ignoring");
+            }
+            if (m_ProjectType == ProjectType::AdvancedModMode && !m_ModIniPath.empty()) {
+                // Best-effort reparse; paint continues even if ini missing
+                ApplyModIniParse();
+            }
+        }
+
         if (metadata.contains("brush_tip_custom_size") && metadata.contains("brush_tip_custom_pixels")) {
             m_CustomBrushTipSize = metadata["brush_tip_custom_size"].get<int>();
             m_CustomBrushTipPixels = metadata["brush_tip_custom_pixels"].get<std::vector<uint8_t>>();
@@ -3599,6 +3629,39 @@ void Canvas::FlipCanvasVertical(ID3D11Device* device) {
     }
     m_IsDocumentModified = true;
     Logger::Get().Info("Flipped canvas vertically");
+}
+
+bool Canvas::ApplyModIniParse() {
+    m_ModParseSummary.clear();
+    m_ModScene = modio::ModScene{};
+
+    if (m_ModIniPath.empty()) {
+        m_ModParseSummary = "No INI path set.";
+        return false;
+    }
+
+    try {
+        m_ModScene = modio::ModIniParser::ParseFile(m_ModIniPath);
+        m_ModParseSummary = modio::FormatSceneSummary(m_ModScene);
+        if (!m_ModScene.ok) {
+            Logger::Get().Warn("Mod INI parse failed: " + m_ModScene.error);
+            return false;
+        }
+        Logger::Get().Info("Mod INI applied:\n" + m_ModParseSummary);
+        return true;
+    } catch (const std::exception& e) {
+        m_ModScene.ok = false;
+        m_ModScene.error = e.what();
+        m_ModParseSummary = std::string("Exception parsing INI: ") + e.what();
+        Logger::Get().Error(m_ModParseSummary);
+        return false;
+    } catch (...) {
+        m_ModScene.ok = false;
+        m_ModScene.error = "Unknown exception";
+        m_ModParseSummary = "Unknown exception while parsing INI";
+        Logger::Get().Error(m_ModParseSummary);
+        return false;
+    }
 }
 
 bool Canvas::SaveProjectAuto() {

@@ -11,6 +11,7 @@
 #include "core/PaintEngine.h"
 #include "core/DdsHelper.h"
 #include "core/UndoRedoManager.h"
+#include "modio/ModTypes.h"
 
 // ---- Blend Modes ----
 enum class BlendMode : uint8_t {
@@ -427,6 +428,20 @@ public:
     void SetProjectType(ProjectType type) { m_ProjectType = type; }
     bool SaveProjectAuto();
 
+    // ---- Advanced Mod Mode (optional 3D preview sources) ----
+    // Paths are stored in .rayp; broken paths never crash — paint still works.
+    const std::string& GetModIniPath() const { return m_ModIniPath; }
+    void SetModIniPath(const std::string& p) { m_ModIniPath = p; m_IsDocumentModified = true; }
+    const std::string& GetModDumpPath() const { return m_ModDumpPath; }
+    void SetModDumpPath(const std::string& p) { m_ModDumpPath = p; m_IsDocumentModified = true; }
+
+    // Re-parse INI → updates GetModScene(). Soft-fail (returns false + fills warnings).
+    bool ApplyModIniParse();
+    const modio::ModScene& GetModScene() const { return m_ModScene; }
+    modio::ModScene& GetModScene() { return m_ModScene; }
+    const std::string& GetModParseSummary() const { return m_ModParseSummary; }
+    bool IsModParseOk() const { return m_ModScene.ok; }
+
     // Native RAYP Format
     bool SaveCanvasRayp(const std::string& filepath);
     void SaveCanvasRaypAsync(const std::string& filepath, std::function<void(bool)> callback = nullptr);
@@ -594,6 +609,12 @@ private:
     bool m_ViewportFlipV = false;
     ProjectType m_ProjectType = ProjectType::Advanced;
     DocumentBitDepth m_DocumentBitDepth = DocumentBitDepth::U8;
+
+    // Advanced Mod Mode — optional XXMI/3DMigoto binding (3D preview later)
+    std::string m_ModIniPath;
+    std::string m_ModDumpPath;
+    modio::ModScene m_ModScene;
+    std::string m_ModParseSummary;
 
     // Selection State
     bool m_HasSelection = false;

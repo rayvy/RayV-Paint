@@ -1,7 +1,11 @@
 # Advanced Mod Mode · ProjectManager · Cross-Texture · 3D Preview
 
-**Date:** 2026-07-10 (rev 3 — shell implementation started)  
-**Status:** Plan −1 partially **implemented** (ProjectManager + single instance + header tabs). Plans 0–2 still pending.  
+**Date:** 2026-07-11 (rev 4)  
+**Status:**
+- Plan −1 shell: **done** (ProjectManager + single instance + header tabs)
+- Plan 1.A meta + 1.D/E INI parser + binds: **done** (`modio`, Belle.ini smoke PASS)
+- Plan 1 remaining: Document multi-map / ITextureProvider
+- Plan 2: 3D viewport not started  
 **References:**
 - `research/xxmi_research.md` — INI / `.buf` / `.ib` geometry
 - `research/zzz-materials/` — ZZZ character pipeline + decompiled HLSL

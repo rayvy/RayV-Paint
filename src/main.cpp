@@ -497,6 +497,7 @@ int main(int argc, char* argv[]) {
     std::string scriptPath = "";
     std::string configPath = "";
     std::string startupImagePath = "";
+    std::string parseModIniPath = "";
     int processExitCode = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -519,6 +520,12 @@ int main(int argc, char* argv[]) {
             allowMultiInstance = true;
         } else if (arg == "--console") {
             forceConsole = true;
+        } else if (arg == "--parse-mod-ini" && i + 1 < argc) {
+            parseModIniPath = argv[++i];
+            headlessMode = true;
+            testMode = true;
+            forceConsole = true;
+            allowMultiInstance = true;
         } else if (arg == "--version") {
             SetupConsole(true);
             std::cout << "RayV Paint - Version " << kRayVPaintVersion << std::endl;
@@ -706,6 +713,28 @@ int main(int argc, char* argv[]) {
             }
         } else {
             OpenPathAsNewProject(startupImagePath);
+        }
+    }
+
+    // Smoke: parse XXMI/3DMigoto character ini (no mesh load yet)
+    if (!parseModIniPath.empty()) {
+        ActiveCanvas().SetProjectType(Canvas::ProjectType::AdvancedModMode);
+        ActiveCanvas().SetModIniPath(parseModIniPath);
+        bool ok = ActiveCanvas().ApplyModIniParse();
+        const std::string summary = ActiveCanvas().GetModParseSummary();
+        Logger::Get().Info("---- ModIni parse summary ----\n" + summary);
+        std::cout << summary << std::endl;
+        if (!ok) {
+            Logger::Get().Error("ModIni parse returned failure");
+            processExitCode = 3;
+        } else {
+            const auto& sc = ActiveCanvas().GetModScene();
+            if (sc.components.empty() && sc.PartCount() == 0) {
+                Logger::Get().Error("ModIni parse OK but empty scene");
+                processExitCode = 4;
+            } else {
+                Logger::Get().Info("ModIni parse smoke PASS");
+            }
         }
     }
 

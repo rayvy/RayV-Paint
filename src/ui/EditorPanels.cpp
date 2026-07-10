@@ -2170,6 +2170,90 @@ namespace UI {
                 canvas.SetCurrentProjectFilePath(propProjPath);
             }
 
+            // Advanced Mod Mode — INI / dump sources (optional 3D preview foundation)
+            if (canvas.GetProjectType() == Canvas::ProjectType::AdvancedModMode) {
+                ImGui::NewLine();
+                ImGui::Separator();
+                ImGui::Text("Mod Preview Sources");
+                ImGui::TextDisabled("Optional. Paint works without them. Apply parses XXMI/3DMigoto INI.");
+
+                char iniPath[512] = "";
+                std::strncpy(iniPath, canvas.GetModIniPath().c_str(), sizeof(iniPath) - 1);
+                if (Ui::PathField("##mod_ini", "INI Path", iniPath, sizeof(iniPath),
+                        ShowOpenFileWin32, "INI Files (*.ini)\0*.ini\0All Files (*.*)\0*.*\0")) {
+                    canvas.SetModIniPath(iniPath);
+                }
+
+                char dumpPath[512] = "";
+                std::strncpy(dumpPath, canvas.GetModDumpPath().c_str(), sizeof(dumpPath) - 1);
+                // Folder: reuse open-file dialog for now (user can paste folder path)
+                if (Ui::PathField("##mod_dump", "Dump Path", dumpPath, sizeof(dumpPath),
+                        ShowOpenFileWin32, "All Files (*.*)\0*.*\0")) {
+                    canvas.SetModDumpPath(dumpPath);
+                }
+                ImGui::TextDisabled("Dump folder: hash.json + frame analysis (names). Apply uses INI first.");
+
+                if (ImGui::Button("Apply INI##mod_apply", ImVec2(140, 0))) {
+                    canvas.ApplyModIniParse();
+                }
+                ImGui::SameLine();
+                if (canvas.IsModParseOk()) {
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.f), "OK");
+                } else if (!canvas.GetModParseSummary().empty()) {
+                    ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.3f, 1.f), "Issues");
+                } else {
+                    ImGui::TextDisabled("Not parsed");
+                }
+
+                const auto& scene = canvas.GetModScene();
+                if (scene.ok || !scene.components.empty()) {
+                    ImGui::Text("Components: %d  Parts: %d  Draws: %d  Binds: %d",
+                        (int)scene.components.size(), scene.PartCount(),
+                        scene.DrawCount(), scene.TextureBindCount());
+                    if (ImGui::TreeNode("Component tree##mod_tree")) {
+                        for (const auto& c : scene.components) {
+                            if (ImGui::TreeNode(c.name.c_str())) {
+                                ImGui::TextDisabled("Position: %s  stride=%d",
+                                    c.positionResource.c_str(), c.positionStride);
+                                ImGui::TextDisabled("Texcoord: %s  stride=%d",
+                                    c.texcoordResource.c_str(), c.texcoordStride);
+                                for (const auto& p : c.parts) {
+                                    if (ImGui::TreeNode(p.name.c_str())) {
+                                        ImGui::Text("IB: %s%s", p.ibResource.c_str(),
+                                            p.hasGeometry ? "" : " (missing)");
+                                        ImGui::Text("Draws: %d  Textures: %d",
+                                            (int)p.draws.size(), (int)p.textures.size());
+                                        for (const auto& t : p.textures) {
+                                            ImGui::BulletText("%s → %s%s",
+                                                modio::MaterialSlotName(t.slot),
+                                                t.resourceName.c_str(),
+                                                t.exists ? "" : " [missing]");
+                                        }
+                                        for (const auto& d : p.draws) {
+                                            if (!d.commentLabel.empty())
+                                                ImGui::Text("  draw %d @%d  ; %s",
+                                                    d.indexCount, d.indexStart, d.commentLabel.c_str());
+                                            else
+                                                ImGui::Text("  draw %d @%d", d.indexCount, d.indexStart);
+                                        }
+                                        ImGui::TreePop();
+                                    }
+                                }
+                                ImGui::TreePop();
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+                    if (!scene.warnings.empty() && ImGui::TreeNode("Warnings##mod_warn")) {
+                        for (const auto& w : scene.warnings)
+                            ImGui::TextWrapped("%s", w.message.c_str());
+                        ImGui::TreePop();
+                    }
+                } else if (!canvas.GetModParseSummary().empty()) {
+                    ImGui::TextWrapped("%s", canvas.GetModParseSummary().c_str());
+                }
+            }
+
             ImGui::NewLine();
             ImGui::Separator();
             ImGui::Text("Project Output Format (DDS ↔ PNG):");

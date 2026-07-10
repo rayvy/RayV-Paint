@@ -122,6 +122,10 @@ set(SOURCES
     src/core/ProjectManager.h
     src/core/SingleInstance.cpp
     src/core/SingleInstance.h
+    src/modio/ModTypes.cpp
+    src/modio/ModTypes.h
+    src/modio/ModIniParser.cpp
+    src/modio/ModIniParser.h
     src/scripting/ScriptingEngine.cpp
     src/scripting/ScriptingEngine.h
     src/ui/EditorPanels.cpp
