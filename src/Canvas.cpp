@@ -2035,6 +2035,9 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
         if (loadedDdsFormat == DdsFormat::R8_UNORM || loadedDdsFormat == DdsFormat::R16_FLOAT || loadedDdsFormat == DdsFormat::R32_FLOAT) {
             m_ChannelR = true; m_ChannelG = false; m_ChannelB = false; m_ChannelA = false;
             Logger::Get().Info("Single-channel DDS detected. Auto-configured R-only channels.");
+        } else if (loadedDdsFormat == DdsFormat::R8G8_UNORM) {
+            m_ChannelR = true; m_ChannelG = true; m_ChannelB = false; m_ChannelA = false;
+            Logger::Get().Info("R8G8 DDS detected. Auto-configured RG channels.");
         }
     } else {
         // Non-DDS path still uses a flat decode buffer (stb). Guard huge images.
@@ -2100,10 +2103,13 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
         m_ExportPath         = filepath;
 
         if (ext == "dds") {
+            // Export format mirrors source when we can re-export natively.
+            // Depth dumps open as R8 grayscale — do NOT force "R32 Linear" project/export.
             if (loadedDdsFormat == DdsFormat::RGBA32_FLOAT) m_ExportFormat = "RGBA32_FLOAT";
             else if (loadedDdsFormat == DdsFormat::RGBA16_UNORM) m_ExportFormat = "RGBA16_UNORM";
             else if (loadedDdsFormat == DdsFormat::RGBA16_FLOAT) m_ExportFormat = "RGBA16_FLOAT";
-            else if (loadedDdsFormat == DdsFormat::R8_UNORM)     m_ExportFormat = "R8_UNORM";
+            else if (loadedDdsFormat == DdsFormat::R8_UNORM)     m_ExportFormat = "R8 (Linear, Unsigned, L8)";
+            else if (loadedDdsFormat == DdsFormat::R8G8_UNORM)   m_ExportFormat = "R8G8 (Linear, Unsigned)";
             else if (loadedDdsFormat == DdsFormat::R16_FLOAT)    m_ExportFormat = "R16_FLOAT";
             else if (loadedDdsFormat == DdsFormat::R32_FLOAT)    m_ExportFormat = "R32 (Linear, Float)";
             else m_ExportFormat = "BC7 (sRGB, DX 11+)";

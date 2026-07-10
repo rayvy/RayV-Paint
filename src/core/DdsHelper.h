@@ -8,6 +8,7 @@ enum class DdsFormat {
     RGBA16_FLOAT,
     RGBA32_FLOAT,
     R8_UNORM,
+    R8G8_UNORM, // RG only (B=0, A=1 on open); matches Paint.NET / texconv R8G8
     R16_FLOAT,
     R32_FLOAT
 };

@@ -5,11 +5,13 @@
 #include "PathUtil.h"
 #include <fstream>
 #include <cstring>
+#include <cstdio>
 #include <algorithm>
 #include <vector>
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <string>
 
 
 #define BCDEC_IMPLEMENTATION
@@ -476,12 +478,13 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
         } else if (dxgiFormat == 26) { // R11G11B10_FLOAT
             outFormat = DdsFormat::RGBA16_FLOAT;
             useFloatCache = true;
-        } else if (dxgiFormat == 20) { // D32_FLOAT_S8X24_UINT — depth dump
-            outFormat = DdsFormat::R32_FLOAT;
-            useFloatCache = true;
-        } else if (dxgiFormat == 40) { // D32_FLOAT
-            outFormat = DdsFormat::R32_FLOAT;
-            useFloatCache = true;
+        } else if (dxgiFormat == 20 || dxgiFormat == 40) {
+            // D32_FLOAT_S8X24_UINT (20) / D32_FLOAT (40) — match DirectXTex/PDN convert:
+            // Depth → RGB grayscale, Stencil → Alpha. Stay U8 (no R32 project).
+            outFormat = DdsFormat::RGBA8_UNORM;
+            useFloatCache = false;
+        } else if (dxgiFormat == 49 || dxgiFormat == 50) { // R8G8_UNORM / R8G8_SNORM
+            outFormat = DdsFormat::R8G8_UNORM;
         } else if (dxgiFormat == 24) { // R10G10B10A2_UNORM
             outFormat = DdsFormat::RGBA8_UNORM; // expand 10-bit → 8 for now; full 10-bit later
         } else if (dxgiFormat == 71 || dxgiFormat == 72) {
@@ -544,11 +547,42 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
                 return false;
             }
         } else {
-            bool isRGBA = (header.ddspf.dwFlags & 0x40) || (header.ddspf.dwFlags & 0x41);
-            if (isRGBA && header.ddspf.dwRGBBitCount == 32) {
+            // Legacy uncompressed — masks mirror DirectXTex GetDXGIFormat / DDSPF_* tables.
+            // Note: DX9 writers often encode R8G8 as A8L8 (DDPF_LUMINANCE|ALPHAPIXELS,
+            // R=0x00FF, A=0xFF00) rather than DX10 DXGI R8G8_UNORM.
+            const uint32_t pf = header.ddspf.dwFlags;
+            const uint32_t bits = header.ddspf.dwRGBBitCount;
+            const uint32_t rM = header.ddspf.dwRBitMask;
+            const uint32_t gM = header.ddspf.dwGBitMask;
+            const uint32_t bM = header.ddspf.dwBBitMask;
+            const uint32_t aM = header.ddspf.dwABitMask;
+            const bool isRGB  = (pf & 0x40) != 0;       // DDPF_RGB
+            const bool isLum  = (pf & 0x20000) != 0;    // DDPF_LUMINANCE
+            const bool isBump = (pf & 0x80000) != 0;    // DDPF_BUMPDUDV (V8U8 etc.)
+            auto isMask = [&](uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
+                return rM == r && gM == g && bM == b && aM == a;
+            };
+
+            if ((isRGB || (pf & 0x41) == 0x41) && bits == 32) {
                 outFormat = DdsFormat::RGBA8_UNORM;
+            } else if ((isLum || isRGB || isBump) && bits == 16 &&
+                       (isMask(0x00ff, 0, 0, 0xff00) || isMask(0xff, 0, 0, 0xff00))) {
+                // A8L8 / NVTT RGB-as-luminance → DXGI R8G8_UNORM (L→R, A→G)
+                outFormat = DdsFormat::R8G8_UNORM;
+            } else if (isRGB && bits == 16 && gM != 0 && bM == 0 && aM == 0) {
+                // Rare true RG masks without alpha
+                outFormat = DdsFormat::R8G8_UNORM;
+            } else if (isBump && bits == 16 && isMask(0x00ff, 0xff00, 0, 0)) {
+                // V8U8 signed bump → treat as R8G8 for open
+                outFormat = DdsFormat::R8G8_UNORM;
+            } else if ((isLum || isRGB) && bits == 8 && isMask(0xff, 0, 0, 0)) {
+                outFormat = DdsFormat::R8_UNORM;
             } else {
-                Logger::Get().Error("Unsupported legacy DDS format. Only uncompressed 32-bit RGBA/BGRA is supported natively in: " + filename);
+                char detail[160];
+                std::snprintf(detail, sizeof(detail),
+                    "Unsupported legacy DDS format (flags=0x%X bits=%u R=0x%X G=0x%X B=0x%X A=0x%X) in: ",
+                    pf, bits, rM, gM, bM, aM);
+                Logger::Get().Error(std::string(detail) + filename);
                 return false;
             }
         }
@@ -590,14 +624,17 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
         return true;
     }
     if (isDX10 && (dxgiFormat == 20 || dxgiFormat == 40)) {
-        // D32_FLOAT_S8X24_UINT (20): 8 bytes/px — float depth + 8-bit stencil in low byte of next dword
-        // D32_FLOAT (40): 4 bytes/px
-        // Preserve stencil as alpha when present. Depth clear (0 or ~1 / non-finite) → A=0
-        // so empty buffer regions stay transparent instead of opaque black.
+        // DirectXTex LoadScanline (D32_FLOAT_S8X24): XMVector(depth, stencil_u8, 0, 1)
+        // Convert DEPTH→RGBA8 UNORM:
+        //   Stencil → Alpha  (A = stencil/255)
+        //   Depth   → RGB    (R=G=B = saturate(depth))
+        // Typical frame dumps: clear pixels have depth=0 and stencil=0 → fully transparent;
+        // covered geometry keeps stencil as alpha (often a constant like 32).
+        // PDN FileType+ uses the same DirectXTex Convert path.
         const bool withStencil = (dxgiFormat == 20);
         const size_t stride = withStencil ? 8 : 4;
         std::vector<uint8_t> rowRaw((size_t)outWidth * stride);
-        std::vector<float> rowF((size_t)outWidth * 4);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
             file.read(reinterpret_cast<char*>(rowRaw.data()), (std::streamsize)rowRaw.size());
             if (!file) {
@@ -607,33 +644,61 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             for (int x = 0; x < outWidth; ++x) {
                 float depth = 0.f;
                 std::memcpy(&depth, rowRaw.data() + (size_t)x * stride, sizeof(float));
-                float alpha = 1.f;
-                if (!std::isfinite(depth)) {
+                if (!std::isfinite(depth))
                     depth = 0.f;
-                    alpha = 0.f;
-                } else if (depth <= 0.f || depth >= 0.999999f) {
-                    // cleared / far-plane samples → transparent (both standard-Z and reverse-Z extremes)
-                    alpha = 0.f;
-                }
+                uint8_t gray = FloatToU8(depth);
+                uint8_t alpha = 255;
                 if (withStencil) {
-                    uint32_t pad = 0;
-                    std::memcpy(&pad, rowRaw.data() + (size_t)x * stride + 4, 4);
-                    uint8_t st = (uint8_t)(pad & 0xFFu);
-                    // If stencil is used as a coverage mask, prefer it when non-zero;
-                    // if entire buffer has stencil=0, keep depth-based alpha above.
-                    if (st > 0)
-                        alpha = st / 255.f;
+                    // Low byte of the second dword is stencil (S8X24)
+                    alpha = rowRaw[(size_t)x * stride + 4];
                 }
                 size_t d = (size_t)x * 4;
-                rowF[d + 0] = depth;
-                rowF[d + 1] = depth;
-                rowF[d + 2] = depth;
-                rowF[d + 3] = alpha;
+                rowRGBA[d + 0] = gray;
+                rowRGBA[d + 1] = gray;
+                rowRGBA[d + 2] = gray;
+                rowRGBA[d + 3] = alpha;
             }
-            writeRowRGBA32F(rowF, y);
+            writeRowRGBA8(rowRGBA, y);
         }
         Logger::Get().InfoTag("io", "Loaded depth DXGI " + std::to_string(dxgiFormat) +
-            " as float mono (clear→transparent)");
+            " as RGBA8 (DirectXTex: depth→RGB, stencil→A; U8 project)");
+        return true;
+    }
+    if (isDX10 && (dxgiFormat == 49 || dxgiFormat == 50)) {
+        // R8G8_UNORM (49) / R8G8_SNORM (50) — expand to RGBA, B=0, A=255
+        const bool snorm = (dxgiFormat == 50);
+        std::vector<uint8_t> rowRG((size_t)outWidth * 2);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowRG.data()), (std::streamsize)rowRG.size());
+            if (!file) {
+                Logger::Get().Error("Failed reading R8G8 row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                size_t s = (size_t)x * 2;
+                size_t d = (size_t)x * 4;
+                if (snorm) {
+                    // SNORM: byte as signed → [-1,1] → [0,1] display
+                    auto snormToU8 = [](uint8_t raw) -> uint8_t {
+                        int8_t s8;
+                        std::memcpy(&s8, &raw, 1);
+                        float n = (s8 == -128) ? -1.f : (s8 / 127.f);
+                        return FloatToU8(n * 0.5f + 0.5f);
+                    };
+                    rowRGBA[d + 0] = snormToU8(rowRG[s + 0]);
+                    rowRGBA[d + 1] = snormToU8(rowRG[s + 1]);
+                } else {
+                    rowRGBA[d + 0] = rowRG[s + 0];
+                    rowRGBA[d + 1] = rowRG[s + 1];
+                }
+                rowRGBA[d + 2] = 0;
+                rowRGBA[d + 3] = 255;
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+        Logger::Get().InfoTag("io", std::string("Loaded R8G8 ") + (snorm ? "SNORM" : "UNORM") +
+            " as RG + opaque alpha");
         return true;
     }
 
@@ -685,8 +750,9 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
             writeRowRGBA8(rowRGBA, y);
         }
     } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R32_FLOAT) {
+        // True mono float HDR — keep float tiles (opaque grayscale). Not used for depth dumps.
         std::vector<float> rowFloats((size_t)outWidth);
-        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        std::vector<float> rowF((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
             file.read(reinterpret_cast<char*>(rowFloats.data()), (std::streamsize)rowFloats.size() * (std::streamsize)sizeof(float));
             if (!file) {
@@ -694,18 +760,19 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
                 return false;
             }
             for (int x = 0; x < outWidth; ++x) {
-                uint8_t v = FloatToU8(rowFloats[(size_t)x]);
+                float v = rowFloats[(size_t)x];
+                if (!std::isfinite(v)) v = 0.f;
                 size_t dst = (size_t)x * 4;
-                rowRGBA[dst + 0] = v;
-                rowRGBA[dst + 1] = v;
-                rowRGBA[dst + 2] = v;
-                rowRGBA[dst + 3] = 255;
+                rowF[dst + 0] = v;
+                rowF[dst + 1] = v;
+                rowF[dst + 2] = v;
+                rowF[dst + 3] = 1.f;
             }
-            writeRowRGBA8(rowRGBA, y);
+            writeRowRGBA32F(rowF, y);
         }
     } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R16_FLOAT) {
         std::vector<uint16_t> rowHalf((size_t)outWidth);
-        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        std::vector<float> rowF((size_t)outWidth * 4);
         for (int y = 0; y < outHeight; ++y) {
             file.read(reinterpret_cast<char*>(rowHalf.data()), (std::streamsize)rowHalf.size() * (std::streamsize)sizeof(uint16_t));
             if (!file) {
@@ -713,14 +780,15 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
                 return false;
             }
             for (int x = 0; x < outWidth; ++x) {
-                uint8_t v = FloatToU8(HalfToFloat(rowHalf[(size_t)x]));
+                float v = HalfToFloat(rowHalf[(size_t)x]);
+                if (!std::isfinite(v)) v = 0.f;
                 size_t dst = (size_t)x * 4;
-                rowRGBA[dst + 0] = v;
-                rowRGBA[dst + 1] = v;
-                rowRGBA[dst + 2] = v;
-                rowRGBA[dst + 3] = 255;
+                rowF[dst + 0] = v;
+                rowF[dst + 1] = v;
+                rowF[dst + 2] = v;
+                rowF[dst + 3] = 1.f;
             }
-            writeRowRGBA8(rowRGBA, y);
+            writeRowRGBA32F(rowF, y);
         }
     } else if (isDX10 && dxgiFormat == DXGI_FORMAT_R8_UNORM) {
         std::vector<uint8_t> rowR((size_t)outWidth);
@@ -861,6 +929,59 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
                     writeRowRGBA8(rowRGBA, y);
                 }
             }
+        }
+    } else if (!isDX10 && outFormat == DdsFormat::R8G8_UNORM) {
+        // Legacy 16-bit: A8L8 (R=0x00FF,A=0xFF00) → DXGI R8G8 (L→R, A→G) per DirectXTex.
+        // Also handles V8U8 (R=0x00FF,G=0xFF00) and similar.
+        std::vector<uint8_t> rowRG((size_t)outWidth * 2);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        const uint32_t rMask = header.ddspf.dwRBitMask;
+        const uint32_t gMask = header.ddspf.dwGBitMask;
+        const uint32_t aMask = header.ddspf.dwABitMask;
+        auto extract8 = [](uint16_t packed, uint32_t mask) -> uint8_t {
+            if (mask == 0) return 0;
+            uint32_t v = packed & mask;
+            while (mask && (mask & 1u) == 0) { mask >>= 1; v >>= 1; }
+            return static_cast<uint8_t>(v & 0xFFu);
+        };
+        // A8L8: second channel lives in ABitMask, not GBitMask
+        const uint32_t secondMask = (gMask != 0) ? gMask : aMask;
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowRG.data()), (std::streamsize)rowRG.size());
+            if (!file) {
+                Logger::Get().Error("Failed reading legacy R8G8/A8L8 row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                uint16_t packed = 0;
+                std::memcpy(&packed, rowRG.data() + (size_t)x * 2, 2);
+                size_t d = (size_t)x * 4;
+                rowRGBA[d + 0] = extract8(packed, rMask);
+                rowRGBA[d + 1] = extract8(packed, secondMask);
+                rowRGBA[d + 2] = 0;
+                rowRGBA[d + 3] = 255;
+            }
+            writeRowRGBA8(rowRGBA, y);
+        }
+        Logger::Get().InfoTag("io", "Loaded legacy A8L8/R8G8 as RG + opaque alpha");
+    } else if (!isDX10 && outFormat == DdsFormat::R8_UNORM) {
+        std::vector<uint8_t> rowR((size_t)outWidth);
+        std::vector<uint8_t> rowRGBA((size_t)outWidth * 4);
+        for (int y = 0; y < outHeight; ++y) {
+            file.read(reinterpret_cast<char*>(rowR.data()), (std::streamsize)rowR.size());
+            if (!file) {
+                Logger::Get().Error("Failed reading legacy L8/R8 row from: " + filename);
+                return false;
+            }
+            for (int x = 0; x < outWidth; ++x) {
+                uint8_t v = rowR[(size_t)x];
+                size_t d = (size_t)x * 4;
+                rowRGBA[d + 0] = v;
+                rowRGBA[d + 1] = v;
+                rowRGBA[d + 2] = v;
+                rowRGBA[d + 3] = 255;
+            }
+            writeRowRGBA8(rowRGBA, y);
         }
     } else {
         std::vector<uint8_t> rowBytes((size_t)outWidth * 4);
