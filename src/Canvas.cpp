@@ -897,6 +897,12 @@ void Canvas::PaintMaskStamp(float cx, float cy, const BrushSettings& brush) {
     Layer& layer = m_Layers[m_ActiveLayerIdx];
     if (!layer.hasMask || layer.mask.empty()) return;
 
+    const size_t maskN = (size_t)m_Width * (size_t)m_Height;
+    if (layer.mask.size() != maskN) {
+        // Safety: never index a mismatched buffer (resize / race).
+        layer.mask.assign(maskN, 255);
+    }
+
     const float radius = std::max(1.f, brush.radius);
     const float hardness = std::clamp(brush.hardness, 0.f, 1.f);
     const float opacity = std::clamp(brush.opacity, 0.f, 1.f);
@@ -915,14 +921,18 @@ void Canvas::PaintMaskStamp(float cx, float cy, const BrushSettings& brush) {
     const int y0 = std::max(0, (int)std::floor(cy) - rCeil);
     const int x1 = std::min(m_Width - 1, (int)std::ceil(cx) + rCeil);
     const int y1 = std::min(m_Height - 1, (int)std::ceil(cy) + rCeil);
+    if (x0 > x1 || y0 > y1) return;
+
     const float softStart = radius * hardness; // hard core radius
+    const float r2 = radius * radius;
 
     for (int y = y0; y <= y1; ++y) {
         for (int x = x0; x <= x1; ++x) {
             float dx = (float)x + 0.5f - cx;
             float dy = (float)y + 0.5f - cy;
-            float dist = std::sqrt(dx * dx + dy * dy);
-            if (dist > radius) continue;
+            float dist2 = dx * dx + dy * dy;
+            if (dist2 > r2) continue;
+            float dist = std::sqrt(dist2);
             float w = 1.f;
             if (dist > softStart && radius > softStart) {
                 w = 1.f - (dist - softStart) / (radius - softStart);
@@ -935,6 +945,17 @@ void Canvas::PaintMaskStamp(float cx, float cy, const BrushSettings& brush) {
             float out = cur * (1.f - w) + paintVal * w;
             layer.mask[idx] = (uint8_t)(std::clamp(out, 0.f, 1.f) * 255.f + 0.5f);
         }
+    }
+
+    // Expand dirty rect for partial GPU upload (avoids full-texture recreate every dab).
+    if (layer.maskDirtyX1 < layer.maskDirtyX0) {
+        layer.maskDirtyX0 = x0; layer.maskDirtyY0 = y0;
+        layer.maskDirtyX1 = x1; layer.maskDirtyY1 = y1;
+    } else {
+        layer.maskDirtyX0 = std::min(layer.maskDirtyX0, x0);
+        layer.maskDirtyY0 = std::min(layer.maskDirtyY0, y0);
+        layer.maskDirtyX1 = std::max(layer.maskDirtyX1, x1);
+        layer.maskDirtyY1 = std::max(layer.maskDirtyY1, y1);
     }
     layer.maskNeedsUpload = true;
     m_CompositeDirty = true;
@@ -993,34 +1014,107 @@ void Canvas::ApplyLayerMask(int index) {
 }
 
 void Canvas::UpdateLayerMaskTexture(ID3D11Device* device, int index) {
-    if (index < 0 || index >= m_Layers.size()) return;
+    if (!device || index < 0 || index >= (int)m_Layers.size()) return;
     Layer& layer = m_Layers[index];
     if (!layer.hasMask) return;
-    
-    if (layer.maskTexture) { layer.maskTexture->Release(); layer.maskTexture = nullptr; }
-    if (layer.maskSRV) { layer.maskSRV->Release(); layer.maskSRV = nullptr; }
-    
-    D3D11_TEXTURE2D_DESC desc = {};
-    desc.Width = m_Width;
-    desc.Height = m_Height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = DXGI_FORMAT_R8_UNORM;
-    desc.SampleDesc.Count = 1;
-    desc.SampleDesc.Quality = 0;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    
-    D3D11_SUBRESOURCE_DATA initData = {};
-    initData.pSysMem = layer.mask.data();
-    initData.SysMemPitch = m_Width * sizeof(uint8_t);
-    
-    HRESULT hr = device->CreateTexture2D(&desc, &initData, &layer.maskTexture);
-    if (SUCCEEDED(hr)) {
-        device->CreateShaderResourceView(layer.maskTexture, nullptr, &layer.maskSRV);
+
+    const size_t need = (size_t)m_Width * (size_t)m_Height;
+    if (need == 0) return;
+    if (layer.mask.size() != need) {
+        // Keep CPU buffer in sync (resize / load edge cases).
+        layer.mask.assign(need, 255);
+        layer.maskDirtyX0 = 0;
+        layer.maskDirtyY0 = 0;
+        layer.maskDirtyX1 = m_Width - 1;
+        layer.maskDirtyY1 = m_Height - 1;
     }
+
+    ID3D11DeviceContext* ctx = nullptr;
+    device->GetImmediateContext(&ctx);
+
+    auto releaseMaskGpu = [&]() {
+        // Unbind before Release — ImGui / previous compose may still reference slot t1.
+        if (ctx) {
+            ID3D11ShaderResourceView* nulls[2] = { nullptr, nullptr };
+            ctx->PSSetShaderResources(0, 2, nulls);
+        }
+        if (layer.maskSRV) { layer.maskSRV->Release(); layer.maskSRV = nullptr; }
+        if (layer.maskTexture) { layer.maskTexture->Release(); layer.maskTexture = nullptr; }
+    };
+
+    bool needCreate = (layer.maskTexture == nullptr);
+    if (layer.maskTexture) {
+        D3D11_TEXTURE2D_DESC existing = {};
+        layer.maskTexture->GetDesc(&existing);
+        if (existing.Width != (UINT)m_Width || existing.Height != (UINT)m_Height ||
+            existing.Format != DXGI_FORMAT_R8_UNORM) {
+            releaseMaskGpu();
+            needCreate = true;
+        }
+    }
+
+    if (needCreate) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = m_Width;
+        desc.Height = m_Height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        D3D11_SUBRESOURCE_DATA initData = {};
+        initData.pSysMem = layer.mask.data();
+        initData.SysMemPitch = (UINT)m_Width * sizeof(uint8_t);
+
+        HRESULT hr = device->CreateTexture2D(&desc, &initData, &layer.maskTexture);
+        if (SUCCEEDED(hr) && layer.maskTexture) {
+            device->CreateShaderResourceView(layer.maskTexture, nullptr, &layer.maskSRV);
+        } else {
+            Logger::Get().ErrorTag("gpu",
+                "UpdateLayerMaskTexture: CreateTexture2D failed size=" +
+                std::to_string(m_Width) + "x" + std::to_string(m_Height));
+        }
+    } else if (ctx && !layer.mask.empty()) {
+        // In-place upload: keep maskSRV pointer stable (ImGui ImageButton holds it).
+        // Old code destroyed+recreated every dab → use-after-free crash on long strokes.
+        // Unbind first: texture may still be bound from last compose / ImGui draw.
+        {
+            ID3D11ShaderResourceView* nulls[2] = { nullptr, nullptr };
+            ctx->PSSetShaderResources(0, 2, nulls);
+        }
+        const bool hasDirty = layer.maskDirtyX1 >= layer.maskDirtyX0 &&
+                              layer.maskDirtyY1 >= layer.maskDirtyY0;
+        if (hasDirty) {
+            const int bx0 = std::clamp(layer.maskDirtyX0, 0, m_Width - 1);
+            const int by0 = std::clamp(layer.maskDirtyY0, 0, m_Height - 1);
+            const int bx1 = std::clamp(layer.maskDirtyX1, 0, m_Width - 1);
+            const int by1 = std::clamp(layer.maskDirtyY1, 0, m_Height - 1);
+            D3D11_BOX box = {};
+            box.left   = (UINT)bx0;
+            box.top    = (UINT)by0;
+            box.front  = 0;
+            box.right  = (UINT)(bx1 + 1);
+            box.bottom = (UINT)(by1 + 1);
+            box.back   = 1;
+            const uint8_t* src = layer.mask.data() + (size_t)by0 * (size_t)m_Width + (size_t)bx0;
+            ctx->UpdateSubresource(layer.maskTexture, 0, &box, src,
+                                   (UINT)m_Width * sizeof(uint8_t), 0);
+        } else {
+            ctx->UpdateSubresource(layer.maskTexture, 0, nullptr, layer.mask.data(),
+                                   (UINT)m_Width * sizeof(uint8_t), 0);
+        }
+    }
+
+    layer.maskDirtyX0 = 0;
+    layer.maskDirtyY0 = 0;
+    layer.maskDirtyX1 = -1;
+    layer.maskDirtyY1 = -1;
     layer.maskNeedsUpload = false;
     m_CompositeDirty = true;
+    if (ctx) ctx->Release();
 }
 
 DXGI_FORMAT Canvas::GetLayerDxgiFormat() const {
@@ -1565,12 +1659,19 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
             if (!activeBrush.erase) {
                 activeBrush.color[0] = activeBrush.color[1] = activeBrush.color[2] = 1.f;
             }
-            // Space stamps along segment (same idea as stroke spacing).
+            // Match layer PaintEngine spacing (radius * 2 * spacing) — denser step
+            // flooded CPU+GPU every frame and used to recreate mask SRV (crash).
             float dx = sx - m_LastDabX, dy = sy - m_LastDabY;
             float dist = std::sqrt(dx * dx + dy * dy);
-            float step = std::max(1.f, activeBrush.radius * std::max(0.05f, activeBrush.spacing));
-            while (m_StrokeDistanceAccumulator + dist >= step) {
+            const float spacingMul = (activeBrush.tip) ? activeBrush.tip->spacingMul : 1.0f;
+            float step = std::max(1.f, activeBrush.radius * 2.0f *
+                std::max(0.05f, activeBrush.spacing) * spacingMul);
+            // Cap stamps per mouse event so a huge jump cannot stall/kill the app.
+            constexpr int kMaxMaskStampsPerUpdate = 64;
+            int stamps = 0;
+            while (m_StrokeDistanceAccumulator + dist >= step && stamps < kMaxMaskStampsPerUpdate) {
                 float t = (step - m_StrokeDistanceAccumulator) / std::max(dist, 1e-4f);
+                t = std::clamp(t, 0.f, 1.f);
                 float px = m_LastDabX + dx * t;
                 float py = m_LastDabY + dy * t;
                 PaintMaskStamp(px, py, activeBrush);
@@ -1582,9 +1683,16 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                 m_StrokeDistanceAccumulator = 0.f;
                 dx = sx - m_LastDabX; dy = sy - m_LastDabY;
                 dist = std::sqrt(dx * dx + dy * dy);
+                ++stamps;
             }
-            m_StrokeDistanceAccumulator += dist;
-            m_LastDabX = sx; m_LastDabY = sy;
+            if (stamps >= kMaxMaskStampsPerUpdate) {
+                // Snap to cursor; skip intermediate stamps to stay responsive.
+                m_LastDabX = sx; m_LastDabY = sy;
+                m_StrokeDistanceAccumulator = 0.f;
+            } else {
+                m_StrokeDistanceAccumulator += dist;
+                m_LastDabX = sx; m_LastDabY = sy;
+            }
             m_PrevStabilizedX = sx; m_PrevStabilizedY = sy;
         } else if (phase == StrokePhase::End) {
             m_IsStrokeActive = false;

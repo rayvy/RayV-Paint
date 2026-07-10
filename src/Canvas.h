@@ -90,6 +90,8 @@ struct Layer {
     ID3D11ShaderResourceView* maskSRV = nullptr;
     bool hasMask = false;
     bool maskNeedsUpload = false;
+    // Dirty rect for GPU upload (x1 < x0 ⇒ full upload). Keeps maskSRV pointer stable.
+    int maskDirtyX0 = 0, maskDirtyY0 = 0, maskDirtyX1 = -1, maskDirtyY1 = -1;
 
     // Group support
     bool isGroup        = false; // group header — no pixel data
