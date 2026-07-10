@@ -1478,8 +1478,23 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     activeBrush.writeR = m_ChannelR;
     activeBrush.writeG = m_ChannelG;
     activeBrush.writeB = m_ChannelB;
-    // Channel A must be on AND layer Alpha Rewrite enabled to overwrite alpha.
-    activeBrush.writeA = m_ChannelA && layer.alphaRewrite;
+
+    // Photoshop-like channel isolation + Alpha Rewrite:
+    // - Channels A OFF → tools use stamp (opacity/hardness) as RGB multiplier only;
+    //   never write A (even on Alpha Rewrite layers).
+    // - Channels A ON + Alpha Rewrite ON → may write A (classic over).
+    // - Channels A ON + Alpha Rewrite OFF → RGB morph only (A is compose strength /
+    //   packing data; keep non-destructive). Solo-A channel can still paint A.
+    const bool onlyAlphaChannel = m_ChannelA && !m_ChannelR && !m_ChannelG && !m_ChannelB;
+    const bool channelAOff = !m_ChannelA;
+    activeBrush.writeA = m_ChannelA && (layer.alphaRewrite || onlyAlphaChannel);
+    activeBrush.rgbMorphOnly = channelAOff || (!layer.alphaRewrite && !onlyAlphaChannel);
+
+    // When A channel is hidden, stamp strength = opacity×hardness only (ignore brush.color.a).
+    if (channelAOff || activeBrush.rgbMorphOnly) {
+        activeBrush.color[3] = 1.0f;
+    }
+
     if (brush.pressureRadius) {
         activeBrush.radius = brush.radius * g_PenPressure;
         if (activeBrush.radius < 1.0f) activeBrush.radius = 1.0f;
