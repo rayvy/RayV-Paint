@@ -4,11 +4,16 @@
 #include <vector>
 #include <filesystem>
 #include <optional>
+#include <mutex>
+#include <atomic>
 
 // ---------------------------------------------------------------------------
 // Brush preset system (data + disk + RAM staging).
 // UI owns popup chrome; core owns identity, I/O, and tip lifetime.
 // See plans/BRUSH_PRESETS.md
+//
+// .rvbrush format: single JSON file, version field mandatory.
+// Custom tip textures: embedded as raw8_base64 inside the file (portable).
 // ---------------------------------------------------------------------------
 
 struct BrushPresetMeta {
@@ -55,13 +60,24 @@ public:
     static BrushLibrary& Get();
 
     // Paths: default = %AppData%/Roaming/RayVPaint/brushes (Windows).
-    // Fallback = <exeDir>/RayVPaint/brushes. Never requires admin.
+    // Fallback = Documents/RayVPaint/brushes. Never requires admin.
     void SetRootDir(const std::filesystem::path& root);
-    std::filesystem::path GetRootDir() const { return m_Root; }
+    std::filesystem::path GetRootDir() const;
     void EnsureRootExists();
-    void LoadAll(); // builtins + scan *.rvbrush
 
-    const std::vector<BrushPresetMeta>& List() const { return m_MetaList; }
+    // Instant: register 4 builtins only (startup-safe).
+    void LoadBuiltins();
+    // Background: scan disk for *.rvbrush and merge. Non-blocking.
+    void StartAsyncDiskLoad();
+    // Call once per frame (main thread): apply finished async results if any.
+    void PollAsyncDiskLoad();
+    bool IsDiskLoadPending() const { return m_DiskLoadRunning.load(); }
+
+    // Full sync load (tests / --test-brushes). Prefer LoadBuiltins+async for app.
+    void LoadAll();
+
+    // Copy of meta list (thread-safe snapshot for UI).
+    std::vector<BrushPresetMeta> List() const;
 
     // Resolve by id → params + owned tip (pointer valid until next mutating API that drops entry).
     bool Get(const std::string& id, BrushPresetParams& outParams) const;
@@ -76,6 +92,7 @@ public:
     bool Rename(const std::string& id, const std::string& newDisplayName);
 
     // Persist staging/custom to disk as .rvbrush; clears isDirty. Fails for builtins.
+    // Embedded tips are base64-encoded inside the file (portable between users).
     bool SaveToDisk(const std::string& id);
     // Drop unsaved staging (or reload disk custom from file). Builtins: no-op false.
     bool DiscardStaging(const std::string& id);
@@ -83,11 +100,15 @@ public:
     bool DeleteCustom(const std::string& id);
 
     // Active selection for UI (optional convenience; not auto-persisted to .rayp).
-    void SetActiveId(const std::string& id) { m_ActiveId = id; }
-    const std::string& GetActiveId() const { return m_ActiveId; }
+    void SetActiveId(const std::string& id);
+    std::string GetActiveId() const;
 
     // Smoke: returns true if create→save→reload→apply matches. Logs details.
     static bool RunSmokeTest();
+
+    // Format constants for UI/docs
+    static constexpr int kFormatVersion = 1;
+    static constexpr const char* kFormatMagic = "RVBRUSH";
 
 private:
     BrushLibrary() = default;
@@ -103,16 +124,23 @@ private:
     void RebuildMetaList();
     Entry* Find(const std::string& id);
     const Entry* Find(const std::string& id) const;
-    bool LoadFile(const std::filesystem::path& path);
+    bool LoadFileUnlocked(const std::filesystem::path& path);
     bool WriteFile(const Entry& e) const;
     static std::string NewUuid();
     static std::filesystem::path DefaultRootDir();
     static std::string Base64Encode(const std::vector<uint8_t>& data);
     static bool Base64Decode(const std::string& in, std::vector<uint8_t>& out);
 
+    mutable std::mutex m_Mutex;
     std::filesystem::path m_Root;
     std::vector<Entry> m_Entries;
     std::vector<BrushPresetMeta> m_MetaList;
     std::string m_ActiveId;
     bool m_Loaded = false;
+
+    // Async disk scan
+    std::atomic<bool> m_DiskLoadRunning{false};
+    std::mutex m_PendingMutex;
+    std::vector<Entry> m_PendingDiskEntries;
+    std::atomic<bool> m_PendingReady{false};
 };

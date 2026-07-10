@@ -39,6 +39,9 @@
 #include "ui/EditorPanels.h"
 #include "ui/style/UiTokens.h"
 
+// App version (CLI --version, about, logs)
+static constexpr const char* kRayVPaintVersion = "0.3.0";
+
 // Tablet Pointer API support
 float g_PenPressure = 1.0f;
 static bool g_IsPenActive = false;
@@ -476,7 +479,7 @@ int main(int argc, char* argv[]) {
             forceConsole = true;
         } else if (arg == "--version") {
             SetupConsole(true);
-            std::cout << "RayV Paint - Version 0.2.0" << std::endl;
+            std::cout << "RayV Paint - Version " << kRayVPaintVersion << std::endl;
             return 0;
         } else if (arg == "--script" && i + 1 < argc) {
             scriptPath = argv[++i];
@@ -523,8 +526,9 @@ int main(int argc, char* argv[]) {
     else if (cfgLevel == "error") Logger::Get().SetMinLevel(LogLevel::LogLevel_Error);
     else Logger::Get().SetMinLevel(LogLevel::LogLevel_Info);
 
-    // Brush presets: global user library (AppData/RayVPaint/brushes)
-    BrushLibrary::Get().LoadAll();
+    // Brush presets: builtins instantly; custom *.rvbrush scan on background thread
+    BrushLibrary::Get().LoadBuiltins();
+    BrushLibrary::Get().StartAsyncDiskLoad();
     if (testBrushes) {
         bool ok = BrushLibrary::RunSmokeTest();
         Logger::Get().Info(ok ? "BrushLibrary smoke PASS" : "BrushLibrary smoke FAIL");
@@ -694,6 +698,9 @@ int main(int argc, char* argv[]) {
     // 9. Main loop
     while (!glfwWindowShouldClose(window)) {
         glfwPollEvents();
+
+        // Merge async brush disk scan (non-blocking)
+        BrushLibrary::Get().PollAsyncDiskLoad();
 
         // Handle completed background loading
         if (UI::g_LoadingState.isLoading && UI::g_LoadingState.completed) {
@@ -1055,89 +1062,139 @@ int main(int argc, char* argv[]) {
 
             float wheelDelta = isHovered ? ImGui::GetIO().MouseWheel : 0.0f;
 
-            // Photoshop-like Brush Resize/Hardness (Ctrl+Alt+RMB)
-            // CRITICAL: use ABSOLUTE offset from start (not accumulated MouseDelta).
-            // Freezing MousePos made MouseDelta = full travel each frame → explosive size/hardness.
-            // WYSIWYG size: screen circle grows 1:1 with horizontal mouse travel
-            //   r_screen = radius * zoom  ⇒  radius = startR + dx_screen / zoom
-            // Hardness: full 0..1 over a drag equal to the max brush circle radius on screen
-            //   (same visual zone as the ghost max ring).
+            // Photoshop-like Brush Resize/Hardness (Ctrl+Alt+RMB) and Rotation (Ctrl+Alt+LMB)
+            // Use ImGui mouse coords (DPI-consistent with drawn rings), absolute offset from start.
+            // Size WYSIWYG: screen radius changes 1:1 with horizontal drag.
+            // Hardness: fixed ~180 screen-px drag = full 0..1 (not maxBrush*zoom — that felt dead).
+            // Rotation (LMB): angular drag around anchor, or fallback horizontal if near center.
             static bool g_IsCtrlAltRmbDragging = false;
-            static ImVec2 g_CtrlAltRmbScreenPos(0, 0);
-            static float g_CtrlAltRmbStartRadius = 10.f;
-            static float g_CtrlAltRmbStartHardness = 0.5f;
-            static double g_CtrlAltRmbGlfwX = 0.0, g_CtrlAltRmbGlfwY = 0.0;
+            static bool g_IsCtrlAltLmbDragging = false;
+            static ImVec2 g_CtrlAltAnchorScreen(0, 0);
+            static float g_CtrlAltStartRadius = 10.f;
+            static float g_CtrlAltStartHardness = 0.5f;
+            static float g_CtrlAltStartRotation = 0.f;
+            static float g_CtrlAltStartAngleRad = 0.f; // for LMB angular
 
             const bool brushOrEraser = isBrushLikeTool;
             const float maxBrushR = std::max(10.f, ConfigManager::Get().GetMaxBrushRadius());
             ImGuiIO& ioRmb = ImGui::GetIO();
+            const float brushZoom = std::max(0.001f, g_Canvas.GetZoom());
+            const bool modsResize = brushOrEraser && ioRmb.KeyCtrl && ioRmb.KeyAlt
+                && (isHovered || ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem));
 
-            if (!g_IsCtrlAltRmbDragging && brushOrEraser && ioRmb.KeyCtrl && ioRmb.KeyAlt
-                && ImGui::IsMouseClicked(ImGuiMouseButton_Right)
-                && (isHovered || ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))) {
+            // --- Begin RMB: size + hardness ---
+            if (!g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging && modsResize
+                && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 g_IsCtrlAltRmbDragging = true;
-                g_CtrlAltRmbScreenPos = ImGui::GetMousePos();
-                g_CtrlAltRmbStartRadius = g_Brush.radius;
-                g_CtrlAltRmbStartHardness = g_Brush.hardness;
-                GLFWwindow* win = glfwGetCurrentContext();
-                if (win) {
-                    glfwGetCursorPos(win, &g_CtrlAltRmbGlfwX, &g_CtrlAltRmbGlfwY);
-                    glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_HIDDEN);
-                }
+                g_CtrlAltAnchorScreen = ImGui::GetMousePos();
+                g_CtrlAltStartRadius = g_Brush.radius;
+                g_CtrlAltStartHardness = g_Brush.hardness;
+            }
+            // --- Begin LMB: brush tip rotation ---
+            if (!g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging && modsResize
+                && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                g_IsCtrlAltLmbDragging = true;
+                g_CtrlAltAnchorScreen = ImGui::GetMousePos();
+                g_CtrlAltStartRotation = g_Brush.rotationDeg;
+                ImVec2 mp = ImGui::GetMousePos();
+                g_CtrlAltStartAngleRad = std::atan2(mp.y - g_CtrlAltAnchorScreen.y,
+                                                    mp.x - g_CtrlAltAnchorScreen.x);
             }
 
+            auto drawBrushAdjustOverlay = [&](bool showHardness, bool showRotation) {
+                ImDrawList* drawList = ImGui::GetForegroundDrawList();
+                const ImVec2 fixed = g_CtrlAltAnchorScreen;
+                float rScreen = g_Brush.radius * brushZoom;
+                float hScreen = rScreen * g_Brush.hardness;
+                // Soft / hard rings
+                if (g_Brush.hardness < 0.999f && rScreen > hScreen + 0.5f)
+                    drawList->AddCircleFilled(fixed, rScreen, IM_COL32(235, 64, 52, 35), 64);
+                if (hScreen > 0.5f)
+                    drawList->AddCircleFilled(fixed, hScreen, IM_COL32(235, 64, 52, 110), 64);
+                drawList->AddCircle(fixed, rScreen, IM_COL32(235, 64, 52, 235), 64, 2.0f);
+                if (showHardness && hScreen > 1.f && hScreen < rScreen - 0.5f)
+                    drawList->AddCircle(fixed, hScreen, IM_COL32(255, 200, 120, 200), 64, 1.25f);
+                // Rotation direction: diameter + arrow head
+                if (showRotation || std::fabs(g_Brush.rotationDeg) > 0.01f) {
+                    float rad = g_Brush.rotationDeg * (3.14159265f / 180.f);
+                    float c = std::cos(rad), s = std::sin(rad);
+                    float len = std::max(12.f, rScreen);
+                    ImVec2 a(fixed.x - c * len, fixed.y - s * len);
+                    ImVec2 b(fixed.x + c * len, fixed.y + s * len);
+                    drawList->AddLine(a, b, IM_COL32(80, 180, 255, 240), 2.0f);
+                    // arrow at +direction end
+                    ImVec2 t1(b.x - c * 10.f + s * 5.f, b.y - s * 10.f - c * 5.f);
+                    ImVec2 t2(b.x - c * 10.f - s * 5.f, b.y - s * 10.f + c * 5.f);
+                    drawList->AddTriangleFilled(b, t1, t2, IM_COL32(80, 180, 255, 240));
+                    // cross tick for tip "top"
+                    float px = -s, py = c;
+                    drawList->AddLine(ImVec2(fixed.x - px * 6.f, fixed.y - py * 6.f),
+                                      ImVec2(fixed.x + px * 6.f, fixed.y + py * 6.f),
+                                      IM_COL32(80, 180, 255, 180), 1.5f);
+                }
+            };
+
             if (g_IsCtrlAltRmbDragging) {
-                GLFWwindow* win = glfwGetCurrentContext();
-                if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) || !brushOrEraser) {
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Right) || !brushOrEraser || !ioRmb.KeyCtrl || !ioRmb.KeyAlt) {
                     g_IsCtrlAltRmbDragging = false;
-                    if (win) {
-                        glfwSetCursorPos(win, g_CtrlAltRmbGlfwX, g_CtrlAltRmbGlfwY);
-                        glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-                    }
                     ioRmb.MouseDelta = ImVec2(0, 0);
                 } else {
-                    // Absolute screen offset from invoke point (GLFW client coords)
-                    double cx = g_CtrlAltRmbGlfwX, cy = g_CtrlAltRmbGlfwY;
-                    if (win) glfwGetCursorPos(win, &cx, &cy);
-                    float dxScreen = (float)(cx - g_CtrlAltRmbGlfwX);
-                    float dyScreen = (float)(cy - g_CtrlAltRmbGlfwY);
+                    ImVec2 cur = ImGui::GetMousePos();
+                    float dxScreen = cur.x - g_CtrlAltAnchorScreen.x;
+                    float dyScreen = cur.y - g_CtrlAltAnchorScreen.y;
 
-                    const float zoom = std::max(0.001f, g_Canvas.GetZoom());
-                    // Size: 1 screen px of drag ↔ 1 screen px of circle radius change
-                    g_Brush.radius = std::clamp(
-                        g_CtrlAltRmbStartRadius + dxScreen / zoom, 1.0f, maxBrushR);
+                    // Screen-space 1:1: new_screen_r = start_screen_r + dx
+                    float startRScreen = g_CtrlAltStartRadius * brushZoom;
+                    float newRScreen = std::max(1.f, startRScreen + dxScreen);
+                    g_Brush.radius = std::clamp(newRScreen / brushZoom, 1.0f, maxBrushR);
 
-                    // Hardness: drag across the max-radius ghost ring (screen px) = 0..1 full range
-                    // Matches visual: travel from center to ghost edge = full hardness swing
-                    float hardSpanScreen = std::max(32.f, maxBrushR * zoom);
+                    // Hardness: comfortable ~180 px vertical drag = full range
+                    constexpr float kHardSpanPx = 180.f;
                     g_Brush.hardness = std::clamp(
-                        g_CtrlAltRmbStartHardness - dyScreen / hardSpanScreen, 0.0f, 1.0f);
+                        g_CtrlAltStartHardness - dyScreen / kHardSpanPx, 0.0f, 1.0f);
 
-                    // Kill ImGui input so pan/paint don't move; do NOT feed fake MousePos
-                    // (that recreated huge deltas next frame).
                     ioRmb.MouseDelta = ImVec2(0, 0);
                     ioRmb.WantCaptureMouse = true;
 
                     ImGui::SetTooltip(
-                        "Size: %.1f / %.0f px  (screen circle = size × zoom)\n"
-                        "Hardness: %.0f%%  (full range = drag max-ring radius)",
-                        g_Brush.radius, maxBrushR, g_Brush.hardness * 100.f);
+                        "Size: %.1f px  (drag right/left)\n"
+                        "Hardness: %.0f%%  (drag up/down, ~180px = full range)",
+                        g_Brush.radius, g_Brush.hardness * 100.f);
+                    drawBrushAdjustOverlay(true, true);
+                }
+                isPanning = false;
+                isRotating = false;
+                wheelDelta = 0.f;
+                dragDx = dragDy = 0.f;
+            }
 
-                    ImDrawList* drawList = ImGui::GetForegroundDrawList();
-                    const ImVec2 fixed = g_CtrlAltRmbScreenPos;
-                    float rScreen = g_Brush.radius * zoom;
-                    float hScreen = rScreen * g_Brush.hardness;
-                    float maxScreen = maxBrushR * zoom;
-                    // Ghost max = hardness/size reference zone
-                    drawList->AddCircle(fixed, maxScreen, IM_COL32(255, 255, 255, 50), 64, 1.0f);
-                    // Soft falloff annulus + hard core
-                    if (g_Brush.hardness < 0.999f && rScreen > hScreen + 0.5f)
-                        drawList->AddCircleFilled(fixed, rScreen, IM_COL32(235, 64, 52, 35), 64);
-                    if (hScreen > 0.5f)
-                        drawList->AddCircleFilled(fixed, hScreen, IM_COL32(235, 64, 52, 110), 64);
-                    drawList->AddCircle(fixed, rScreen, IM_COL32(235, 64, 52, 235), 64, 2.0f);
-                    if (hScreen > 1.f && hScreen < rScreen - 0.5f)
-                        drawList->AddCircle(fixed, hScreen, IM_COL32(255, 200, 120, 200), 64, 1.25f);
+            if (g_IsCtrlAltLmbDragging) {
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || !brushOrEraser || !ioRmb.KeyCtrl || !ioRmb.KeyAlt) {
+                    g_IsCtrlAltLmbDragging = false;
+                    ioRmb.MouseDelta = ImVec2(0, 0);
+                } else {
+                    ImVec2 cur = ImGui::GetMousePos();
+                    float dx = cur.x - g_CtrlAltAnchorScreen.x;
+                    float dy = cur.y - g_CtrlAltAnchorScreen.y;
+                    float dist = std::sqrt(dx * dx + dy * dy);
+                    if (dist > 8.f) {
+                        // Angular: rotate around anchor
+                        float ang = std::atan2(dy, dx);
+                        float deltaDeg = (ang - g_CtrlAltStartAngleRad) * (180.f / 3.14159265f);
+                        g_Brush.rotationDeg = g_CtrlAltStartRotation + deltaDeg;
+                    } else {
+                        // Near center: horizontal fine-tune (0.4° per px)
+                        g_Brush.rotationDeg = g_CtrlAltStartRotation + dx * 0.4f;
+                    }
+                    // Normalize to [0, 360)
+                    while (g_Brush.rotationDeg < 0.f) g_Brush.rotationDeg += 360.f;
+                    while (g_Brush.rotationDeg >= 360.f) g_Brush.rotationDeg -= 360.f;
+
+                    ioRmb.MouseDelta = ImVec2(0, 0);
+                    ioRmb.WantCaptureMouse = true;
+                    ImGui::SetTooltip("Brush rotation: %.1f°\n(orbit around center, or drag near center horizontally)",
+                        g_Brush.rotationDeg);
+                    drawBrushAdjustOverlay(false, true);
                 }
                 isPanning = false;
                 isRotating = false;
@@ -1173,15 +1230,32 @@ int main(int argc, char* argv[]) {
             }
 
             // Handle custom brush / smudge visualizer and cursor hiding when inside canvas bounds
-            if (isHovered && isInsideCanvas && !g_IsCtrlAltRmbDragging && (isBrushLikeTool || isSmudgeTool) && !isEyedropperMode) {
+            if (isHovered && isInsideCanvas && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging
+                && (isBrushLikeTool || isSmudgeTool) && !isEyedropperMode) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
 
-                // Draw custom outline circle at mouse position
+                // Draw custom outline circle + rotation direction at mouse position
                 ImDrawList* drawList = ImGui::GetForegroundDrawList();
                 float cursorRadius = isSmudgeTool ? uiState.smudge.radius : g_Brush.radius;
                 float screenRadius = cursorRadius * g_Canvas.GetZoom();
+                float hScreen = screenRadius * g_Brush.hardness;
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(0, 0, 0, 255), 32, 1.5f);
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(255, 255, 255, 255), 32, 1.0f);
+                if (!isSmudgeTool && hScreen > 1.f && hScreen < screenRadius - 0.5f)
+                    drawList->AddCircle(mousePos, hScreen, IM_COL32(255, 200, 120, 160), 32, 1.0f);
+                // Rotation direction (where the tip "faces") so user sees stroke orientation
+                if (!isSmudgeTool) {
+                    float rad = g_Brush.rotationDeg * (3.14159265f / 180.f);
+                    float c = std::cos(rad), s = std::sin(rad);
+                    float len = std::max(10.f, screenRadius);
+                    ImVec2 a(mousePos.x - c * len, mousePos.y - s * len);
+                    ImVec2 b(mousePos.x + c * len, mousePos.y + s * len);
+                    drawList->AddLine(a, b, IM_COL32(0, 0, 0, 200), 2.5f);
+                    drawList->AddLine(a, b, IM_COL32(100, 200, 255, 255), 1.25f);
+                    ImVec2 t1(b.x - c * 8.f + s * 4.f, b.y - s * 8.f - c * 4.f);
+                    ImVec2 t2(b.x - c * 8.f - s * 4.f, b.y - s * 8.f + c * 4.f);
+                    drawList->AddTriangleFilled(b, t1, t2, IM_COL32(100, 200, 255, 230));
+                }
             }
 
             float zoom = g_Canvas.GetZoom();
@@ -1304,7 +1378,7 @@ int main(int argc, char* argv[]) {
             // Eyedropper: live preview sample + commit on LMB
             static float s_PipettePreview[4] = {0, 0, 0, 1};
             static bool s_PipetteHasPreview = false;
-            if (isHovered && isInsideCanvas && isEyedropperMode && !isPanning && !g_IsCtrlAltRmbDragging) {
+            if (isHovered && isInsideCanvas && isEyedropperMode && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
                 UI::SampleCanvasColor(g_Canvas, canvasX, canvasY, s_PipettePreview);
                 s_PipetteHasPreview = true;
@@ -1318,7 +1392,9 @@ int main(int argc, char* argv[]) {
                 s_PipetteHasPreview = false;
             }
 
-            if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging && isBrushLikeTool && !isEyedropperMode) {
+            if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging
+                && isBrushLikeTool && !isEyedropperMode
+                && !(ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt)) {
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     g_IsPainting = true;
                     if (isShiftHeld && g_HasLastStrokeEnd) {

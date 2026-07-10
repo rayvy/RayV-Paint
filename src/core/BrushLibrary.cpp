@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <thread>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -197,10 +198,17 @@ std::filesystem::path BrushLibrary::DefaultRootDir() {
 }
 
 void BrushLibrary::SetRootDir(const std::filesystem::path& root) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     m_Root = root;
 }
 
+std::filesystem::path BrushLibrary::GetRootDir() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_Root;
+}
+
 void BrushLibrary::EnsureRootExists() {
+    // Caller should hold m_Mutex or call from single-threaded init.
     if (m_Root.empty())
         m_Root = DefaultRootDir();
     std::error_code ec;
@@ -391,7 +399,7 @@ bool BrushLibrary::WriteFile(const Entry& e) const {
     return true;
 }
 
-bool BrushLibrary::LoadFile(const std::filesystem::path& path) {
+bool BrushLibrary::LoadFileUnlocked(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return false;
     json root;
@@ -462,9 +470,154 @@ bool BrushLibrary::LoadFile(const std::filesystem::path& path) {
 // Public API
 // ---------------------------------------------------------------------------
 
+void BrushLibrary::LoadBuiltins() {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    if (m_Root.empty())
+        m_Root = DefaultRootDir();
+    // Do not scan disk — only builtins for instant startup
+    std::vector<Entry> staging;
+    for (auto& e : m_Entries) {
+        if (e.meta.isDirty && !e.meta.isBuiltin)
+            staging.push_back(std::move(e));
+    }
+    m_Entries.clear();
+    RegisterBuiltins();
+    for (auto& s : staging)
+        m_Entries.push_back(std::move(s));
+    RebuildMetaList();
+    m_Loaded = true;
+    Logger::Get().Info("BrushLibrary: builtins ready (" + std::to_string(m_MetaList.size()) +
+                       "), disk scan deferred");
+}
+
+void BrushLibrary::StartAsyncDiskLoad() {
+    if (m_DiskLoadRunning.exchange(true)) return;
+
+    std::filesystem::path root;
+    {
+        std::lock_guard<std::mutex> lock(m_Mutex);
+        if (m_Root.empty())
+            m_Root = DefaultRootDir();
+        EnsureRootExists();
+        root = m_Root;
+    }
+
+    std::thread([this, root]() {
+        std::vector<Entry> loaded;
+        std::error_code ec;
+        if (std::filesystem::exists(root, ec)) {
+            for (auto& ent : std::filesystem::directory_iterator(root, ec)) {
+                if (!ent.is_regular_file()) continue;
+                auto ext = ent.path().extension().string();
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                if (ext != ".rvbrush") continue;
+
+                // Parse in isolation (no m_Entries)
+                std::ifstream in(ent.path(), std::ios::binary);
+                if (!in) continue;
+                json rootJ;
+                try { in >> rootJ; } catch (...) { continue; }
+                if (!rootJ.contains("magic") || rootJ["magic"] != "RVBRUSH") continue;
+                if (rootJ.value("version", 0) < 1) continue;
+
+                Entry e;
+                e.meta.id = rootJ.value("id", ent.path().stem().string());
+                e.meta.displayName = rootJ.value("name", e.meta.id);
+                e.meta.isBuiltin = false;
+                e.meta.isDirty = false;
+                e.meta.sourcePath = ent.path().string();
+                if (e.meta.id.rfind("builtin.", 0) == 0) continue;
+                if (rootJ.contains("params")) {
+                    // reuse ParamsFromJson via temp - it's file-local static
+                    // inline minimal: call LoadFileUnlocked under lock is wrong here
+                }
+                // Use a local parse by writing to temp library method:
+                // Re-open via LoadFileUnlocked on main — instead parse fully here:
+                auto& p = e.params;
+                if (rootJ.contains("params")) {
+                    const json& j = rootJ["params"];
+                    if (j.contains("radius")) p.radius = j["radius"].get<float>();
+                    if (j.contains("hardness")) p.hardness = j["hardness"].get<float>();
+                    if (j.contains("opacity")) p.opacity = j["opacity"].get<float>();
+                    if (j.contains("spacing")) p.spacing = j["spacing"].get<float>();
+                    if (j.contains("stabilization")) p.stabilization = j["stabilization"].get<int>();
+                    if (j.contains("erase")) p.erase = j["erase"].get<bool>();
+                    if (j.contains("writeR")) p.writeR = j["writeR"].get<bool>();
+                    if (j.contains("writeG")) p.writeG = j["writeG"].get<bool>();
+                    if (j.contains("writeB")) p.writeB = j["writeB"].get<bool>();
+                    if (j.contains("writeA")) p.writeA = j["writeA"].get<bool>();
+                    if (j.contains("pressureRadius")) p.pressureRadius = j["pressureRadius"].get<bool>();
+                    if (j.contains("pressureHardness")) p.pressureHardness = j["pressureHardness"].get<bool>();
+                    if (j.contains("pressureOpacity")) p.pressureOpacity = j["pressureOpacity"].get<bool>();
+                    if (j.contains("rotationDeg")) p.rotationDeg = j["rotationDeg"].get<float>();
+                    if (j.contains("pressureRotation")) p.pressureRotation = j["pressureRotation"].get<bool>();
+                    if (j.contains("scatter")) p.scatter = j["scatter"].get<float>();
+                    if (j.contains("angleJitter")) p.angleJitter = j["angleJitter"].get<float>();
+                    if (j.contains("tipSourcePath")) p.tipSourcePath = j["tipSourcePath"].get<std::string>();
+                }
+                if (rootJ.contains("tip")) {
+                    const json& tip = rootJ["tip"];
+                    std::string type = tip.value("type", "none");
+                    if (type == "builtin") {
+                        p.tipType = BrushPresetParams::TipType::Builtin;
+                        p.tipBuiltinId = tip.value("builtin_id", "soft_round");
+                        p.tipSpacingMul = tip.value("spacing_mul", 1.f);
+                    } else if (type == "embedded") {
+                        p.tipType = BrushPresetParams::TipType::Embedded;
+                        p.tipSize = tip.value("size", 0);
+                        p.tipSpacingMul = tip.value("spacing_mul", 1.f);
+                        std::string data = tip.value("data", "");
+                        if (!Base64Decode(data, p.tipPixels))
+                            p.tipType = BrushPresetParams::TipType::None;
+                    } else {
+                        p.tipType = BrushPresetParams::TipType::None;
+                    }
+                }
+                e.RebuildOwnedTip();
+                loaded.push_back(std::move(e));
+            }
+        }
+        {
+            std::lock_guard<std::mutex> plock(m_PendingMutex);
+            m_PendingDiskEntries = std::move(loaded);
+            m_PendingReady.store(true);
+        }
+        m_DiskLoadRunning.store(false);
+        Logger::Get().Info("BrushLibrary: async disk scan finished");
+    }).detach();
+}
+
+void BrushLibrary::PollAsyncDiskLoad() {
+    if (!m_PendingReady.load()) return;
+    std::vector<Entry> pending;
+    {
+        std::lock_guard<std::mutex> plock(m_PendingMutex);
+        if (!m_PendingReady.load()) return;
+        pending = std::move(m_PendingDiskEntries);
+        m_PendingReady.store(false);
+    }
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    int added = 0;
+    for (auto& e : pending) {
+        if (Entry* old = Find(e.meta.id)) {
+            // Don't overwrite dirty staging
+            if (!old->meta.isDirty) {
+                *old = std::move(e);
+                ++added;
+            }
+        } else {
+            m_Entries.push_back(std::move(e));
+            ++added;
+        }
+    }
+    RebuildMetaList();
+    Logger::Get().Info("BrushLibrary: merged " + std::to_string(added) +
+                       " disk presets, total=" + std::to_string(m_MetaList.size()));
+}
+
 void BrushLibrary::LoadAll() {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     EnsureRootExists();
-    // Keep staging (dirty) entries across reload
     std::vector<Entry> staging;
     for (auto& e : m_Entries) {
         if (e.meta.isDirty && !e.meta.isBuiltin)
@@ -480,11 +633,10 @@ void BrushLibrary::LoadAll() {
             auto ext = ent.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             if (ext == ".rvbrush")
-                LoadFile(ent.path());
+                LoadFileUnlocked(ent.path());
         }
     }
 
-    // Restore staging if not overwritten by disk
     for (auto& s : staging) {
         if (!Find(s.meta.id))
             m_Entries.push_back(std::move(s));
@@ -492,19 +644,16 @@ void BrushLibrary::LoadAll() {
 
     RebuildMetaList();
     m_Loaded = true;
-    Logger::Get().Info("BrushLibrary: loaded " + std::to_string(m_MetaList.size()) +
-                       " presets (" + std::to_string(m_Root.string().size() ? 1 : 0) + " root)");
-    size_t builtins = 0, customs = 0, dirty = 0;
-    for (const auto& m : m_MetaList) {
-        if (m.isBuiltin) ++builtins;
-        else ++customs;
-        if (m.isDirty) ++dirty;
-    }
-    Logger::Get().Info("BrushLibrary: builtins=" + std::to_string(builtins) +
-                       " custom=" + std::to_string(customs) + " dirty=" + std::to_string(dirty));
+    Logger::Get().Info("BrushLibrary: loaded " + std::to_string(m_MetaList.size()) + " presets (sync)");
+}
+
+std::vector<BrushPresetMeta> BrushLibrary::List() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_MetaList;
 }
 
 bool BrushLibrary::Get(const std::string& id, BrushPresetParams& outParams) const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     const Entry* e = Find(id);
     if (!e) return false;
     outParams = e->params;
@@ -512,6 +661,7 @@ bool BrushLibrary::Get(const std::string& id, BrushPresetParams& outParams) cons
 }
 
 bool BrushLibrary::GetMeta(const std::string& id, BrushPresetMeta& out) const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     const Entry* e = Find(id);
     if (!e) return false;
     out = e->meta;
@@ -519,6 +669,7 @@ bool BrushLibrary::GetMeta(const std::string& id, BrushPresetMeta& out) const {
 }
 
 bool BrushLibrary::ApplyTo(const std::string& id, BrushSettings& brush) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     Entry* e = Find(id);
     if (!e) return false;
     e->RebuildOwnedTip();
@@ -530,8 +681,23 @@ bool BrushLibrary::ApplyTo(const std::string& id, BrushSettings& brush) {
     return true;
 }
 
+void BrushLibrary::SetActiveId(const std::string& id) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_ActiveId = id;
+}
+
+std::string BrushLibrary::GetActiveId() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_ActiveId;
+}
+
 std::string BrushLibrary::CreateFromCurrent(const BrushSettings& brush, const std::string& name) {
-    if (!m_Loaded) LoadAll();
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    if (!m_Loaded) {
+        // builtins only — don't block on disk
+        RegisterBuiltins();
+        m_Loaded = true;
+    }
     Entry e;
     e.meta.id = NewUuid();
     e.meta.displayName = name.empty() ? "New Brush" : name;
@@ -548,6 +714,7 @@ std::string BrushLibrary::CreateFromCurrent(const BrushSettings& brush, const st
 }
 
 bool BrushLibrary::UpdateStaging(const std::string& id, const BrushSettings& brush) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     Entry* e = Find(id);
     if (!e || e->meta.isBuiltin) return false;
     e->params = BrushPresetParams::FromSettings(brush, brush.tip);
@@ -558,6 +725,7 @@ bool BrushLibrary::UpdateStaging(const std::string& id, const BrushSettings& bru
 }
 
 bool BrushLibrary::Rename(const std::string& id, const std::string& newDisplayName) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     Entry* e = Find(id);
     if (!e || e->meta.isBuiltin) return false;
     e->meta.displayName = newDisplayName;
@@ -567,6 +735,7 @@ bool BrushLibrary::Rename(const std::string& id, const std::string& newDisplayNa
 }
 
 bool BrushLibrary::SaveToDisk(const std::string& id) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     Entry* e = Find(id);
     if (!e || e->meta.isBuiltin) return false;
     EnsureRootExists();
@@ -578,13 +747,12 @@ bool BrushLibrary::SaveToDisk(const std::string& id) {
 }
 
 bool BrushLibrary::DiscardStaging(const std::string& id) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     Entry* e = Find(id);
     if (!e || e->meta.isBuiltin) return false;
     if (!e->meta.isDirty && !e->meta.sourcePath.empty()) {
-        // Reload from disk
-        return LoadFile(e->meta.sourcePath);
+        return LoadFileUnlocked(e->meta.sourcePath);
     }
-    // Drop entirely if never saved
     if (e->meta.sourcePath.empty()) {
         m_Entries.erase(std::remove_if(m_Entries.begin(), m_Entries.end(),
             [&](const Entry& x) { return x.meta.id == id; }), m_Entries.end());
@@ -592,16 +760,16 @@ bool BrushLibrary::DiscardStaging(const std::string& id) {
         RebuildMetaList();
         return true;
     }
-    // Dirty but has disk: reload file
     std::string path = e->meta.sourcePath;
     m_Entries.erase(std::remove_if(m_Entries.begin(), m_Entries.end(),
         [&](const Entry& x) { return x.meta.id == id; }), m_Entries.end());
-    bool ok = LoadFile(path);
+    bool ok = LoadFileUnlocked(path);
     RebuildMetaList();
     return ok;
 }
 
 bool BrushLibrary::DeleteCustom(const std::string& id) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
     Entry* e = Find(id);
     if (!e) return false;
     if (e->meta.isBuiltin) {
@@ -612,7 +780,6 @@ bool BrushLibrary::DeleteCustom(const std::string& id) {
         std::error_code ec;
         std::filesystem::remove(e->meta.sourcePath, ec);
     } else {
-        // Also try default path
         std::error_code ec;
         std::filesystem::remove(m_Root / (id + ".rvbrush"), ec);
     }

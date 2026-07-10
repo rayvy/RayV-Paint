@@ -8,15 +8,21 @@
 | **Fallback** | `Documents/RayVPaint/brushes` (same tree as `ConfigManager::GetUserDirectory()`) |
 | **Override** | `BrushLibrary::SetRootDir(path)` before `LoadAll()` |
 
-- Folder is created on first `EnsureRootExists()` / `LoadAll()`.
+- Folder is created on first `EnsureRootExists()` / disk scan.
 - Customs only appear as `*.rvbrush` files; builtins are **code-registered**, never deleted from disk.
 - Empty folder ⇒ only the 4 builtins in `List()`.
 
-Log line on init: `BrushLibrary root: <path> (ok)`.
+### Startup (fast path)
+1. `LoadBuiltins()` — sync, instant (4 code presets)
+2. `StartAsyncDiskLoad()` — background thread scans `*.rvbrush`
+3. Main loop `PollAsyncDiskLoad()` — merges customs when ready
+
+Log line on init: `BrushLibrary: builtins ready (...), disk scan deferred`.
 
 ## Format: `.rvbrush` (Option A — single JSON file)
 
-Filename: `{id}.rvbrush`
+Filename: `{id}.rvbrush`  
+**Portable:** one file = full brush. Tip texture is **embedded** as base64 (not a separate PNG path dependency). Share the `.rvbrush` file between users.
 
 ```json
 {
@@ -34,7 +40,11 @@ Filename: `{id}.rvbrush`
     "writeR": true, "writeG": true, "writeB": true, "writeA": false,
     "pressureRadius": false,
     "pressureHardness": false,
-    "pressureOpacity": false
+    "pressureOpacity": false,
+    "rotationDeg": 0.0,
+    "pressureRotation": false,
+    "scatter": 0.0,
+    "angleJitter": 0.0
   },
   "tip": {
     "type": "none | builtin | embedded",
@@ -42,15 +52,23 @@ Filename: `{id}.rvbrush`
     "size": 64,
     "encoding": "raw8_base64",
     "spacing_mul": 1.0,
-    "data": "<base64 grayscale tip>"
+    "data": "<base64 grayscale tip pixels>"
   }
 }
 ```
 
-- **version** mandatory; readers accept `version >= 1`.
-- **FG color is not stored** (Photoshop-like). UI keeps color on `g_Brush`.
-- Tip `builtin` references `BrushPresets::*` by id (no tip bytes on disk).
-- Tip `embedded` stores size×size u8 grayscale base64.
+| Field | Role |
+|-------|------|
+| `magic` | Must be `"RVBRUSH"` |
+| `version` | **Mandatory.** Current = `1`. Readers accept `version >= 1`, ignore unknown fields. Bump when adding breaking fields. |
+| `id` | Stable uuid (or `builtin.*`) |
+| `name` | Display name |
+| `params.*` | Full paint snapshot (no FG color) |
+| `tip.type=embedded` | Custom PNG→grayscale tip **inside file** (`data` base64) — portable |
+| `tip.type=builtin` | Reference to code tip (no bytes) |
+| `tipSourcePath` | Optional original path metadata only (not required to load) |
+
+Constants: `BrushLibrary::kFormatVersion`, `BrushLibrary::kFormatMagic`.
 
 ## Identity & meta
 

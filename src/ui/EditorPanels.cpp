@@ -308,7 +308,7 @@ namespace UI {
             }
             ImGui::Spacing();
 
-            const std::string& active = lib.GetActiveId();
+            const std::string active = lib.GetActiveId();
             const float rowH = 64.f; // taller rows = longer visible stroke
             for (const auto& m : lib.List()) {
                 ImGui::PushID(m.id.c_str());
