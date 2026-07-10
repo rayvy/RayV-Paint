@@ -9,6 +9,7 @@
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace modio {
 namespace {
@@ -282,60 +283,169 @@ TextureBind MakeBindFromPs(int slot, const std::string& resourceName,
     return b;
 }
 
-void ParseDrawsWithComments(const RawSection& sec, ModPart& part) {
+// Slot-keyed texture state (last bind wins per slot)
+using TexState = std::unordered_map<int, TextureBind>; // key = (int)MaterialSlot or 1000+ps
+
+static std::vector<TextureBind> TexStateToList(const TexState& st) {
+    std::vector<TextureBind> out;
+    out.reserve(st.size());
+    for (const auto& kv : st) out.push_back(kv.second);
+    return out;
+}
+
+static int BindKey(const TextureBind& b) {
+    if (b.slot != MaterialSlot::Unknown && b.slot != MaterialSlot::Custom)
+        return (int)b.slot;
+    if (b.psSlot >= 0) return 1000 + b.psSlot;
+    return 2000 + (int)std::hash<std::string>{}(b.resourceName) % 500;
+}
+
+// Apply one bind line into state
+static void ApplyBindLine(const std::string& key, const std::string& val,
+                          const std::unordered_map<std::string, ModResource>& resMap,
+                          TexState& state) {
+    std::string keyLow = ToLower(key);
+    if (keyLow.rfind("post ", 0) == 0) return;
+
+    std::string apiToken;
+    if (ParseApiAssignKey(key, apiToken)) {
+        std::string res = ParseResourceRef(val);
+        if (res.empty() || ToLower(res) == "null") return;
+        TextureBind b = MakeBindFromApi(apiToken, res, resMap);
+        state[BindKey(b)] = b;
+        return;
+    }
+    int ps = ParsePsSlotKey(keyLow);
+    if (ps >= 0) {
+        std::string res = ParseResourceRef(val);
+        if (res.empty() || ToLower(res) == "null") return;
+        TextureBind b = MakeBindFromPs(ps, res, resMap);
+        state[BindKey(b)] = b;
+    }
+}
+
+// Sequential multi-texture parse: texture binds + drawindexed + run=CommandList*
+// Dedup drawindexed within the part by (count, start).
+struct BatchParseCtx {
+    const std::unordered_map<std::string, const RawSection*>* secByName = nullptr;
+    const std::unordered_map<std::string, ModResource>* resMap = nullptr;
+    ModPart* part = nullptr;
+    TexState state;
+    bool stateDirty = true;
     std::string pendingComment;
+    std::unordered_set<uint64_t> seenDraws; // dedup key
+    int recursion = 0;
+};
+
+static uint64_t DrawKey(int count, int start) {
+    return (uint64_t)(uint32_t)count << 32 | (uint32_t)start;
+}
+
+static void FlushBatchIfNeeded(BatchParseCtx& ctx) {
+    if (!ctx.stateDirty && !ctx.part->batches.empty()) return;
+    DrawBatch batch;
+    batch.textures = TexStateToList(ctx.state);
+    batch.name = ctx.pendingComment.empty()
+        ? ("batch" + std::to_string(ctx.part->batches.size()))
+        : ctx.pendingComment;
+    ctx.part->batches.push_back(std::move(batch));
+    ctx.stateDirty = false;
+}
+
+static void ParseSectionLinesSequential(const RawSection& sec, BatchParseCtx& ctx);
+
+static void HandleRunCommand(const std::string& val, BatchParseCtx& ctx) {
+    // run = CommandListBody  or  CommandList\ZZMI\SetTextures
+    std::string name = Trim(val);
+    if (name.empty()) return;
+    // Engine helpers without local section — ignore quietly
+    if (!ctx.secByName) return;
+    auto it = ctx.secByName->find(ToLower(name));
+    if (it == ctx.secByName->end()) {
+        // try without CommandList prefix variants
+        return;
+    }
+    if (ctx.recursion > 8) return;
+    ++ctx.recursion;
+    ParseSectionLinesSequential(*it->second, ctx);
+    --ctx.recursion;
+}
+
+static void ParseSectionLinesSequential(const RawSection& sec, BatchParseCtx& ctx) {
     for (const std::string& raw : sec.rawLines) {
         if (IsCommentLine(raw)) {
             std::string c = CommentText(raw);
-            if (!c.empty()) pendingComment = c;
+            if (!c.empty()) ctx.pendingComment = c;
             continue;
         }
         std::string body = StripInlineComment(raw);
         if (body.empty()) continue;
         size_t eq = body.find('=');
         if (eq == std::string::npos) continue;
-        std::string key = ToLower(Trim(body.substr(0, eq)));
+        std::string key = Trim(body.substr(0, eq));
         std::string val = Trim(body.substr(eq + 1));
-        if (key == "drawindexed") {
+        std::string keyLow = ToLower(key);
+
+        if (keyLow == "drawindexed") {
             DrawIndexed d;
-            if (ParseDrawIndexed(val, d)) {
-                d.commentLabel = pendingComment;
-                part.draws.push_back(d);
+            if (!ParseDrawIndexed(val, d)) continue;
+            // Dedup within part
+            uint64_t dk = DrawKey(d.indexCount, d.indexStart);
+            if (ctx.seenDraws.count(dk)) continue;
+            ctx.seenDraws.insert(dk);
+
+            d.commentLabel = ctx.pendingComment;
+            FlushBatchIfNeeded(ctx);
+            if (ctx.part->batches.empty()) {
+                DrawBatch b;
+                b.textures = TexStateToList(ctx.state);
+                b.name = ctx.pendingComment.empty() ? "batch0" : ctx.pendingComment;
+                ctx.part->batches.push_back(std::move(b));
+                ctx.stateDirty = false;
             }
-            pendingComment.clear();
+            // If comment names the mesh, rename current batch when it has no draws yet
+            if (!ctx.pendingComment.empty() && ctx.part->batches.back().draws.empty())
+                ctx.part->batches.back().name = ctx.pendingComment;
+            ctx.part->batches.back().draws.push_back(d);
+            ctx.pendingComment.clear();
+            continue;
+        }
+
+        if (keyLow == "run") {
+            // Only expand CommandList / CustomShader that may contain draws or binds
+            std::string vlow = ToLower(val);
+            if (vlow.find("commandlist") != std::string::npos ||
+                vlow.find("customshader") != std::string::npos) {
+                HandleRunCommand(val, ctx);
+            }
+            continue;
+        }
+
+        // Texture / API binds change material state → next draw starts new batch
+        std::string apiTok;
+        bool isBind = ParseApiAssignKey(key, apiTok) || ParsePsSlotKey(keyLow) >= 0;
+        if (isBind) {
+            ApplyBindLine(key, val, *ctx.resMap, ctx.state);
+            ctx.stateDirty = true;
         }
     }
 }
 
-void CollectTextures(const RawSection& sec,
-                     const std::unordered_map<std::string, ModResource>& resMap,
-                     ModPart& part) {
-    for (const auto& kv : sec.keys) {
-        const std::string& key = kv.first;
-        const std::string& val = kv.second;
-        std::string keyLow = ToLower(key);
-
-        // Skip "post ..." bindings (unbind)
-        if (keyLow.rfind("post ", 0) == 0) continue;
-
-        std::string apiToken;
-        if (ParseApiAssignKey(key, apiToken)) {
-            std::string res = ParseResourceRef(val);
-            if (!res.empty() && ToLower(res) != "null")
-                part.textures.push_back(MakeBindFromApi(apiToken, res, resMap));
-            continue;
-        }
-
-        int ps = ParsePsSlotKey(keyLow);
-        if (ps >= 0) {
-            std::string res = ParseResourceRef(val);
-            if (!res.empty() && ToLower(res) != "null")
-                part.textures.push_back(MakeBindFromPs(ps, res, resMap));
-        }
-    }
-
-    // Prefer API binds over ps-t for same slot role: if we have both Diffuse API and
-    // a ps-t that maps to Diffuse, keep both for now (UI can de-dupe later).
+// Build batches for a TextureOverride part section (+ nested CommandLists)
+static void ParsePartBatches(const RawSection& sec,
+                             const std::unordered_map<std::string, const RawSection*>& secByName,
+                             const std::unordered_map<std::string, ModResource>& resMap,
+                             ModPart& part) {
+    BatchParseCtx ctx;
+    ctx.secByName = &secByName;
+    ctx.resMap = &resMap;
+    ctx.part = &part;
+    ParseSectionLinesSequential(sec, ctx);
+    // Drop empty batches
+    part.batches.erase(
+        std::remove_if(part.batches.begin(), part.batches.end(),
+                       [](const DrawBatch& b) { return b.draws.empty(); }),
+        part.batches.end());
 }
 
 } // namespace
@@ -536,19 +646,30 @@ ModScene ModIniParser::ParseText(const std::string& iniText, const std::string& 
         }
     }
 
-    // Pass 3: parts — sections with drawindexed
+    // Pass 3: parts — TextureOverride with drawindexed OR run=CommandList that draws
     for (const auto& sec : sections) {
         if (ToLower(sec.name).rfind("textureoverride", 0) != 0)
             continue;
 
         bool hasDraw = false;
+        bool hasRunCL = false;
         for (const auto& kv : sec.keys) {
-            if (ToLower(kv.first) == "drawindexed") { hasDraw = true; break; }
+            std::string k = ToLower(kv.first);
+            if (k == "drawindexed") hasDraw = true;
+            if (k == "run") {
+                std::string v = ToLower(kv.second);
+                if (v.find("commandlist") != std::string::npos) hasRunCL = true;
+            }
         }
-        if (!hasDraw) continue;
-
-        // Skip pure IB skip handlers without textures (handling=skip only)
-        // still may have drawindexed on part sections
+        // Also scan raw lines (keys map may collapse duplicates)
+        for (const auto& raw : sec.rawLines) {
+            std::string body = StripInlineComment(raw);
+            std::string low = ToLower(body);
+            if (low.rfind("drawindexed", 0) == 0) hasDraw = true;
+            if (low.rfind("run", 0) == 0 && low.find("commandlist") != std::string::npos)
+                hasRunCL = true;
+        }
+        if (!hasDraw && !hasRunCL) continue;
 
         ModPart part;
         part.sectionName = sec.name;
@@ -570,12 +691,11 @@ ModScene ModIniParser::ParseText(const std::string& iniText, const std::string& 
                 scene.warnings.push_back({ "Unknown IB resource: " + part.ibResource });
             }
         } else {
-            // Texture-only override possible
             part.hasGeometry = false;
         }
 
-        ParseDrawsWithComments(sec, part);
-        CollectTextures(sec, resMap, part);
+        ParsePartBatches(sec, secByName, resMap, part);
+        if (part.batches.empty()) continue;
 
         std::string ckey = ComponentKeyFromOverride(sec.name);
         part.name = PartNameFromSection(sec.name, ckey);
@@ -584,7 +704,6 @@ ModScene ModIniParser::ParseText(const std::string& iniText, const std::string& 
         if (it != comps.end()) {
             it->second.comp.parts.push_back(std::move(part));
         } else {
-            // Try attach by IB resource name prefix (BelleBodyAIB → BelleBody)
             bool attached = false;
             if (!part.ibResource.empty()) {
                 for (auto& [lk, b] : comps) {
@@ -597,7 +716,6 @@ ModScene ModIniParser::ParseText(const std::string& iniText, const std::string& 
                 }
             }
             if (!attached) {
-                // Create synthetic component for lone part
                 if (!ckey.empty()) {
                     auto& b = getComp(ckey);
                     b.comp.parts.push_back(std::move(part));
@@ -622,7 +740,7 @@ ModScene ModIniParser::ParseText(const std::string& iniText, const std::string& 
         if (b.comp.positionResource.empty() && !b.comp.parts.empty()) {
             bool anyGeo = false;
             for (const auto& p : b.comp.parts)
-                if (p.hasGeometry && !p.draws.empty()) anyGeo = true;
+                if (p.hasGeometry && p.TotalDraws() > 0) anyGeo = true;
             if (!anyGeo) {
                 scene.warnings.push_back({
                     "Component '" + b.comp.name + "' has parts but no Position buffer (texture-only?)"
@@ -847,9 +965,11 @@ void ModIniParser::RefreshExistence(ModScene& scene) {
     auto fixPart = [&](ModPart& p) {
         if (!p.ibAbsolutePath.empty())
             p.hasGeometry = FileExistsUtf8(p.ibAbsolutePath);
-        for (auto& t : p.textures) {
-            if (!t.absolutePath.empty())
-                t.exists = FileExistsUtf8(t.absolutePath);
+        for (auto& b : p.batches) {
+            for (auto& t : b.textures) {
+                if (!t.absolutePath.empty())
+                    t.exists = FileExistsUtf8(t.absolutePath);
+            }
         }
     };
     for (auto& c : scene.components) {
@@ -878,20 +998,24 @@ std::string FormatSceneSummary(const ModScene& scene) {
           << " parts=" << c.parts.size() << "\n";
         for (const auto& p : c.parts) {
             o << "    - " << p.name << " ib=" << p.ibResource
-              << " draws=" << p.draws.size()
-              << " tex=" << p.textures.size()
+              << " batches=" << p.batches.size()
+              << " draws=" << p.TotalDraws()
               << (p.hasGeometry ? "" : " [no geo]") << "\n";
-            for (const auto& d : p.draws) {
-                o << "        drawindexed " << d.indexCount << ", " << d.indexStart;
-                if (!d.commentLabel.empty()) o << "  ; " << d.commentLabel;
-                o << "\n";
-            }
-            for (const auto& t : p.textures) {
-                o << "        " << MaterialSlotName(t.slot);
-                if (t.source == BindSource::ApiNamed) o << " (API:" << t.apiName << ")";
-                if (t.source == BindSource::PsSlot) o << " (ps-t" << t.psSlot << ")";
-                o << " → " << t.resourceName
-                  << (t.exists ? "" : " MISSING") << "\n";
+            for (const auto& bat : p.batches) {
+                o << "      batch \"" << bat.name << "\" draws=" << bat.draws.size()
+                  << " tex=" << bat.textures.size()
+                  << (bat.visible ? "" : " [hidden]") << "\n";
+                for (const auto& t : bat.textures) {
+                    o << "        " << MaterialSlotName(t.slot);
+                    if (t.source == BindSource::ApiNamed) o << " (API:" << t.apiName << ")";
+                    o << " → " << t.resourceName << (t.exists ? "" : " MISSING") << "\n";
+                }
+                for (const auto& d : bat.draws) {
+                    o << "        drawindexed " << d.indexCount << ", " << d.indexStart;
+                    if (!d.commentLabel.empty()) o << "  ; " << d.commentLabel;
+                    if (!d.visible) o << " [hidden]";
+                    o << "\n";
+                }
             }
         }
     }

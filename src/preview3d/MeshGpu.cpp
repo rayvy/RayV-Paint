@@ -227,11 +227,33 @@ bool CreateGpuMesh(ID3D11Device* device,
     return true;
 }
 
-bool BuildPartMesh(ID3D11Device* device,
-                   const modio::ModComponent& comp,
-                   const modio::ModPart& part,
-                   GpuMesh& out,
-                   std::string& err) {
+static bool CollectDrawIndices(const std::vector<modio::DrawIndexed>& draws,
+                               const std::vector<uint32_t>& fullIb,
+                               std::vector<uint32_t>& used) {
+    used.clear();
+    for (const auto& d : draws) {
+        if (!d.visible || d.indexCount <= 0) continue;
+        int start = d.indexStart;
+        int count = d.indexCount;
+        if (start < 0) start = 0;
+        if (start + count > (int)fullIb.size())
+            count = std::max(0, (int)fullIb.size() - start);
+        for (int i = 0; i < count; ++i)
+            used.push_back(fullIb[(size_t)start + (size_t)i]);
+    }
+    return !used.empty();
+}
+
+bool BuildBatchMesh(ID3D11Device* device,
+                    const modio::ModComponent& comp,
+                    const modio::ModPart& part,
+                    const modio::DrawBatch& batch,
+                    GpuMesh& out,
+                    std::string& err) {
+    if (!batch.visible) {
+        err = "batch hidden";
+        return false;
+    }
     std::vector<PreviewVertex> verts;
     if (!DecodeComponentVertices(comp, verts, err))
         return false;
@@ -240,24 +262,38 @@ bool BuildPartMesh(ID3D11Device* device,
     if (part.ibAbsolutePath.empty() || !LoadIndexBufferFile(part.ibAbsolutePath, fullIb, err))
         return false;
 
-    // Collect indices from draw ranges
     std::vector<uint32_t> used;
-    for (const auto& d : part.draws) {
-        if (!d.visible || d.indexCount <= 0) continue;
-        int start = d.indexStart;
-        int count = d.indexCount;
-        if (start < 0) start = 0;
-        if (start + count > (int)fullIb.size()) {
-            count = std::max(0, (int)fullIb.size() - start);
-        }
-        for (int i = 0; i < count; ++i)
-            used.push_back(fullIb[(size_t)start + (size_t)i]);
+    if (!CollectDrawIndices(batch.draws, fullIb, used)) {
+        err = "no visible draws in batch " + batch.name;
+        return false;
+    }
+    std::string meshName = comp.name + "/" + part.name + "/" + batch.name;
+    return CreateGpuMesh(device, verts, used, meshName, out, err);
+}
+
+bool BuildPartMesh(ID3D11Device* device,
+                   const modio::ModComponent& comp,
+                   const modio::ModPart& part,
+                   GpuMesh& out,
+                   std::string& err) {
+    // Merge all visible batch draws (single mesh — loses multi-texture)
+    std::vector<PreviewVertex> verts;
+    if (!DecodeComponentVertices(comp, verts, err))
+        return false;
+    std::vector<uint32_t> fullIb;
+    if (part.ibAbsolutePath.empty() || !LoadIndexBufferFile(part.ibAbsolutePath, fullIb, err))
+        return false;
+    std::vector<uint32_t> used;
+    for (const auto& b : part.batches) {
+        if (!b.visible) continue;
+        std::vector<uint32_t> tmp;
+        CollectDrawIndices(b.draws, fullIb, tmp);
+        used.insert(used.end(), tmp.begin(), tmp.end());
     }
     if (used.empty()) {
-        // fallback: whole IB
-        used = std::move(fullIb);
+        err = "no visible draws";
+        return false;
     }
-
     return CreateGpuMesh(device, verts, used, comp.name + "/" + part.name, out, err);
 }
 

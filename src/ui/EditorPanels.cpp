@@ -3817,17 +3817,51 @@ namespace UI {
                         ImGui::TreePop();
                     }
 
-                    if (ImGui::TreeNode("Component tree##mod_tree")) {
-                        for (const auto& c : scene.components) {
+                    if (ImGui::TreeNode("Component / batches / draws##mod_tree")) {
+                        auto& sceneEdit = canvas.GetModScene();
+                        for (auto& c : sceneEdit.components) {
                             if (ImGui::TreeNode(c.name.c_str())) {
-                                for (const auto& p : c.parts) {
-                                    ImGui::BulletText("%s  draws=%d tex=%d%s",
-                                        p.name.c_str(), (int)p.draws.size(), (int)p.textures.size(),
-                                        p.hasGeometry ? "" : " [no geo]");
+                                ImGui::Checkbox("Component visible", &c.visible);
+                                for (auto& p : c.parts) {
+                                    if (ImGui::TreeNode((p.name + "##" + p.sectionName).c_str())) {
+                                        ImGui::Checkbox("Part visible", &p.visible);
+                                        ImGui::TextDisabled("IB %s  batches=%d draws=%d",
+                                            p.ibResource.c_str(), (int)p.batches.size(), p.TotalDraws());
+                                        for (int bi = 0; bi < (int)p.batches.size(); ++bi) {
+                                            auto& bat = p.batches[bi];
+                                            ImGui::PushID(bi);
+                                            if (ImGui::TreeNode(bat.name.c_str())) {
+                                                if (ImGui::Checkbox("Batch visible", &bat.visible))
+                                                    state.preview3DNeedReload = true;
+                                                for (const auto& t : bat.textures) {
+                                                    ImGui::BulletText("%s → %s%s",
+                                                        modio::MaterialSlotName(t.slot),
+                                                        t.resourceName.c_str(),
+                                                        t.exists ? "" : " [missing]");
+                                                }
+                                                for (int di = 0; di < (int)bat.draws.size(); ++di) {
+                                                    auto& d = bat.draws[di];
+                                                    ImGui::PushID(di);
+                                                    char lab[256];
+                                                    std::snprintf(lab, sizeof(lab),
+                                                        "draw %d @%d%s", d.indexCount, d.indexStart,
+                                                        d.commentLabel.empty() ? "" : (" ; " + d.commentLabel).c_str());
+                                                    if (ImGui::Checkbox(lab, &d.visible))
+                                                        state.preview3DNeedReload = true;
+                                                    ImGui::PopID();
+                                                }
+                                                ImGui::TreePop();
+                                            }
+                                            ImGui::PopID();
+                                        }
+                                        ImGui::TreePop();
+                                    }
                                 }
                                 ImGui::TreePop();
                             }
                         }
+                        if (ImGui::Button("Reload 3D after visibility##mod_vis"))
+                            state.preview3DNeedReload = true;
                         ImGui::TreePop();
                     }
                     if (!scene.warnings.empty() && ImGui::TreeNode("Warnings##mod_warn")) {
@@ -3855,6 +3889,8 @@ namespace UI {
             static bool s_VpCapture = false;   // block window drag while using viewport
             static int s_NPanel = 0;           // 0=collapsed strip, 1=Light 2=Shade 3=Orient 4=Parts 5=Debug
             static int s_SelPart = 0;
+            static float s_NBodyW = 380.f;     // resizable N-panel content width
+            static bool s_Splitting = false;
 
             if (!s_PreviewInit && device)
                 s_PreviewInit = s_Preview.Initialize(device);
@@ -3864,10 +3900,10 @@ namespace UI {
             }
 
             ImGuiWindowFlags winFlags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
-            if (s_VpCapture)
+            if (s_VpCapture || s_Splitting)
                 winFlags |= ImGuiWindowFlags_NoMove;
 
-            ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowSize(ImVec2(1100, 700), ImGuiCond_FirstUseEver);
             if (ImGui::Begin("3D Preview", &state.showPreview3D, winFlags)) {
                 // HOME = reset view when this window focused
                 if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
@@ -3875,10 +3911,13 @@ namespace UI {
                     s_Preview.ResetView();
                 }
 
-                const float nTabW = 28.f;
-                const float nPanelW = (s_NPanel > 0) ? 280.f : nTabW;
+                const float nTabW = 32.f;
+                const float splitW = 6.f;
+                s_NBodyW = std::clamp(s_NBodyW, 220.f, 700.f);
+                const float nPanelW = (s_NPanel > 0) ? (nTabW + s_NBodyW) : nTabW;
                 ImVec2 avail = ImGui::GetContentRegionAvail();
-                float vpW = std::max(64.f, avail.x - nPanelW - 4.f);
+                float splitSpace = (s_NPanel > 0) ? splitW : 2.f;
+                float vpW = std::max(64.f, avail.x - nPanelW - splitSpace);
                 float vpH = std::max(64.f, avail.y);
 
                 // ===== Viewport (left) =====
@@ -3969,11 +4008,35 @@ namespace UI {
                 }
                 ImGui::EndChild();
 
-                ImGui::SameLine(0, 2);
+                ImGui::SameLine(0, 0);
+
+                // ===== Splitter (drag to resize N-panel) =====
+                if (s_NPanel > 0) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.25f, 0.28f, 0.6f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.4f, 0.55f, 0.9f, 0.8f));
+                    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.35f, 0.5f, 0.95f, 1.f));
+                    ImGui::Button("##p3d_split", ImVec2(splitW, vpH));
+                    if (ImGui::IsItemActive() || ImGui::IsItemHovered())
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                    if (ImGui::IsItemActive()) {
+                        s_Splitting = true;
+                        // Dragging left increases N-panel, right shrinks it
+                        s_NBodyW = std::clamp(s_NBodyW - ImGui::GetIO().MouseDelta.x, 220.f, 700.f);
+                    } else {
+                        s_Splitting = false;
+                    }
+                    ImGui::PopStyleColor(3);
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip("Drag to resize N-panel");
+                    ImGui::SameLine(0, 0);
+                } else {
+                    ImGui::SameLine(0, 2);
+                    s_Splitting = false;
+                }
 
                 // ===== N-panel (right) =====
                 ImGui::BeginChild("##p3d_n", ImVec2(nPanelW, vpH), true,
-                    ImGuiWindowFlags_NoScrollbar);
+                    ImGuiWindowFlags_None); // allow scroll inside panel
 
                 auto nTab = [&](int id, const char* letter, const char* tip) {
                     bool on = (s_NPanel == id);
@@ -4050,51 +4113,78 @@ namespace UI {
                             }
                             if (ImGui::Button("Apply to all parts"))
                                 s_Preview.ApplyPresetToAll(items[s_SelPart].material);
+                            ImGui::SameLine();
                             if (ImGui::Button("Save preset JSON")) {
                                 std::string dir = ConfigManager::GetUserSubdirectory("presets/shaders");
                                 lib.SavePreset(items[s_SelPart].material, dir);
                             }
+
+                            // Bind diagnostics — verify multi-texture paths
+                            if (ImGui::TreeNode("Bound textures (paths)##binds")) {
+                                const char* slotN[] = { "Diffuse", "Normal", "LightMap", "Material" };
+                                auto& it = items[s_SelPart];
+                                for (int mi = 0; mi < 4; ++mi) {
+                                    bool ok = !it.paths[mi].empty();
+                                    ImGui::TextColored(
+                                        ok ? ImVec4(0.4f, 0.9f, 0.5f, 1.f) : ImVec4(0.95f, 0.45f, 0.3f, 1.f),
+                                        "%s: %s", slotN[mi],
+                                        ok ? it.paths[mi].c_str() : "(missing — fallback grey)");
+                                }
+                                ImGui::TextDisabled(
+                                    "ZZZ default remap:\n"
+                                    "  LightMap R=Shadow  G=Metal  B=Gloss\n"
+                                    "  Material R=Opacity G=None   B=Spec\n"
+                                    "  Normal   R/G=N     B=AO\n"
+                                    "  Vtx COLOR.r=Outline thick");
+                                ImGui::TreePop();
+                            }
+
                             auto& mat = items[s_SelPart].material;
                             ImGui::SliderFloat("Toon thr", &mat.toonThreshold, 0.f, 1.f);
                             ImGui::SliderFloat("Toon soft", &mat.toonSoftness, 0.01f, 0.5f);
                             ImGui::SliderFloat("Rim", &mat.rimStrength, 0.f, 1.5f);
                             ImGui::SliderFloat("SSS", &mat.sssStrength, 0.f, 1.f);
-                            ImGui::SliderFloat("Aniso", &mat.anisoStrength, 0.f, 2.f);
                             ImGui::Checkbox("Normal map", &mat.useNormalMap);
+                            ImGui::SameLine();
                             ImGui::Checkbox("Normal RG only", &mat.normalRGOnly);
-                            if (ImGui::TreeNode("Channel remap")) {
+                            ImGui::Checkbox("Alpha clip (Material.R)", &mat.alphaClip);
+                            if (ImGui::TreeNode("Channel remap##ch")) {
+                                ImGui::TextDisabled("If look is wrong — remap first, then blame shader.");
                                 auto editCh = [](const char* label, preview3d::ChannelSource& ch) {
                                     ImGui::PushID(label);
+                                    ImGui::AlignTextToFramePadding();
                                     ImGui::TextUnformatted(label);
+                                    ImGui::SameLine(100);
                                     int map = (ch.map == preview3d::MapSet::Constant) ? 4 : (int)ch.map;
                                     const char* maps[] = { "Diffuse", "Normal", "LightMap", "MaterialMap", "Const" };
-                                    ImGui::SetNextItemWidth(100);
+                                    ImGui::SetNextItemWidth(110);
                                     if (ImGui::Combo("##m", &map, maps, 5))
                                         ch.map = (map >= 4) ? preview3d::MapSet::Constant
                                                             : static_cast<preview3d::MapSet>(map);
                                     ImGui::SameLine();
                                     int sw = std::clamp((int)ch.swizzle, 0, 6);
                                     const char* swz[] = { "R", "G", "B", "A", "Luma", "1", "0" };
-                                    ImGui::SetNextItemWidth(56);
+                                    ImGui::SetNextItemWidth(64);
                                     if (ImGui::Combo("##s", &sw, swz, 7))
                                         ch.swizzle = static_cast<preview3d::ChanSwizzle>(sw);
                                     ImGui::SameLine();
                                     ImGui::Checkbox("inv", &ch.invert);
                                     if (ch.map == preview3d::MapSet::Constant) {
-                                        ImGui::SetNextItemWidth(60);
+                                        ImGui::SameLine();
+                                        ImGui::SetNextItemWidth(56);
                                         ImGui::DragFloat("##c", &ch.constantValue, 0.01f, 0.f, 1.f);
                                     }
                                     ImGui::PopID();
                                 };
                                 editCh("Shadow", mat.shadowMask);
-                                editCh("Specular", mat.specular);
                                 editCh("Metallic", mat.metallic);
-                                editCh("Rough", mat.roughness);
+                                editCh("Rough/Gloss", mat.roughness);
+                                editCh("Specular", mat.specular);
                                 editCh("AO", mat.ao);
+                                editCh("Opacity", mat.opacity);
                                 editCh("Aniso", mat.anisotropy);
                                 editCh("SSS", mat.sssMask);
                                 editCh("Glow", mat.glow);
-                                editCh("Opacity", mat.opacity);
                                 ImGui::TreePop();
                             }
                         } else {
@@ -4144,7 +4234,7 @@ namespace UI {
                         ImGui::EndDisabled();
                         ImGui::SliderFloat("Outline thick", &P.outlineThickness, 0.001f, 0.08f, "%.4f");
                         ImGui::SliderFloat("Outline darken", &P.outlineAlbedoMul, 0.02f, 0.5f, "%.2f");
-                        ImGui::Checkbox("Outline × COLOR.g", &P.outlineUseVertexColor);
+                        ImGui::Checkbox("Outline × COLOR.r (thick)", &P.outlineUseVertexColor);
                         ImGui::Checkbox("Fixed outline tint", &P.outlineUseFixedTint);
                         if (P.outlineUseFixedTint)
                             ImGui::ColorEdit3("Tint", P.outlineTint, ImGuiColorEditFlags_NoInputs);

@@ -23,10 +23,11 @@ struct PassConfig {
     bool enableGlow = false;
     bool enableBloom = false;
 
-    // ZZZ outline knobs (preview-owned, not game CB)
-    float outlineThickness = 0.012f;
-    float outlineAlbedoMul = 0.12f;
-    bool  outlineUseVertexColor = true;
+    // ZZZ outline knobs (preview-owned). Game uses ~0.001–0.005 view-space-ish;
+    // we expand in model space — keep default thin, scale with character size.
+    float outlineThickness = 0.0035f;
+    float outlineAlbedoMul = 0.22f;
+    bool  outlineUseVertexColor = true; // COLOR.r thickness (ZZZ community)
     float outlineTint[3] = { 0.05f, 0.05f, 0.06f };
     bool  outlineUseFixedTint = false; // false = diffuse * mul
 

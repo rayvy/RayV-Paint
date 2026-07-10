@@ -49,7 +49,15 @@ bool CreateGpuMesh(ID3D11Device* device,
                    GpuMesh& out,
                    std::string& err);
 
-// Build one part's mesh: full component VB + indices for that part's draws
+// Build mesh for one draw-batch (subset of IB with its own textures)
+bool BuildBatchMesh(ID3D11Device* device,
+                    const modio::ModComponent& comp,
+                    const modio::ModPart& part,
+                    const modio::DrawBatch& batch,
+                    GpuMesh& out,
+                    std::string& err);
+
+// Legacy: all visible draws of a part (single material — prefer BuildBatchMesh)
 bool BuildPartMesh(ID3D11Device* device,
                    const modio::ModComponent& comp,
                    const modio::ModPart& part,

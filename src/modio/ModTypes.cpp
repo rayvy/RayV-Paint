@@ -17,11 +17,22 @@ int ModScene::PartCount() const {
     return n;
 }
 
+int ModPart::TotalDraws() const {
+    int n = 0;
+    for (const auto& b : batches) n += (int)b.draws.size();
+    return n;
+}
+
+int ModPart::TotalTextureBinds() const {
+    int n = 0;
+    for (const auto& b : batches) n += (int)b.textures.size();
+    return n;
+}
+
 int ModScene::DrawCount() const {
     int n = 0;
     auto count = [&](const std::vector<ModPart>& parts) {
-        for (const auto& p : parts)
-            n += (int)p.draws.size();
+        for (const auto& p : parts) n += p.TotalDraws();
     };
     for (const auto& c : components) count(c.parts);
     count(orphanParts);
@@ -31,8 +42,7 @@ int ModScene::DrawCount() const {
 int ModScene::TextureBindCount() const {
     int n = 0;
     auto count = [&](const std::vector<ModPart>& parts) {
-        for (const auto& p : parts)
-            n += (int)p.textures.size();
+        for (const auto& p : parts) n += p.TotalTextureBinds();
     };
     for (const auto& c : components) count(c.parts);
     count(orphanParts);

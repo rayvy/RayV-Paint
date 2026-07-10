@@ -134,6 +134,7 @@ float3 PerturbNormal(float3 N, float3 T, float3 B, float2 uv, float strength, bo
 {
     float3 nrm = texNormal.Sample(sampLin, uv).xyz;
     float3 mapN;
+    // ZZZ: R/G = normal XY, B = occlusion (not Z) when rgOnly
     if (rgOnly)
     {
         mapN.xy = nrm.xy * 2.0 - 1.0;
@@ -142,8 +143,7 @@ float3 PerturbNormal(float3 N, float3 T, float3 B, float2 uv, float strength, bo
     else
     {
         mapN = nrm * 2.0 - 1.0;
-        // Some maps store only RG with Z in alpha or blue — if blue ~0/1 flat, reconstruct
-        if (nrm.z < 0.02 || nrm.z > 0.98)
+        if (nrm.z < 0.05 || nrm.z > 0.95)
             mapN.z = sqrt(saturate(1.0 - dot(mapN.xy, mapN.xy)));
     }
     mapN.xy *= strength;
@@ -245,14 +245,19 @@ float4 PSMain(VSOut i) : SV_Target
     else
         ndl = saturate(ndlRaw);
 
-    // Toon shadow via remap of ndl * shadowMask
+    // Soft cel: shadowMask from LightMap tints the lit/unlit blend (ZZZ-style)
     float thr = style0.x;
     float soft = max(style0.y, 1e-4);
-    float shade = saturate((ndl * lerp(0.35, 1.0, shadowM) - thr) / soft + 0.5);
-    // 2-band toon
+    float litFactor = ndl * lerp(0.55, 1.0, shadowM);
+    float shade = saturate((litFactor - thr) / soft + 0.5);
     float toon = smoothstep(0.0, 1.0, shade);
+    // Slight LightMap RGB as color grading (helps jacket/cloth match game)
+    float3 lmRgb = texLight.Sample(sampLin, uvL).rgb;
+    if (dot(uvL, uvL) < 1e-8)
+        lmRgb = texLight.Sample(sampLin, uv).rgb;
+    float3 albedoTint = albedo * lerp(float3(1, 1, 1), saturate(lmRgb * 1.15 + 0.15), 0.35);
     float shadowTint = style0.z;
-    float3 diffuseLit = albedo * lerp(shadowTint, 1.0, toon);
+    float3 diffuseLit = albedoTint * lerp(shadowTint, 1.0, toon);
 
     // Specular (Blinn + optional anisotropic ring for hair)
     float rough01 = max(rough, 0.04);

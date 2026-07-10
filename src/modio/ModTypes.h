@@ -61,8 +61,17 @@ struct TextureBind {
 struct DrawIndexed {
     int indexCount = 0;
     int indexStart = 0;
-    int baseVertex = 0;
+    int baseVertex = 0;        // 3rd arg; always 0 in XXMI exports
     std::string commentLabel;  // from preceding ; comment if any
+    bool visible = true;
+};
+
+// One material group inside a part: textures active for one or more drawindexed.
+// Belle BodyA: jacket maps → several draws, then BodyDiffuse maps → base mesh draw.
+struct DrawBatch {
+    std::string name;          // comment label or "batchN"
+    std::vector<TextureBind> textures;
+    std::vector<DrawIndexed> draws;
     bool visible = true;
 };
 
@@ -73,10 +82,13 @@ struct ModPart {
     std::string ibAbsolutePath;
     int matchFirstIndex = -1;
     std::string hash;
-    std::vector<DrawIndexed> draws;
-    std::vector<TextureBind> textures;
+    std::vector<DrawBatch> batches; // multi-texture sequential groups
     bool visible = true;
     bool hasGeometry = true;   // false for texture-only overrides
+
+    // Flattened views (filled after parse) for stats / simple UIs
+    int TotalDraws() const;
+    int TotalTextureBinds() const;
 };
 
 struct ModComponent {

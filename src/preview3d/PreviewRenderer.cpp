@@ -465,6 +465,10 @@ MaterialConfig PreviewRenderer::GuessPresetForPart(const std::string& component,
 bool PreviewRenderer::LoadScene(ID3D11Device* device, const modio::ModScene& scene) {
     if (!m_Ready && !Initialize(device))
         return false;
+    // Refresh builtin channel maps (ZZZ LightMap/Material/Normal community layout)
+    ShaderPresetLibrary::Get().LoadBuiltins();
+    ShaderPresetLibrary::Get().LoadDirectory(
+        ConfigManager::GetUserSubdirectory("presets/shaders"));
     ReleaseItems();
     m_LastError.clear();
 
@@ -473,34 +477,38 @@ bool PreviewRenderer::LoadScene(ID3D11Device* device, const modio::ModScene& sce
         if (!c.visible) continue;
         for (const auto& p : c.parts) {
             if (!p.visible || !p.hasGeometry) continue;
-            PartDrawItem item;
-            item.componentName = c.name;
-            item.partName = p.name;
-            item.visible = true;
-            item.material = GuessPresetForPart(c.name, p.name);
-            item.presetId = item.material.id;
+            // One GPU draw item per texture batch (multi-texture within same IB section)
+            for (const auto& bat : p.batches) {
+                if (!bat.visible) continue;
+                PartDrawItem item;
+                item.componentName = c.name;
+                item.partName = p.name + "/" + bat.name;
+                item.visible = true;
+                item.material = GuessPresetForPart(c.name, p.name + " " + bat.name);
+                item.presetId = item.material.id;
 
-            for (int mi = 0; mi < 4; ++mi) {
-                modio::MaterialSlot slot = SlotForMapIndex(mi);
-                for (const auto& t : p.textures) {
-                    if (t.slot == slot && t.exists) {
-                        item.paths[mi] = t.absolutePath;
-                        break;
+                for (int mi = 0; mi < 4; ++mi) {
+                    modio::MaterialSlot slot = SlotForMapIndex(mi);
+                    for (const auto& t : bat.textures) {
+                        if (t.slot == slot && t.exists) {
+                            item.paths[mi] = t.absolutePath;
+                            break;
+                        }
                     }
                 }
-            }
 
-            std::string err;
-            if (!BuildPartMesh(device, c, p, item.mesh, err)) {
-                Logger::Get().Warn("Preview mesh skip " + c.name + "/" + p.name + ": " + err);
-                ++failCount;
-                continue;
-            }
-            for (int mi = 0; mi < 4; ++mi)
-                item.srvs[mi] = GetOrLoadSRV(device, item.paths[mi]);
+                std::string err;
+                if (!BuildBatchMesh(device, c, p, bat, item.mesh, err)) {
+                    Logger::Get().Warn("Preview mesh skip " + item.partName + ": " + err);
+                    ++failCount;
+                    continue;
+                }
+                for (int mi = 0; mi < 4; ++mi)
+                    item.srvs[mi] = GetOrLoadSRV(device, item.paths[mi]);
 
-            m_Items.push_back(std::move(item));
-            ++okCount;
+                m_Items.push_back(std::move(item));
+                ++okCount;
+            }
         }
     }
 
@@ -610,7 +618,7 @@ void PreviewRenderer::DrawOutlineZZZPass(ID3D11DeviceContext* ctx) {
             thick,
             mul,
             m_Passes.outlineUseVertexColor ? 1.f : 0.f,
-            0.f);
+            0.15f); // min vertex-color thickness scale
         ocb.tint = XMFLOAT4(
             m_Passes.outlineTint[0], m_Passes.outlineTint[1], m_Passes.outlineTint[2],
             m_Passes.outlineUseFixedTint ? 1.f : 0.f);

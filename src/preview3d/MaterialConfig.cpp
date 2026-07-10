@@ -99,19 +99,31 @@ MaterialConfig MaterialConfig::MakeDefaultZZZ_Skin() {
     m.id = "ZZZ-Skin";
     m.displayName = "ZZZ Skin / Body";
     m.family = GameFamily::ZZZ;
-    // Popular ZZZ packing guesses — user can remap per part
+    // Community-common ZZZ packing (not guaranteed per-character — remappable in UI):
+    // LightMap:  R=ShadowRamp/outline-ish  G=Metallic  B=Gloss
+    // Material:  R=Transparency  G=GodKnows→None  B=Specular-ish
+    // Normal:    R=N.x  G=N.y  B=Occlusion  (RG normal, B AO)
+    // Vertex:    R=Outline thick  G=?  B=contact shadow?  A=neck?
     m.shadowMask = From(MapSet::LightMap, ChanSwizzle::R);
-    m.specular   = From(MapSet::LightMap, ChanSwizzle::G);
-    m.ao         = From(MapSet::MaterialMap, ChanSwizzle::R);
-    m.roughness  = From(MapSet::MaterialMap, ChanSwizzle::G);
-    m.metallic   = From(MapSet::MaterialMap, ChanSwizzle::B);
-    m.sssMask    = From(MapSet::MaterialMap, ChanSwizzle::A);
+    m.metallic   = From(MapSet::LightMap, ChanSwizzle::G);
+    m.roughness  = From(MapSet::LightMap, ChanSwizzle::B, 1.f, true); // gloss → rough via invert
+    m.opacity    = From(MapSet::MaterialMap, ChanSwizzle::R);
+    m.anisotropy = Const(0.f); // Material.G = God Knows → unused
+    m.specular   = From(MapSet::MaterialMap, ChanSwizzle::B);
+    m.ao         = From(MapSet::Normal, ChanSwizzle::B);
+    m.sssMask    = Const(0.5f);
+    m.glow       = Const(0.f);
+    m.rimMask    = Const(1.f);
+    m.normalRGOnly = true; // ZZZ normal often RG + AO in B
     m.sssStrength = 0.35f;
-    m.toonThreshold = 0.42f;
-    m.toonSoftness = 0.12f;
-    m.toonShadowTint = 0.62f;
-    m.rimStrength = 0.2f;
+    m.toonThreshold = 0.38f;
+    m.toonSoftness = 0.22f;
+    m.toonShadowTint = 0.72f;
+    m.rimStrength = 0.12f;
     m.anisoStrength = 0.f;
+    m.outlineThickness = 0.0035f;
+    m.outlineColorMul = 0.22f;
+    m.alphaClip = false; // Transparency when enabled — user toggles
     return m;
 }
 
@@ -121,12 +133,10 @@ MaterialConfig MaterialConfig::MakeDefaultZZZ_Cloth() {
     m.displayName = "ZZZ Cloth / Coat";
     m.sssStrength = 0.f;
     m.sssMask = Const(0.f);
-    m.metallic = From(MapSet::MaterialMap, ChanSwizzle::B);
-    m.specular = From(MapSet::LightMap, ChanSwizzle::G);
-    m.toonThreshold = 0.48f;
-    m.toonSoftness = 0.06f;
-    m.toonShadowTint = 0.5f;
-    m.rimStrength = 0.3f;
+    m.toonThreshold = 0.45f;
+    m.toonSoftness = 0.12f;
+    m.toonShadowTint = 0.58f;
+    m.rimStrength = 0.22f;
     return m;
 }
 
@@ -135,9 +145,9 @@ MaterialConfig MaterialConfig::MakeDefaultZZZ_Face() {
     m.id = "ZZZ-Face";
     m.displayName = "ZZZ Face";
     m.sssStrength = 0.55f;
-    m.toonSoftness = 0.18f;
-    m.toonShadowTint = 0.7f;
-    m.rimStrength = 0.12f;
+    m.toonSoftness = 0.28f;
+    m.toonShadowTint = 0.78f;
+    m.rimStrength = 0.1f;
     return m;
 }
 
@@ -145,13 +155,12 @@ MaterialConfig MaterialConfig::MakeDefaultZZZ_Hair() {
     MaterialConfig m = MakeDefaultZZZ_Cloth();
     m.id = "ZZZ-Hair";
     m.displayName = "ZZZ Hair";
-    m.anisotropy = From(MapSet::MaterialMap, ChanSwizzle::G);
-    m.anisoStrength = 0.85f;
-    m.anisoSharpness = 48.f;
-    m.specular = From(MapSet::LightMap, ChanSwizzle::G);
-    m.toonSoftness = 0.05f;
-    m.rimStrength = 0.35f;
-    m.alphaClip = false; // enable per character if needed
+    // Keep community maps; aniso unknown → off unless user remaps
+    m.anisotropy = Const(0.f);
+    m.anisoStrength = 0.f;
+    m.toonSoftness = 0.1f;
+    m.rimStrength = 0.28f;
+    m.alphaClip = false;
     return m;
 }
 
