@@ -1,12 +1,13 @@
 # Advanced Mod Mode · ProjectManager · Cross-Texture · 3D Preview
 
-**Date:** 2026-07-11 (rev 5)  
+**Date:** 2026-07-11 (rev 7)  
 **Status:**
-- Plan −1 shell: **done**
-- Plan 1 INI + **VertexLayout semantics** (preset / dump / manual Role incl. None): **done**
-- MeshGpu decode + optional **3D Preview window** (shaded/UV/outline debug): **MVP scaffold done**
-- Belle: Mesh decode 20174 verts OK; TEXCOORD1 → UV_Outline by default
-- Remaining: multi-pass outline, live paint SRV, layout JSON in .rayp, better dump matching per-component  
+- Shell / INI / layouts / uber + presets / UI split: **done**
+- **Multi-pass foundation + ZZZ Outline: done**
+  - `RenderPasses` graph: Main → OutlineZZZ (Glow/Bloom reserved)
+  - Outline: TEXCOORD1 TS pack → expand, Cull Front (not GI math)
+  - N-panel D: pass toggles + thickness
+- Remaining: live paint SRV, Glow pass, material/layout in .rayp, GI outline, async load  
 **References:**
 - `research/xxmi_research.md` — INI / `.buf` / `.ib` geometry
 - `research/zzz-materials/` — ZZZ character pipeline + decompiled HLSL

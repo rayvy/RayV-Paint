@@ -18,6 +18,7 @@
 #include "../core/BrushLibrary.h"
 #include "../core/ProjectManager.h"
 #include "../preview3d/PreviewRenderer.h"
+#include "../preview3d/MaterialConfig.h"
 #include <stb_image.h>
 #include <thread>
 #include <imgui_internal.h>
@@ -882,9 +883,8 @@ namespace UI {
                 ImGui::MenuItem("Console logs", nullptr, &state.showConsole);
                 ImGui::Separator();
                 ImGui::MenuItem("Rulers", nullptr, &state.showRulers);
-                if (ImGui::MenuItem("3D Preview", nullptr, &state.showPreview3D)) {
-                    /* toggle */
-                }
+                ImGui::MenuItem("Mod Setup…", nullptr, &state.showModSetup);
+                ImGui::MenuItem("3D Preview", nullptr, &state.showPreview3D);
                 if (ImGui::MenuItem("Reset View")) {
                     canvas.ResetView();
                 }
@@ -2174,168 +2174,22 @@ namespace UI {
                 canvas.SetCurrentProjectFilePath(propProjPath);
             }
 
-            // Advanced Mod Mode — INI / dump sources (optional 3D preview foundation)
+            // Advanced Mod Mode — setup lives in dedicated window (not Properties)
             if (canvas.GetProjectType() == Canvas::ProjectType::AdvancedModMode) {
                 ImGui::NewLine();
                 ImGui::Separator();
-                ImGui::Text("Mod Preview Sources");
-                ImGui::TextDisabled("Optional. Paint works without them. Apply parses XXMI/3DMigoto INI.");
-
-                char iniPath[512] = "";
-                std::strncpy(iniPath, canvas.GetModIniPath().c_str(), sizeof(iniPath) - 1);
-                if (Ui::PathField("##mod_ini", "INI Path", iniPath, sizeof(iniPath),
-                        ShowOpenFileWin32, "INI Files (*.ini)\0*.ini\0All Files (*.*)\0*.*\0")) {
-                    canvas.SetModIniPath(iniPath);
-                }
-
-                char dumpPath[512] = "";
-                std::strncpy(dumpPath, canvas.GetModDumpPath().c_str(), sizeof(dumpPath) - 1);
-                // Folder: reuse open-file dialog for now (user can paste folder path)
-                if (Ui::PathField("##mod_dump", "Dump Path", dumpPath, sizeof(dumpPath),
-                        ShowOpenFileWin32, "All Files (*.*)\0*.*\0")) {
-                    canvas.SetModDumpPath(dumpPath);
-                }
-                ImGui::TextDisabled("Dump folder: hash.json + frame analysis (names). Apply uses INI first.");
-
-                if (ImGui::Button("Apply INI##mod_apply", ImVec2(140, 0))) {
-                    canvas.ApplyModIniParse();
+                ImGui::Text("Advanced Mod");
+                if (ImGui::Button("Mod Setup…##prop_mod"))
+                    state.showModSetup = true;
+                ImGui::SameLine();
+                if (ImGui::Button("3D Preview##prop_3d")) {
+                    state.showPreview3D = true;
                     state.preview3DNeedReload = true;
                 }
-                ImGui::SameLine();
-                if (ImGui::Button("Apply Dump##mod_dump", ImVec2(140, 0))) {
-                    canvas.ApplyModDumpParse();
-                    state.preview3DNeedReload = true;
-                }
-                ImGui::SameLine();
-                if (canvas.IsModParseOk()) {
-                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.f), "OK");
-                } else if (!canvas.GetModParseSummary().empty()) {
-                    ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.3f, 1.f), "Issues");
-                } else {
-                    ImGui::TextDisabled("Not parsed");
-                }
-
-                ImGui::TextWrapped(
-                    "Semantics: TEXCOORD ≠ always UV. Outline packing / backface can be remapped. "
-                    "Dump provides real formats (F16/F32). Role=None ignores the attribute.");
-
-                auto& sceneMut = canvas.GetModScene();
-                const auto& scene = sceneMut;
-                if (scene.ok || !scene.components.empty()) {
-                    ImGui::Text("Components: %d  Parts: %d  Draws: %d  Binds: %d",
-                        (int)scene.components.size(), scene.PartCount(),
-                        scene.DrawCount(), scene.TextureBindCount());
-
-                    // ---- Vertex attribute role editor (per first selected / each component) ----
-                    if (ImGui::TreeNode("Vertex semantics (roles)##mod_sem")) {
-                        ImGui::TextDisabled(
-                            "Maps StructuredBuffer fields → unified shader inputs. "
-                            "UV_Outline is NOT sampled as a texture UV.");
-                        int roleCount = 0;
-                        const char* const* roleNames = modio::AttrRoleNameTable(roleCount);
-
-                        auto drawLayoutEditor = [&](const char* label, modio::BufferLayout& layout) {
-                            if (!ImGui::TreeNode(label)) return;
-                            ImGui::Text("stride=%d  source=%d  %s",
-                                layout.stride, (int)layout.source,
-                                layout.valid ? "valid" : "invalid");
-                            if (ImGui::BeginTable("##lay", 5,
-                                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
-                                ImGui::TableSetupColumn("i", ImGuiTableColumnFlags_WidthFixed, 28);
-                                ImGui::TableSetupColumn("Dump", ImGuiTableColumnFlags_WidthStretch);
-                                ImGui::TableSetupColumn("Format", ImGuiTableColumnFlags_WidthStretch);
-                                ImGui::TableSetupColumn("Off", ImGuiTableColumnFlags_WidthFixed, 40);
-                                ImGui::TableSetupColumn("Role → shader", ImGuiTableColumnFlags_WidthStretch);
-                                ImGui::TableHeadersRow();
-                                for (auto& el : layout.elements) {
-                                    ImGui::TableNextRow();
-                                    ImGui::TableNextColumn();
-                                    ImGui::Text("%d", el.index);
-                                    ImGui::TableNextColumn();
-                                    if (el.dumpSemanticIndex > 0)
-                                        ImGui::Text("%s%d", el.dumpSemanticName.c_str(), el.dumpSemanticIndex);
-                                    else
-                                        ImGui::TextUnformatted(el.dumpSemanticName.c_str());
-                                    ImGui::TableNextColumn();
-                                    ImGui::TextUnformatted(modio::AttrFormatName(el.format));
-                                    ImGui::TableNextColumn();
-                                    ImGui::Text("%d", el.offset);
-                                    ImGui::TableNextColumn();
-                                    int role = (int)el.role;
-                                    ImGui::PushID(el.index + layout.stride * 100 + (int)layout.kind * 10000);
-                                    if (ImGui::Combo("##role", &role, roleNames, roleCount)) {
-                                        modio::SetElementRole(layout, el.index, static_cast<modio::AttrRole>(role));
-                                        canvas.SetDocumentModified(true);
-                                        state.preview3DNeedReload = true;
-                                    }
-                                    if (el.roleManual) {
-                                        ImGui::SameLine();
-                                        ImGui::TextDisabled("M");
-                                    }
-                                    ImGui::PopID();
-                                }
-                                ImGui::EndTable();
-                            }
-                            ImGui::TreePop();
-                        };
-
-                        for (auto& c : sceneMut.components) {
-                            if (ImGui::TreeNode(c.name.c_str())) {
-                                drawLayoutEditor("Position layout", c.positionLayout);
-                                drawLayoutEditor("Texcoord layout", c.texcoordLayout);
-                                ImGui::TreePop();
-                            }
-                        }
-                        ImGui::TreePop();
-                    }
-
-                    if (ImGui::TreeNode("Component tree##mod_tree")) {
-                        for (const auto& c : scene.components) {
-                            if (ImGui::TreeNode(c.name.c_str())) {
-                                ImGui::TextDisabled("Position: %s  stride=%d",
-                                    c.positionResource.c_str(), c.positionStride);
-                                ImGui::TextDisabled("Texcoord: %s  stride=%d",
-                                    c.texcoordResource.c_str(), c.texcoordStride);
-                                for (const auto& p : c.parts) {
-                                    if (ImGui::TreeNode(p.name.c_str())) {
-                                        ImGui::Text("IB: %s%s", p.ibResource.c_str(),
-                                            p.hasGeometry ? "" : " (missing)");
-                                        ImGui::Text("Draws: %d  Textures: %d",
-                                            (int)p.draws.size(), (int)p.textures.size());
-                                        for (const auto& t : p.textures) {
-                                            ImGui::BulletText("%s → %s%s",
-                                                modio::MaterialSlotName(t.slot),
-                                                t.resourceName.c_str(),
-                                                t.exists ? "" : " [missing]");
-                                        }
-                                        for (const auto& d : p.draws) {
-                                            if (!d.commentLabel.empty())
-                                                ImGui::Text("  draw %d @%d  ; %s",
-                                                    d.indexCount, d.indexStart, d.commentLabel.c_str());
-                                            else
-                                                ImGui::Text("  draw %d @%d", d.indexCount, d.indexStart);
-                                        }
-                                        ImGui::TreePop();
-                                    }
-                                }
-                                ImGui::TreePop();
-                            }
-                        }
-                        ImGui::TreePop();
-                    }
-                    if (!scene.warnings.empty() && ImGui::TreeNode("Warnings##mod_warn")) {
-                        for (const auto& w : scene.warnings)
-                            ImGui::TextWrapped("%s", w.message.c_str());
-                        ImGui::TreePop();
-                    }
-
-                    if (ImGui::Button("Open 3D Preview##mod_3d")) {
-                        state.showPreview3D = true;
-                        state.preview3DNeedReload = true;
-                    }
-                } else if (!canvas.GetModParseSummary().empty()) {
-                    ImGui::TextWrapped("%s", canvas.GetModParseSummary().c_str());
-                }
+                if (canvas.IsModParseOk())
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.f), "INI parsed OK");
+                else
+                    ImGui::TextDisabled("INI not applied — open Mod Setup");
             }
 
             ImGui::NewLine();
@@ -3867,7 +3721,128 @@ namespace UI {
             }
         }
 
-        // ---- Optional 3D Preview (detached window, Advanced Mod Mode) ----
+        // ---- Mod Setup (INI / dump / semantics) — separate from Properties ----
+        if (state.showModSetup) {
+            ImGui::SetNextWindowSize(ImVec2(520, 640), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Mod Setup", &state.showModSetup)) {
+                ImGui::TextDisabled("XXMI / 3DMigoto sources for optional 3D preview. Paint works without this.");
+
+                char iniPath[512] = "";
+                std::strncpy(iniPath, canvas.GetModIniPath().c_str(), sizeof(iniPath) - 1);
+                if (Ui::PathField("##mod_ini", "INI Path", iniPath, sizeof(iniPath),
+                        ShowOpenFileWin32, "INI Files (*.ini)\0*.ini\0All Files (*.*)\0*.*\0")) {
+                    canvas.SetModIniPath(iniPath);
+                }
+                char dumpPath[512] = "";
+                std::strncpy(dumpPath, canvas.GetModDumpPath().c_str(), sizeof(dumpPath) - 1);
+                if (Ui::PathField("##mod_dump", "Dump Path", dumpPath, sizeof(dumpPath),
+                        ShowOpenFileWin32, "All Files (*.*)\0*.*\0")) {
+                    canvas.SetModDumpPath(dumpPath);
+                }
+
+                if (ImGui::Button("Apply INI##mod_apply", ImVec2(120, 0))) {
+                    canvas.ApplyModIniParse();
+                    state.preview3DNeedReload = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Apply Dump##mod_dump", ImVec2(120, 0))) {
+                    canvas.ApplyModDumpParse();
+                    state.preview3DNeedReload = true;
+                }
+                ImGui::SameLine();
+                if (canvas.IsModParseOk())
+                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.f), "OK");
+                else if (!canvas.GetModParseSummary().empty())
+                    ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.3f, 1.f), "Issues");
+
+                if (ImGui::Button("Open 3D Preview##mod_3d")) {
+                    state.showPreview3D = true;
+                    state.preview3DNeedReload = true;
+                }
+
+                auto& sceneMut = canvas.GetModScene();
+                const auto& scene = sceneMut;
+                if (scene.ok || !scene.components.empty()) {
+                    ImGui::Separator();
+                    ImGui::Text("Components: %d  Parts: %d  Draws: %d  Binds: %d",
+                        (int)scene.components.size(), scene.PartCount(),
+                        scene.DrawCount(), scene.TextureBindCount());
+
+                    if (ImGui::TreeNode("Vertex semantics (roles)##mod_sem")) {
+                        ImGui::TextDisabled("TEXCOORD ≠ always UV. Role=None ignores attribute.");
+                        int roleCount = 0;
+                        const char* const* roleNames = modio::AttrRoleNameTable(roleCount);
+                        auto drawLayoutEditor = [&](const char* label, modio::BufferLayout& layout) {
+                            if (!ImGui::TreeNode(label)) return;
+                            ImGui::Text("stride=%d %s", layout.stride, layout.valid ? "valid" : "invalid");
+                            if (ImGui::BeginTable("##lay", 4,
+                                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+                                ImGui::TableSetupColumn("Dump");
+                                ImGui::TableSetupColumn("Fmt");
+                                ImGui::TableSetupColumn("Off", ImGuiTableColumnFlags_WidthFixed, 36);
+                                ImGui::TableSetupColumn("Role");
+                                ImGui::TableHeadersRow();
+                                for (auto& el : layout.elements) {
+                                    ImGui::TableNextRow();
+                                    ImGui::TableNextColumn();
+                                    if (el.dumpSemanticIndex > 0)
+                                        ImGui::Text("%s%d", el.dumpSemanticName.c_str(), el.dumpSemanticIndex);
+                                    else
+                                        ImGui::TextUnformatted(el.dumpSemanticName.c_str());
+                                    ImGui::TableNextColumn();
+                                    ImGui::TextUnformatted(modio::AttrFormatName(el.format));
+                                    ImGui::TableNextColumn();
+                                    ImGui::Text("%d", el.offset);
+                                    ImGui::TableNextColumn();
+                                    int role = (int)el.role;
+                                    ImGui::PushID(el.index + layout.stride * 100 + (int)layout.kind * 10000);
+                                    if (ImGui::Combo("##role", &role, roleNames, roleCount)) {
+                                        modio::SetElementRole(layout, el.index, static_cast<modio::AttrRole>(role));
+                                        canvas.SetDocumentModified(true);
+                                        state.preview3DNeedReload = true;
+                                    }
+                                    ImGui::PopID();
+                                }
+                                ImGui::EndTable();
+                            }
+                            ImGui::TreePop();
+                        };
+                        for (auto& c : sceneMut.components) {
+                            if (ImGui::TreeNode(c.name.c_str())) {
+                                drawLayoutEditor("Position", c.positionLayout);
+                                drawLayoutEditor("Texcoord", c.texcoordLayout);
+                                ImGui::TreePop();
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+
+                    if (ImGui::TreeNode("Component tree##mod_tree")) {
+                        for (const auto& c : scene.components) {
+                            if (ImGui::TreeNode(c.name.c_str())) {
+                                for (const auto& p : c.parts) {
+                                    ImGui::BulletText("%s  draws=%d tex=%d%s",
+                                        p.name.c_str(), (int)p.draws.size(), (int)p.textures.size(),
+                                        p.hasGeometry ? "" : " [no geo]");
+                                }
+                                ImGui::TreePop();
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+                    if (!scene.warnings.empty() && ImGui::TreeNode("Warnings##mod_warn")) {
+                        for (const auto& w : scene.warnings)
+                            ImGui::TextWrapped("%s", w.message.c_str());
+                        ImGui::TreePop();
+                    }
+                } else if (!canvas.GetModParseSummary().empty()) {
+                    ImGui::TextWrapped("%s", canvas.GetModParseSummary().c_str());
+                }
+            }
+            ImGui::End();
+        }
+
+        // ---- 3D Preview: viewport-first + Blender-style N-panel ----
         if (state.showPreview3D) {
             static preview3d::PreviewRenderer s_Preview;
             static bool s_PreviewInit = false;
@@ -3877,44 +3852,41 @@ namespace UI {
             static ID3D11Texture2D* s_Depth = nullptr;
             static ID3D11DepthStencilView* s_DSV = nullptr;
             static int s_RTw = 0, s_RTh = 0;
+            static bool s_VpCapture = false;   // block window drag while using viewport
+            static int s_NPanel = 0;           // 0=collapsed strip, 1=Light 2=Shade 3=Orient 4=Parts 5=Debug
+            static int s_SelPart = 0;
 
-            if (!s_PreviewInit && device) {
+            if (!s_PreviewInit && device)
                 s_PreviewInit = s_Preview.Initialize(device);
-            }
-
             if (state.preview3DNeedReload && device && canvas.IsModParseOk()) {
                 s_Preview.LoadScene(device, canvas.GetModScene());
                 state.preview3DNeedReload = false;
             }
 
-            ImGui::SetNextWindowSize(ImVec2(640, 520), ImGuiCond_FirstUseEver);
-            if (ImGui::Begin("3D Preview (optional)", &state.showPreview3D)) {
-                ImGui::TextUnformatted(s_Preview.Status().c_str());
-                if (!s_Preview.LastError().empty())
-                    ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "%s", s_Preview.LastError().c_str());
+            ImGuiWindowFlags winFlags = ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+            if (s_VpCapture)
+                winFlags |= ImGuiWindowFlags_NoMove;
 
-                int dbg = s_Preview.GetDebugMode();
-                const char* modes[] = { "Shaded", "UV0", "Normals", "VertexColor", "OutlineUV (not tex)" };
-                if (ImGui::Combo("Debug##p3d", &dbg, modes, IM_ARRAYSIZE(modes)))
-                    s_Preview.SetDebugMode(dbg);
-                ImGui::SameLine();
-                if (ImGui::Button("Reload Scene##p3d"))
-                    state.preview3DNeedReload = true;
-
-                // Part visibility
-                if (ImGui::TreeNode("Parts##p3d")) {
-                    for (auto& it : s_Preview.Items()) {
-                        ImGui::Checkbox((it.componentName + "/" + it.partName).c_str(), &it.visible);
-                    }
-                    ImGui::TreePop();
+            ImGui::SetNextWindowSize(ImVec2(900, 600), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("3D Preview", &state.showPreview3D, winFlags)) {
+                // HOME = reset view when this window focused
+                if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                    ImGui::IsKeyPressed(ImGuiKey_Home, false)) {
+                    s_Preview.ResetView();
                 }
 
-                ImGui::TextDisabled("LMB drag orbit · Wheel zoom · Preview only (no 3D paint)");
-
+                const float nTabW = 28.f;
+                const float nPanelW = (s_NPanel > 0) ? 280.f : nTabW;
                 ImVec2 avail = ImGui::GetContentRegionAvail();
-                int tw = std::max(64, (int)avail.x);
-                int th = std::max(64, (int)avail.y - 4);
+                float vpW = std::max(64.f, avail.x - nPanelW - 4.f);
+                float vpH = std::max(64.f, avail.y);
 
+                // ===== Viewport (left) =====
+                ImGui::BeginChild("##p3d_vp", ImVec2(vpW, vpH), false,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+                int tw = (int)vpW;
+                int th = (int)vpH;
                 auto releaseRT = [&]() {
                     if (s_SRV) { s_SRV->Release(); s_SRV = nullptr; }
                     if (s_RTV) { s_RTV->Release(); s_RTV = nullptr; }
@@ -3923,7 +3895,6 @@ namespace UI {
                     if (s_Depth) { s_Depth->Release(); s_Depth = nullptr; }
                     s_RTw = s_RTh = 0;
                 };
-
                 if (device && (tw != s_RTw || th != s_RTh || !s_RTV)) {
                     releaseRT();
                     D3D11_TEXTURE2D_DESC td{};
@@ -3945,33 +3916,257 @@ namespace UI {
                     s_RTw = tw; s_RTh = th;
                 }
 
-                // Orbit / zoom when hovering image
-                ImVec2 imgPos = ImGui::GetCursorScreenPos();
+                ImVec2 vpPos = ImGui::GetCursorScreenPos();
                 if (s_SRV && s_RTV && context) {
                     D3D11_VIEWPORT vp{};
-                    vp.Width = (float)s_RTw; vp.Height = (float)s_RTh;
-                    vp.MaxDepth = 1.f;
+                    vp.Width = (float)s_RTw; vp.Height = (float)s_RTh; vp.MaxDepth = 1.f;
                     context->RSSetViewports(1, &vp);
                     s_Preview.Render(context, s_RTV, s_DSV, (float)s_RTw / (float)std::max(1, s_RTh));
-                    ImGui::Image((ImTextureID)s_SRV, ImVec2((float)s_RTw, (float)s_RTh));
-                    if (ImGui::IsItemHovered()) {
-                        auto& cam = s_Preview.Camera();
-                        ImGuiIO& io = ImGui::GetIO();
-                        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+
+                    // Invisible button captures mouse so window does not drag (like 2D canvas)
+                    ImGui::InvisibleButton("##p3d_hit", ImVec2((float)s_RTw, (float)s_RTh));
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    dl->AddImage((ImTextureID)s_SRV, vpPos,
+                        ImVec2(vpPos.x + s_RTw, vpPos.y + s_RTh));
+
+                    bool hovered = ImGui::IsItemHovered();
+                    bool active = ImGui::IsItemActive();
+                    s_VpCapture = active || (hovered && (
+                        ImGui::IsMouseDown(ImGuiMouseButton_Left) ||
+                        ImGui::IsMouseDown(ImGuiMouseButton_Middle)));
+
+                    ImGuiIO& io = ImGui::GetIO();
+                    auto& cam = s_Preview.Camera();
+                    if (active || hovered) {
+                        if (ImGui::IsMouseDragging(ImGuiMouseButton_Left) &&
+                            !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
                             cam.yaw += io.MouseDelta.x * 0.01f;
                             cam.pitch += io.MouseDelta.y * 0.01f;
-                            cam.pitch = std::clamp(cam.pitch, -1.4f, 1.4f);
+                            cam.pitch = std::clamp(cam.pitch, -1.45f, 1.45f);
                         }
-                        if (io.MouseWheel != 0.f) {
+                        if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+                            cam.PanScreen(io.MouseDelta.x, io.MouseDelta.y, (float)s_RTh);
+                        }
+                        if (hovered && io.MouseWheel != 0.f) {
                             cam.distance *= (io.MouseWheel > 0 ? 0.9f : 1.1f);
-                            cam.distance = std::clamp(cam.distance, 0.3f, 50.f);
+                            cam.distance = std::clamp(cam.distance, 0.25f, 80.f);
                         }
                     }
+
+                    // Floating Reset View (top-left of viewport)
+                    ImGui::SetCursorScreenPos(ImVec2(vpPos.x + 8.f, vpPos.y + 8.f));
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.12f, 0.14f, 0.75f));
+                    if (ImGui::Button("Reset View##p3d_rst"))
+                        s_Preview.ResetView();
+                    ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip("Reset camera (Home)");
                 } else {
-                    ImGui::Dummy(ImVec2((float)tw, (float)th));
-                    ImGui::TextDisabled("Initialize preview / Apply INI first");
+                    ImGui::Dummy(ImVec2(vpW, vpH));
+                    ImGui::SetCursorScreenPos(ImVec2(vpPos.x + 16, vpPos.y + 16));
+                    ImGui::TextDisabled("Apply INI in Mod Setup, then Reload in N-panel.");
+                    s_VpCapture = false;
                 }
-                (void)imgPos;
+                ImGui::EndChild();
+
+                ImGui::SameLine(0, 2);
+
+                // ===== N-panel (right) =====
+                ImGui::BeginChild("##p3d_n", ImVec2(nPanelW, vpH), true,
+                    ImGuiWindowFlags_NoScrollbar);
+
+                auto nTab = [&](int id, const char* letter, const char* tip) {
+                    bool on = (s_NPanel == id);
+                    if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                    if (ImGui::Button(letter, ImVec2(nTabW - 6, 28)))
+                        s_NPanel = on ? 0 : id;
+                    if (on) ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) Ui::Tooltip(tip);
+                };
+
+                if (s_NPanel == 0) {
+                    // Vertical tab strip only
+                    nTab(1, "L", "Lighting");
+                    nTab(2, "S", "Shading / presets");
+                    nTab(3, "O", "Orientation (up axis / flip)");
+                    nTab(4, "P", "Parts visibility");
+                    nTab(5, "D", "Debug / reload");
+                } else {
+                    // Tab strip + content
+                    ImGui::BeginGroup();
+                    nTab(1, "L", "Lighting");
+                    nTab(2, "S", "Shading");
+                    nTab(3, "O", "Orientation");
+                    nTab(4, "P", "Parts");
+                    nTab(5, "D", "Debug");
+                    if (ImGui::Button("«##np", ImVec2(nTabW - 6, 22)))
+                        s_NPanel = 0;
+                    if (ImGui::IsItemHovered()) Ui::Tooltip("Collapse N-panel");
+                    ImGui::EndGroup();
+                    ImGui::SameLine();
+                    ImGui::BeginChild("##p3d_nbody", ImVec2(0, 0), false);
+
+                    if (s_NPanel == 1) {
+                        ImGui::TextUnformatted("Lighting");
+                        auto& L = s_Preview.Lighting();
+                        float yawDeg = L.yaw * (180.f / 3.14159265f);
+                        float pitchDeg = L.pitch * (180.f / 3.14159265f);
+                        if (ImGui::SliderFloat("Yaw", &yawDeg, -180.f, 180.f, "%.0f°"))
+                            L.yaw = yawDeg * (3.14159265f / 180.f);
+                        if (ImGui::SliderFloat("Pitch", &pitchDeg, -89.f, 89.f, "%.0f°"))
+                            L.pitch = pitchDeg * (3.14159265f / 180.f);
+                        ImGui::SliderFloat("Intensity", &L.intensity, 0.f, 2.f);
+                        ImGui::SliderFloat("Ambient", &L.ambient, 0.f, 1.f);
+                        ImGui::Checkbox("Follow camera", &L.followCamera);
+                        if (ImGui::Button("Left")) { L.yaw = -0.9f; L.pitch = 0.4f; }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Front")) { L.yaw = 0.f; L.pitch = 0.35f; }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Right")) { L.yaw = 0.9f; L.pitch = 0.4f; }
+                    } else if (s_NPanel == 2) {
+                        ImGui::TextUnformatted("Shading");
+                        ImGui::TextDisabled("Uber shader · channel remaps");
+                        auto& lib = preview3d::ShaderPresetLibrary::Get();
+                        if (lib.All().empty()) lib.LoadBuiltins();
+                        auto& items = s_Preview.Items();
+                        if (!items.empty()) {
+                            s_SelPart = std::clamp(s_SelPart, 0, (int)items.size() - 1);
+                            if (ImGui::BeginCombo("Part",
+                                    (items[s_SelPart].componentName + "/" + items[s_SelPart].partName).c_str())) {
+                                for (int i = 0; i < (int)items.size(); ++i) {
+                                    bool sel = (i == s_SelPart);
+                                    if (ImGui::Selectable((items[i].componentName + "/" + items[i].partName).c_str(), sel))
+                                        s_SelPart = i;
+                                }
+                                ImGui::EndCombo();
+                            }
+                            int presetIdx = lib.IndexOf(items[s_SelPart].presetId);
+                            if (ImGui::BeginCombo("Preset", lib.At(presetIdx).displayName.c_str())) {
+                                for (int i = 0; i < (int)lib.All().size(); ++i) {
+                                    if (ImGui::Selectable(lib.At(i).displayName.c_str(), i == presetIdx))
+                                        s_Preview.ApplyPresetToPart(s_SelPart, lib.At(i));
+                                }
+                                ImGui::EndCombo();
+                            }
+                            if (ImGui::Button("Apply to all parts"))
+                                s_Preview.ApplyPresetToAll(items[s_SelPart].material);
+                            if (ImGui::Button("Save preset JSON")) {
+                                std::string dir = ConfigManager::GetUserSubdirectory("presets/shaders");
+                                lib.SavePreset(items[s_SelPart].material, dir);
+                            }
+                            auto& mat = items[s_SelPart].material;
+                            ImGui::SliderFloat("Toon thr", &mat.toonThreshold, 0.f, 1.f);
+                            ImGui::SliderFloat("Toon soft", &mat.toonSoftness, 0.01f, 0.5f);
+                            ImGui::SliderFloat("Rim", &mat.rimStrength, 0.f, 1.5f);
+                            ImGui::SliderFloat("SSS", &mat.sssStrength, 0.f, 1.f);
+                            ImGui::SliderFloat("Aniso", &mat.anisoStrength, 0.f, 2.f);
+                            ImGui::Checkbox("Normal map", &mat.useNormalMap);
+                            ImGui::Checkbox("Normal RG only", &mat.normalRGOnly);
+                            if (ImGui::TreeNode("Channel remap")) {
+                                auto editCh = [](const char* label, preview3d::ChannelSource& ch) {
+                                    ImGui::PushID(label);
+                                    ImGui::TextUnformatted(label);
+                                    int map = (ch.map == preview3d::MapSet::Constant) ? 4 : (int)ch.map;
+                                    const char* maps[] = { "Diffuse", "Normal", "LightMap", "MaterialMap", "Const" };
+                                    ImGui::SetNextItemWidth(100);
+                                    if (ImGui::Combo("##m", &map, maps, 5))
+                                        ch.map = (map >= 4) ? preview3d::MapSet::Constant
+                                                            : static_cast<preview3d::MapSet>(map);
+                                    ImGui::SameLine();
+                                    int sw = std::clamp((int)ch.swizzle, 0, 6);
+                                    const char* swz[] = { "R", "G", "B", "A", "Luma", "1", "0" };
+                                    ImGui::SetNextItemWidth(56);
+                                    if (ImGui::Combo("##s", &sw, swz, 7))
+                                        ch.swizzle = static_cast<preview3d::ChanSwizzle>(sw);
+                                    ImGui::SameLine();
+                                    ImGui::Checkbox("inv", &ch.invert);
+                                    if (ch.map == preview3d::MapSet::Constant) {
+                                        ImGui::SetNextItemWidth(60);
+                                        ImGui::DragFloat("##c", &ch.constantValue, 0.01f, 0.f, 1.f);
+                                    }
+                                    ImGui::PopID();
+                                };
+                                editCh("Shadow", mat.shadowMask);
+                                editCh("Specular", mat.specular);
+                                editCh("Metallic", mat.metallic);
+                                editCh("Rough", mat.roughness);
+                                editCh("AO", mat.ao);
+                                editCh("Aniso", mat.anisotropy);
+                                editCh("SSS", mat.sssMask);
+                                editCh("Glow", mat.glow);
+                                editCh("Opacity", mat.opacity);
+                                ImGui::TreePop();
+                            }
+                        } else {
+                            ImGui::TextDisabled("No mesh — Apply INI + Reload");
+                        }
+                    } else if (s_NPanel == 3) {
+                        ImGui::TextUnformatted("Orientation");
+                        ImGui::TextDisabled("ZZZ dumps often need Up = +Z");
+                        auto& O = s_Preview.Orientation();
+                        int up = (int)O.upAxis;
+                        const char* ups[] = { "+Y", "-Y", "+Z", "-Z", "+X", "-X" };
+                        if (ImGui::Combo("Model up axis", &up, ups, 6))
+                            O.upAxis = static_cast<preview3d::ModelUpAxis>(up);
+                        ImGui::Checkbox("Flip X", &O.flipX);
+                        ImGui::Checkbox("Flip Y", &O.flipY);
+                        ImGui::Checkbox("Flip Z", &O.flipZ);
+                        ImGui::SliderFloat("Yaw offset", &O.yawOffsetDeg, -180.f, 180.f, "%.0f°");
+                        if (ImGui::Button("ZZZ default (+Z up)")) {
+                            O.upAxis = preview3d::ModelUpAxis::PlusZ;
+                            O.flipX = O.flipY = O.flipZ = false;
+                            O.yawOffsetDeg = 0.f;
+                        }
+                        ImGui::SameLine();
+                        if (ImGui::Button("Identity (+Y up)")) {
+                            O.upAxis = preview3d::ModelUpAxis::PlusY;
+                            O.flipX = O.flipY = O.flipZ = false;
+                        }
+                    } else if (s_NPanel == 4) {
+                        ImGui::TextUnformatted("Parts");
+                        for (auto& it : s_Preview.Items()) {
+                            ImGui::Checkbox((it.componentName + "/" + it.partName).c_str(), &it.visible);
+                        }
+                    } else if (s_NPanel == 5) {
+                        ImGui::TextUnformatted("Passes / Debug");
+                        ImGui::TextWrapped("%s", s_Preview.Status().c_str());
+                        if (!s_Preview.LastError().empty())
+                            ImGui::TextColored(ImVec4(1, 0.5f, 0.3f, 1), "%s", s_Preview.LastError().c_str());
+
+                        ImGui::Separator();
+                        ImGui::TextUnformatted("Multi-pass (ZZZ)");
+                        auto& P = s_Preview.Passes();
+                        ImGui::Checkbox("Main", &P.enableMain);
+                        ImGui::Checkbox("Outline (ZZZ TEXCOORD1)", &P.enableOutline);
+                        ImGui::BeginDisabled(true);
+                        ImGui::Checkbox("Glow (soon)", &P.enableGlow);
+                        ImGui::Checkbox("Bloom (soon)", &P.enableBloom);
+                        ImGui::EndDisabled();
+                        ImGui::SliderFloat("Outline thick", &P.outlineThickness, 0.001f, 0.08f, "%.4f");
+                        ImGui::SliderFloat("Outline darken", &P.outlineAlbedoMul, 0.02f, 0.5f, "%.2f");
+                        ImGui::Checkbox("Outline × COLOR.g", &P.outlineUseVertexColor);
+                        ImGui::Checkbox("Fixed outline tint", &P.outlineUseFixedTint);
+                        if (P.outlineUseFixedTint)
+                            ImGui::ColorEdit3("Tint", P.outlineTint, ImGuiColorEditFlags_NoInputs);
+                        ImGui::TextDisabled("Outline ≠ GI math. Mode locked to ZZZ for now.");
+
+                        ImGui::Separator();
+                        int dbg = s_Preview.GetDebugMode();
+                        const char* modes[] = {
+                            "Shaded (multipass)", "UV0", "Normals", "VertexColor", "OutlineUV pack",
+                            "Shadow mask", "Metal/Rough/AO", "LightMap", "MaterialMap"
+                        };
+                        if (ImGui::Combo("View mode", &dbg, modes, IM_ARRAYSIZE(modes)))
+                            s_Preview.SetDebugMode(dbg);
+                        if (ImGui::Button("Reload scene", ImVec2(-1, 0)))
+                            state.preview3DNeedReload = true;
+                        if (ImGui::Button("Open Mod Setup", ImVec2(-1, 0)))
+                            state.showModSetup = true;
+                        ImGui::TextDisabled("LMB orbit · MMB pan · Wheel · Home");
+                    }
+                    ImGui::EndChild();
+                }
+                ImGui::EndChild();
             }
             ImGui::End();
         }

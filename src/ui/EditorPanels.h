@@ -59,7 +59,8 @@ namespace UI {
         bool showColors = true;
         bool showToolSettings = true;
         bool showRulers = true;
-        bool showPreview3D = false;    // optional detachable 3D mod preview
+        bool showPreview3D = false;    // optional detachable 3D viewport (N-panel)
+        bool showModSetup = false;     // INI/dump/semantics launcher (separate from Properties)
         bool preview3DNeedReload = false;
         bool openAboutModal = false;
         int  layerEffectsFocusIdx = -1; // selected FX in Layer Effects panel

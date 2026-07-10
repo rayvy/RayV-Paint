@@ -130,6 +130,10 @@ set(SOURCES
     src/modio/VertexLayout.h
     src/preview3d/MeshGpu.cpp
     src/preview3d/MeshGpu.h
+    src/preview3d/MaterialConfig.cpp
+    src/preview3d/MaterialConfig.h
+    src/preview3d/RenderPasses.cpp
+    src/preview3d/RenderPasses.h
     src/preview3d/PreviewRenderer.cpp
     src/preview3d/PreviewRenderer.h
     src/scripting/ScriptingEngine.cpp
@@ -162,6 +166,7 @@ set(SOURCES
 set(SHADER_FILES
     src/shaders/Canvas.hlsl
     src/shaders/Preview3D.hlsl
+    src/shaders/Preview3D_Outline.hlsl
 )
 set_source_files_properties(${SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 
