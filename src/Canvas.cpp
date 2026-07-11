@@ -287,6 +287,8 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
     out.assign(bytes, 0);
 
     // Build export list: top-level only. Groups must already have presentationCache (export prep).
+    // IMPORTANT: export composes ALL visible layers (viewport map/role filter is display-only).
+    // Multi-map packing / per-role export is handled by TextureSetIO + QuickExportAllMaps.
     std::vector<const Layer*> vis;
     vis.reserve(layers.size());
     for (size_t i = 0; i < layers.size(); ++i) {
@@ -841,6 +843,7 @@ void Canvas::ReleaseCompositeResources() {
     if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
     if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
     if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
+    ClearViewMapUnderlay();
     ReleaseChannelPreviewResources();
 }
 
@@ -1259,6 +1262,98 @@ void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
     m_ActiveLayerIdx = (int)m_Layers.size() - 1;
     m_CompositeDirty = true;
     Logger::Get().Info("Created new layer: " + name);
+}
+
+bool Canvas::ImportImageAsMapLayer(ID3D11Device* device, const std::string& filepath,
+                                   texset::MapKind mapKind, const std::string& layerName) {
+    if (!device || filepath.empty()) return false;
+    if (m_Width <= 0 || m_Height <= 0) {
+        // No document yet — fall back to full open as base (sets size)
+        if (mapKind == texset::MapKind::Diffuse)
+            return LoadImageToLayer(device, filepath);
+        Logger::Get().ErrorTag("texset", "ImportImageAsMapLayer: document size unknown; load Diffuse first");
+        return false;
+    }
+
+    std::string ext;
+    size_t dot = filepath.find_last_of('.');
+    if (dot != std::string::npos) {
+        ext = filepath.substr(dot + 1);
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+    }
+
+    int imgW = 0, imgH = 0;
+    std::unique_ptr<TileCache> loaded = std::make_unique<TileCache>();
+    if (ext == "dds") {
+        DdsFormat fmt = DdsFormat::RGBA8_UNORM;
+        if (!DdsHelper::LoadDDSToTileCache(filepath, *loaded, imgW, imgH, fmt)) {
+            Logger::Get().ErrorTag("texset", "ImportImageAsMapLayer DDS failed: " + filepath);
+            return false;
+        }
+    } else {
+        std::vector<uint8_t> rgba;
+        if (!ImageManager::LoadImageFromFile(filepath, rgba, imgW, imgH)) {
+            Logger::Get().ErrorTag("texset", "ImportImageAsMapLayer image failed: " + filepath);
+            return false;
+        }
+        loaded->Init(imgW, imgH, CanvasPixelFormat::RGBA8);
+        loaded->ImportRGBA8(rgba.data(), imgW, imgH);
+    }
+
+    Layer layer;
+    if (!layerName.empty())
+        layer.name = layerName;
+    else {
+        size_t slash = filepath.find_last_of("/\\");
+        layer.name = (slash == std::string::npos) ? filepath : filepath.substr(slash + 1);
+    }
+    layer.visible = true;
+    layer.opacity = 1.f;
+    layer.alphaRewrite = true;
+    layer.type = Layer::Type::Raster;
+    // Bind to one map — still a normal layer in the list
+    layer.workSpace = texset::LayerWorkSpace{};
+    layer.workSpace.mapMask = 0;
+    layer.workSpace.roleMask = 0;
+    layer.workSpace.channelWriteMask = 0xF;
+    layer.workSpace.SetMap(mapKind, true);
+
+    // Place in document UV space (canvas size)
+    layer.tileCache = std::make_unique<TileCache>();
+    layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+    if (imgW == m_Width && imgH == m_Height && loaded->GetFormat() == m_CanvasFormat) {
+        layer.tileCache = std::move(loaded);
+    } else {
+        // Scale-ish: nearest copy into canvas (preserves UV alignment for export)
+        layer.tileCache->CopyFrom(*loaded, 0, 0, 0, 0, imgW, imgH);
+        // If smaller map (e.g. Normal 1k on 2k canvas), pixels sit top-left;
+        // UV sampling in export maps by UV so for viewport stretch we fill by UV:
+        if (imgW != m_Width || imgH != m_Height) {
+            layer.tileCache->Clear();
+            layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+            for (int y = 0; y < m_Height; ++y) {
+                int sy = std::min(imgH - 1, (int)((y + 0.5f) / m_Height * imgH));
+                for (int x = 0; x < m_Width; ++x) {
+                    int sx = std::min(imgW - 1, (int)((x + 0.5f) / m_Width * imgW));
+                    float px[4];
+                    loaded->GetPixelF(sx, sy, px);
+                    layer.tileCache->SetPixelF(x, y, px);
+                }
+            }
+        }
+    }
+    layer.tileCache->MarkAllDirty();
+    RecreateLayerTexture(device, layer);
+
+    m_Layers.push_back(std::move(layer));
+    m_ActiveLayerIdx = (int)m_Layers.size() - 1;
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    Logger::Get().InfoTag("texset",
+        "Map layer '" + m_Layers.back().name + "' → " + texset::MapKindName(mapKind) +
+        " (" + std::to_string(imgW) + "x" + std::to_string(imgH) + ")");
+    return true;
 }
 
 void Canvas::DeleteLayer(int index) {
@@ -1716,27 +1811,36 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     //                   establish / erase coverage when Alpha Rewrite is ON
     // Alpha Rewrite ON  → A is real coverage (brush builds it, eraser punches holes)
     // Alpha Rewrite OFF → A is RGB morph strength (brush keeps A; eraser fades A)
-    activeBrush.writeR = m_ChannelR;
-    activeBrush.writeG = m_ChannelG;
-    activeBrush.writeB = m_ChannelB;
+    // Global channel view toggles AND layer workSpace physical write mask
+    activeBrush.writeR = m_ChannelR && layer.workSpace.WritesChan(texset::Chan::R);
+    activeBrush.writeG = m_ChannelG && layer.workSpace.WritesChan(texset::Chan::G);
+    activeBrush.writeB = m_ChannelB && layer.workSpace.WritesChan(texset::Chan::B);
 
     const bool onlyAlphaChannel = m_ChannelA && !m_ChannelR && !m_ChannelG && !m_ChannelB;
     const bool channelAOff = !m_ChannelA;
 
     if (onlyAlphaChannel) {
         activeBrush.writeR = activeBrush.writeG = activeBrush.writeB = false;
-        activeBrush.writeA = true;
+        activeBrush.writeA = layer.workSpace.WritesChan(texset::Chan::A);
         activeBrush.rgbMorphOnly = false;
     } else {
-        // All RGB channels off + A off → still paint RGB (A is not a write lock).
+        // All RGB channels off + A off → still paint RGB (A is not a write lock),
+        // but still respect layer write mask.
         if (!activeBrush.writeR && !activeBrush.writeG && !activeBrush.writeB) {
-            activeBrush.writeR = activeBrush.writeG = activeBrush.writeB = true;
+            activeBrush.writeR = layer.workSpace.WritesChan(texset::Chan::R);
+            activeBrush.writeG = layer.workSpace.WritesChan(texset::Chan::G);
+            activeBrush.writeB = layer.workSpace.WritesChan(texset::Chan::B);
+            if (!activeBrush.writeR && !activeBrush.writeG && !activeBrush.writeB) {
+                activeBrush.writeR = activeBrush.writeG = activeBrush.writeB = true;
+            }
         }
 
         if (layer.alphaRewrite) {
             // Coverage layer: always write A so brush/eraser work without needing
             // Channels→Alpha ON. A-off only changes stamp source (opacity×hardness).
-            activeBrush.writeA = true;
+            activeBrush.writeA = layer.workSpace.WritesChan(texset::Chan::A);
+            if (!activeBrush.writeA && (activeBrush.writeR || activeBrush.writeG || activeBrush.writeB))
+                activeBrush.writeA = true; // need coverage for RGB paint on rewrite layers
             activeBrush.rgbMorphOnly = channelAOff;
             if (channelAOff)
                 activeBrush.color[3] = 1.0f;
@@ -2342,11 +2446,28 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     if (groupDev && !m_GroupCompositeRTV && m_CompositeWidth > 0)
         CreateGroupCompositeResources(groupDev);
 
+    // View filter: layers that opt into active map (+ underlay for imported maps)
+    const texset::MapKind viewMap = m_ViewMapKind;
+    const bool roleIso = m_ViewRoleIsolate;
+    const texset::ChannelRole soloRole = m_ViewSoloRole;
+
+    // Non-Diffuse: draw imported map composite as base underlay (so user SEES LightMap/etc.)
+    if (viewMap != texset::MapKind::Diffuse && m_ViewUnderlaySRV) {
+        Layer dummy;
+        dummy.alphaRewrite = true;
+        dummy.blendMode = BlendMode::Normal;
+        dummy.opacity = 1.f;
+        drawLayerSrv(dummy, m_ViewUnderlaySRV, false, 1.f);
+    }
+
     for (size_t i = 0; i < m_Layers.size(); ++i) {
         Layer& layer = m_Layers[i];
         // Only top-level entries; grouped children rendered inside parent group
         if (layer.parentGroupId >= 0) continue;
         if (!layer.visible) continue;
+        if (!layer.isGroup &&
+            !layer.ParticipatesInView(viewMap, roleIso, soloRole))
+            continue;
 
         if (layer.isGroup) {
             const bool groupHasFx = layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters);
@@ -2418,6 +2539,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 Layer& child = m_Layers[ci];
                 // Direct children only for GPU path (nested groups with no FX on parent)
                 if ((int)child.parentGroupId != (int)i || !child.visible || child.isGroup) continue;
+                if (!child.ParticipatesInView(viewMap, roleIso, soloRole)) continue;
                 if (!child.srv) continue;
 
                 const bool childBaked = child.HasEnabledStyles() && !m_IsStrokeActive;
@@ -2875,7 +2997,9 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
 
         CreateCompositeResources(device);
         m_Layers.clear();
-        m_ProjectType        = ProjectType::Simple;
+        // Do NOT force Simple — Advanced project create imports Diffuse after SetProjectType.
+        // Only default to Simple when type was never set (still default Advanced actually —
+        // preserve whatever the caller configured).
         m_CurrentProjectFilePath = filepath;
         m_ExportPath         = filepath;
 
@@ -3067,6 +3191,127 @@ std::vector<float> Canvas::GetCompositePixels() const {
         return std::vector<float>((size_t)m_Width * m_Height * 4, 0.0f);
     }
     return ComposeVisibleLayers(m_Layers, m_Width, m_Height);
+}
+
+bool Canvas::ComposePackedMapRGBA8(texset::MapKind kind,
+                                   const std::vector<texset::MapSlot>& maps,
+                                   const TileCache* importedBase,
+                                   std::vector<uint8_t>& outRgba,
+                                   int& outW, int& outH) const {
+    const texset::MapSlot* slot = texset::FindMap(maps, kind);
+    outW = (slot && slot->width > 0) ? slot->width : m_Width;
+    outH = (slot && slot->height > 0) ? slot->height : m_Height;
+    if (outW <= 0 || outH <= 0) return false;
+
+    // Diffuse: full document composite (all visible layers)
+    if (kind == texset::MapKind::Diffuse) {
+        if (!ComposeVisibleLayersRGBA8(m_Layers, m_Width, m_Height, outRgba))
+            return false;
+        // If map size differs, nearest-neighbor resample
+        if (outW != m_Width || outH != m_Height) {
+            std::vector<uint8_t> src = std::move(outRgba);
+            outRgba.assign((size_t)outW * (size_t)outH * 4u, 0);
+            for (int y = 0; y < outH; ++y) {
+                int sy = std::min(m_Height - 1, y * m_Height / outH);
+                for (int x = 0; x < outW; ++x) {
+                    int sx = std::min(m_Width - 1, x * m_Width / outW);
+                    size_t di = ((size_t)y * outW + x) * 4;
+                    size_t si = ((size_t)sy * m_Width + sx) * 4;
+                    outRgba[di + 0] = src[si + 0];
+                    outRgba[di + 1] = src[si + 1];
+                    outRgba[di + 2] = src[si + 2];
+                    outRgba[di + 3] = src[si + 3];
+                }
+            }
+        }
+        return true;
+    }
+
+    // Non-Diffuse: start from imported base or neutral
+    outRgba.assign((size_t)outW * (size_t)outH * 4u, 0);
+    const bool isNormal = (kind == texset::MapKind::NormalMap);
+    for (size_t i = 0; i < outRgba.size(); i += 4) {
+        if (isNormal) {
+            outRgba[i + 0] = 128; outRgba[i + 1] = 128; outRgba[i + 2] = 255; outRgba[i + 3] = 255;
+        } else {
+            outRgba[i + 0] = 0; outRgba[i + 1] = 0; outRgba[i + 2] = 0; outRgba[i + 3] = 255;
+        }
+    }
+
+    if (importedBase && importedBase->GetWidth() > 0) {
+        std::vector<uint8_t> base((size_t)importedBase->GetWidth() * (size_t)importedBase->GetHeight() * 4u);
+        importedBase->ExportRGBA8(base.data(), importedBase->GetWidth(), importedBase->GetHeight());
+        int bw = importedBase->GetWidth(), bh = importedBase->GetHeight();
+        for (int y = 0; y < outH; ++y) {
+            int sy = std::min(bh - 1, y * bh / outH);
+            for (int x = 0; x < outW; ++x) {
+                int sx = std::min(bw - 1, x * bw / outW);
+                size_t di = ((size_t)y * outW + x) * 4;
+                size_t si = ((size_t)sy * bw + sx) * 4;
+                outRgba[di + 0] = base[si + 0];
+                outRgba[di + 1] = base[si + 1];
+                outRgba[di + 2] = base[si + 2];
+                outRgba[di + 3] = base[si + 3];
+            }
+        }
+    }
+
+    // Blend layers that write this map (Fills with packing + rasters with workSpace)
+    auto blendOver = [](uint8_t* dp, float sr, float sg, float sb, float sa) {
+        if (sa <= 0.f) return;
+        float dr = dp[0] / 255.f, dg = dp[1] / 255.f, db = dp[2] / 255.f, da = dp[3] / 255.f;
+        float outA = sa + da * (1.f - sa);
+        if (outA <= 1e-6f) return;
+        float or_ = (sr * sa + dr * da * (1.f - sa)) / outA;
+        float og = (sg * sa + dg * da * (1.f - sa)) / outA;
+        float ob = (sb * sa + db * da * (1.f - sa)) / outA;
+        dp[0] = (uint8_t)(std::clamp(or_, 0.f, 1.f) * 255.f + 0.5f);
+        dp[1] = (uint8_t)(std::clamp(og, 0.f, 1.f) * 255.f + 0.5f);
+        dp[2] = (uint8_t)(std::clamp(ob, 0.f, 1.f) * 255.f + 0.5f);
+        dp[3] = (uint8_t)(std::clamp(outA, 0.f, 1.f) * 255.f + 0.5f);
+    };
+
+    for (const auto& layer : m_Layers) {
+        if (!layer.visible || layer.isGroup || layer.parentGroupId >= 0) continue;
+        if (!layer.ParticipatesInView(kind, false, texset::ChannelRole::None))
+            continue;
+
+        float solid[4] = {0, 0, 0, 1};
+        bool useSolid = false;
+        if (layer.IsFill()) {
+            if (!layer.fill.ResolveForMap(maps, kind, solid))
+                continue;
+            useSolid = true;
+        }
+
+        const float opacity = layer.opacity;
+        const bool hasMask = layer.hasMask && layer.mask.size() == (size_t)m_Width * m_Height;
+
+        for (int y = 0; y < outH; ++y) {
+            // Map UV → canvas pixel (shared UV space)
+            int cy = std::min(m_Height - 1, (int)((y + 0.5f) / outH * m_Height));
+            for (int x = 0; x < outW; ++x) {
+                int cx = std::min(m_Width - 1, (int)((x + 0.5f) / outW * m_Width));
+                float sr, sg, sb, sa;
+                if (useSolid) {
+                    sr = solid[0]; sg = solid[1]; sb = solid[2]; sa = solid[3];
+                } else if (layer.tileCache) {
+                    float px[4];
+                    layer.tileCache->GetPixelF(cx, cy, px);
+                    sr = px[0]; sg = px[1]; sb = px[2]; sa = px[3];
+                } else {
+                    continue;
+                }
+                sa *= opacity;
+                if (hasMask)
+                    sa *= layer.mask[(size_t)cy * m_Width + cx] / 255.f;
+                if (sa <= 0.001f) continue;
+                uint8_t* dp = outRgba.data() + ((size_t)y * outW + x) * 4;
+                blendOver(dp, sr, sg, sb, sa);
+            }
+        }
+    }
+    return true;
 }
 
 void Canvas::SampleActiveLayerPixel(int x, int y, float outColor[4]) const {
@@ -3316,18 +3561,36 @@ static StyleType StyleTypeFromString(const std::string& s) {
 }
 
 static const char* FillTargetToString(FillChannelTarget t) {
-    switch (t) {
-    case FillChannelTarget::Transparency: return "Transparency";
-    case FillChannelTarget::Metallic: return "Metallic";
-    case FillChannelTarget::Roughness: return "Roughness";
-    default: return "Diffuse";
-    }
+    return FillChannelTargetName(t);
 }
 static FillChannelTarget FillTargetFromString(const std::string& s) {
-    if (s == "Transparency") return FillChannelTarget::Transparency;
-    if (s == "Metallic") return FillChannelTarget::Metallic;
-    if (s == "Roughness") return FillChannelTarget::Roughness;
-    return FillChannelTarget::Diffuse;
+    return FillChannelTargetFromName(s);
+}
+
+// Fill: workSpace = enabled maps (RGBA each). Roles are soft labels only.
+void Layer::SyncWorkSpaceFromFillTarget(const texset::TextureSet* /*set*/) {
+    fill.MigrateFromLegacy();
+    fill.EnsureDefaults();
+
+    workSpace = texset::LayerWorkSpace{};
+    workSpace.mapMask = 0;
+    workSpace.roleMask = 0; // 0 = don't filter by role
+    workSpace.channelWriteMask = 0xF;
+
+    for (int i = 0; i < (int)texset::MapKind::Count; ++i) {
+        if (fill.mapColor[i].enabled)
+            workSpace.SetMap((texset::MapKind)i, true);
+    }
+    if (workSpace.mapMask == 0)
+        workSpace.SetMap(texset::MapKind::Diffuse, true);
+}
+
+bool Layer::ParticipatesInView(texset::MapKind viewMap, bool /*roleIsolate*/,
+                               texset::ChannelRole /*soloRole*/) const {
+    if (isGroup) return true;
+    // Default paint layers (Diffuse-only workSpace) still show on Diffuse.
+    // On other maps: only layers that opted into that map (Fill multi-map / activity).
+    return workSpace.AffectsMap(viewMap);
 }
 static const char* FillModeToString(FillValueMode m) {
     switch (m) {
@@ -3368,7 +3631,29 @@ static json LayerToJson(const Layer& layer) {
         fj["texture_path"] = layer.fill.texturePath;
         fj["tex_scale"] = { layer.fill.texScale[0], layer.fill.texScale[1] };
         fj["tex_offset"] = { layer.fill.texOffset[0], layer.fill.texOffset[1] };
+        // Per-map RGBA (primary model)
+        json maps = json::array();
+        for (int i = 0; i < (int)texset::MapKind::Count; ++i) {
+            json mj;
+            mj["kind"] = texset::MapKindName((texset::MapKind)i);
+            mj["enabled"] = layer.fill.mapColor[i].enabled;
+            mj["rgba"] = {
+                layer.fill.mapColor[i].rgba[0], layer.fill.mapColor[i].rgba[1],
+                layer.fill.mapColor[i].rgba[2], layer.fill.mapColor[i].rgba[3]
+            };
+            maps.push_back(mj);
+        }
+        fj["map_colors"] = maps;
         j["fill"] = fj;
+    }
+
+    // Texture-set work space (Plan 0)
+    {
+        json wj;
+        wj["map_mask"] = layer.workSpace.mapMask;
+        wj["role_mask"] = layer.workSpace.roleMask;
+        wj["channel_write_mask"] = (int)layer.workSpace.channelWriteMask;
+        j["work_space"] = wj;
     }
 
     json filters = json::array();
@@ -3465,8 +3750,46 @@ static void LayerFromJson(Layer& layer, const json& j) {
             layer.fill.texOffset[0] = fj["tex_offset"][0].get<float>();
             layer.fill.texOffset[1] = fj["tex_offset"][1].get<float>();
         }
+        layer.fill.roles.clear();
+        for (int i = 0; i < (int)texset::MapKind::Count; ++i)
+            layer.fill.mapColor[i] = FillMapColor{};
+        if (fj.contains("map_colors") && fj["map_colors"].is_array()) {
+            for (const auto& mj : fj["map_colors"]) {
+                texset::MapKind mk = texset::MapKindFromName(mj.value("kind", "Diffuse"));
+                int i = (int)mk;
+                if (i < 0 || i >= (int)texset::MapKind::Count) continue;
+                layer.fill.mapColor[i].enabled = mj.value("enabled", false);
+                if (mj.contains("rgba") && mj["rgba"].is_array()) {
+                    for (int c = 0; c < 4 && c < (int)mj["rgba"].size(); ++c)
+                        layer.fill.mapColor[i].rgba[c] = mj["rgba"][c].get<float>();
+                }
+            }
+        } else if (fj.contains("roles") && fj["roles"].is_array()) {
+            for (const auto& rj : fj["roles"]) {
+                FillRoleSlot rs;
+                rs.role = texset::ChannelRoleFromName(rj.value("role", "BaseColor"));
+                rs.enabled = rj.value("enabled", false);
+                rs.mode = FillModeFromString(rj.value("mode", "RGB"));
+                if (rj.contains("rgba") && rj["rgba"].is_array()) {
+                    for (int i = 0; i < 4 && i < (int)rj["rgba"].size(); ++i)
+                        rs.rgba[i] = rj["rgba"][i].get<float>();
+                }
+                rs.gray = rj.value("gray", 1.f);
+                layer.fill.roles.push_back(rs);
+            }
+        }
+        layer.fill.MigrateFromLegacy();
         if (layer.type != Layer::Type::Group)
             layer.type = Layer::Type::Fill;
+        layer.SyncWorkSpaceFromFillTarget(nullptr);
+    }
+
+    if (j.contains("work_space") && j["work_space"].is_object()) {
+        const auto& wj = j["work_space"];
+        if (wj.contains("map_mask")) layer.workSpace.mapMask = wj["map_mask"].get<uint32_t>();
+        if (wj.contains("role_mask")) layer.workSpace.roleMask = wj["role_mask"].get<uint32_t>();
+        if (wj.contains("channel_write_mask"))
+            layer.workSpace.channelWriteMask = (uint8_t)wj["channel_write_mask"].get<int>();
     }
 
     layer.filters.clear();
@@ -3647,6 +3970,15 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
             metadata["mod"] = mod;
         }
 
+        // Texture Set library meta (Project injects before save)
+        if (!m_TextureSetsMetaJson.empty()) {
+            try {
+                metadata["texture_sets"] = json::parse(m_TextureSetsMetaJson);
+            } catch (...) {
+                Logger::Get().Warn("Save RAYP: texture_sets meta JSON invalid — skipped");
+            }
+        }
+
         json layersArray = json::array();
         for (const auto& layer : m_Layers) {
             layersArray.push_back(LayerToJson(layer));
@@ -3796,6 +4128,16 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
             m_ExportIccPreset = IccPresetFromName(m_ExportPngColorSpace);
         }
         if (metadata.contains("brush_tip_id")) m_BrushTipId = metadata["brush_tip_id"].get<std::string>();
+
+        // Texture Set library meta → Project reads after load
+        m_TextureSetsMetaJson.clear();
+        if (metadata.contains("texture_sets")) {
+            try {
+                m_TextureSetsMetaJson = metadata["texture_sets"].dump();
+            } catch (...) {
+                m_TextureSetsMetaJson.clear();
+            }
+        }
 
         // Mod preview sources (soft — never fail the load)
         m_ModIniPath.clear();
@@ -3989,6 +4331,11 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
     exportMeta["export_png_color_space"] = m_ExportPngColorSpace;
     exportMeta["export_icc_preset"] = IccPresetName(m_ExportIccPreset);
     exportMeta["brush_tip_id"] = m_BrushTipId;
+    if (!m_TextureSetsMetaJson.empty()) {
+        try {
+            exportMeta["texture_sets"] = json::parse(m_TextureSetsMetaJson);
+        } catch (...) {}
+    }
 
     std::vector<RaypLayerSnapshot> layers;
     layers.reserve(m_Layers.size());
@@ -6355,9 +6702,17 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
         return;
     }
 
-    // Cheap path: 1×1 solid color texture (sampled at any UV)
-    float c[4];
-    layer.fill.ResolveRgba(c);
+    // Cheap path: 1×1 solid color texture (sampled at any UV).
+    // Multi-target Fill: pack enabled roles into current view map.
+    float c[4] = {0,0,0,1};
+    if (!m_ActiveSetMaps.empty()) {
+        if (!layer.fill.ResolveForMap(m_ActiveSetMaps, m_ViewMapKind, c)) {
+            // No contribution to this map — transparent (layer still filtered by workSpace)
+            c[0] = c[1] = c[2] = 0.f; c[3] = 0.f;
+        }
+    } else {
+        layer.fill.ResolveRgba(c);
+    }
     if (layer.texture) {
         D3D11_TEXTURE2D_DESC desc{};
         layer.texture->GetDesc(&desc);
@@ -6467,7 +6822,9 @@ void Canvas::CreateFillLayer(ID3D11Device* device, const std::string& name, cons
     layer.type = Layer::Type::Fill;
     layer.isGroup = false;
     layer.fill = params;
+    layer.fill.EnsureDefaults();
     layer.alphaRewrite = true;
+    layer.SyncWorkSpaceFromFillTarget(nullptr);
     // No paint tiles for fill content
     layer.tileCache.reset();
     layer.filtersDirty = false;
@@ -7391,6 +7748,101 @@ void Canvas::SetChannelA(bool a) {
     if (m_ChannelA == a) return;
     m_ChannelA = a;
     // Viewport PSMain: A-off shows composite RGB ignoring coverage (buffer view).
+    MarkCompositeDirty();
+}
+
+void Canvas::SetViewMapKind(texset::MapKind k) {
+    if (m_ViewMapKind == k) return;
+    m_ViewMapKind = k;
+    // Multi-target Fill resolves different packed colors per map — re-upload GPU solids
+    for (auto& L : m_Layers) {
+        if (L.IsFill()) {
+            L.needsUpload = true;
+            L.presentationDirty = true;
+        }
+    }
+    MarkCompositeDirty();
+}
+
+void Canvas::SetActiveSetMaps(const std::vector<texset::MapSlot>& maps) {
+    m_ActiveSetMaps = maps;
+}
+
+void Canvas::ClearViewMapUnderlay() {
+    if (m_ViewUnderlaySRV) { m_ViewUnderlaySRV->Release(); m_ViewUnderlaySRV = nullptr; }
+    if (m_ViewUnderlayTex) { m_ViewUnderlayTex->Release(); m_ViewUnderlayTex = nullptr; }
+    m_ViewUnderlayW = m_ViewUnderlayH = 0;
+}
+
+void Canvas::SetViewMapUnderlay(ID3D11Device* device, const TileCache* cache) {
+    if (!device || !cache || cache->GetWidth() <= 0 || cache->GetHeight() <= 0) {
+        ClearViewMapUnderlay();
+        MarkCompositeDirty();
+        return;
+    }
+    const int w = cache->GetWidth();
+    const int h = cache->GetHeight();
+    // Rebuild GPU tex if size changed
+    if (!m_ViewUnderlayTex || m_ViewUnderlayW != w || m_ViewUnderlayH != h) {
+        ClearViewMapUnderlay();
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = (UINT)w;
+        desc.Height = (UINT)h;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &m_ViewUnderlayTex)))
+            return;
+        device->CreateShaderResourceView(m_ViewUnderlayTex, nullptr, &m_ViewUnderlaySRV);
+        m_ViewUnderlayW = w;
+        m_ViewUnderlayH = h;
+    }
+    // Upload full image (map sizes are usually 1k–2k — acceptable for map switch)
+    std::vector<uint8_t> rgba((size_t)w * (size_t)h * 4u);
+    cache->ExportRGBA8(rgba.data(), w, h);
+    ID3D11DeviceContext* ctx = nullptr;
+    device->GetImmediateContext(&ctx);
+    if (ctx && m_ViewUnderlayTex) {
+        ctx->UpdateSubresource(m_ViewUnderlayTex, 0, nullptr, rgba.data(), (UINT)(w * 4), 0);
+        ctx->Release();
+    }
+    MarkCompositeDirty();
+}
+
+void Canvas::SetViewRoleIsolate(bool on, texset::ChannelRole role) {
+    if (m_ViewRoleIsolate == on && m_ViewSoloRole == role) return;
+    m_ViewRoleIsolate = on;
+    m_ViewSoloRole = role;
+    MarkCompositeDirty();
+}
+
+void Canvas::ApplyViewRoleToChannelMasks(const texset::MapSlot* slot) {
+    if (!m_ViewRoleIsolate || !slot) {
+        // Full map RGBA
+        m_ChannelR = m_ChannelG = m_ChannelB = true;
+        m_ChannelA = true;
+        MarkCompositeDirty();
+        return;
+    }
+    if (m_ViewSoloRole == texset::ChannelRole::BaseColor) {
+        m_ChannelR = m_ChannelG = m_ChannelB = true;
+        m_ChannelA = false;
+        MarkCompositeDirty();
+        return;
+    }
+    int ch = texset::ResolveChannelForRole(*slot, m_ViewSoloRole);
+    m_ChannelR = m_ChannelG = m_ChannelB = m_ChannelA = false;
+    if (ch == 0) m_ChannelR = true;
+    else if (ch == 1) m_ChannelG = true;
+    else if (ch == 2) m_ChannelB = true;
+    else if (ch == 3) m_ChannelA = true;
+    else {
+        // Role not packed — grayscale R as fallback
+        m_ChannelR = true;
+    }
     MarkCompositeDirty();
 }
 

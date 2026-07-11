@@ -96,6 +96,7 @@ void KeymapManager::Initialize() {
     m_Bindings["Redo"] = KeyCombination{ GLFW_KEY_Y, -1, true, false, false };
     m_Bindings["SaveProject"] = KeyCombination{ GLFW_KEY_S, -1, true, false, false };
     m_Bindings["OpenProject"] = KeyCombination{ GLFW_KEY_O, -1, true, false, false };
+    m_Bindings["NewProject"] = KeyCombination{ GLFW_KEY_T, -1, true, false, false }; // Ctrl+T
     m_Bindings["BrushTool"] = KeyCombination{ GLFW_KEY_B, -1, false, false, false };
     m_Bindings["EraserTool"] = KeyCombination{ GLFW_KEY_E, -1, false, false, false };
     // Reserved for UI brush picker popup (RMB also opens it). No default key binding.

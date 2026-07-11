@@ -1,4 +1,5 @@
 #include "EditorPanels.h"
+#include "FileExplorer.h"
 #include "../core/ConfigManager.h"
 #include "../core/Logger.h"
 #include "../core/KeymapManager.h"
@@ -744,8 +745,14 @@ namespace UI {
         // 1. Persistent Header (Main Menu Bar)
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                if (ImGui::MenuItem("New Project Tab", "Ctrl+T")) {
+                if (ImGui::MenuItem("New Project…", "Ctrl+T")) {
+                    state.openNewProjectWizard = true;
+                }
+                if (ImGui::MenuItem("New Blank Tab")) {
                     ProjectManager::Get().CreateEmptyProject();
+                }
+                if (ImGui::MenuItem("Import Texture…")) {
+                    UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
                 }
                 if (ImGui::MenuItem("Open Project (.rayp)", KeymapManager::Get().GetActionShortcutString("OpenProject").c_str())) {
                     state.openLoadRaypModal = true;
@@ -901,6 +908,64 @@ namespace UI {
                     state.openAboutModal = true;
                 ImGui::EndMenu();
             }
+
+            // ---- Right header: mode · I/O · map switcher (compact, high-use) ----
+            {
+                Project* hp = ProjectManager::Get().ActiveProject();
+                auto ptype = canvas.GetProjectType();
+                const bool adv = (ptype != Canvas::ProjectType::Simple);
+                if (hp) hp->textureSets.EnsureSimpleDefault();
+                texset::TextureSet* hset = hp ? hp->textureSets.Active() : nullptr;
+
+                // Estimate width of right tools
+                float rightTools = 210.f; // mode + I/O
+                if (adv && hset) {
+                    for (const auto& m : hset->maps)
+                        if (m.enabled || m.kind == texset::MapKind::Diffuse)
+                            rightTools += 72.f;
+                }
+                float barW = ImGui::GetWindowWidth();
+                float x = barW - rightTools - 8.f;
+                if (x > ImGui::GetCursorPosX() + 40.f)
+                    ImGui::SameLine(x);
+
+                // Project mode
+                {
+                    int mi = (ptype == Canvas::ProjectType::Simple) ? 0
+                           : (ptype == Canvas::ProjectType::AdvancedModMode) ? 2 : 1;
+                    const char* modes[] = { "Simple", "Advanced", "Adv Mod" };
+                    ImGui::SetNextItemWidth(88.f);
+                    if (ImGui::Combo("##projmode", &mi, modes, 3)) {
+                        canvas.SetProjectType(
+                            mi == 0 ? Canvas::ProjectType::Simple :
+                            mi == 2 ? Canvas::ProjectType::AdvancedModMode :
+                                      Canvas::ProjectType::Advanced);
+                        canvas.SetDocumentModified(true);
+                        if (mi == 0)
+                            canvas.SetViewMapKind(texset::MapKind::Diffuse);
+                    }
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip("Project mode — workspace layout");
+                }
+                ImGui::SameLine(0, 6);
+                if (adv) {
+                    if (ImGui::SmallButton("Import"))
+                        UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
+                    ImGui::SameLine(0, 4);
+                    if (ImGui::SmallButton("Export"))
+                        state.openQuickExportTrigger = true;
+                    ImGui::SameLine(0, 8);
+                    if (ImGui::SmallButton("Setup"))
+                        state.openProjectSetup = true;
+                } else {
+                    if (ImGui::SmallButton("Import"))
+                        state.openImportModal = true;
+                    ImGui::SameLine(0, 4);
+                    if (ImGui::SmallButton("Export"))
+                        state.openQuickExportTrigger = true;
+                }
+            }
+
             ImGui::EndMainMenuBar();
         }
 
@@ -1770,6 +1835,8 @@ namespace UI {
             }
             ImGui::Separator();
             if (ImGui::Button("Save", ImVec2(120, 0))) {
+                if (Project* proj = ProjectManager::Get().ActiveProject())
+                    proj->InjectTextureSetsIntoCanvas();
                 if (canvas.SaveCanvasRayp(savePath)) {
                     ImGui::CloseCurrentPopup();
                 }
@@ -2402,47 +2469,71 @@ namespace UI {
                                 "(default for imported decals). Paint keeps layer A non-destructive.");
                         }
                     }
+
                     ImGui::PopID();
                     ImGui::Separator();
 
-                    // Fill Layer extended properties
+                    // Fill Layer: enable maps + RGBA each (no role mandatory setup)
                     if (al.IsFill()) {
                         ImGui::PushID("##fill_props");
-                        ImGui::TextDisabled("Fill Layer");
-                        int mode = (int)al.fill.mode;
-                        const char* modes[] = { "RGB", "Gray 0–1", "Gray −1…1" };
-                        if (UiCombo("##fillmode", &mode, modes, 3, "Value Mode")) {
-                            al.fill.mode = (FillValueMode)mode;
+                        al.fill.EnsureDefaults();
+                        const texset::TextureSet* tset = nullptr;
+                        if (Project* p = ProjectManager::Get().ActiveProject())
+                            tset = p->textureSets.Active();
+
+                        auto dirtyFill = [&]() {
                             al.needsUpload = true;
+                            al.presentationDirty = true;
+                            al.SyncWorkSpaceFromFillTarget(tset);
                             if (al.HasEnabledStyles()) canvas.RequestPresentationRebuild(ai);
                             else canvas.MarkCompositeDirty();
-                        }
-                        if (al.fill.mode == FillValueMode::RGB) {
-                            if (ImGui::ColorEdit4("Color##fillfull", al.fill.color,
-                                    ImGuiColorEditFlags_AlphaBar)) {
-                                al.needsUpload = true;
-                                if (al.HasEnabledStyles()) canvas.RequestPresentationRebuild(ai);
-                                else canvas.MarkCompositeDirty();
-                            }
+                            canvas.SetDocumentModified(true);
+                        };
+
+                        ImGui::TextDisabled("Write maps (RGBA each · one mask)");
+                        // Show enabled maps in project; if simple, just Diffuse
+                        std::vector<texset::MapKind> mapsToShow;
+                        if (tset) {
+                            for (const auto& m : tset->maps)
+                                if (m.enabled || m.kind == texset::MapKind::Diffuse)
+                                    mapsToShow.push_back(m.kind);
                         } else {
-                            float gmin = (al.fill.mode == FillValueMode::GrayscaleSigned) ? -1.f : 0.f;
-                            float gmax = 1.f;
-                            if (Ui::SmartSliderFloat("Value##fillg", &al.fill.gray, gmin, gmax,
-                                    (al.fill.mode == FillValueMode::GrayscaleSigned) ? 0.f : 1.f, 0.05f)) {
-                                al.needsUpload = true;
-                                if (al.HasEnabledStyles()) canvas.RequestPresentationRebuild(ai);
-                                else canvas.MarkCompositeDirty();
+                            mapsToShow.push_back(texset::MapKind::Diffuse);
+                        }
+                        float availW = ImGui::GetContentRegionAvail().x;
+                        int n = std::max(1, (int)mapsToShow.size());
+                        int cols = std::max(1, std::min(n, (int)(availW / 88.f)));
+                        float cellW = (availW - ImGui::GetStyle().ItemSpacing.x * (cols - 1)) / cols;
+                        int col = 0;
+                        for (texset::MapKind mk : mapsToShow) {
+                            int mi = (int)mk;
+                            auto& mc = al.fill.mapColor[mi];
+                            ImGui::PushID(mi);
+                            const char* lab = texset::MapKindName(mk);
+                            if (tset) {
+                                if (const texset::MapSlot* sl = tset->GetMap(mk))
+                                    lab = sl->DisplayName();
                             }
+                            if (mc.enabled)
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.48f, 0.80f, 0.75f));
+                            if (ImGui::Button(lab, ImVec2(cellW, 0))) {
+                                mc.enabled = !mc.enabled;
+                                dirtyFill();
+                            }
+                            if (mc.enabled) ImGui::PopStyleColor();
+                            if (mc.enabled) {
+                                if (ImGui::ColorEdit4("##mc", mc.rgba,
+                                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel |
+                                        ImGuiColorEditFlags_AlphaBar))
+                                    dirtyFill();
+                            }
+                            ImGui::PopID();
+                            ++col;
+                            if (col < cols) ImGui::SameLine();
+                            else col = 0;
                         }
-                        int tgt = (int)al.fill.target;
-                        const char* targets[] = { "Diffuse", "Transparency", "Metallic", "Roughness" };
-                        if (UiCombo("##filltgt", &tgt, targets, 4, "Channel Target")) {
-                            al.fill.target = (FillChannelTarget)tgt;
-                            // Only Diffuse is composited today; others stored for multi-map later
-                            canvas.MarkCompositeDirty();
-                        }
-                        if (al.fill.target != FillChannelTarget::Diffuse)
-                            ImGui::TextDisabled("Multi-map targets: stored only (system not ready)");
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("Mask paints all toggled maps at once");
 
                         bool useTex = al.fill.useTexture;
                         if (ImGui::Checkbox("Use Texture##filltex", &useTex)) {
@@ -2700,10 +2791,37 @@ namespace UI {
                         s_RenameIdx = -1;
                 } else {
                     char label[256];
+                    // Map participation badge (which texture map this layer belongs to)
+                    auto mapBadge = [&]() -> const char* {
+                        if (layer.isGroup) return "";
+                        uint32_t mm = layer.workSpace.mapMask;
+                        if (mm == 0 || mm == (1u << (uint32_t)texset::MapKind::Diffuse))
+                            return layer.IsFill() ? "" : "";
+                        // single map?
+                        int count = 0; texset::MapKind one = texset::MapKind::Diffuse;
+                        for (int k = 0; k < (int)texset::MapKind::Count; ++k) {
+                            if (mm & (1u << k)) { ++count; one = (texset::MapKind)k; }
+                        }
+                        if (count == 1) {
+                            switch (one) {
+                            case texset::MapKind::Diffuse: return "Diff";
+                            case texset::MapKind::LightMap: return "LM";
+                            case texset::MapKind::MaterialMap: return "Mat";
+                            case texset::MapKind::NormalMap: return "Nrm";
+                            case texset::MapKind::GlowMap: return "Glow";
+                            case texset::MapKind::ExtraMap: return "Ext";
+                            default: return "Map";
+                            }
+                        }
+                        if (count > 1) return "Multi";
+                        return "";
+                    };
+                    const char* mb = mapBadge();
                     if (layer.isGroup) std::snprintf(label, sizeof(label), "[G] %s", layer.name.c_str());
-                    else if (layer.IsFill()) std::snprintf(label, sizeof(label), "[F] %s", layer.name.c_str());
+                    else if (layer.IsFill()) std::snprintf(label, sizeof(label), "[F%s%s] %s", mb[0]?" ":"", mb, layer.name.c_str());
                     else if (layer.type == Layer::Type::VectorSvg) std::snprintf(label, sizeof(label), "[SVG] %s", layer.name.c_str());
                     else if (layer.type == Layer::Type::SmartObject) std::snprintf(label, sizeof(label), "[SO] %s", layer.name.c_str());
+                    else if (mb[0]) std::snprintf(label, sizeof(label), "[%s] %s", mb, layer.name.c_str());
                     else std::snprintf(label, sizeof(label), "%s", layer.name.c_str());
 
                     if (multiSel && !isActive) {
@@ -2826,6 +2944,35 @@ namespace UI {
                             }
                             if (ImGui::IsItemHovered()) {
                                 Ui::Tooltip("OFF: A = RGB strength only; underlay/layer A preserved.");
+                            }
+                        }
+                        // Channel activity (maps + write mask) — RMB only
+                        if (!layer.isGroup && canvas.GetProjectType() != Canvas::ProjectType::Simple) {
+                            if (ImGui::BeginMenu("Channel Activity")) {
+                                auto& ws = layer.workSpace;
+                                const char* mapNames[] = {
+                                    "Diffuse","LightMap","MaterialMap","NormalMap",
+                                    "ExtraMap","GlowMap","WengineFX"
+                                };
+                                for (int mi = 0; mi < (int)texset::MapKind::Count; ++mi) {
+                                    bool on = ws.AffectsMap((texset::MapKind)mi);
+                                    if (ImGui::MenuItem(mapNames[mi], nullptr, on)) {
+                                        ws.SetMap((texset::MapKind)mi, !on);
+                                        canvas.MarkCompositeDirty();
+                                        canvas.SetDocumentModified(true);
+                                    }
+                                }
+                                ImGui::Separator();
+                                ImGui::TextDisabled("Write R G B A");
+                                for (int c = 0; c < 4; ++c) {
+                                    bool on = ws.WritesChan((texset::Chan)c);
+                                    const char* cl[] = { "R", "G", "B", "A" };
+                                    if (ImGui::MenuItem(cl[c], nullptr, on)) {
+                                        ws.SetWriteChan((texset::Chan)c, !on);
+                                        canvas.SetDocumentModified(true);
+                                    }
+                                }
+                                ImGui::EndMenu();
                             }
                         }
                         if (ImGui::MenuItem("Duplicate", "Ctrl+J")) {
@@ -3302,100 +3449,303 @@ namespace UI {
             ImGui::EndPopup();
         }
 
+        // Sync non-Diffuse underlay so imported maps are VISIBLE in viewport
+        if (device) {
+            if (Project* up = ProjectManager::Get().ActiveProject()) {
+                if (texset::TextureSet* us = up->textureSets.Active()) {
+                    canvas.SetActiveSetMaps(us->maps);
+                    texset::MapKind vm = canvas.GetViewMapKind();
+                    if (vm != texset::MapKind::Diffuse) {
+                        auto it = us->mapComposites.find((int)vm);
+                        const TileCache* tc = (it != us->mapComposites.end() && it->second)
+                            ? it->second.get() : nullptr;
+                        // Only re-upload when map changes / first time — cheap check via dirty flag
+                        static int s_lastUnderlayKey = -999;
+                        static int s_lastProj = -1;
+                        int key = (up->id * 100) + (int)vm;
+                        if (tc && (key != s_lastUnderlayKey || s_lastProj != up->id || !canvas.HasViewMapUnderlay())) {
+                            canvas.SetViewMapUnderlay(device, tc);
+                            s_lastUnderlayKey = key;
+                            s_lastProj = up->id;
+                        } else if (!tc) {
+                            canvas.ClearViewMapUnderlay();
+                            s_lastUnderlayKey = -999;
+                        }
+                    } else {
+                        if (canvas.HasViewMapUnderlay())
+                            canvas.ClearViewMapUnderlay();
+                    }
+                }
+            }
+        }
+
         if (state.showChannels) {
             Ui::BeginDockPanel("Channels", &state.showChannels);
 
+            Project* proj = ProjectManager::Get().ActiveProject();
+            auto ptype = canvas.GetProjectType();
+            const bool advanced = (ptype != Canvas::ProjectType::Simple);
+            if (proj) proj->textureSets.EnsureSimpleDefault();
+            texset::TextureSet* set = proj ? proj->textureSets.Active() : nullptr;
+
+            // ---- TOP: compact map switchers (Advanced) ----
+            if (advanced && set) {
+                float avail = ImGui::GetContentRegionAvail().x;
+                int nMaps = 0;
+                for (const auto& m : set->maps)
+                    if (m.enabled || m.kind == texset::MapKind::Diffuse) ++nMaps;
+                nMaps = std::max(1, nMaps);
+                float bw = std::max(48.f, (avail - ImGui::GetStyle().ItemSpacing.x * (nMaps - 1)) / nMaps);
+                int ci = 0;
+                for (auto& m : set->maps) {
+                    if (!m.enabled && m.kind != texset::MapKind::Diffuse) continue;
+                    ImGui::PushID((int)m.kind);
+                    bool on = canvas.GetViewMapKind() == m.kind;
+                    if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.50f, 0.85f, 0.9f));
+                    if (ImGui::Button(m.DisplayName(), ImVec2(bw, 22))) {
+                        set->activeMap = m.kind;
+                        canvas.SetViewMapKind(m.kind);
+                        // force underlay refresh next frame
+                        canvas.ClearViewMapUnderlay();
+                        if (m.kind != texset::MapKind::Diffuse) {
+                            auto it = set->mapComposites.find((int)m.kind);
+                            if (it != set->mapComposites.end() && it->second && device)
+                                canvas.SetViewMapUnderlay(device, it->second.get());
+                        }
+                        canvas.MarkCompositeDirty();
+                    }
+                    if (on) ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) {
+                        char tip[128];
+                        std::snprintf(tip, sizeof(tip), "%s  %dx%d%s",
+                            m.DisplayName(),
+                            m.width > 0 ? m.width : canvas.GetWidth(),
+                            m.height > 0 ? m.height : canvas.GetHeight(),
+                            set->mapComposites.count((int)m.kind) ? "  (loaded)" : "");
+                        Ui::Tooltip(tip);
+                    }
+                    ImGui::PopID();
+                    ++ci;
+                    if (ci < nMaps) ImGui::SameLine(0, 4);
+                }
+                ImGui::Spacing();
+                ImGui::Separator();
+            }
+
+            // ---- R G B A thumbs ----
             bool r = canvas.GetChannelR();
             bool g = canvas.GetChannelG();
             bool b = canvas.GetChannelB();
             bool a = canvas.GetChannelA();
-
-            ImVec2 avail = ImGui::GetContentRegionAvail();
-            bool listMode = (avail.y >= avail.x);
             auto& tok = Ui::Tokens();
-
-            struct Ch { const char* name; bool* flag; Canvas::ChannelPreview preview; };
+            float availX = ImGui::GetContentRegionAvail().x;
+            float gap = 6.f;
+            float thumb = std::clamp((availX - gap * 3.f) / 4.f, 36.f, 64.f);
+            // Soft pack labels (hints only)
+            const char* roleUnder[4] = { "R", "G", "B", "A" };
+            if (advanced && set) {
+                if (const texset::MapSlot* slot = set->GetMap(canvas.GetViewMapKind())) {
+                    for (int i = 0; i < 4; ++i) {
+                        if (slot->pack[i].role != texset::ChannelRole::None)
+                            roleUnder[i] = texset::ChannelRoleShortName(slot->pack[i].role);
+                        else
+                            roleUnder[i] = (i == 0 ? "R" : i == 1 ? "G" : i == 2 ? "B" : "A");
+                    }
+                }
+            }
+            struct Ch { const char* name; bool* flag; Canvas::ChannelPreview preview; const char* role; };
             Ch chans[] = {
-                { "Red",   &r, Canvas::ChannelPreview::R },
-                { "Green", &g, Canvas::ChannelPreview::G },
-                { "Blue",  &b, Canvas::ChannelPreview::B },
-                { "Alpha", &a, Canvas::ChannelPreview::A },
+                { "R", &r, Canvas::ChannelPreview::R, roleUnder[0] },
+                { "G", &g, Canvas::ChannelPreview::G, roleUnder[1] },
+                { "B", &b, Canvas::ChannelPreview::B, roleUnder[2] },
+                { "A", &a, Canvas::ChannelPreview::A, roleUnder[3] },
             };
-
-            float thumb = listMode ? 40.f : std::clamp(std::min(avail.x / 4.5f, avail.y - 8.f), 32.f, 72.f);
-            // Channel color tints (grayscale preview × tint → red/green/blue-black, A stays B&W)
             const ImVec4 chTint[] = {
-                ImVec4(1.f, 0.15f, 0.15f, 1.f),
-                ImVec4(0.15f, 1.f, 0.15f, 1.f),
-                ImVec4(0.25f, 0.45f, 1.f, 1.f),
-                ImVec4(1.f, 1.f, 1.f, 1.f),
+                ImVec4(1.f, 0.2f, 0.2f, 1.f), ImVec4(0.2f, 1.f, 0.2f, 1.f),
+                ImVec4(0.3f, 0.5f, 1.f, 1.f), ImVec4(1.f, 1.f, 1.f, 1.f),
             };
-
             for (int i = 0; i < 4; ++i) {
                 ImGui::PushID(i);
-                if (!listMode && i > 0) ImGui::SameLine(0, 8);
-
+                if (i) ImGui::SameLine(0, gap);
                 ImGui::BeginGroup();
                 ImVec2 t0 = ImGui::GetCursorScreenPos();
                 ImGui::InvisibleButton("##ch", ImVec2(thumb, thumb));
                 bool hovered = ImGui::IsItemHovered();
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) *chans[i].flag = !*chans[i].flag;
-
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 ImVec2 t1(t0.x + thumb, t0.y + thumb);
                 const bool on = *chans[i].flag;
-                const float pad = 2.f;
-
                 dl->AddRectFilled(t0, t1, tok.ColU32(ImVec4(0.04f, 0.04f, 0.05f, 1.f)), tok.rSm);
                 if (on || hovered)
-                    dl->AddRect(t0, t1, tok.ColU32(on ? tok.strokeActive : tok.strokeHairline), tok.rSm, 0, on ? 1.75f : 1.0f);
-
-                // Prefer core channel grayscale proxy; fallback to composite × tint
+                    dl->AddRect(t0, t1, tok.ColU32(on ? tok.strokeActive : tok.strokeHairline), tok.rSm, 0, on ? 1.75f : 1.f);
                 ID3D11ShaderResourceView* prev = canvas.GetChannelPreviewSRV(device, chans[i].preview);
-                ID3D11ShaderResourceView* comp = canvas.GetCompositeSRV();
                 ImVec4 tint = chTint[i];
-                if (!on) tint.w = 0.45f;
-
-                if (prev) {
-                    ImU32 col = ImGui::ColorConvertFloat4ToU32(tint);
-                    dl->AddImage((ImTextureID)prev,
-                        ImVec2(t0.x + pad, t0.y + pad), ImVec2(t1.x - pad, t1.y - pad),
-                        ImVec2(0, 0), ImVec2(1, 1), col);
-                } else if (comp) {
-                    // Fallback: full composite with channel tint (legacy look)
-                    ImGui::SetCursorScreenPos(ImVec2(t0.x + pad, t0.y + pad));
-                    ImGui::ImageWithBg((ImTextureID)comp, ImVec2(thumb - pad * 2, thumb - pad * 2),
-                        ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 1), tint);
-                }
-
+                if (!on) tint.w = 0.4f;
+                if (prev)
+                    dl->AddImage((ImTextureID)prev, ImVec2(t0.x + 2, t0.y + 2), ImVec2(t1.x - 2, t1.y - 2),
+                        ImVec2(0, 0), ImVec2(1, 1), ImGui::ColorConvertFloat4ToU32(tint));
                 if (!on) {
-                    ImU32 xcol = IM_COL32(255, 255, 255, (int)(0.25f * 255));
                     float m = thumb * 0.22f;
-                    dl->AddLine(ImVec2(t0.x + m, t0.y + m), ImVec2(t1.x - m, t1.y - m), xcol, 2.0f);
-                    dl->AddLine(ImVec2(t1.x - m, t0.y + m), ImVec2(t0.x + m, t1.y - m), xcol, 2.0f);
+                    dl->AddLine(ImVec2(t0.x + m, t0.y + m), ImVec2(t1.x - m, t1.y - m), IM_COL32(255,255,255,50), 2.f);
+                    dl->AddLine(ImVec2(t1.x - m, t0.y + m), ImVec2(t0.x + m, t1.y - m), IM_COL32(255,255,255,50), 2.f);
                 }
-
-                if (listMode) {
-                    ImGui::SameLine(0, 10);
-                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (thumb - ImGui::GetTextLineHeight()) * 0.5f);
-                    ImGui::TextUnformatted(chans[i].name);
-                } else if (hovered) {
-                    {
-                        char tipBuf[96];
-                        std::snprintf(tipBuf, sizeof(tipBuf), "%s — click to toggle", chans[i].name);
-                        Ui::Tooltip(tipBuf);
-                    }
-                }
+                float tw = ImGui::CalcTextSize(chans[i].role).x;
+                ImGui::SetCursorScreenPos(ImVec2(t0.x + (thumb - tw) * 0.5f, t1.y + 2.f));
+                ImGui::TextUnformatted(chans[i].role);
+                ImGui::Dummy(ImVec2(thumb, ImGui::GetTextLineHeight() + 2.f));
                 ImGui::EndGroup();
+                if (hovered) {
+                    char tip[80];
+                    std::snprintf(tip, sizeof(tip), "%s channel  (label: %s)", chans[i].name, chans[i].role);
+                    Ui::Tooltip(tip);
+                }
                 ImGui::PopID();
             }
-
             canvas.SetChannelR(r);
             canvas.SetChannelG(g);
             canvas.SetChannelB(b);
             canvas.SetChannelA(a);
 
+            if (advanced)
+                ImGui::TextDisabled("Maps switch above · Setup in header");
+
             Ui::EndDockPanel();
+        }
+
+        // ---- Project Setup popup (tabbed) ----
+        if (state.openProjectSetup) {
+            ImGui::OpenPopup("Project Setup##ps");
+            state.openProjectSetup = false;
+        }
+        ImGui::SetNextWindowSize(ImVec2(480, 420), ImGuiCond_FirstUseEver);
+        if (ImGui::BeginPopupModal("Project Setup##ps", nullptr, ImGuiWindowFlags_None)) {
+            Project* proj = ProjectManager::Get().ActiveProject();
+            texset::TextureSet* set = proj ? proj->textureSets.Active() : nullptr;
+            if (ImGui::BeginTabBar("##setupTabs")) {
+                if (ImGui::BeginTabItem("Maps")) {
+                    if (set) {
+                        for (auto& m : set->maps) {
+                            ImGui::PushID((int)m.kind);
+                            bool en = m.enabled;
+                            bool isDiff = (m.kind == texset::MapKind::Diffuse);
+                            if (isDiff) ImGui::BeginDisabled();
+                            if (ImGui::Checkbox("##en", &en) && !isDiff) {
+                                if (en) {
+                                    int w = set->LogicalWidth() > 0 ? set->LogicalWidth() : canvas.GetWidth();
+                                    int h = set->LogicalHeight() > 0 ? set->LogicalHeight() : canvas.GetHeight();
+                                    set->EnableMap(m.kind, w, h);
+                                } else set->DisableMap(m.kind);
+                                canvas.SetDocumentModified(true);
+                            }
+                            if (isDiff) ImGui::EndDisabled();
+                            ImGui::SameLine();
+                            char nameBuf[64];
+                            std::snprintf(nameBuf, sizeof(nameBuf), "%s", m.DisplayName());
+                            ImGui::SetNextItemWidth(140);
+                            if (ImGui::InputText("##nm", nameBuf, sizeof(nameBuf))) {
+                                m.displayName = nameBuf;
+                                canvas.SetDocumentModified(true);
+                            }
+                            ImGui::SameLine();
+                            ImGui::TextDisabled("%dx%d", m.width > 0 ? m.width : canvas.GetWidth(),
+                                m.height > 0 ? m.height : canvas.GetHeight());
+                            if (m.width <= 0) {
+                                ImGui::SameLine();
+                                int mw = canvas.GetWidth(), mh = canvas.GetHeight();
+                                ImGui::SetNextItemWidth(60);
+                                if (ImGui::DragInt("##w", &mw, 1, 1, 16384)) { m.width = mw; m.enabled = true; }
+                                ImGui::SameLine();
+                                ImGui::SetNextItemWidth(60);
+                                if (ImGui::DragInt("##h", &mh, 1, 1, 16384)) { m.height = mh; m.enabled = true; }
+                            }
+                            ImGui::PopID();
+                        }
+                        ImGui::Spacing();
+                        const char* temps[] = { "Default", "ZZZ", "GI" };
+                        int ti = 0;
+                        if (set->templateId == "ZZZ") ti = 1;
+                        else if (set->templateId == "GI") ti = 2;
+                        if (ImGui::Combo("Template", &ti, temps, 3)) {
+                            if (proj) proj->ApplyActiveSetTemplate(temps[ti]);
+                            canvas.SetDocumentModified(true);
+                        }
+                        if (ImGui::Button("Import maps…", ImVec2(-1, 0)))
+                            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
+                    } else ImGui::TextDisabled("No texture set");
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Labels")) {
+                    ImGui::TextWrapped("Soft channel labels for 3D / hints. Paint uses plain RGBA per map.");
+                    if (set) {
+                        texset::MapSlot* slot = set->GetMap(canvas.GetViewMapKind());
+                        if (!slot) {
+                            for (auto& m : set->maps) if (m.enabled) { slot = &m; break; }
+                        }
+                        if (slot) {
+                            ImGui::Text("Map: %s", slot->DisplayName());
+                            const char* chLab[4] = { "R", "G", "B", "A" };
+                            for (int c = 0; c < 4; ++c) {
+                                ImGui::PushID(c);
+                                int ri = texset::ChannelRoleToComboIndex(slot->pack[c].role);
+                                ImGui::SetNextItemWidth(-1);
+                                if (ImGui::Combo(chLab[c], &ri, texset::ChannelRoleComboNames(),
+                                                 texset::ChannelRoleComboCount())) {
+                                    slot->pack[c].role = texset::ChannelRoleFromComboIndex(ri);
+                                    canvas.SetDocumentModified(true);
+                                }
+                                ImGui::PopID();
+                            }
+                        }
+                    }
+                    ImGui::EndTabItem();
+                }
+                if (ImGui::BeginTabItem("Export")) {
+                    if (set) {
+                        for (auto& m : set->maps) {
+                            if (!m.enabled && m.kind != texset::MapKind::Diffuse) continue;
+                            ImGui::PushID(300 + (int)m.kind);
+                            ImGui::TextUnformatted(m.DisplayName());
+                            int cs = (m.colorSpace == texset::MapColorSpace::sRGB) ? 0 : 1;
+                            const char* css[] = { "sRGB", "Linear" };
+                            ImGui::SetNextItemWidth(100);
+                            if (ImGui::Combo("##cs", &cs, css, 2)) {
+                                m.colorSpace = cs == 0 ? texset::MapColorSpace::sRGB : texset::MapColorSpace::Linear;
+                                canvas.SetDocumentModified(true);
+                            }
+                            ImGui::SameLine();
+                            const char* codecs[] = { "PNG", "BC7_sRGB", "BC7", "BC5", "R8G8", "R32", "RGBA8" };
+                            int ci = (int)m.exportCodec;
+                            if (ci < 0 || ci > 6) ci = 0;
+                            ImGui::SetNextItemWidth(100);
+                            if (ImGui::Combo("##codec", &ci, codecs, 7)) {
+                                m.exportCodec = (texset::MapExportCodec)ci;
+                                canvas.SetDocumentModified(true);
+                            }
+                            ImGui::PopID();
+                        }
+                        if (ImGui::Button("Export folder template…", ImVec2(-1, 0)))
+                            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ExportTemplate);
+                        if (ImGui::Button("Batch Export Now", ImVec2(-1, 0)))
+                            state.openQuickExportTrigger = true;
+                    }
+                    ImGui::EndTabItem();
+                }
+                ImGui::EndTabBar();
+            }
+            ImGui::Separator();
+            if (ImGui::Button("Close", ImVec2(120, 0)))
+                ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+
+        // File Explorer / project wizard
+        if (state.openNewProjectWizard) {
+            state.openNewProjectWizard = false;
+            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ProjectCreate);
+        }
+        if (state.fileExplorer.open) {
+            Project* p = ProjectManager::Get().ActiveProject();
+            UI::DrawFileExplorer(state.fileExplorer, p, canvas, device);
         }
 
         // 8. Tool Settings — adaptive height when horizontal (no scrollbar)

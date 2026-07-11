@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Canvas.h"
+#include "../texset/TextureSet.h"
 
 #include <d3d11.h>
 #include <deque>
@@ -12,14 +13,47 @@
 #include <stdexcept>
 
 // One open editor document (Photoshop-style tab).
-// AdvancedModMode multi-map docs live inside a single Project later.
+// Advanced / AdvancedMod: textureSets hold multi-map workspace; canvas is active view.
 struct Project {
     int id = 0;
     std::unique_ptr<Canvas> canvas;
     int untitledIndex = 0; // >0 → "Untitled-N" when path empty
 
+    // Cross-texture workspace (Simple: 1 Diffuse set; Advanced+: N sets)
+    texset::TextureSetLibrary textureSets;
+
     std::string GetTabTitle() const;
     bool IsBlank() const; // no path, not modified, no useful content
+
+    // Sync Diffuse map size/path from canvas (call after open/resize)
+    void SyncTextureSetsFromCanvas();
+
+    // Push / pull texture set meta through Canvas for .rayp I/O
+    void InjectTextureSetsIntoCanvas();
+    void ApplyTextureSetsFromCanvas();
+
+    // Advanced: add another set (no path dedup)
+    int AddTextureSet(const std::string& name, const std::string& templateId = "Default");
+
+    // Import a file into active set as MapKind (optional solo channel role extract)
+    bool ImportMapFile(texset::MapKind kind, const std::string& filepath,
+                       texset::ChannelRole soloRole = texset::ChannelRole::None);
+
+    // Apply built-in template (Default / ZZZ / GI) to active set
+    bool ApplyActiveSetTemplate(const std::string& templateId);
+
+    // Ctrl+E multi-map: export all enabled maps of active set
+    // Diffuse uses current canvas composite (RGBA8); other maps use imported composites.
+    int QuickExportAllMaps(const std::string& baseDirHint = {});
+
+    // Create / reconfigure this project as Advanced multi-map from a base Diffuse texture.
+    // Finds sibling LightMap / MaterialMap / NormalMap in the same folder by stem+suffix.
+    // Returns number of maps successfully loaded (Diffuse counts as 1).
+    int SetupAdvancedFromBaseTexture(
+        ID3D11Device* device,
+        const std::string& baseDiffusePath,
+        const std::string& templateId = "ZZZ",
+        const std::string& setName = {});
 };
 
 // Owns all open projects in the single app process (one D3D11 device).
@@ -30,21 +64,11 @@ public:
     bool Initialize(ID3D11Device* device);
     void Shutdown();
 
-    // Create empty project and make it active. Returns project id, or -1.
     int CreateEmptyProject();
-
-    // Open path as a new project tab (or reuse blank active if still empty).
-    // Returns project id that will receive the document. Does not load pixels —
-    // caller should OpenDocument / TriggerBackgroundOpenDocument on ActiveCanvas
-    // after SwitchTo(id) (id is already active).
     int PrepareOpenAsNewProject(const std::string& filepath);
-
-    // If a project already has this path open, switch to it and return its id.
-    // Otherwise PrepareOpenAsNewProject. Returns id to load into (or -1).
     int ActivateOrPrepareOpen(const std::string& filepath);
 
     bool SwitchTo(int id);
-    // force=true skips dirty check. Returns false if dirty and !force.
     bool CloseProject(int id, bool force = false);
 
     Canvas& ActiveCanvas();
@@ -68,9 +92,7 @@ public:
     };
     std::vector<ProjectTabInfo> ListTabs() const;
 
-    // IPC / second-instance: queue paths for the main loop.
     void EnqueueOpenPath(const std::string& path);
-    // Drain queue: for each path, prepare project + call openFn(path, canvas).
     void DrainPendingOpens(const std::function<void(const std::string& path, Canvas& canvas)>& openFn);
 
     ID3D11Device* GetDevice() const { return m_Device; }

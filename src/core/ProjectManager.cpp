@@ -1,11 +1,16 @@
 #include "ProjectManager.h"
 #include "Logger.h"
 #include "PathUtil.h"
+#include "ImageManager.h"
+#include "../texset/TextureSetIO.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <filesystem>
 #include <functional>
+#include <unordered_map>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -39,6 +44,342 @@ bool Project::IsBlank() const {
     if (canvas->GetWidth() <= 0 || canvas->GetHeight() <= 0) return true;
     if (canvas->GetLayers().empty()) return true;
     return false;
+}
+
+void Project::SyncTextureSetsFromCanvas() {
+    if (!canvas) return;
+    textureSets.EnsureSimpleDefault();
+    texset::TextureSet* set = textureSets.Active();
+    if (!set) return;
+    int w = canvas->GetWidth();
+    int h = canvas->GetHeight();
+    if (w > 0 && h > 0)
+        set->EnableMap(texset::MapKind::Diffuse, w, h, canvas->GetCurrentProjectFilePath());
+    // Align set name with project tab when still default
+    if (set->name == "Document" || set->name == "Texture Set")
+        set->name = GetTabTitle();
+}
+
+void Project::InjectTextureSetsIntoCanvas() {
+    if (!canvas) return;
+    SyncTextureSetsFromCanvas();
+    canvas->SetTextureSetsMetaJson(textureSets.MetaToJson());
+}
+
+void Project::ApplyTextureSetsFromCanvas() {
+    if (!canvas) return;
+    const std::string& j = canvas->GetTextureSetsMetaJson();
+    if (!j.empty()) {
+        // MetaFromJson rebuilds in place (TextureSetLibrary is non-copyable)
+        texset::TextureSetLibrary::MetaFromJson(j, textureSets);
+    }
+    textureSets.EnsureSimpleDefault();
+    SyncTextureSetsFromCanvas();
+}
+
+int Project::AddTextureSet(const std::string& name, const std::string& templateId) {
+    texset::SetTemplate t = texset::Template_Default();
+    if (templateId == "ZZZ" || templateId == "zzz") t = texset::Template_ZZZ();
+    else if (templateId == "GI" || templateId == "gi") t = texset::Template_GI();
+    auto set = texset::TextureSet::CreateFromTemplate(name.empty() ? "Texture Set" : name, t);
+    // Match canvas size for Diffuse if available
+    if (canvas && canvas->GetWidth() > 0)
+        set.EnableMap(texset::MapKind::Diffuse, canvas->GetWidth(), canvas->GetHeight());
+    int id = textureSets.AddSet(std::move(set));
+    textureSets.SetActive(id);
+    if (canvas) canvas->SetDocumentModified(true);
+    return id;
+}
+
+bool Project::ImportMapFile(texset::MapKind kind, const std::string& filepath,
+                            texset::ChannelRole soloRole) {
+    textureSets.EnsureSimpleDefault();
+    texset::TextureSet* set = textureSets.Active();
+    if (!set || !canvas) return false;
+
+    ID3D11Device* device = ProjectManager::Get().GetDevice();
+    if (!device) return false;
+
+    // Real layer in Layers panel (user-visible). Not a hidden mapComposites-only store.
+    std::string layerName;
+    try {
+        layerName = PathUtil::WideToUtf8(
+            fs::path(PathUtil::Utf8ToWide(filepath)).filename().wstring());
+    } catch (...) {
+        layerName = filepath;
+    }
+
+    bool ok = false;
+    if (kind == texset::MapKind::Diffuse &&
+        (canvas->GetLayers().empty() || canvas->GetWidth() <= 0)) {
+        ok = canvas->LoadImageToLayer(device, filepath);
+        if (ok && !canvas->GetLayers().empty()) {
+            auto& L = canvas->GetLayers().back();
+            L.workSpace = texset::LayerWorkSpace{};
+            L.workSpace.mapMask = 0;
+            L.workSpace.SetMap(texset::MapKind::Diffuse, true);
+            L.workSpace.channelWriteMask = 0xF;
+        }
+    } else {
+        ok = canvas->ImportImageAsMapLayer(device, filepath, kind, layerName);
+    }
+
+    // Meta + optional composite cache (export / underlay fallback)
+    if (ok) {
+        int w = canvas->GetWidth();
+        int h = canvas->GetHeight();
+        set->EnableMap(kind, w, h, filepath);
+        // Keep mapComposites as a mirror of the layer for quick underlay (optional)
+        texset::ImportMapFromFile(*set, kind, filepath, soloRole);
+        canvas->SetDocumentModified(true);
+        if (texset::TextureSet* s = textureSets.Active())
+            canvas->SetActiveSetMaps(s->maps);
+    }
+    return ok;
+}
+
+bool Project::ApplyActiveSetTemplate(const std::string& templateId) {
+    texset::TextureSet* set = textureSets.Active();
+    if (!set) return false;
+    texset::SetTemplate t = texset::Template_Default();
+    if (templateId == "ZZZ" || templateId == "zzz") t = texset::Template_ZZZ();
+    else if (templateId == "GI" || templateId == "gi") t = texset::Template_GI();
+    set->ApplySetTemplate(t);
+    SyncTextureSetsFromCanvas();
+    return true;
+}
+
+static std::string ToLowerCopy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+
+// Strip map kind tokens from filename stem → shared base "BelleHairA"
+static std::string StripMapKindFromStem(std::string stem) {
+    static const char* kTokens[] = {
+        "materialmap", "_materialmap", "_material", "material",
+        "lightmap", "_lightmap", "normalmap", "_normalmap", "_normal", "normal",
+        "diffuse", "_diffuse", "albedo", "_albedo", "basecolor", "_basecolor",
+        "_d", "_lm", "_n", "_mat"
+    };
+    std::string lower = ToLowerCopy(stem);
+    for (const char* tok : kTokens) {
+        size_t tlen = std::strlen(tok);
+        if (lower.size() > tlen && lower.compare(lower.size() - tlen, tlen, tok) == 0) {
+            // Avoid stripping single-letter from tiny stems
+            if (tlen <= 2 && lower.size() < 6) continue;
+            stem = stem.substr(0, stem.size() - tlen);
+            break;
+        }
+    }
+    // trim trailing _ -
+    while (!stem.empty() && (stem.back() == '_' || stem.back() == '-'))
+        stem.pop_back();
+    return stem;
+}
+
+static texset::MapKind GuessMapKindFromFileName(const std::string& fname) {
+    std::string lower = ToLowerCopy(fname);
+    if (lower.find("lightmap") != std::string::npos || lower.find("_lm") != std::string::npos)
+        return texset::MapKind::LightMap;
+    if (lower.find("material") != std::string::npos || lower.find("_mat") != std::string::npos)
+        return texset::MapKind::MaterialMap;
+    if (lower.find("normal") != std::string::npos || lower.find("_nrm") != std::string::npos ||
+        lower.find("_nml") != std::string::npos)
+        return texset::MapKind::NormalMap;
+    if (lower.find("glow") != std::string::npos || lower.find("emiss") != std::string::npos)
+        return texset::MapKind::GlowMap;
+    if (lower.find("diffuse") != std::string::npos || lower.find("albedo") != std::string::npos ||
+        lower.find("basecolor") != std::string::npos)
+        return texset::MapKind::Diffuse;
+    return texset::MapKind::Diffuse;
+}
+
+int Project::SetupAdvancedFromBaseTexture(
+    ID3D11Device* device,
+    const std::string& baseDiffusePath,
+    const std::string& templateId,
+    const std::string& setName) {
+
+    if (!device || !canvas || baseDiffusePath.empty()) {
+        Logger::Get().ErrorTag("project", "SetupAdvancedFromBaseTexture: bad args");
+        return 0;
+    }
+
+    const std::string basePath = PathUtil::NormalizeToUtf8Path(baseDiffusePath);
+    fs::path baseFs = PathUtil::FromUtf8(basePath);
+    if (!fs::exists(baseFs)) {
+        Logger::Get().ErrorTag("project", "Base texture missing: " + basePath);
+        return 0;
+    }
+
+    // 1) Project type BEFORE load (LoadImage no longer forces Simple)
+    canvas->SetProjectType(Canvas::ProjectType::Advanced);
+
+    // 2) Texture set library + template (ZZZ packing)
+    textureSets.sets.clear();
+    textureSets.activeSetId = -1;
+    textureSets.nextId = 1;
+    textureSets.EnsureSimpleDefault();
+    ApplyActiveSetTemplate(templateId.empty() ? "ZZZ" : templateId);
+
+    std::string stem = PathUtil::WideToUtf8(baseFs.stem().wstring());
+    std::string group = StripMapKindFromStem(stem);
+    if (texset::TextureSet* set = textureSets.Active()) {
+        set->name = setName.empty() ? group : setName;
+    }
+
+    // 3) Load base Diffuse as first real layer
+    if (!ImportMapFile(texset::MapKind::Diffuse, basePath)) {
+        // Fallback: raw load if ImportMapFile path failed empty canvas edge-case
+        if (!canvas->LoadImageToLayer(device, basePath)) {
+            Logger::Get().ErrorTag("project", "Failed to load base Diffuse: " + basePath);
+            return 0;
+        }
+        if (!canvas->GetLayers().empty()) {
+            auto& L = canvas->GetLayers().back();
+            L.workSpace.mapMask = 0;
+            L.workSpace.SetMap(texset::MapKind::Diffuse, true);
+        }
+    }
+    canvas->SetProjectType(Canvas::ProjectType::Advanced);
+    SyncTextureSetsFromCanvas();
+
+    int loaded = 1;
+    Logger::Get().InfoTag("project",
+        "Advanced base Diffuse loaded " + std::to_string(canvas->GetWidth()) + "x" +
+        std::to_string(canvas->GetHeight()) + " stem=" + group +
+        " layers=" + std::to_string(canvas->GetLayers().size()));
+
+    // 4) Sibling maps in same folder matching group stem
+    fs::path dir = baseFs.parent_path();
+    std::error_code ec;
+    struct Found { texset::MapKind kind; std::string path; };
+    std::vector<Found> found;
+    for (auto& ent : fs::directory_iterator(dir, ec)) {
+        if (ec || !ent.is_regular_file()) continue;
+        std::string fname = PathUtil::WideToUtf8(ent.path().filename().wstring());
+        std::string fstem = PathUtil::WideToUtf8(ent.path().stem().wstring());
+        std::string ext = ToLowerCopy(ent.path().extension().string());
+        if (ext != ".dds" && ext != ".png" && ext != ".jpg" && ext != ".jpeg" &&
+            ext != ".tga" && ext != ".bmp")
+            continue;
+
+        std::string fgroup = StripMapKindFromStem(fstem);
+        // Match group (case-insensitive)
+        if (ToLowerCopy(fgroup) != ToLowerCopy(group) &&
+            ToLowerCopy(fstem).find(ToLowerCopy(group)) == std::string::npos)
+            continue;
+
+        texset::MapKind mk = GuessMapKindFromFileName(fname);
+        std::string full = PathUtil::WideToUtf8(ent.path().wstring());
+        // Skip the base diffuse itself
+        if (ToLowerCopy(full) == ToLowerCopy(basePath)) continue;
+        if (mk == texset::MapKind::Diffuse) continue; // don't replace paint stack
+        found.push_back({ mk, full });
+    }
+
+    // Prefer one file per MapKind (prefer .dds over .png if both)
+    auto score = [](const std::string& p) {
+        std::string e = ToLowerCopy(p);
+        if (e.size() >= 4 && e.substr(e.size() - 4) == ".dds") return 2;
+        if (e.size() >= 4 && e.substr(e.size() - 4) == ".png") return 1;
+        return 0;
+    };
+    std::unordered_map<int, Found> best;
+    for (const auto& f : found) {
+        int k = (int)f.kind;
+        auto it = best.find(k);
+        if (it == best.end() || score(f.path) > score(it->second.path))
+            best[k] = f;
+    }
+
+    for (auto& kv : best) {
+        const Found& f = kv.second;
+        if (ImportMapFile(f.kind, f.path)) {
+            ++loaded;
+            Logger::Get().InfoTag("project",
+                std::string("Imported ") + texset::MapKindName(f.kind) + " ← " + f.path);
+        } else {
+            Logger::Get().WarnTag("project",
+                std::string("Failed map ") + texset::MapKindName(f.kind) + " ← " + f.path);
+        }
+    }
+
+    // 5) Wire UI/view state
+    if (texset::TextureSet* set = textureSets.Active()) {
+        canvas->SetActiveSetMaps(set->maps);
+        set->activeMap = texset::MapKind::Diffuse;
+    }
+    canvas->SetViewMapKind(texset::MapKind::Diffuse);
+    canvas->SetDocumentModified(true);
+
+    Logger::Get().InfoTag("project",
+        "SetupAdvancedFromBaseTexture done maps_loaded=" + std::to_string(loaded) +
+        " type=" + std::to_string((int)canvas->GetProjectType()));
+    return loaded;
+}
+
+int Project::QuickExportAllMaps(const std::string& baseDirHint) {
+    textureSets.EnsureSimpleDefault();
+    texset::TextureSet* set = textureSets.Active();
+    if (!set || !canvas) return 0;
+
+    std::string baseDir = baseDirHint;
+    if (baseDir.empty()) {
+        std::string exp = canvas->GetExportPath();
+        if (!exp.empty()) {
+            try {
+                baseDir = PathUtil::WideToUtf8(
+                    fs::path(PathUtil::Utf8ToWide(exp)).parent_path().wstring());
+            } catch (...) { baseDir.clear(); }
+        }
+        if (baseDir.empty()) {
+            std::string proj = canvas->GetCurrentProjectFilePath();
+            if (!proj.empty()) {
+                try {
+                    baseDir = PathUtil::WideToUtf8(
+                        fs::path(PathUtil::Utf8ToWide(proj)).parent_path().wstring());
+                } catch (...) { baseDir.clear(); }
+            }
+        }
+        if (baseDir.empty()) baseDir = ".";
+    }
+
+    // Sync Diffuse size from canvas
+    SyncTextureSetsFromCanvas();
+
+    // Pack every enabled map via channel packing + fills + imported bases
+    std::unordered_map<int, texset::MapExportPixels> packed;
+    for (const auto& m : set->maps) {
+        if (!m.enabled) continue;
+        const TileCache* base = nullptr;
+        auto it = set->mapComposites.find((int)m.kind);
+        if (it != set->mapComposites.end() && it->second)
+            base = it->second.get();
+
+        texset::MapExportPixels px;
+        if (canvas->ComposePackedMapRGBA8(m.kind, set->maps, base, px.rgba, px.w, px.h)) {
+            Logger::Get().InfoTag("texset",
+                std::string("Packed ") + texset::MapKindName(m.kind) + " " +
+                std::to_string(px.w) + "x" + std::to_string(px.h));
+            packed[(int)m.kind] = std::move(px);
+        } else {
+            Logger::Get().WarnTag("texset",
+                std::string("Pack failed for ") + texset::MapKindName(m.kind));
+        }
+    }
+
+    std::string ext = "png";
+    auto result = texset::ExportAllMaps(
+        *set, baseDir, ext, nullptr, nullptr, 0, 0, &packed);
+
+    Logger::Get().InfoTag("texset",
+        "BatchExport maps written=" + std::to_string(result.written) +
+        " failed=" + std::to_string(result.failed) +
+        (result.log.empty() ? "" : ("\n" + result.log)));
+    return result.written;
 }
 
 bool ProjectManager::Initialize(ID3D11Device* device) {
@@ -87,6 +428,10 @@ int ProjectManager::CreateEmptyProject() {
                             std::to_string(proj->id));
         return -1;
     }
+    // Texture Set library (Simple = 1 Diffuse set)
+    proj->textureSets.EnsureSimpleDefault();
+    if (texset::TextureSet* s = proj->textureSets.Active())
+        s->name = proj->GetTabTitle();
 
     const int id = proj->id;
     m_Projects.push_back(std::move(proj));

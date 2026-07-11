@@ -500,6 +500,9 @@ int main(int argc, char* argv[]) {
     std::string configPath = "";
     std::string startupImagePath = "";
     std::string parseModIniPath = "";
+    std::string testAdvancedImportFolder = "";
+    std::string testAdvancedBase = "";
+    std::string testAdvancedOut = "";
     int processExitCode = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -528,6 +531,17 @@ int main(int argc, char* argv[]) {
             testMode = true;
             forceConsole = true;
             allowMultiInstance = true;
+        } else if (arg == "--test-advanced-import" && i + 1 < argc) {
+            // Create Advanced multi-map project from folder of BelleHairA* textures, export, exit.
+            testAdvancedImportFolder = argv[++i];
+            headlessMode = true;
+            testMode = true;
+            forceConsole = true;
+            allowMultiInstance = true;
+        } else if (arg == "--test-advanced-base" && i + 1 < argc) {
+            testAdvancedBase = argv[++i];
+        } else if (arg == "--test-advanced-out" && i + 1 < argc) {
+            testAdvancedOut = argv[++i];
         } else if (arg == "--version") {
             SetupConsole(true);
             std::cout << "RayV Paint - Version " << kRayVPaintVersion << std::endl;
@@ -718,6 +732,142 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ---- CLI proof: Advanced multi-map import + batch export ----
+    if (!testAdvancedImportFolder.empty() || !testAdvancedBase.empty()) {
+        SetupConsole(true);
+        std::string base = testAdvancedBase;
+        if (base.empty()) {
+            // Prefer *Diffuse.dds then *_Diffuse.png in folder
+            namespace fs = std::filesystem;
+            try {
+                fs::path dir = PathUtil::FromUtf8(testAdvancedImportFolder);
+                std::string bestDds, bestPng;
+                for (auto& ent : fs::directory_iterator(dir)) {
+                    if (!ent.is_regular_file()) continue;
+                    std::string fn = PathUtil::WideToUtf8(ent.path().filename().wstring());
+                    std::string low = fn;
+                    std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+                    std::string full = PathUtil::WideToUtf8(ent.path().wstring());
+                    if (low.find("diffuse") == std::string::npos) continue;
+                    if (low.size() >= 4 && low.substr(low.size()-4) == ".dds") bestDds = full;
+                    if (low.size() >= 4 && low.substr(low.size()-4) == ".png") bestPng = full;
+                }
+                base = !bestDds.empty() ? bestDds : bestPng;
+            } catch (const std::exception& e) {
+                Logger::Get().Error(std::string("test-advanced-import scan failed: ") + e.what());
+            }
+        }
+        if (base.empty()) {
+            Logger::Get().Error("--test-advanced-import: no Diffuse texture found");
+            std::cerr << "FAIL: no Diffuse base\n";
+            processExitCode = 2;
+        } else {
+            Project* proj = ProjectManager::Get().ActiveProject();
+            if (!proj) {
+                processExitCode = 3;
+            } else {
+                Logger::Get().Info("TEST Advanced import base=" + base);
+                int n = proj->SetupAdvancedFromBaseTexture(g_pd3dDevice, base, "ZZZ", "CLI_Test");
+                auto ptype = ActiveCanvas().GetProjectType();
+                int w = ActiveCanvas().GetWidth();
+                int h = ActiveCanvas().GetHeight();
+                size_t layers = ActiveCanvas().GetLayers().size();
+                int enabledMaps = 0;
+                if (texset::TextureSet* set = proj->textureSets.Active()) {
+                    for (const auto& m : set->maps)
+                        if (m.enabled) ++enabledMaps;
+                }
+                // Content checks: tile presence + LightMap composite variance (Diffuse can be pure white intentionally)
+                bool hasContent = false;
+                float minL = 1.f, maxL = 0.f;
+                size_t diffuseTiles = 0;
+                if (layers > 0) {
+                    const auto& L = ActiveCanvas().GetLayers()[0];
+                    if (L.tileCache) {
+                        diffuseTiles = L.tileCache->GetTileCount();
+                        // scan first few tiles for any non-uniform bytes
+                        for (int ty = 0; ty < L.tileCache->GetTilesY() && ty < 4; ++ty) {
+                            for (int tx = 0; tx < L.tileCache->GetTilesX() && tx < 4; ++tx) {
+                                const uint8_t* td = L.tileCache->GetTileData(tx, ty);
+                                if (!td) continue;
+                                uint8_t lo = 255, hi = 0;
+                                for (int i = 0; i < 256 * 4; i += 4) {
+                                    lo = std::min(lo, td[i]);
+                                    hi = std::max(hi, td[i]);
+                                }
+                                if (hi > lo) { hasContent = true; break; }
+                            }
+                            if (hasContent) break;
+                        }
+                        // all-white diffuse is still valid content if tiles exist
+                        if (diffuseTiles > 0) hasContent = true;
+                    }
+                }
+                if (texset::TextureSet* set = proj->textureSets.Active()) {
+                    auto it = set->mapComposites.find((int)texset::MapKind::LightMap);
+                    if (it != set->mapComposites.end() && it->second) {
+                        for (int y = 0; y < it->second->GetHeight(); y += 64) {
+                            for (int x = 0; x < it->second->GetWidth(); x += 64) {
+                                float c[4];
+                                it->second->GetPixelF(x, y, c);
+                                float lum = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+                                minL = std::min(minL, lum);
+                                maxL = std::max(maxL, lum);
+                            }
+                        }
+                    }
+                }
+                Logger::Get().Info("Diffuse tiles=" + std::to_string(diffuseTiles) +
+                    " LightMap lum=[" + std::to_string(minL) + ".." + std::to_string(maxL) + "]");
+
+                std::string outDir = testAdvancedOut;
+                if (outDir.empty())
+                    outDir = testAdvancedImportFolder.empty()
+                        ? (std::filesystem::temp_directory_path() / "rayv_adv_export").string()
+                        : (testAdvancedImportFolder + "/_rayv_export_test");
+                try {
+                    std::filesystem::create_directories(PathUtil::FromUtf8(outDir));
+                } catch (...) {}
+                int written = proj->QuickExportAllMaps(outDir);
+
+                std::cout << "=== test-advanced-import ===\n";
+                std::cout << "base: " << base << "\n";
+                std::cout << "maps_loaded: " << n << "\n";
+                std::cout << "project_type: " << (int)ptype << " (1=Advanced)\n";
+                std::cout << "canvas: " << w << "x" << h << " layers=" << layers << "\n";
+                std::cout << "enabled_maps: " << enabledMaps << "\n";
+                std::cout << "diffuse_tiles: " << diffuseTiles << "\n";
+                std::cout << "lightmap_lum: [" << minL << ".." << maxL << "]\n";
+                std::cout << "has_content: " << (hasContent ? "yes" : "NO") << "\n";
+                std::cout << "export_written: " << written << " dir=" << outDir << "\n";
+
+                bool lmVar = (maxL - minL) > 0.01f;
+                std::cout << "layers: " << layers << "\n";
+                bool ok = (n >= 4) &&
+                          (ptype == Canvas::ProjectType::Advanced) &&
+                          (w > 0 && h > 0 && layers >= 4) && // each map = a real layer
+                          (diffuseTiles > 0) &&
+                          hasContent &&
+                          lmVar &&
+                          (written >= 4) &&
+                          (enabledMaps >= 4);
+                if (ok) {
+                    std::cout << "RESULT: PASS\n";
+                    processExitCode = 0;
+                } else {
+                    std::cout << "RESULT: FAIL\n";
+                    processExitCode = 1;
+                }
+            }
+        }
+        // Exit after test (no UI loop)
+        ProjectManager::Get().Shutdown();
+        CleanupDeviceD3D();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return processExitCode;
+    }
+
     // Smoke: parse XXMI/3DMigoto character ini (+ optional mesh decode)
     if (!parseModIniPath.empty()) {
         ActiveCanvas().SetProjectType(Canvas::ProjectType::AdvancedModMode);
@@ -825,6 +975,9 @@ int main(int argc, char* argv[]) {
             ActiveCanvas().MarkCompositeDirty();
             if (UI::g_LoadingState.success) {
                 Logger::Get().Info("Background document load successful: " + UI::g_LoadingState.filepath);
+                // Plan 0: restore Texture Set library from .rayp meta / sync Diffuse size
+                if (Project* proj = ProjectManager::Get().ActiveProject())
+                    proj->ApplyTextureSetsFromCanvas();
             } else {
                 Logger::Get().Error("Background document load failed: " + UI::g_LoadingState.filepath);
             }
@@ -874,6 +1027,9 @@ int main(int argc, char* argv[]) {
             }
             if (KeymapManager::Get().ConsumeActionTrigger("OpenProject")) {
                 uiState.openLoadRaypModal = true;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("NewProject")) {
+                uiState.openNewProjectWizard = true;
             }
             if (KeymapManager::Get().ConsumeActionTrigger("BrushTool")) {
                 g_ActiveTool = ActiveTool::Brush;
@@ -963,46 +1119,55 @@ int main(int argc, char* argv[]) {
             }
             if (KeymapManager::Get().ConsumeActionTrigger("QuickExport") || uiState.openQuickExportTrigger) {
                 uiState.openQuickExportTrigger = false;
-                std::string path = ActiveCanvas().GetExportPath();
-                if (path.empty()) {
-                    std::string proj = ActiveCanvas().GetCurrentProjectFilePath();
-                    if (!proj.empty()) {
-                        size_t dot = proj.find_last_of('.');
-                        if (dot != std::string::npos) {
-                            path = proj.substr(0, dot) + ".png";
-                        } else {
-                            path = proj + ".png";
-                        }
-                    } else {
-                        path = "export.png";
-                    }
-                    ActiveCanvas().SetExportPath(path);
-                }
-                
-                size_t dot = path.find_last_of('.');
-                std::string ext = "";
-                if (dot != std::string::npos) {
-                    ext = path.substr(dot + 1);
-                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                }
-                
-                if (ext == "dds") {
-                    // Same pipeline as Advanced Export (texconv + user format/mips/quality)
-                    if (ActiveCanvas().SaveCanvasCompressed(
-                            path,
-                            ActiveCanvas().GetExportFormat(),
-                            ActiveCanvas().GetExportGenerateMipMaps(),
-                            ActiveCanvas().GetExportMipFilter(),
-                            ActiveCanvas().GetExportCompressionSpeed())) {
-                        Logger::Get().Info("Quick exported DDS successfully to: " + path);
-                    } else {
-                        Logger::Get().Error("Quick export DDS failed for path: " + path);
+                const bool advanced =
+                    ActiveCanvas().GetProjectType() != Canvas::ProjectType::Simple;
+
+                // Advanced+: batch export all enabled maps with channel packing
+                if (advanced) {
+                    if (Project* proj = ProjectManager::Get().ActiveProject()) {
+                        int n = proj->QuickExportAllMaps();
+                        if (n > 0)
+                            Logger::Get().Info("Batch export: " + std::to_string(n) + " map(s) written");
+                        else
+                            Logger::Get().Error("Batch export: no maps written");
                     }
                 } else {
-                    if (ActiveCanvas().SaveCanvasStandard(path, ActiveCanvas().GetExportIccPreset())) {
-                        Logger::Get().Info("Quick exported image successfully to: " + path);
+                    // Simple: single file export
+                    std::string path = ActiveCanvas().GetExportPath();
+                    if (path.empty()) {
+                        std::string projPath = ActiveCanvas().GetCurrentProjectFilePath();
+                        if (!projPath.empty()) {
+                            size_t dot = projPath.find_last_of('.');
+                            if (dot != std::string::npos)
+                                path = projPath.substr(0, dot) + ".png";
+                            else
+                                path = projPath + ".png";
+                        } else {
+                            path = "export.png";
+                        }
+                        ActiveCanvas().SetExportPath(path);
+                    }
+                    size_t dot = path.find_last_of('.');
+                    std::string ext = "";
+                    if (dot != std::string::npos) {
+                        ext = path.substr(dot + 1);
+                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    }
+                    if (ext == "dds") {
+                        if (ActiveCanvas().SaveCanvasCompressed(
+                                path,
+                                ActiveCanvas().GetExportFormat(),
+                                ActiveCanvas().GetExportGenerateMipMaps(),
+                                ActiveCanvas().GetExportMipFilter(),
+                                ActiveCanvas().GetExportCompressionSpeed()))
+                            Logger::Get().Info("Quick exported DDS: " + path);
+                        else
+                            Logger::Get().Error("Quick export DDS failed: " + path);
                     } else {
-                        Logger::Get().Error("Quick export image failed for path: " + path);
+                        if (ActiveCanvas().SaveCanvasStandard(path, ActiveCanvas().GetExportIccPreset()))
+                            Logger::Get().Info("Quick exported: " + path);
+                        else
+                            Logger::Get().Error("Quick export failed: " + path);
                     }
                 }
             }
@@ -1070,6 +1235,8 @@ int main(int argc, char* argv[]) {
                 s_IsAutoSaving = true;
                 std::filesystem::create_directories(uiState.backupDir);
                 Logger::Get().Info("Triggering background auto-save to " + uiState.backupPath);
+                if (Project* proj = ProjectManager::Get().ActiveProject())
+                    proj->InjectTextureSetsIntoCanvas();
                 ActiveCanvas().SaveCanvasRaypAsync(uiState.backupPath, [](bool success) {
                     s_IsAutoSaving = false;
                     if (success) {

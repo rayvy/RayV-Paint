@@ -131,6 +131,12 @@ set(SOURCES
     src/modio/ModIniParser.h
     src/modio/VertexLayout.cpp
     src/modio/VertexLayout.h
+    src/texset/TextureSetTypes.cpp
+    src/texset/TextureSetTypes.h
+    src/texset/TextureSet.cpp
+    src/texset/TextureSet.h
+    src/texset/TextureSetIO.cpp
+    src/texset/TextureSetIO.h
     src/preview3d/MeshGpu.cpp
     src/preview3d/MeshGpu.h
     src/preview3d/MaterialConfig.cpp
@@ -143,6 +149,8 @@ set(SOURCES
     src/scripting/ScriptingEngine.h
     src/ui/EditorPanels.cpp
     src/ui/EditorPanels.h
+    src/ui/FileExplorer.cpp
+    src/ui/FileExplorer.h
     src/ui/style/UiTokens.cpp
     src/ui/style/UiTokens.h
     src/ui/style/UiMotion.cpp

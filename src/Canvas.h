@@ -15,6 +15,8 @@
 #include "core/UndoRedoManager.h"
 #include "modio/ModTypes.h"
 #include "layer/LayerTypes.h"
+#include "texset/TextureSetTypes.h"
+#include "texset/TextureSet.h"
 
 // What the brush/smudge tools write into for the active layer (Photoshop-like).
 enum class PaintTarget : uint8_t {
@@ -96,11 +98,22 @@ struct Layer {
     std::string smartSourcePath;
     float smartScale = 1.0f;
 
+    // Texture-set participation (Plan 0): which maps/roles this layer writes.
+    // Default = Diffuse only (Simple-compatible). Fill layers update this from fill.target.
+    texset::LayerWorkSpace workSpace;
+
     bool IsFill() const { return type == Type::Fill; }
     bool CanPaintContent() const {
         return !isGroup && type != Type::Fill && type != Type::Group;
     }
     bool HasEnabledStyles() const { return LayerStyleListHasEnabled(styles); }
+
+    // Sync workSpace from FillChannelTarget. Optional set resolves map from pack table.
+    void SyncWorkSpaceFromFillTarget(const texset::TextureSet* set = nullptr);
+
+    // Does this layer participate in the current map/role view?
+    bool ParticipatesInView(texset::MapKind viewMap, bool roleIsolate,
+                            texset::ChannelRole soloRole) const;
 };
 
 
@@ -178,6 +191,11 @@ public:
 
     // Layer Management
     void CreateNewLayer(ID3D11Device* device, const std::string& name);
+    // Import image/DDS as a real paint layer bound to one map (LightMap/Normal/…).
+    // Visible in Layers panel; participates only when that map is active in viewport.
+    // Pixels are placed in document UV space (scaled to canvas size if needed).
+    bool ImportImageAsMapLayer(ID3D11Device* device, const std::string& filepath,
+                               texset::MapKind mapKind, const std::string& layerName = {});
     // Substance-like fill layer: full-canvas color, no content paint; mask paintable.
     void CreateFillLayer(ID3D11Device* device, const std::string& name,
                          const FillLayerParams& params = {});
@@ -344,6 +362,27 @@ public:
     void SetChannelB(bool b);
     void SetChannelA(bool a);
 
+    // Advanced+ viewport: which texture-set map is shown (default Diffuse).
+    // Layers with workSpace not affecting this map are skipped in compose.
+    texset::MapKind GetViewMapKind() const { return m_ViewMapKind; }
+    void SetViewMapKind(texset::MapKind k);
+    // Isolate a logical role as grayscale (false = full map RGBA with R/G/B/A toggles)
+    bool GetViewRoleIsolate() const { return m_ViewRoleIsolate; }
+    texset::ChannelRole GetViewSoloRole() const { return m_ViewSoloRole; }
+    void SetViewRoleIsolate(bool on, texset::ChannelRole role = texset::ChannelRole::None);
+    // Apply pack channel → auto-set R/G/B/A solo for role (uses map pack table)
+    void ApplyViewRoleToChannelMasks(const texset::MapSlot* slot);
+
+    // Packing tables of active texture set (for Fill ResolveForMap). UI/Project syncs this.
+    void SetActiveSetMaps(const std::vector<texset::MapSlot>& maps);
+    const std::vector<texset::MapSlot>& GetActiveSetMaps() const { return m_ActiveSetMaps; }
+
+    // Non-Diffuse view underlay: imported map composite (LightMap/Normal/…) shown under layers.
+    // Call when switching maps. Pass nullptr to clear.
+    void SetViewMapUnderlay(ID3D11Device* device, const TileCache* cache);
+    void ClearViewMapUnderlay();
+    bool HasViewMapUnderlay() const { return m_ViewUnderlaySRV != nullptr; }
+
     ID3D11ShaderResourceView* GetCompositeSRV() const { return m_CompositeSRV; }
 
     // Channel preview thumbs (R/G/B/A as grayscale). Built from *layer tile data*
@@ -368,6 +407,13 @@ public:
     bool SaveCanvasStandard(const std::string& filepath, IccPreset preset);
     bool SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed);
     std::vector<float> GetCompositePixels() const;
+    // Batch export: pack layers/fills into one map's RGBA using project packing table.
+    // importedBase: optional imported TileCache for that map (underlay).
+    bool ComposePackedMapRGBA8(texset::MapKind kind,
+                               const std::vector<texset::MapSlot>& maps,
+                               const TileCache* importedBase,
+                               std::vector<uint8_t>& outRgba,
+                               int& outW, int& outH) const;
     // Composite sample (float-accurate when document is F16/F32; U8 path quantizes).
     void SampleCompositePixel(int x, int y, float outColor[4]) const;
     // Raw active-layer pixel (no blend) — preferred for height/HDR diagnostics.
@@ -463,6 +509,12 @@ public:
     void SaveCanvasRaypAsync(const std::string& filepath, std::function<void(bool)> callback = nullptr);
     bool LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, LoadProgressFn progress = nullptr);
 
+    // Texture Set library meta (JSON) — owned by Project; mirrored here for .rayp I/O.
+    // Call SetTextureSetsMetaJson before Save; read GetTextureSetsMetaJson after Load.
+    void SetTextureSetsMetaJson(std::string json) { m_TextureSetsMetaJson = std::move(json); }
+    const std::string& GetTextureSetsMetaJson() const { return m_TextureSetsMetaJson; }
+    void ClearTextureSetsMetaJson() { m_TextureSetsMetaJson.clear(); }
+
     std::vector<float> GetComposedPixels();
 
 private:
@@ -518,6 +570,17 @@ private:
     bool m_ChannelG = true;
     bool m_ChannelB = true;
     bool m_ChannelA = true;
+
+    // Texture-set view (Advanced+). Simple mode ignores and always composes Diffuse.
+    texset::MapKind m_ViewMapKind = texset::MapKind::Diffuse;
+    bool m_ViewRoleIsolate = false;
+    texset::ChannelRole m_ViewSoloRole = texset::ChannelRole::None;
+    std::vector<texset::MapSlot> m_ActiveSetMaps; // soft labels + map sizes
+
+    // Imported map pixels for non-Diffuse viewport (GPU)
+    ID3D11Texture2D* m_ViewUnderlayTex = nullptr;
+    ID3D11ShaderResourceView* m_ViewUnderlaySRV = nullptr;
+    int m_ViewUnderlayW = 0, m_ViewUnderlayH = 0;
 
     std::vector<Layer> m_Layers;
     int m_ActiveLayerIdx = -1;
@@ -617,6 +680,8 @@ private:
 
     std::string m_ExportPath = "";
     std::string m_ExportFormat = "BC7_UNORM_SRGB";
+    // Texture set library JSON (Project.textureSets.MetaToJson) for .rayp round-trip
+    std::string m_TextureSetsMetaJson;
     bool m_ExportAdvancedMode = false;
     std::string m_ExportCompressionSpeed = "Medium";
     bool m_ExportGenerateMipMaps = true;

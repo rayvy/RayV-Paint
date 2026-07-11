@@ -8,6 +8,7 @@
 #include <imgui.h>
 #include "../Canvas.h"
 #include "../core/PaintEngine.h"
+#include "FileExplorer.h"
 
 enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSelect, PolygonalLasso, QuickSelect, MagicWand, SmartSelect, MovePixels, Pipette, BucketFill, Gradient, Smudge };
 
@@ -62,7 +63,14 @@ namespace UI {
         bool showPreview3D = false;    // optional detachable 3D viewport (N-panel)
         bool showModSetup = false;     // INI/dump/semantics launcher (separate from Properties)
         bool preview3DNeedReload = false;
+        // Channels panel: map import helpers
+        int  importMapKind = 1; // default LightMap
+        int  importMapSoloRole = 0; // 0=Full RGBA
         bool openAboutModal = false;
+        bool openNewProjectWizard = false;
+        bool openProjectSetup = false;
+        int  projectSetupTab = 0; // 0 Maps 1 Labels 2 Export
+        FileExplorerState fileExplorer;
         // Layer Effects modal selection: kind 0=style, 1=filter, -1=none
         int  layerEffectsFocusIdx = -1;
         int  layerEffectsSelKind = -1; // 0 style, 1 filter, -1 none
