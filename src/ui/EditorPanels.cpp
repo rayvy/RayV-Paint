@@ -2336,11 +2336,10 @@ namespace UI {
                     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.30f);
                     if (Ui::SmartSliderFloat("##op_top", &al.opacity, 0.f, 1.f, 1.f, 0.05f, "Fill %.2f")) {
                         // Content/fill opacity — styles keep independent style.opacity
-                        if (al.HasEnabledStyles()) {
-                            al.presentationDirty = true;
-                            al.stylesDirty = true;
-                        }
-                        canvas.MarkCompositeDirty();
+                        if (al.HasEnabledStyles() || al.isGroup)
+                            canvas.RequestPresentationRebuild(ai);
+                        else
+                            canvas.MarkCompositeDirty();
                     }
                     ImGui::SameLine(0, hdrGap);
                     static const char* blendNamesTop[] = {
@@ -2376,14 +2375,16 @@ namespace UI {
                     if (ImGui::IsItemHovered())
                         Ui::Tooltip("Layer Effects (filters + styles)…");
 
-                    // Fill layer color controls
+                    // Fill layer color controls (compact)
                     if (al.IsFill()) {
                         ImGui::SameLine(0, hdrGap);
                         if (ImGui::ColorEdit4("##fillcol", al.fill.color,
                                 ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) {
                             al.needsUpload = true;
-                            al.presentationDirty = true;
-                            canvas.MarkCompositeDirty();
+                            if (al.HasEnabledStyles())
+                                canvas.RequestPresentationRebuild(ai);
+                            else
+                                canvas.MarkCompositeDirty();
                         }
                         if (ImGui::IsItemHovered()) Ui::Tooltip("Fill Layer color");
                     }
@@ -2403,6 +2404,49 @@ namespace UI {
                     }
                     ImGui::PopID();
                     ImGui::Separator();
+
+                    // Fill Layer extended properties
+                    if (al.IsFill()) {
+                        ImGui::PushID("##fill_props");
+                        ImGui::TextDisabled("Fill Layer");
+                        int mode = (int)al.fill.mode;
+                        const char* modes[] = { "RGB", "Gray 0–1", "Gray −1…1" };
+                        if (UiCombo("##fillmode", &mode, modes, 3, "Value Mode")) {
+                            al.fill.mode = (FillValueMode)mode;
+                            al.needsUpload = true;
+                            if (al.HasEnabledStyles()) canvas.RequestPresentationRebuild(ai);
+                            else canvas.MarkCompositeDirty();
+                        }
+                        if (al.fill.mode == FillValueMode::RGB) {
+                            if (ImGui::ColorEdit4("Color##fillfull", al.fill.color,
+                                    ImGuiColorEditFlags_AlphaBar)) {
+                                al.needsUpload = true;
+                                if (al.HasEnabledStyles()) canvas.RequestPresentationRebuild(ai);
+                                else canvas.MarkCompositeDirty();
+                            }
+                        } else {
+                            float gmin = (al.fill.mode == FillValueMode::GrayscaleSigned) ? -1.f : 0.f;
+                            float gmax = 1.f;
+                            if (Ui::SmartSliderFloat("Value##fillg", &al.fill.gray, gmin, gmax,
+                                    (al.fill.mode == FillValueMode::GrayscaleSigned) ? 0.f : 1.f, 0.05f)) {
+                                al.needsUpload = true;
+                                if (al.HasEnabledStyles()) canvas.RequestPresentationRebuild(ai);
+                                else canvas.MarkCompositeDirty();
+                            }
+                        }
+                        int tgt = (int)al.fill.target;
+                        const char* targets[] = { "Diffuse", "Transparency", "Metallic", "Roughness" };
+                        if (UiCombo("##filltgt", &tgt, targets, 4, "Channel Target")) {
+                            al.fill.target = (FillChannelTarget)tgt;
+                            // Only Diffuse is composited today; others stored for multi-map later
+                            canvas.MarkCompositeDirty();
+                        }
+                        if (al.fill.target != FillChannelTarget::Diffuse)
+                            ImGui::TextDisabled("Multi-map targets: stored only (system not ready)");
+                        ImGui::TextDisabled("Paint content blocked — paint the mask to shape fill");
+                        ImGui::PopID();
+                        ImGui::Separator();
+                    }
                 }
             }
 
@@ -2860,14 +2904,20 @@ namespace UI {
             };
 
             auto markStyleDirty = [&](Layer& layer) {
-                layer.stylesDirty = true;
-                layer.presentationDirty = true;
-                canvas.MarkCompositeDirty();
+                int idx = canvas.GetActiveLayerIndex();
+                canvas.RequestPresentationRebuild(idx);
+                // Groups: also dirty self if editing group layer
+                if (layer.isGroup) {
+                    layer.filtersDirty = true;
+                }
             };
             auto markFilterDirty = [&](Layer& layer) {
                 layer.filtersDirty = true;
                 layer.presentationDirty = true;
-                canvas.MarkCompositeDirty();
+                if (layer.isGroup || layer.HasEnabledStyles())
+                    canvas.RequestPresentationRebuild(canvas.GetActiveLayerIndex());
+                else
+                    canvas.MarkCompositeDirty();
             };
             auto selectStyle = [&](int idx) {
                 state.layerEffectsSelKind = 0;

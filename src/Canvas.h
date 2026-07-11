@@ -8,6 +8,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <chrono>
 #include "core/TileCache.h"
 #include "core/PaintEngine.h"
 #include "core/DdsHelper.h"
@@ -186,6 +187,8 @@ public:
     int  AddLayerStyle(int layerIdx, StyleType type);
     void RemoveLayerStyle(int layerIdx, int styleIdx);
     void MarkLayerStylesDirty(int layerIdx);
+    // Debounced style/presentation rebuild (call from UI while dragging FX params).
+    void RequestPresentationRebuild(int layerIdx);
     void DeleteLayer(int index);
     // Clone layer (or group header) inserted after source. Returns new index, or -1.
     int  DuplicateLayer(ID3D11Device* device, int index);
@@ -568,12 +571,16 @@ private:
     // Rebuild presentation cache when styles/filters/fill require baked buffer for GPU.
     // fullQuality=true: document-res bake (export/rasterize). false: proxy preview.
     void RebuildLayerPresentation(Layer& layer, bool fullQuality = false);
+    // Group: flatten children then apply group filters/styles → presentationCache + GPU tex.
+    void RebuildGroupPresentation(int groupIdx, bool fullQuality = false);
     // Resolve raw content (tiles or fill solid) to float RGBA W×H.
     std::vector<float> ResolveLayerContentF(const Layer& layer) const;
     // Ensure Fill layer has a GPU texture (1×1 solid or full presentation).
     void EnsureFillLayerGpu(ID3D11Device* device, Layer& layer);
     // True if layer should be drawn as top-level (parentGroupId < 0 or parent missing).
     static bool IsTopLevelLayer(const Layer& layer);
+    // True if layerIdx is under groupIdx (any depth).
+    bool IsLayerUnderGroup(int layerIdx, int groupIdx) const;
 
 
     bool ExtractAndSetICCProfile(const std::string& pngPath);
@@ -585,6 +592,10 @@ private:
     float m_StrokeDistanceAccumulator = 0.0f;
     float m_PrevStabilizedX = 0.0f;
     float m_PrevStabilizedY = 0.0f;
+
+    // Debounce style/presentation rebuild while dragging FX sliders (~80ms).
+    std::chrono::steady_clock::time_point m_PresentationRebuildNotBefore{};
+    bool m_PresentationRebuildDeferred = false;
 
     // Smudge state
     float m_SmudgePickup[4] = { 0.f, 0.f, 0.f, 0.f };
