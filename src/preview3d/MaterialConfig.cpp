@@ -121,8 +121,8 @@ MaterialConfig MaterialConfig::MakeDefaultZZZ_Skin() {
     m.toonShadowTint = 0.72f;
     m.rimStrength = 0.12f;
     m.anisoStrength = 0.f;
-    m.outlineThickness = 0.0035f;
-    m.outlineColorMul = 0.22f;
+    m.outlineThickness = 1.0f;  // view-space scale
+    m.outlineColorMul = 0.42f;  // soft ink (game-like), not pure black
     m.alphaClip = false; // Transparency when enabled — user toggles
     return m;
 }

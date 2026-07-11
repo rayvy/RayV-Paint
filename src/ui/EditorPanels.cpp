@@ -4237,9 +4237,10 @@ namespace UI {
                         ImGui::Checkbox("Glow (soon)", &P.enableGlow);
                         ImGui::Checkbox("Bloom (soon)", &P.enableBloom);
                         ImGui::EndDisabled();
-                        ImGui::SliderFloat("Outline thick", &P.outlineThickness, 0.001f, 0.08f, "%.4f");
-                        ImGui::SliderFloat("Outline darken", &P.outlineAlbedoMul, 0.02f, 0.5f, "%.2f");
+                        ImGui::SliderFloat("Outline thick (view)", &P.outlineThickness, 0.2f, 3.0f, "%.2f");
+                        ImGui::SliderFloat("Outline ink (albedo*)", &P.outlineAlbedoMul, 0.15f, 0.75f, "%.2f");
                         ImGui::Checkbox("Outline × COLOR.r (thick)", &P.outlineUseVertexColor);
+                        ImGui::TextDisabled("View-space expand ≈ game (not 3D balloon).\nInk ~0.4 = soft; 0.15 = black.");
                         ImGui::Checkbox("Fixed outline tint", &P.outlineUseFixedTint);
                         if (P.outlineUseFixedTint)
                             ImGui::ColorEdit3("Tint", P.outlineTint, ImGuiColorEditFlags_NoInputs);

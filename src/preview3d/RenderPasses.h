@@ -23,13 +23,13 @@ struct PassConfig {
     bool enableGlow = false;
     bool enableBloom = false;
 
-    // ZZZ outline knobs (preview-owned). Game uses ~0.001–0.005 view-space-ish;
-    // we expand in model space — keep default thin, scale with character size.
-    float outlineThickness = 0.0035f;
-    float outlineAlbedoMul = 0.22f;
-    bool  outlineUseVertexColor = true; // COLOR.r thickness (ZZZ community)
-    float outlineTint[3] = { 0.05f, 0.05f, 0.06f };
-    bool  outlineUseFixedTint = false; // false = diffuse * mul
+    // ZZZ outline: view-space silhouette expand (game-like), not model-space balloon.
+    // thickness = UI scale (1.0 ≈ game mid); albedoMul ~0.4 soft ink (not pure black).
+    float outlineThickness = 1.0f;
+    float outlineAlbedoMul = 0.42f;
+    bool  outlineUseVertexColor = true; // COLOR.r thickness
+    float outlineTint[3] = { 0.08f, 0.07f, 0.07f };
+    bool  outlineUseFixedTint = false; // false = darkened diffuse
 
     // Which outline backend
     enum class OutlineMode : uint8_t { None = 0, ZZZ, GI_Reserved } outlineMode = OutlineMode::ZZZ;

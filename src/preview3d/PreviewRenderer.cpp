@@ -30,6 +30,8 @@ struct FrameCBData {
     XMFLOAT4 ambientColor;
     XMFLOAT4 cameraPos;
     XMFLOAT4 frameDebug;
+    XMFLOAT4X4 view;
+    XMFLOAT4X4 proj;
 };
 
 // Must match HLSL MaterialCB layout (float4 array)
@@ -621,20 +623,23 @@ void PreviewRenderer::DrawOutlineZZZPass(ID3D11DeviceContext* ctx) {
         if (!item.visible || !item.mesh.valid) continue;
         if (!item.material.outlineEnable) continue;
 
+        // Global pass scale; material can multiply if it set a non-default thickness
         float thick = m_Passes.outlineThickness;
-        // material override if set
-        if (item.material.outlineThickness > 0.f)
-            thick = item.material.outlineThickness;
+        if (item.material.outlineThickness > 0.f &&
+            std::abs(item.material.outlineThickness - 1.0f) > 0.01f)
+            thick *= item.material.outlineThickness;
         float mul = m_Passes.outlineAlbedoMul;
-        if (item.material.outlineColorMul > 0.f)
+        if (item.material.outlineColorMul > 0.f &&
+            std::abs(item.material.outlineColorMul - 0.42f) > 0.01f)
             mul = item.material.outlineColorMul;
 
         OutlineCBData ocb{};
+        // x = view-space thickness scale (UI ~0.5–3), y = albedo darken (~0.4 game-like)
         ocb.params = XMFLOAT4(
             thick,
             mul,
             m_Passes.outlineUseVertexColor ? 1.f : 0.f,
-            0.15f); // min vertex-color thickness scale
+            0.35f); // min COLOR.r scale
         ocb.tint = XMFLOAT4(
             m_Passes.outlineTint[0], m_Passes.outlineTint[1], m_Passes.outlineTint[2],
             m_Passes.outlineUseFixedTint ? 1.f : 0.f);
@@ -647,8 +652,13 @@ void PreviewRenderer::DrawOutlineZZZPass(ID3D11DeviceContext* ctx) {
         ctx->VSSetConstantBuffers(1, 1, &m_OutlineCB);
         ctx->PSSetConstantBuffers(1, 1, &m_OutlineCB);
 
-        ID3D11ShaderResourceView* diff = item.srvs[0] ? item.srvs[0] : m_FallbackSRV;
-        ctx->PSSetShaderResources(0, 1, &diff);
+        // t0 Diffuse + t2 LightMap (outline colour / ramp)
+        ID3D11ShaderResourceView* srvs[3] = {
+            item.srvs[0] ? item.srvs[0] : m_FallbackSRV,
+            nullptr,
+            item.srvs[2] ? item.srvs[2] : m_FallbackSRV,
+        };
+        ctx->PSSetShaderResources(0, 3, srvs);
 
         UINT stride = sizeof(PreviewVertex);
         UINT offset = 0;
@@ -695,6 +705,8 @@ void PreviewRenderer::Render(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* r
     XMStoreFloat4x4(&fcb.worldViewProj, XMMatrixTranspose(wvp));
     XMStoreFloat4x4(&fcb.world, XMMatrixTranspose(world));
     XMStoreFloat4x4(&fcb.worldInvTranspose, XMMatrixTranspose(wit));
+    XMStoreFloat4x4(&fcb.view, XMMatrixTranspose(view));
+    XMStoreFloat4x4(&fcb.proj, XMMatrixTranspose(proj));
     fcb.lightDirIntensity = XMFLOAT4(ldir[0], ldir[1], ldir[2], m_Lighting.intensity);
     fcb.ambientColor = XMFLOAT4(
         m_Lighting.ambientTint[0] * m_Lighting.ambient,

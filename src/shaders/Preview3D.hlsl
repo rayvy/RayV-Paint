@@ -23,6 +23,8 @@ cbuffer FrameCB : register(b0)
     float4   ambientColor;      // rgb ambient * intensity in w unused
     float4   cameraPos;         // xyz world camera
     float4   frameDebug;        // x = global debug mode
+    float4x4 view;              // for outline / multipass
+    float4x4 proj;
 };
 
 cbuffer MaterialCB : register(b1)
