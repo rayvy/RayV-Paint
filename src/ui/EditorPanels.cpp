@@ -138,6 +138,11 @@ namespace UI {
     DocumentLoadingState g_LoadingState;
     ProjectTabCloseRequest g_ProjectTabCloseRequest;
 
+    // Fill Layer popup pipette (arm → click canvas once)
+    static bool s_FillPipetteArmed = false;
+    static int s_FillPipetteLayer = -1;
+    static int s_FillPipetteMap = -1;
+
     void TriggerBackgroundOpenDocument(const std::string& filepath, ID3D11Device* device, Canvas& canvas) {
         if (g_LoadingState.isLoading) return;
 
@@ -193,14 +198,43 @@ namespace UI {
     void SampleCanvasColor(Canvas& canvas, float canvasX, float canvasY, float outColor[4]) {
         int cx = std::clamp((int)canvasX, 0, canvas.GetWidth() - 1);
         int cy = std::clamp((int)canvasY, 0, canvas.GetHeight() - 1);
-        // Float docs: sample active layer raw (height/HDR diagnostics).
-        // U8: composite (matches viewport appearance).
-        if (canvas.GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8 &&
-            canvas.GetActiveLayerIndex() >= 0) {
-            canvas.SampleActiveLayerPixel(cx, cy, outColor);
-        } else {
-            canvas.SampleCompositePixel(cx, cy, outColor);
+        // Always sample the active Channels view composite (map-filtered stack).
+        // Matches what the viewport shows — not the unfiltered all-maps blend.
+        canvas.SampleCompositePixel(cx, cy, outColor);
+    }
+
+    bool IsFillPipetteArmed() { return s_FillPipetteArmed; }
+
+    bool TryApplyFillPipette(Canvas& canvas, float canvasX, float canvasY) {
+        if (!s_FillPipetteArmed) return false;
+        auto& layers = canvas.GetLayers();
+        if (s_FillPipetteLayer < 0 || s_FillPipetteLayer >= (int)layers.size()) {
+            s_FillPipetteArmed = false;
+            return false;
         }
+        Layer& L = layers[s_FillPipetteLayer];
+        if (!L.IsFill()) {
+            s_FillPipetteArmed = false;
+            return false;
+        }
+        int mi = s_FillPipetteMap;
+        if (mi < 0 || mi >= (int)texset::MapKind::Count) {
+            s_FillPipetteArmed = false;
+            return false;
+        }
+        float c[4] = {0, 0, 0, 1};
+        SampleCanvasColor(canvas, canvasX, canvasY, c);
+        auto& mc = L.fill.mapColor[mi];
+        mc.enabled = true;
+        mc.rgba[0] = c[0]; mc.rgba[1] = c[1]; mc.rgba[2] = c[2]; mc.rgba[3] = c[3];
+        L.needsUpload = true;
+        L.SyncWorkSpaceFromFillTarget(nullptr);
+        canvas.MarkCompositeDirty();
+        canvas.SetDocumentModified(true);
+        s_FillPipetteArmed = false;
+        s_FillPipetteLayer = -1;
+        s_FillPipetteMap = -1;
+        return true;
     }
 
     // Stroke dab preview (rotation/spacing-aware visual; scatter/dynamics drawn as ghost only)
@@ -2481,9 +2515,14 @@ namespace UI {
                         if (Project* p = ProjectManager::Get().ActiveProject())
                             tset = p->textureSets.Active();
 
-                        auto dirtyFill = [&]() {
+                        // Solid multi-map fill: only needsUpload (NOT presentationDirty).
+                        // Sticky presentationDirty caused EnsureFillLayerGpu every frame → lag.
+                        auto dirtyFill = [&](bool needsPresentation = false) {
                             al.needsUpload = true;
-                            al.presentationDirty = true;
+                            if (needsPresentation || al.HasEnabledStyles() ||
+                                LayerFilterListHasEnabled(al.filters) || al.fill.HasTexture()) {
+                                al.presentationDirty = true;
+                            }
                             al.SyncWorkSpaceFromFillTarget(tset);
                             if (al.HasEnabledStyles()) canvas.RequestPresentationRebuild(ai);
                             else canvas.MarkCompositeDirty();
@@ -2533,6 +2572,42 @@ namespace UI {
                             else col = 0;
                         }
                         ImGui::Spacing();
+                        // Full color picker for active view map / first enabled + pipette
+                        {
+                            int pick = (int)canvas.GetViewMapKind();
+                            if (!al.fill.mapColor[pick].enabled) {
+                                for (int i = 0; i < (int)texset::MapKind::Count; ++i)
+                                    if (al.fill.mapColor[i].enabled) { pick = i; break; }
+                            }
+                            if (al.fill.mapColor[pick].enabled) {
+                                float* col = al.fill.mapColor[pick].rgba;
+                                float before[4] = { col[0], col[1], col[2], col[3] };
+                                ImGui::ColorPicker4("##fillpicker", col,
+                                    ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_DisplayRGB |
+                                    ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
+                                if (ImGui::IsItemEdited() || ImGui::IsItemDeactivatedAfterEdit()) {
+                                    if (before[0] != col[0] || before[1] != col[1] ||
+                                        before[2] != col[2] || before[3] != col[3])
+                                        dirtyFill();
+                                }
+                                // Pipette: sample active Channels view into this map's fill color
+                                ImGui::SameLine(0, 8.f);
+                                ImGui::BeginGroup();
+                                if (ImGui::Button("Pipette##fillpip", ImVec2(72.f, 0))) {
+                                    // Sample canvas center of current view (user can Alt+brush too)
+                                    // Arm one-shot: next LMB on canvas writes into this fill slot
+                                    s_FillPipetteArmed = true;
+                                    s_FillPipetteLayer = ai;
+                                    s_FillPipetteMap = pick;
+                                }
+                                if (ImGui::IsItemHovered())
+                                    Ui::Tooltip("Sample from canvas (active Channels map)\nClick button then LMB on viewport");
+                                if (s_FillPipetteArmed && s_FillPipetteLayer == ai && s_FillPipetteMap == pick) {
+                                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "Click canvas…");
+                                }
+                                ImGui::EndGroup();
+                            }
+                        }
                         ImGui::TextDisabled("Mask paints all toggled maps at once");
 
                         bool useTex = al.fill.useTexture;
@@ -3449,36 +3524,6 @@ namespace UI {
             ImGui::EndPopup();
         }
 
-        // Sync non-Diffuse underlay so imported maps are VISIBLE in viewport
-        if (device) {
-            if (Project* up = ProjectManager::Get().ActiveProject()) {
-                if (texset::TextureSet* us = up->textureSets.Active()) {
-                    canvas.SetActiveSetMaps(us->maps);
-                    texset::MapKind vm = canvas.GetViewMapKind();
-                    if (vm != texset::MapKind::Diffuse) {
-                        auto it = us->mapComposites.find((int)vm);
-                        const TileCache* tc = (it != us->mapComposites.end() && it->second)
-                            ? it->second.get() : nullptr;
-                        // Only re-upload when map changes / first time — cheap check via dirty flag
-                        static int s_lastUnderlayKey = -999;
-                        static int s_lastProj = -1;
-                        int key = (up->id * 100) + (int)vm;
-                        if (tc && (key != s_lastUnderlayKey || s_lastProj != up->id || !canvas.HasViewMapUnderlay())) {
-                            canvas.SetViewMapUnderlay(device, tc);
-                            s_lastUnderlayKey = key;
-                            s_lastProj = up->id;
-                        } else if (!tc) {
-                            canvas.ClearViewMapUnderlay();
-                            s_lastUnderlayKey = -999;
-                        }
-                    } else {
-                        if (canvas.HasViewMapUnderlay())
-                            canvas.ClearViewMapUnderlay();
-                    }
-                }
-            }
-        }
-
         if (state.showChannels) {
             Ui::BeginDockPanel("Channels", &state.showChannels);
 
@@ -3505,23 +3550,15 @@ namespace UI {
                     if (ImGui::Button(m.DisplayName(), ImVec2(bw, 22))) {
                         set->activeMap = m.kind;
                         canvas.SetViewMapKind(m.kind);
-                        // force underlay refresh next frame
-                        canvas.ClearViewMapUnderlay();
-                        if (m.kind != texset::MapKind::Diffuse) {
-                            auto it = set->mapComposites.find((int)m.kind);
-                            if (it != set->mapComposites.end() && it->second && device)
-                                canvas.SetViewMapUnderlay(device, it->second.get());
-                        }
                         canvas.MarkCompositeDirty();
                     }
                     if (on) ImGui::PopStyleColor();
                     if (ImGui::IsItemHovered()) {
-                        char tip[128];
-                        std::snprintf(tip, sizeof(tip), "%s  %dx%d%s",
+                        char tip[96];
+                        std::snprintf(tip, sizeof(tip), "%s  %dx%d",
                             m.DisplayName(),
                             m.width > 0 ? m.width : canvas.GetWidth(),
-                            m.height > 0 ? m.height : canvas.GetHeight(),
-                            set->mapComposites.count((int)m.kind) ? "  (loaded)" : "");
+                            m.height > 0 ? m.height : canvas.GetHeight());
                         Ui::Tooltip(tip);
                     }
                     ImGui::PopID();
@@ -3617,83 +3654,129 @@ namespace UI {
             ImGui::OpenPopup("Project Setup##ps");
             state.openProjectSetup = false;
         }
-        ImGui::SetNextWindowSize(ImVec2(480, 420), ImGuiCond_FirstUseEver);
-        if (ImGui::BeginPopupModal("Project Setup##ps", nullptr, ImGuiWindowFlags_None)) {
+        ImGui::SetNextWindowSize(ImVec2(560, 480), ImGuiCond_FirstUseEver);
+        if (ImGui::BeginPopupModal("Project Setup##ps", nullptr, 0)) {
             Project* proj = ProjectManager::Get().ActiveProject();
             texset::TextureSet* set = proj ? proj->textureSets.Active() : nullptr;
+
+            // Active map switcher INSIDE setup (no need to leave)
+            if (set) {
+                ImGui::TextDisabled("Active map (viewport)");
+                for (auto& m : set->maps) {
+                    if (!m.enabled && m.kind != texset::MapKind::Diffuse) continue;
+                    ImGui::PushID(9000 + (int)m.kind);
+                    bool on = canvas.GetViewMapKind() == m.kind;
+                    if (on) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.85f, 0.9f));
+                    if (ImGui::SmallButton(m.DisplayName())) {
+                        set->activeMap = m.kind;
+                        canvas.SetViewMapKind(m.kind);
+                        canvas.MarkCompositeDirty();
+                    }
+                    if (on) ImGui::PopStyleColor();
+                    ImGui::SameLine(0, 4);
+                    ImGui::PopID();
+                }
+                ImGui::NewLine();
+                ImGui::Separator();
+            }
+
             if (ImGui::BeginTabBar("##setupTabs")) {
                 if (ImGui::BeginTabItem("Maps")) {
                     if (set) {
-                        for (auto& m : set->maps) {
-                            ImGui::PushID((int)m.kind);
-                            bool en = m.enabled;
-                            bool isDiff = (m.kind == texset::MapKind::Diffuse);
-                            if (isDiff) ImGui::BeginDisabled();
-                            if (ImGui::Checkbox("##en", &en) && !isDiff) {
-                                if (en) {
-                                    int w = set->LogicalWidth() > 0 ? set->LogicalWidth() : canvas.GetWidth();
-                                    int h = set->LogicalHeight() > 0 ? set->LogicalHeight() : canvas.GetHeight();
-                                    set->EnableMap(m.kind, w, h);
-                                } else set->DisableMap(m.kind);
-                                canvas.SetDocumentModified(true);
+                        if (ImGui::BeginTable("##maptbl", 5,
+                                ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+                            ImGui::TableSetupColumn("On", ImGuiTableColumnFlags_WidthFixed, 28);
+                            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                            ImGui::TableSetupColumn("W", ImGuiTableColumnFlags_WidthFixed, 72);
+                            ImGui::TableSetupColumn("H", ImGuiTableColumnFlags_WidthFixed, 72);
+                            ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthFixed, 90);
+                            ImGui::TableHeadersRow();
+                            for (auto& m : set->maps) {
+                                ImGui::PushID((int)m.kind);
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                bool en = m.enabled;
+                                if (ImGui::Checkbox("##en", &en)) {
+                                    if (en) {
+                                        int w = m.width > 0 ? m.width : canvas.GetWidth();
+                                        int h = m.height > 0 ? m.height : canvas.GetHeight();
+                                        set->EnableMap(m.kind, w, h);
+                                    } else set->DisableMap(m.kind);
+                                    canvas.SetDocumentModified(true);
+                                }
+                                ImGui::TableNextColumn();
+                                char nameBuf[64];
+                                std::snprintf(nameBuf, sizeof(nameBuf), "%s", m.DisplayName());
+                                ImGui::SetNextItemWidth(-1);
+                                if (ImGui::InputText("##nm", nameBuf, sizeof(nameBuf))) {
+                                    m.displayName = nameBuf;
+                                    canvas.SetDocumentModified(true);
+                                }
+                                ImGui::TableNextColumn();
+                                int mw = m.width > 0 ? m.width : canvas.GetWidth();
+                                ImGui::SetNextItemWidth(-1);
+                                if (ImGui::InputInt("##w", &mw, 0, 0)) {
+                                    m.width = std::clamp(mw, 1, 16384);
+                                    canvas.SetDocumentModified(true);
+                                }
+                                ImGui::TableNextColumn();
+                                int mh = m.height > 0 ? m.height : canvas.GetHeight();
+                                ImGui::SetNextItemWidth(-1);
+                                if (ImGui::InputInt("##h", &mh, 0, 0)) {
+                                    m.height = std::clamp(mh, 1, 16384);
+                                    canvas.SetDocumentModified(true);
+                                }
+                                ImGui::TableNextColumn();
+                                ImGui::TextDisabled("%s", texset::MapKindName(m.kind));
+                                ImGui::PopID();
                             }
-                            if (isDiff) ImGui::EndDisabled();
-                            ImGui::SameLine();
-                            char nameBuf[64];
-                            std::snprintf(nameBuf, sizeof(nameBuf), "%s", m.DisplayName());
-                            ImGui::SetNextItemWidth(140);
-                            if (ImGui::InputText("##nm", nameBuf, sizeof(nameBuf))) {
-                                m.displayName = nameBuf;
-                                canvas.SetDocumentModified(true);
-                            }
-                            ImGui::SameLine();
-                            ImGui::TextDisabled("%dx%d", m.width > 0 ? m.width : canvas.GetWidth(),
-                                m.height > 0 ? m.height : canvas.GetHeight());
-                            if (m.width <= 0) {
-                                ImGui::SameLine();
-                                int mw = canvas.GetWidth(), mh = canvas.GetHeight();
-                                ImGui::SetNextItemWidth(60);
-                                if (ImGui::DragInt("##w", &mw, 1, 1, 16384)) { m.width = mw; m.enabled = true; }
-                                ImGui::SameLine();
-                                ImGui::SetNextItemWidth(60);
-                                if (ImGui::DragInt("##h", &mh, 1, 1, 16384)) { m.height = mh; m.enabled = true; }
-                            }
-                            ImGui::PopID();
+                            ImGui::EndTable();
                         }
                         ImGui::Spacing();
                         const char* temps[] = { "Default", "ZZZ", "GI" };
                         int ti = 0;
                         if (set->templateId == "ZZZ") ti = 1;
                         else if (set->templateId == "GI") ti = 2;
+                        ImGui::SetNextItemWidth(160);
                         if (ImGui::Combo("Template", &ti, temps, 3)) {
                             if (proj) proj->ApplyActiveSetTemplate(temps[ti]);
                             canvas.SetDocumentModified(true);
                         }
-                        if (ImGui::Button("Import maps…", ImVec2(-1, 0)))
+                        if (ImGui::Button("Import maps…"))
                             UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
                     } else ImGui::TextDisabled("No texture set");
                     ImGui::EndTabItem();
                 }
                 if (ImGui::BeginTabItem("Labels")) {
-                    ImGui::TextWrapped("Soft channel labels for 3D / hints. Paint uses plain RGBA per map.");
+                    ImGui::TextWrapped("Optional labels for 3D. Paint always uses RGBA.");
                     if (set) {
+                        // Map picker for which map's labels we edit
                         texset::MapSlot* slot = set->GetMap(canvas.GetViewMapKind());
                         if (!slot) {
                             for (auto& m : set->maps) if (m.enabled) { slot = &m; break; }
                         }
                         if (slot) {
-                            ImGui::Text("Map: %s", slot->DisplayName());
-                            const char* chLab[4] = { "R", "G", "B", "A" };
-                            for (int c = 0; c < 4; ++c) {
-                                ImGui::PushID(c);
-                                int ri = texset::ChannelRoleToComboIndex(slot->pack[c].role);
-                                ImGui::SetNextItemWidth(-1);
-                                if (ImGui::Combo(chLab[c], &ri, texset::ChannelRoleComboNames(),
-                                                 texset::ChannelRoleComboCount())) {
-                                    slot->pack[c].role = texset::ChannelRoleFromComboIndex(ri);
-                                    canvas.SetDocumentModified(true);
+                            ImGui::Text("Editing labels for: %s", slot->DisplayName());
+                            if (ImGui::BeginTable("##lab", 2, ImGuiTableFlags_SizingFixedFit)) {
+                                ImGui::TableSetupColumn("Ch", ImGuiTableColumnFlags_WidthFixed, 24);
+                                ImGui::TableSetupColumn("Role", ImGuiTableColumnFlags_WidthFixed, 160);
+                                const char* chLab[4] = { "R", "G", "B", "A" };
+                                for (int c = 0; c < 4; ++c) {
+                                    ImGui::PushID(c);
+                                    ImGui::TableNextRow();
+                                    ImGui::TableNextColumn();
+                                    ImGui::TextUnformatted(chLab[c]);
+                                    ImGui::TableNextColumn();
+                                    int ri = texset::ChannelRoleToComboIndex(slot->pack[c].role);
+                                    ImGui::SetNextItemWidth(150);
+                                    if (ImGui::Combo("##r", &ri, texset::ChannelRoleComboNames(),
+                                                     texset::ChannelRoleComboCount())) {
+                                        slot->pack[c].role = texset::ChannelRoleFromComboIndex(ri);
+                                        canvas.SetDocumentModified(true);
+                                    }
+                                    ImGui::PopID();
                                 }
-                                ImGui::PopID();
+                                ImGui::EndTable();
                             }
                         }
                     }
@@ -3701,32 +3784,48 @@ namespace UI {
                 }
                 if (ImGui::BeginTabItem("Export")) {
                     if (set) {
-                        for (auto& m : set->maps) {
-                            if (!m.enabled && m.kind != texset::MapKind::Diffuse) continue;
-                            ImGui::PushID(300 + (int)m.kind);
-                            ImGui::TextUnformatted(m.DisplayName());
-                            int cs = (m.colorSpace == texset::MapColorSpace::sRGB) ? 0 : 1;
-                            const char* css[] = { "sRGB", "Linear" };
-                            ImGui::SetNextItemWidth(100);
-                            if (ImGui::Combo("##cs", &cs, css, 2)) {
-                                m.colorSpace = cs == 0 ? texset::MapColorSpace::sRGB : texset::MapColorSpace::Linear;
-                                canvas.SetDocumentModified(true);
+                        if (ImGui::BeginTable("##exptbl", 4, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+                            ImGui::TableSetupColumn("Map", ImGuiTableColumnFlags_WidthStretch);
+                            ImGui::TableSetupColumn("Space", ImGuiTableColumnFlags_WidthFixed, 80);
+                            ImGui::TableSetupColumn("Codec", ImGuiTableColumnFlags_WidthFixed, 100);
+                            ImGui::TableSetupColumn("Mips", ImGuiTableColumnFlags_WidthFixed, 40);
+                            ImGui::TableHeadersRow();
+                            for (auto& m : set->maps) {
+                                if (!m.enabled) continue;
+                                ImGui::PushID(300 + (int)m.kind);
+                                ImGui::TableNextRow();
+                                ImGui::TableNextColumn();
+                                ImGui::TextUnformatted(m.DisplayName());
+                                ImGui::TableNextColumn();
+                                int cs = (m.colorSpace == texset::MapColorSpace::sRGB) ? 0 : 1;
+                                const char* css[] = { "sRGB", "Linear" };
+                                ImGui::SetNextItemWidth(-1);
+                                if (ImGui::Combo("##cs", &cs, css, 2)) {
+                                    m.colorSpace = cs == 0 ? texset::MapColorSpace::sRGB : texset::MapColorSpace::Linear;
+                                    canvas.SetDocumentModified(true);
+                                }
+                                ImGui::TableNextColumn();
+                                const char* codecs[] = { "PNG", "BC7_sRGB", "BC7", "BC5", "R8G8", "R32", "RGBA8" };
+                                int ci = (int)m.exportCodec;
+                                if (ci < 0 || ci > 6) ci = 0;
+                                ImGui::SetNextItemWidth(-1);
+                                if (ImGui::Combo("##codec", &ci, codecs, 7)) {
+                                    m.exportCodec = (texset::MapExportCodec)ci;
+                                    canvas.SetDocumentModified(true);
+                                }
+                                ImGui::TableNextColumn();
+                                ImGui::Checkbox("##mips", &m.exportMips);
+                                ImGui::PopID();
                             }
-                            ImGui::SameLine();
-                            const char* codecs[] = { "PNG", "BC7_sRGB", "BC7", "BC5", "R8G8", "R32", "RGBA8" };
-                            int ci = (int)m.exportCodec;
-                            if (ci < 0 || ci > 6) ci = 0;
-                            ImGui::SetNextItemWidth(100);
-                            if (ImGui::Combo("##codec", &ci, codecs, 7)) {
-                                m.exportCodec = (texset::MapExportCodec)ci;
-                                canvas.SetDocumentModified(true);
-                            }
-                            ImGui::PopID();
+                            ImGui::EndTable();
                         }
-                        if (ImGui::Button("Export folder template…", ImVec2(-1, 0)))
+                        ImGui::Spacing();
+                        if (ImGui::Button("Folder template…"))
                             UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ExportTemplate);
-                        if (ImGui::Button("Batch Export Now", ImVec2(-1, 0)))
+                        ImGui::SameLine();
+                        if (ImGui::Button("Export All Now"))
                             state.openQuickExportTrigger = true;
+                        ImGui::TextDisabled("BC7/BC5 → .dds via texconv · PNG → .png");
                     }
                     ImGui::EndTabItem();
                 }

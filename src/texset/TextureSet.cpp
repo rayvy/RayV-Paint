@@ -46,12 +46,9 @@ void TextureSet::ApplySetTemplate(const SetTemplate& t) {
     ApplyTemplate(maps, t);
     if (!GetMap(activeMap) || !GetMap(activeMap)->enabled)
         activeMap = MapKind::Diffuse;
-    MarkAllCompositesDirty();
 }
 
 bool TextureSet::EnableMap(MapKind k, int w, int h, const std::string& sourcePath) {
-    if (k == MapKind::Diffuse && (w <= 0 || h <= 0))
-        return false;
     MapSlot* slot = GetMap(k);
     if (!slot) {
         MapSlot ns;
@@ -67,44 +64,18 @@ bool TextureSet::EnableMap(MapKind k, int w, int h, const std::string& sourcePat
     }
     if (!sourcePath.empty())
         slot->sourcePath = sourcePath;
-    MarkCompositeDirty(k);
     return true;
 }
 
 void TextureSet::DisableMap(MapKind k) {
-    if (k == MapKind::Diffuse) return;
-    if (MapSlot* s = GetMap(k)) {
+    // Diffuse may also be disabled (user request) — paint layers still hold pixels
+    if (MapSlot* s = GetMap(k))
         s->enabled = false;
-        mapComposites.erase((int)k);
-        mapCompositeDirty.erase((int)k);
-    }
-    if (activeMap == k)
+    if (activeMap == k) {
         activeMap = MapKind::Diffuse;
-}
-
-TileCache* TextureSet::EnsureComposite(MapKind k, CanvasPixelFormat fmt) {
-    MapSlot* slot = GetMap(k);
-    if (!slot || !slot->enabled || !slot->IsValidSize())
-        return nullptr;
-    int key = (int)k;
-    auto it = mapComposites.find(key);
-    if (it == mapComposites.end() || !it->second) {
-        auto tc = std::make_unique<TileCache>();
-        tc->Init(slot->width, slot->height, fmt);
-        mapComposites[key] = std::move(tc);
-        mapCompositeDirty[key] = true;
+        for (const auto& m : maps)
+            if (m.enabled) { activeMap = m.kind; break; }
     }
-    return mapComposites[key].get();
-}
-
-void TextureSet::MarkCompositeDirty(MapKind k) {
-    mapCompositeDirty[(int)k] = true;
-}
-
-void TextureSet::MarkAllCompositesDirty() {
-    for (auto& m : maps)
-        if (m.enabled)
-            mapCompositeDirty[(int)m.kind] = true;
 }
 
 static json PackToJson(const ChannelPackEntry& e) {

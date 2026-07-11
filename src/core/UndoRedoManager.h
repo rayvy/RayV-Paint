@@ -71,6 +71,24 @@ private:
     bool m_NewHasSelection;
 };
 
+// Layer mask create / paint / delete
+class LayerMaskCommand : public UndoCommand {
+public:
+    LayerMaskCommand(const std::string& name, int layerIdx,
+                     bool oldHasMask, std::vector<uint8_t> oldMask,
+                     bool newHasMask, std::vector<uint8_t> newMask);
+    std::string GetName() const override { return m_Name; }
+    void Undo(Canvas* canvas) override;
+    void Redo(Canvas* canvas) override;
+    size_t GetOverheadBytes() const override;
+private:
+    void Apply(Canvas* canvas, bool hasMask, const std::vector<uint8_t>& mask);
+    std::string m_Name;
+    int m_LayerIdx = -1;
+    bool m_OldHas = false, m_NewHas = false;
+    std::vector<uint8_t> m_OldMask, m_NewMask;
+};
+
 // Full document geometry change (crop / canvas edit): stores per-layer tile maps + size.
 class DocumentGeometryCommand : public UndoCommand {
 public:

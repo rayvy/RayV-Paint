@@ -803,17 +803,16 @@ int main(int argc, char* argv[]) {
                         if (diffuseTiles > 0) hasContent = true;
                     }
                 }
-                if (texset::TextureSet* set = proj->textureSets.Active()) {
-                    auto it = set->mapComposites.find((int)texset::MapKind::LightMap);
-                    if (it != set->mapComposites.end() && it->second) {
-                        for (int y = 0; y < it->second->GetHeight(); y += 64) {
-                            for (int x = 0; x < it->second->GetWidth(); x += 64) {
-                                float c[4];
-                                it->second->GetPixelF(x, y, c);
-                                float lum = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
-                                minL = std::min(minL, lum);
-                                maxL = std::max(maxL, lum);
-                            }
+                // LightMap content = layers bound to LightMap
+                for (const auto& L : ActiveCanvas().GetLayers()) {
+                    if (!L.workSpace.AffectsMap(texset::MapKind::LightMap) || !L.tileCache) continue;
+                    for (int y = 0; y < ActiveCanvas().GetHeight(); y += 128) {
+                        for (int x = 0; x < ActiveCanvas().GetWidth(); x += 128) {
+                            float c[4];
+                            L.tileCache->GetPixelF(x, y, c);
+                            float lum = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+                            minL = std::min(minL, lum);
+                            maxL = std::max(maxL, lum);
                         }
                     }
                 }
@@ -1705,7 +1704,16 @@ int main(int argc, char* argv[]) {
             // Eyedropper: live preview sample + commit on LMB
             static float s_PipettePreview[4] = {0, 0, 0, 1};
             static bool s_PipetteHasPreview = false;
-            if (isHovered && isInsideCanvas && isEyedropperMode && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging) {
+            // Fill Layer popup pipette (one-shot) takes priority over brush paint
+            if (UI::IsFillPipetteArmed() && isHovered && isInsideCanvas && !isPanning
+                && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_None);
+                UI::SampleCanvasColor(ActiveCanvas(), canvasX, canvasY, s_PipettePreview);
+                s_PipetteHasPreview = true;
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    UI::TryApplyFillPipette(ActiveCanvas(), canvasX, canvasY);
+                }
+            } else if (isHovered && isInsideCanvas && isEyedropperMode && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
                 UI::SampleCanvasColor(ActiveCanvas(), canvasX, canvasY, s_PipettePreview);
                 s_PipetteHasPreview = true;
@@ -1715,12 +1723,12 @@ int main(int argc, char* argv[]) {
                     g_Brush.color[2] = s_PipettePreview[2];
                     g_Brush.color[3] = s_PipettePreview[3];
                 }
-            } else if (!isEyedropperMode) {
+            } else if (!isEyedropperMode && !UI::IsFillPipetteArmed()) {
                 s_PipetteHasPreview = false;
             }
 
             if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging
-                && isBrushLikeTool && !isEyedropperMode
+                && isBrushLikeTool && !isEyedropperMode && !UI::IsFillPipetteArmed()
                 && !(ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt)) {
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                     g_IsPainting = true;

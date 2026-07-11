@@ -100,6 +100,55 @@ size_t SelectionCommand::GetOverheadBytes() const {
 }
 
 // ---------------------------------------------------------------------------
+// LayerMaskCommand
+// ---------------------------------------------------------------------------
+
+LayerMaskCommand::LayerMaskCommand(const std::string& name, int layerIdx,
+                                   bool oldHasMask, std::vector<uint8_t> oldMask,
+                                   bool newHasMask, std::vector<uint8_t> newMask)
+    : m_Name(name), m_LayerIdx(layerIdx)
+    , m_OldHas(oldHasMask), m_NewHas(newHasMask)
+    , m_OldMask(std::move(oldMask)), m_NewMask(std::move(newMask)) {}
+
+void LayerMaskCommand::Apply(Canvas* canvas, bool hasMask, const std::vector<uint8_t>& mask) {
+    if (!canvas || m_LayerIdx < 0 || m_LayerIdx >= (int)canvas->m_Layers.size()) return;
+    auto& L = canvas->m_Layers[m_LayerIdx];
+    if (hasMask) {
+        L.hasMask = true;
+        L.mask = mask;
+        // Full re-upload (dirty rect may be empty after delete/create round-trip)
+        L.maskDirtyX0 = 0;
+        L.maskDirtyY0 = 0;
+        L.maskDirtyX1 = canvas->m_Width > 0 ? canvas->m_Width - 1 : -1;
+        L.maskDirtyY1 = canvas->m_Height > 0 ? canvas->m_Height - 1 : -1;
+        L.maskNeedsUpload = true;
+        // Drop stale GPU mask so size/format mismatches cannot skip restore on redo
+        if (L.maskTexture) { L.maskTexture->Release(); L.maskTexture = nullptr; }
+        if (L.maskSRV) { L.maskSRV->Release(); L.maskSRV = nullptr; }
+    } else {
+        if (L.maskTexture) { L.maskTexture->Release(); L.maskTexture = nullptr; }
+        if (L.maskSRV) { L.maskSRV->Release(); L.maskSRV = nullptr; }
+        L.mask.clear();
+        L.hasMask = false;
+        L.maskNeedsUpload = false;
+        L.maskDirtyX0 = 0; L.maskDirtyY0 = 0;
+        L.maskDirtyX1 = -1; L.maskDirtyY1 = -1;
+        if (canvas->m_PaintTarget == PaintTarget::LayerMask && canvas->m_ActiveLayerIdx == m_LayerIdx)
+            canvas->m_PaintTarget = PaintTarget::LayerContent;
+    }
+    canvas->MarkCompositeDirty();
+    canvas->m_IsDocumentModified = true;
+}
+
+void LayerMaskCommand::Undo(Canvas* canvas) { Apply(canvas, m_OldHas, m_OldMask); }
+void LayerMaskCommand::Redo(Canvas* canvas) { Apply(canvas, m_NewHas, m_NewMask); }
+
+size_t LayerMaskCommand::GetOverheadBytes() const {
+    return sizeof(LayerMaskCommand) + m_Name.capacity()
+         + m_OldMask.capacity() + m_NewMask.capacity();
+}
+
+// ---------------------------------------------------------------------------
 // DocumentGeometryCommand
 // ---------------------------------------------------------------------------
 

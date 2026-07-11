@@ -3,6 +3,8 @@
 #include "../core/ImageManager.h"
 #include "../core/Logger.h"
 #include "../core/PathUtil.h"
+#include "../core/TexconvHelper.h"
+#include "../core/ConfigManager.h"
 
 #include <algorithm>
 #include <cctype>
@@ -57,67 +59,24 @@ bool ExtractChannelAsGrayscale(const TileCache& src, int channelIndex, bool inve
     return true;
 }
 
+// Deprecated path: only updates map *meta*. Pixels live on Canvas layers.
 bool ImportMapFromFile(TextureSet& set, MapKind kind, const std::string& filepath,
-                       ChannelRole soloRole) {
+                       ChannelRole /*soloRole*/) {
     if (filepath.empty()) return false;
-
     int w = 0, h = 0;
-    std::unique_ptr<TileCache> loaded = std::make_unique<TileCache>();
-    const std::string ext = ExtLower(filepath);
-
+    // Peek size without storing composite
+    std::string ext = ExtLower(filepath);
     if (ext == "dds") {
+        TileCache tmp;
         DdsFormat fmt = DdsFormat::RGBA8_UNORM;
-        if (!DdsHelper::LoadDDSToTileCache(filepath, *loaded, w, h, fmt)) {
-            Logger::Get().ErrorTag("texset", "ImportMap DDS failed: " + filepath);
+        if (!DdsHelper::LoadDDSToTileCache(filepath, tmp, w, h, fmt))
             return false;
-        }
     } else {
         std::vector<uint8_t> rgba;
-        if (!ImageManager::LoadImageFromFile(filepath, rgba, w, h)) {
-            Logger::Get().ErrorTag("texset", "ImportMap image failed: " + filepath);
+        if (!ImageManager::LoadImageFromFile(filepath, rgba, w, h))
             return false;
-        }
-        loaded->Init(w, h, CanvasPixelFormat::RGBA8);
-        loaded->ImportRGBA8(rgba.data(), w, h);
     }
-
-    // Optional: solo role → grayscale from packed channel of the *file as-if* using current pack
-    // After enable, we use template pack on the slot to know which channel holds the role.
-    if (!set.EnableMap(kind, w, h, filepath)) {
-        Logger::Get().ErrorTag("texset", "EnableMap failed");
-        return false;
-    }
-
-    MapSlot* slot = set.GetMap(kind);
-    if (!slot) return false;
-
-    if (soloRole != ChannelRole::None) {
-        int ch = ChannelIndexForRole(*slot, soloRole);
-        if (ch < 0) {
-            // Fall back: use R for single-channel intent
-            ch = 0;
-            Logger::Get().WarnTag("texset",
-                std::string("Role ") + ChannelRoleName(soloRole) +
-                " not in pack for " + MapKindName(kind) + " — using R");
-        }
-        auto gray = std::make_unique<TileCache>();
-        const bool inv = (ch >= 0 && ch < 4) ? slot->pack[ch].invert : false;
-        if (!ExtractChannelAsGrayscale(*loaded, ch < 0 ? 0 : ch, inv, *gray)) {
-            Logger::Get().ErrorTag("texset", "Channel extract failed");
-            return false;
-        }
-        loaded = std::move(gray);
-    }
-
-    int key = (int)kind;
-    set.mapComposites[key] = std::move(loaded);
-    set.mapCompositeDirty[key] = false;
-    set.activeMap = kind;
-
-    Logger::Get().InfoTag("texset",
-        std::string("Imported ") + MapKindName(kind) + " " +
-        std::to_string(w) + "x" + std::to_string(h) + " → set '" + set.name + "'");
-    return true;
+    return set.EnableMap(kind, w, h, filepath);
 }
 
 bool ExportTileCacheToFile(const TileCache& cache, const std::string& filepath) {
@@ -129,25 +88,77 @@ bool ExportTileCacheToFile(const TileCache& cache, const std::string& filepath) 
     return ImageManager::SaveRGBA8ToFile(filepath, rgba.data(), w, h);
 }
 
-bool ExportMapToFile(const TextureSet& set, MapKind kind, const std::string& filepath) {
-    auto it = set.mapComposites.find((int)kind);
-    if (it == set.mapComposites.end() || !it->second) {
-        Logger::Get().WarnTag("texset",
-            std::string("No composite for ") + MapKindName(kind));
-        return false;
-    }
-    return ExportTileCacheToFile(*it->second, filepath);
+bool ExportMapToFile(const TextureSet& /*set*/, MapKind /*kind*/, const std::string& /*filepath*/) {
+    // mapComposites removed — use ExportAllMaps with packed layer pixels
+    return false;
 }
 
 std::string DefaultMapExportPath(const TextureSet& set, MapKind kind,
                                  const std::string& baseDir, const std::string& ext) {
     std::string name = SanitizeFileToken(set.name.empty() ? "Set" : set.name);
-    std::string map = MapKindName(kind);
+    const MapSlot* slot = FindMap(set.maps, kind);
+    std::string map = (slot && !slot->nameSuffix.empty())
+        ? slot->nameSuffix
+        : (std::string("_") + MapKindName(kind));
+    if (!map.empty() && map[0] != '_') map = "_" + map;
     std::string e = ext.empty() ? "png" : ext;
     if (!e.empty() && e[0] == '.') e.erase(e.begin());
     fs::path dir = baseDir.empty() ? fs::path(".") : fs::path(PathUtil::Utf8ToWide(baseDir));
-    fs::path out = dir / (PathUtil::Utf8ToWide(name + "_" + map + "." + e));
+    fs::path out = dir / (PathUtil::Utf8ToWide(name + map + "." + e));
     return PathUtil::WideToUtf8(out.wstring());
+}
+
+static bool SaveWithCodec(const std::string& path, const uint8_t* rgba, int w, int h,
+                          MapExportCodec codec, bool mips) {
+    std::string ext = ExtLower(path);
+    // Force PNG if codec is PNG/RGBA8
+    if (codec == MapExportCodec::PNG || codec == MapExportCodec::RGBA8_UNORM ||
+        ext == "png" || ext == "tga" || ext == "bmp" || ext == "jpg" || ext == "jpeg") {
+        // Ensure .png if path had .dds but codec is PNG
+        std::string outPath = path;
+        if (ext == "dds" && (codec == MapExportCodec::PNG || codec == MapExportCodec::RGBA8_UNORM)) {
+            size_t d = outPath.find_last_of('.');
+            if (d != std::string::npos) outPath = outPath.substr(0, d) + ".png";
+        }
+        return ImageManager::SaveRGBA8ToFile(outPath, rgba, w, h);
+    }
+
+    // DDS path via temp + texconv
+    std::string tempDir = ConfigManager::GetUserSubdirectory("temp");
+    std::string tempPng = tempDir + "/texset_export_tmp.png";
+    if (!ImageManager::SaveRGBA8ToFile(tempPng, rgba, w, h))
+        return false;
+
+    std::string formatStr = "BC7_UNORM";
+    switch (codec) {
+    case MapExportCodec::BC7_UNORM_SRGB: formatStr = "BC7_UNORM_SRGB"; break;
+    case MapExportCodec::BC7_UNORM: formatStr = "BC7_UNORM"; break;
+    case MapExportCodec::BC5_UNORM: formatStr = "BC5_UNORM"; break;
+    case MapExportCodec::R8G8_UNORM: formatStr = "R8G8_UNORM"; break;
+    case MapExportCodec::R32_FLOAT: formatStr = "R32_FLOAT"; break;
+    default: formatStr = "BC7_UNORM"; break;
+    }
+
+    std::string outPath = path;
+    if (ext != "dds") {
+        size_t d = outPath.find_last_of('.');
+        if (d != std::string::npos) outPath = outPath.substr(0, d) + ".dds";
+        else outPath += ".dds";
+    }
+
+    ExportSettings settings;
+    settings.isDds = true;
+    settings.ddsFormatStr = formatStr;
+    settings.advancedMode = true;
+    settings.compressionSpeed = "Medium";
+    settings.generateMipMaps = mips;
+    settings.mipFilter = "Bicubic";
+    settings.exportPath = outPath;
+
+    // Texconv expects input image/dds
+    bool ok = TexconvHelper::CompressDDS(tempPng, outPath, settings);
+    try { fs::remove(PathUtil::FromUtf8(tempPng)); } catch (...) {}
+    return ok;
 }
 
 ExportAllResult ExportAllMaps(
@@ -163,49 +174,40 @@ ExportAllResult ExportAllMaps(
     for (const auto& m : set.maps) {
         if (!m.enabled) continue;
 
-        // Prefer per-map exportPath; else suffix-aware default
         std::string path = m.exportPath;
-        if (path.empty()) {
-            std::string e = ext;
-            // Codec may force dds extension
-            if (m.exportCodec != MapExportCodec::PNG && m.exportCodec != MapExportCodec::RGBA8_UNORM)
-                e = "png"; // still PNG until texconv hook; path stays writable
-            path = DefaultMapExportPath(set, m.kind, baseDir, e);
-            // Prefer nameSuffix in filename if set
-            if (!m.nameSuffix.empty()) {
-                std::string name = SanitizeFileToken(set.name.empty() ? "Set" : set.name);
-                try {
-                    fs::path dir = baseDir.empty() ? fs::path(".") : fs::path(PathUtil::Utf8ToWide(baseDir));
-                    fs::path out = dir / PathUtil::Utf8ToWide(name + m.nameSuffix + "." + (e.empty() ? "png" : e));
-                    path = PathUtil::WideToUtf8(out.wstring());
-                } catch (...) {}
-            }
-        }
+        std::string useExt = ext;
+        if (m.exportCodec != MapExportCodec::PNG && m.exportCodec != MapExportCodec::RGBA8_UNORM)
+            useExt = "dds";
+        else if (useExt.empty())
+            useExt = "png";
+
+        if (path.empty())
+            path = DefaultMapExportPath(set, m.kind, baseDir, useExt);
         if (MapSlot* slot = set.GetMap(m.kind))
             slot->exportPath = path;
 
         bool ok = false;
-        // 1) Packed compose from Canvas (preferred — channel packing)
         if (packedByMap) {
             auto it = packedByMap->find((int)m.kind);
-            if (it != packedByMap->end() && it->second.w > 0 && it->second.h > 0 &&
+            if (it != packedByMap->end() && it->second.w > 0 &&
                 it->second.rgba.size() >= (size_t)it->second.w * (size_t)it->second.h * 4u) {
-                ok = ImageManager::SaveRGBA8ToFile(path, it->second.rgba.data(),
-                                                  it->second.w, it->second.h);
+                ok = SaveWithCodec(path, it->second.rgba.data(), it->second.w, it->second.h,
+                                   m.exportCodec, m.exportMips);
             }
         }
-        // 2) Diffuse fallbacks
         if (!ok && m.kind == MapKind::Diffuse) {
             if (diffuseOverride && diffuseOverride->GetWidth() > 0) {
-                ok = ExportTileCacheToFile(*diffuseOverride, path);
-            } else if (diffuseRgba8 && diffuseW > 0 && diffuseH > 0 &&
-                       diffuseRgba8->size() >= (size_t)diffuseW * (size_t)diffuseH * 4u) {
-                ok = ImageManager::SaveRGBA8ToFile(path, diffuseRgba8->data(), diffuseW, diffuseH);
+                std::vector<uint8_t> tmp((size_t)diffuseOverride->GetWidth() *
+                                         (size_t)diffuseOverride->GetHeight() * 4u);
+                diffuseOverride->ExportRGBA8(tmp.data(), diffuseOverride->GetWidth(),
+                                             diffuseOverride->GetHeight());
+                ok = SaveWithCodec(path, tmp.data(), diffuseOverride->GetWidth(),
+                                   diffuseOverride->GetHeight(), m.exportCodec, m.exportMips);
+            } else if (diffuseRgba8 && diffuseW > 0 && diffuseH > 0) {
+                ok = SaveWithCodec(path, diffuseRgba8->data(), diffuseW, diffuseH,
+                                   m.exportCodec, m.exportMips);
             }
         }
-        // 3) Imported composite
-        if (!ok)
-            ok = ExportMapToFile(set, m.kind, path);
 
         if (ok) {
             ++r.written;

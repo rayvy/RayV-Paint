@@ -1,4 +1,5 @@
 #include "Canvas.h"
+#include "core/UndoRedoManager.h"
 #include "layer/LayerStyles.h"
 #include "core/TileCache.h"
 #include "core/HalfFloat.h"
@@ -862,10 +863,14 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
         return;
     }
 
+    std::vector<uint8_t> oldMask = layer.hasMask ? layer.mask : std::vector<uint8_t>{};
+    bool oldHas = layer.hasMask;
     // Photoshop default: white mask = fully reveal layer content.
     layer.mask.assign((size_t)m_Width * m_Height, 255);
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
+    layer.maskDirtyX0 = 0; layer.maskDirtyY0 = 0;
+    layer.maskDirtyX1 = m_Width - 1; layer.maskDirtyY1 = m_Height - 1;
     m_PaintTarget = PaintTarget::LayerMask;
     if (m_ActiveLayerIdx != index) m_ActiveLayerIdx = index;
 
@@ -873,37 +878,49 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
         UpdateLayerMaskTexture(device, index);
     }
     m_CompositeDirty = true;
+    m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
+        "Add Mask", index, oldHas, std::move(oldMask), true, layer.mask));
+    m_IsDocumentModified = true;
     Logger::Get().InfoTag("io", "Created layer mask on '" + layer.name + "' (paint target = mask)");
 }
 
 void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     if (index < 0 || index >= m_Layers.size()) return;
     Layer& layer = m_Layers[index];
-    
+
+    std::vector<uint8_t> oldMask = layer.hasMask ? layer.mask : std::vector<uint8_t>{};
+    bool oldHas = layer.hasMask;
+
     layer.mask.assign((size_t)m_Width * m_Height, 0);
     if (m_HasSelection && m_SelectionMask.size() == (size_t)m_Width * m_Height) {
         std::copy(m_SelectionMask.begin(), m_SelectionMask.end(), layer.mask.begin());
     } else {
         layer.mask.assign((size_t)m_Width * m_Height, 255);
     }
-    
+
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
+    layer.maskDirtyX0 = 0; layer.maskDirtyY0 = 0;
+    layer.maskDirtyX1 = m_Width - 1; layer.maskDirtyY1 = m_Height - 1;
     m_PaintTarget = PaintTarget::LayerMask;
     if (m_ActiveLayerIdx != index) m_ActiveLayerIdx = index;
-    
+
     if (device) {
         UpdateLayerMaskTexture(device, index);
     }
     m_CompositeDirty = true;
-    
+    m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
+        "Add Mask from Selection", index, oldHas, std::move(oldMask), true, layer.mask));
+    m_IsDocumentModified = true;
+
     Logger::Get().Info("Created layer mask from selection for layer: " + layer.name);
 }
 
 void Canvas::DeleteLayerMask(int index) {
     if (index < 0 || index >= m_Layers.size()) return;
     Layer& layer = m_Layers[index];
-    
+    if (!layer.hasMask) return;
+    auto oldMask = layer.mask;
     if (layer.maskTexture) { layer.maskTexture->Release(); layer.maskTexture = nullptr; }
     if (layer.maskSRV) { layer.maskSRV->Release(); layer.maskSRV = nullptr; }
     layer.mask.clear();
@@ -913,7 +930,9 @@ void Canvas::DeleteLayerMask(int index) {
         m_PaintTarget = PaintTarget::LayerContent;
     }
     m_CompositeDirty = true;
-    
+    m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
+        "Delete Mask", index, true, std::move(oldMask), false, std::vector<uint8_t>{}));
+    m_IsDocumentModified = true;
     Logger::Get().Info("Deleted layer mask for layer: " + layer.name);
 }
 
@@ -1604,6 +1623,7 @@ int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
     dup.smartSourcePath = src.smartSourcePath;
     dup.smartScale = src.smartScale;
     dup.fill = src.fill;
+    dup.workSpace = src.workSpace; // map participation
     dup.filters = src.filters;
     dup.filtersDirty = true;
     dup.styles = src.styles;
@@ -1885,6 +1905,12 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
             m_LastDabY = currRawY;
             m_PrevStabilizedX = currRawX;
             m_PrevStabilizedY = currRawY;
+            // Snapshot mask for undo
+            if (layer.hasMask)
+                m_MaskStrokeBackup = layer.mask;
+            else
+                m_MaskStrokeBackup.clear();
+            m_MaskStrokeBackupValid = true;
             // Default mask brush: white (reveal). Eraser paints black.
             if (!activeBrush.erase) {
                 activeBrush.color[0] = activeBrush.color[1] = activeBrush.color[2] = 1.f;
@@ -1901,44 +1927,70 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
             if (!activeBrush.erase) {
                 activeBrush.color[0] = activeBrush.color[1] = activeBrush.color[2] = 1.f;
             }
-            // Match layer PaintEngine spacing (radius * 2 * spacing) — denser step
-            // flooded CPU+GPU every frame and used to recreate mask SRV (crash).
-            float dx = sx - m_LastDabX, dy = sy - m_LastDabY;
-            float dist = std::sqrt(dx * dx + dy * dy);
+            // Match PaintEngine::DrawStrokeSegment — full segment walk so SHIFT+click
+            // long lines complete (old 64-stamp cap left only a short dash).
+            float x0 = m_LastDabX, y0 = m_LastDabY;
+            float x1 = sx, y1 = sy;
+            float dx = x1 - x0, dy = y1 - y0;
+            float segLen = std::sqrt(dx * dx + dy * dy);
             const float spacingMul = (activeBrush.tip) ? activeBrush.tip->spacingMul : 1.0f;
             float step = std::max(1.f, activeBrush.radius * 2.0f *
                 std::max(0.05f, activeBrush.spacing) * spacingMul);
-            // Cap stamps per mouse event so a huge jump cannot stall/kill the app.
-            constexpr int kMaxMaskStampsPerUpdate = 64;
-            int stamps = 0;
-            while (m_StrokeDistanceAccumulator + dist >= step && stamps < kMaxMaskStampsPerUpdate) {
-                float t = (step - m_StrokeDistanceAccumulator) / std::max(dist, 1e-4f);
-                t = std::clamp(t, 0.f, 1.f);
-                float px = m_LastDabX + dx * t;
-                float py = m_LastDabY + dy * t;
-                PaintMaskStamp(px, py, activeBrush);
-                if (m_MirrorHorizontal) PaintMaskStamp((float)m_Width - px, py, activeBrush);
-                if (m_MirrorVertical) PaintMaskStamp(px, (float)m_Height - py, activeBrush);
-                if (m_MirrorHorizontal && m_MirrorVertical)
-                    PaintMaskStamp((float)m_Width - px, (float)m_Height - py, activeBrush);
-                m_LastDabX = px; m_LastDabY = py;
-                m_StrokeDistanceAccumulator = 0.f;
-                dx = sx - m_LastDabX; dy = sy - m_LastDabY;
-                dist = std::sqrt(dx * dx + dy * dy);
-                ++stamps;
-            }
-            if (stamps >= kMaxMaskStampsPerUpdate) {
-                // Snap to cursor; skip intermediate stamps to stay responsive.
-                m_LastDabX = sx; m_LastDabY = sy;
-                m_StrokeDistanceAccumulator = 0.f;
-            } else {
-                m_StrokeDistanceAccumulator += dist;
-                m_LastDabX = sx; m_LastDabY = sy;
+            if (segLen > 1e-4f) {
+                float dirX = dx / segLen, dirY = dy / segLen;
+                float traveled = 0.f;
+                constexpr int kMaxMaskStampsPerUpdate = 4096;
+                int stamps = 0;
+                while (traveled <= segLen && stamps < kMaxMaskStampsPerUpdate) {
+                    float needed = step - m_StrokeDistanceAccumulator;
+                    if (traveled + needed <= segLen) {
+                        traveled += needed;
+                        float px = x0 + dirX * traveled;
+                        float py = y0 + dirY * traveled;
+                        PaintMaskStamp(px, py, activeBrush);
+                        if (m_MirrorHorizontal) PaintMaskStamp((float)m_Width - px, py, activeBrush);
+                        if (m_MirrorVertical) PaintMaskStamp(px, (float)m_Height - py, activeBrush);
+                        if (m_MirrorHorizontal && m_MirrorVertical)
+                            PaintMaskStamp((float)m_Width - px, (float)m_Height - py, activeBrush);
+                        m_LastDabX = px; m_LastDabY = py;
+                        m_StrokeDistanceAccumulator = 0.f;
+                        ++stamps;
+                    } else {
+                        float ex = x1 - m_LastDabX, ey = y1 - m_LastDabY;
+                        m_StrokeDistanceAccumulator = std::sqrt(ex * ex + ey * ey);
+                        break;
+                    }
+                }
+                if (stamps >= kMaxMaskStampsPerUpdate) {
+                    // Extreme path: final stamp at endpoint so SHIFT lines still close.
+                    PaintMaskStamp(x1, y1, activeBrush);
+                    if (m_MirrorHorizontal) PaintMaskStamp((float)m_Width - x1, y1, activeBrush);
+                    if (m_MirrorVertical) PaintMaskStamp(x1, (float)m_Height - y1, activeBrush);
+                    if (m_MirrorHorizontal && m_MirrorVertical)
+                        PaintMaskStamp((float)m_Width - x1, (float)m_Height - y1, activeBrush);
+                    m_LastDabX = x1; m_LastDabY = y1;
+                    m_StrokeDistanceAccumulator = 0.f;
+                }
             }
             m_PrevStabilizedX = sx; m_PrevStabilizedY = sy;
         } else if (phase == StrokePhase::End) {
             m_IsStrokeActive = false;
             m_IsDocumentModified = true;
+            // Undo for mask strokes (full-mask snapshot — simple & reliable)
+            if (m_MaskStrokeBackupValid && m_ActiveLayerIdx >= 0 &&
+                m_ActiveLayerIdx < (int)m_Layers.size() &&
+                m_Layers[m_ActiveLayerIdx].hasMask) {
+                auto& L = m_Layers[m_ActiveLayerIdx];
+                if (L.mask != m_MaskStrokeBackup) {
+                    m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
+                        brush.erase ? "Mask Erase" : "Mask Paint",
+                        m_ActiveLayerIdx,
+                        true, m_MaskStrokeBackup,
+                        true, L.mask));
+                }
+            }
+            m_MaskStrokeBackupValid = false;
+            m_MaskStrokeBackup.clear();
         }
         return;
     }
@@ -2221,15 +2273,28 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             if (layer.IsFill()) {
                 bool fillDirty = layer.needsUpload || layer.stylesDirty || layer.presentationDirty ||
                                  layer.filtersDirty || !layer.texture || !layer.srv;
+                // Invisible fill must not force a full recomposite every frame.
+                // Sticky presentationDirty used to re-upload forever (lag only dies on delete).
                 if (fillDirty) {
-                    EnsureFillLayerGpu(device, layer);
-                    needsCompositeRebuild = true;
-                    layer.thumbDirty = true;
-                    m_ChannelPreviewDirty = true;
+                    if (layer.visible) {
+                        EnsureFillLayerGpu(device, layer);
+                        needsCompositeRebuild = true;
+                        layer.thumbDirty = true;
+                        m_ChannelPreviewDirty = true;
+                    } else {
+                        // Defer GPU; clear sticky flags that would thrash compose while hidden.
+                        const bool needsFull = layer.HasEnabledStyles() ||
+                            LayerFilterListHasEnabled(layer.filters) || layer.fill.HasTexture();
+                        if (!needsFull) {
+                            layer.needsUpload = false;
+                            layer.presentationDirty = false;
+                            layer.stylesDirty = false;
+                        }
+                    }
                 }
-                // Full-buffer path: styles, filters, or fill texture
-                if (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters) ||
-                    layer.fill.HasTexture()) {
+                // Full-buffer path: styles, filters, or fill texture (visible only)
+                if (layer.visible && (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters) ||
+                    layer.fill.HasTexture())) {
                     if (layer.filtersDirty) RebuildFilteredPixels(layer);
                     if (layer.HasEnabledStyles() && (layer.presentationDirty || layer.stylesDirty))
                         RebuildLayerPresentation(layer);
@@ -2259,7 +2324,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                         needsCompositeRebuild = true;
                     }
                 }
-                if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
+                if (layer.visible && layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
                     UpdateLayerMaskTexture(device, static_cast<int>(i));
                     needsCompositeRebuild = true;
                 }
@@ -2451,14 +2516,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     const bool roleIso = m_ViewRoleIsolate;
     const texset::ChannelRole soloRole = m_ViewSoloRole;
 
-    // Non-Diffuse: draw imported map composite as base underlay (so user SEES LightMap/etc.)
-    if (viewMap != texset::MapKind::Diffuse && m_ViewUnderlaySRV) {
-        Layer dummy;
-        dummy.alphaRewrite = true;
-        dummy.blendMode = BlendMode::Normal;
-        dummy.opacity = 1.f;
-        drawLayerSrv(dummy, m_ViewUnderlaySRV, false, 1.f);
-    }
+    // Maps are layers — no hidden underlay. Filter by workSpace below.
 
     for (size_t i = 0; i < m_Layers.size(); ++i) {
         Layer& layer = m_Layers[i];
@@ -3195,7 +3253,7 @@ std::vector<float> Canvas::GetCompositePixels() const {
 
 bool Canvas::ComposePackedMapRGBA8(texset::MapKind kind,
                                    const std::vector<texset::MapSlot>& maps,
-                                   const TileCache* importedBase,
+                                   const TileCache* /*importedBase unused — maps are layers now*/,
                                    std::vector<uint8_t>& outRgba,
                                    int& outW, int& outH) const {
     const texset::MapSlot* slot = texset::FindMap(maps, kind);
@@ -3203,31 +3261,7 @@ bool Canvas::ComposePackedMapRGBA8(texset::MapKind kind,
     outH = (slot && slot->height > 0) ? slot->height : m_Height;
     if (outW <= 0 || outH <= 0) return false;
 
-    // Diffuse: full document composite (all visible layers)
-    if (kind == texset::MapKind::Diffuse) {
-        if (!ComposeVisibleLayersRGBA8(m_Layers, m_Width, m_Height, outRgba))
-            return false;
-        // If map size differs, nearest-neighbor resample
-        if (outW != m_Width || outH != m_Height) {
-            std::vector<uint8_t> src = std::move(outRgba);
-            outRgba.assign((size_t)outW * (size_t)outH * 4u, 0);
-            for (int y = 0; y < outH; ++y) {
-                int sy = std::min(m_Height - 1, y * m_Height / outH);
-                for (int x = 0; x < outW; ++x) {
-                    int sx = std::min(m_Width - 1, x * m_Width / outW);
-                    size_t di = ((size_t)y * outW + x) * 4;
-                    size_t si = ((size_t)sy * m_Width + sx) * 4;
-                    outRgba[di + 0] = src[si + 0];
-                    outRgba[di + 1] = src[si + 1];
-                    outRgba[di + 2] = src[si + 2];
-                    outRgba[di + 3] = src[si + 3];
-                }
-            }
-        }
-        return true;
-    }
-
-    // Non-Diffuse: start from imported base or neutral
+    // IMPORTANT: only layers bound to this map (workSpace). Never dump all maps into Diffuse.
     outRgba.assign((size_t)outW * (size_t)outH * 4u, 0);
     const bool isNormal = (kind == texset::MapKind::NormalMap);
     for (size_t i = 0; i < outRgba.size(); i += 4) {
@@ -3238,25 +3272,7 @@ bool Canvas::ComposePackedMapRGBA8(texset::MapKind kind,
         }
     }
 
-    if (importedBase && importedBase->GetWidth() > 0) {
-        std::vector<uint8_t> base((size_t)importedBase->GetWidth() * (size_t)importedBase->GetHeight() * 4u);
-        importedBase->ExportRGBA8(base.data(), importedBase->GetWidth(), importedBase->GetHeight());
-        int bw = importedBase->GetWidth(), bh = importedBase->GetHeight();
-        for (int y = 0; y < outH; ++y) {
-            int sy = std::min(bh - 1, y * bh / outH);
-            for (int x = 0; x < outW; ++x) {
-                int sx = std::min(bw - 1, x * bw / outW);
-                size_t di = ((size_t)y * outW + x) * 4;
-                size_t si = ((size_t)sy * bw + sx) * 4;
-                outRgba[di + 0] = base[si + 0];
-                outRgba[di + 1] = base[si + 1];
-                outRgba[di + 2] = base[si + 2];
-                outRgba[di + 3] = base[si + 3];
-            }
-        }
-    }
-
-    // Blend layers that write this map (Fills with packing + rasters with workSpace)
+    // Blend layers that write this map only
     auto blendOver = [](uint8_t* dp, float sr, float sg, float sb, float sa) {
         if (sa <= 0.f) return;
         float dr = dp[0] / 255.f, dg = dp[1] / 255.f, db = dp[2] / 255.f, da = dp[3] / 255.f;
@@ -3332,27 +3348,44 @@ void Canvas::SampleCompositePixel(int x, int y, float outColor[4]) const {
 
     if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) return;
 
+    // Match viewport: only layers that participate in the active Channels map.
+    // Previously sampled ALL tileCache layers → pipette only looked right on NormalMap
+    // (or whatever map happened to dominate the unfiltered blend).
+    const texset::MapKind viewMap = m_ViewMapKind;
+    const bool roleIso = m_ViewRoleIsolate;
+    const texset::ChannelRole soloRole = m_ViewSoloRole;
+
     std::vector<const Layer*> vis;
     vis.reserve(m_Layers.size());
     for (const auto& layer : m_Layers) {
-        if (LayerEffectivelyVisible(m_Layers, layer)) vis.push_back(&layer);
+        if (!LayerEffectivelyVisible(m_Layers, layer)) continue;
+        if (layer.isGroup) continue;
+        if (!layer.ParticipatesInView(viewMap, roleIso, soloRole)) continue;
+        vis.push_back(&layer);
     }
     if (vis.empty()) return;
-
-    // Float docs (and any non-U8 storage): blend in float so HDR/height values survive.
-    // U8 docs keep the legacy U8-quantize path for display parity with the viewport.
-    const bool floatSample = (m_DocumentBitDepth != DocumentBitDepth::U8) ||
-                             (m_CanvasFormat != CanvasPixelFormat::RGBA8);
 
     auto sampleStack = [&](float outF[4]) {
         outF[0] = outF[1] = outF[2] = outF[3] = 0.f;
         bool first = true;
         for (const Layer* layer : vis) {
-            const TileCache* cache = layer->tileCache.get();
-            if (!cache) continue;
-            const bool useMask = layer->hasMask && layer->mask.size() == (size_t)m_Width * m_Height;
             float rgba[4] = {};
-            cache->GetPixelF(x, y, rgba);
+            bool have = false;
+            if (layer->IsFill()) {
+                if (!m_ActiveSetMaps.empty()) {
+                    if (!layer->fill.ResolveForMap(m_ActiveSetMaps, viewMap, rgba))
+                        continue;
+                } else {
+                    layer->fill.ResolveRgba(rgba);
+                }
+                have = true;
+            } else if (layer->tileCache) {
+                layer->tileCache->GetPixelF(x, y, rgba);
+                have = true;
+            }
+            if (!have) continue;
+
+            const bool useMask = layer->hasMask && layer->mask.size() == (size_t)m_Width * m_Height;
             float op = layer->opacity;
             float mask = 1.f;
             if (useMask) mask = layer->mask[(size_t)y * m_Width + x] / 255.f;
@@ -3371,7 +3404,6 @@ void Canvas::SampleCompositePixel(int x, int y, float outColor[4]) const {
     };
 
     sampleStack(outColor);
-    (void)floatSample;
 }
 
 void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name, const std::vector<float>& pixels, int width, int height) {
@@ -6699,6 +6731,9 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
             if (desc.Width != (UINT)m_Width || desc.Height != (UINT)m_Height)
                 RecreateLayerTexture(device, layer);
         }
+        // presentationDirty cleared by RebuildLayerPresentation; solid+texture still needs upload path
+        if (!layer.HasEnabledStyles() && !LayerFilterListHasEnabled(layer.filters))
+            layer.presentationDirty = false;
         return;
     }
 
@@ -6747,7 +6782,12 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
         }
         ctx->Release();
     }
+    // MUST clear all dirty flags — sticky presentationDirty forced full recomposite every frame
+    // after enabling multi-map fill channels (lag only ended when the layer was deleted).
     layer.needsUpload = false;
+    layer.presentationDirty = false;
+    layer.stylesDirty = false;
+    layer.filtersDirty = false;
 }
 
 bool Canvas::LoadFillTexture(int layerIdx, const std::string& filepath) {

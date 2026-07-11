@@ -131,6 +131,8 @@ public:
     ~Canvas();
     friend class DocumentGeometryCommand;
     friend class RasterizeCommand;
+    friend class LayerMaskCommand;
+    friend class PaintStrokeCommand;
 
     bool Initialize(ID3D11Device* device);
     void Shutdown();
@@ -577,7 +579,11 @@ private:
     texset::ChannelRole m_ViewSoloRole = texset::ChannelRole::None;
     std::vector<texset::MapSlot> m_ActiveSetMaps; // soft labels + map sizes
 
-    // Imported map pixels for non-Diffuse viewport (GPU)
+    // Mask stroke undo buffer
+    std::vector<uint8_t> m_MaskStrokeBackup;
+    bool m_MaskStrokeBackupValid = false;
+
+    // Optional underlay (legacy; prefer map layers)
     ID3D11Texture2D* m_ViewUnderlayTex = nullptr;
     ID3D11ShaderResourceView* m_ViewUnderlaySRV = nullptr;
     int m_ViewUnderlayW = 0, m_ViewUnderlayH = 0;

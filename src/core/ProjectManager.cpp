@@ -124,13 +124,17 @@ bool Project::ImportMapFile(texset::MapKind kind, const std::string& filepath,
         ok = canvas->ImportImageAsMapLayer(device, filepath, kind, layerName);
     }
 
-    // Meta + optional composite cache (export / underlay fallback)
     if (ok) {
         int w = canvas->GetWidth();
         int h = canvas->GetHeight();
+        // Native size from last layer if available
+        if (!canvas->GetLayers().empty() && canvas->GetLayers().back().tileCache) {
+            // document size already used for layer; keep slot size as native intent
+            // Prefer EnableMap with document size (UV space)
+        }
         set->EnableMap(kind, w, h, filepath);
-        // Keep mapComposites as a mirror of the layer for quick underlay (optional)
-        texset::ImportMapFromFile(*set, kind, filepath, soloRole);
+        // Note: mapComposites intentionally NOT used — maps are layers.
+        (void)soloRole;
         canvas->SetDocumentModified(true);
         if (texset::TextureSet* s = textureSets.Active())
             canvas->SetActiveSetMaps(s->maps);
@@ -350,17 +354,29 @@ int Project::QuickExportAllMaps(const std::string& baseDirHint) {
     // Sync Diffuse size from canvas
     SyncTextureSetsFromCanvas();
 
-    // Pack every enabled map via channel packing + fills + imported bases
+    // Pack every enabled map from layers (workSpace-filtered) — no mapComposites
     std::unordered_map<int, texset::MapExportPixels> packed;
     for (const auto& m : set->maps) {
         if (!m.enabled) continue;
-        const TileCache* base = nullptr;
-        auto it = set->mapComposites.find((int)m.kind);
-        if (it != set->mapComposites.end() && it->second)
-            base = it->second.get();
-
         texset::MapExportPixels px;
-        if (canvas->ComposePackedMapRGBA8(m.kind, set->maps, base, px.rgba, px.w, px.h)) {
+        // Use slot native size if set
+        if (canvas->ComposePackedMapRGBA8(m.kind, set->maps, nullptr, px.rgba, px.w, px.h)) {
+            // Respect explicit export size on slot
+            if (m.width > 0 && m.height > 0 && (px.w != m.width || px.h != m.height)) {
+                std::vector<uint8_t> resized((size_t)m.width * (size_t)m.height * 4u);
+                for (int y = 0; y < m.height; ++y) {
+                    int sy = std::min(px.h - 1, y * px.h / m.height);
+                    for (int x = 0; x < m.width; ++x) {
+                        int sx = std::min(px.w - 1, x * px.w / m.width);
+                        size_t di = ((size_t)y * m.width + x) * 4;
+                        size_t si = ((size_t)sy * px.w + sx) * 4;
+                        resized[di+0]=px.rgba[si+0]; resized[di+1]=px.rgba[si+1];
+                        resized[di+2]=px.rgba[si+2]; resized[di+3]=px.rgba[si+3];
+                    }
+                }
+                px.rgba = std::move(resized);
+                px.w = m.width; px.h = m.height;
+            }
             Logger::Get().InfoTag("texset",
                 std::string("Packed ") + texset::MapKindName(m.kind) + " " +
                 std::to_string(px.w) + "x" + std::to_string(px.h));

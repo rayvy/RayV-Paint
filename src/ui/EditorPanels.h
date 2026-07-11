@@ -45,6 +45,11 @@ namespace UI {
     ActiveTool CycleWandTool(ActiveTool current);
     void SampleCanvasColor(Canvas& canvas, float canvasX, float canvasY, float outColor[4]);
 
+    // Fill Layer color picker → sample next canvas click into armed map slot.
+    bool IsFillPipetteArmed();
+    // If armed and LMB on canvas: write sample into fill.mapColor[map] and clear arm. Returns true if consumed.
+    bool TryApplyFillPipette(Canvas& canvas, float canvasX, float canvasY);
+
     // Brush preset popup (RMB in viewport). Call every frame; open via openFlag/pos.
     void DrawBrushPickerPopup(bool& openFlag, ImVec2 popupPos, BrushSettings& brush);
 
