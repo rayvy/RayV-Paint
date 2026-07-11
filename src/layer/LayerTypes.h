@@ -162,7 +162,7 @@ struct FillLayerParams {
     int textureW = 0;
     int textureH = 0;
 
-    // Soft / legacy
+    // Soft / migration-only (roles → map colors). UI paints RGBA maps + optional Labels for 3D.
     std::vector<FillRoleSlot> roles;
     FillChannelTarget target = FillChannelTarget::Diffuse;
     FillValueMode mode = FillValueMode::RGB;

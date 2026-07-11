@@ -1,17 +1,17 @@
 # Plan 0 — Texture Set Core (cross-texture / multi-file)
 
-**Date:** 2026-07-11  
-**Status:** P0.1–P0.3 in tree (+ export-all stub, Fill workSpace)  
-**Goal:** First-class **Texture Set** in core (Substance-like), shared by Advanced and Advanced Mod Mode. 3D preview only *consumes* sets; it does not own them.
+**Date:** 2026-07-12  
+**Status:** Maps-as-layers simplification in tree (no mapComposites).  
+**Goal:** First-class **Texture Set** in core, shared by Advanced and Advanced Mod Mode. 3D preview only *consumes* sets.
 
 ### Implemented so far
-- `src/texset/*` — MapKind, ChannelRole (None0–None7 + PBR), MapSlot pack/size/exportPath, templates
-- `Project.textureSets` + `.rayp` `texture_sets` meta round-trip
-- **Channels panel** = set/map/pack/size/export hub (Simple=RGBA only; Advanced=maps; AdvMod=sets)
-- Viewport compose filters layers by `workSpace` vs active map/role isolate
-- Layer channel activity UI + paint respects `channelWriteMask`
-- Ctrl+E → `QuickExportAllMaps` (per-map export paths)
-- **Not yet:** multi-map native TileCache paint (P0.4), true pack-merge on export from roles (partial), live 3D SRV (P0.8)
+- `src/texset/*` — MapKind, soft ChannelRole labels, MapSlot size/export, templates
+- `Project.textureSets` + `.rayp` meta; maps imported as real Layers with `workSpace`
+- Viewport filters by `workSpace` + active map; Fill multi-map + per-channel write masks
+- Native-res `nativeMapCache` kept on import when map size ≠ document (export prefers it)
+- Sparse tiled masks (`MaskTiles`) + delta mask undo; layer lifecycle undo
+- Ctrl+E batch export; File Explorer for save/open/import/export
+- **Still open:** paint *into* native resolution (viewport still document UV), AdvMod multi-set UX polish, full 3D material live bind
 
 ---
 

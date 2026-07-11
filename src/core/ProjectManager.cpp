@@ -108,9 +108,23 @@ bool Project::ImportMapFile(texset::MapKind kind, const std::string& filepath,
         layerName = filepath;
     }
 
+    // Blank starter tab has empty "Background" at default size (often 1024/4096).
+    // Loading Diffuse must adopt image native size — never UV-upsample into blank size.
+    auto isBlankStarter = [&]() {
+        if (canvas->GetWidth() <= 0 || canvas->GetHeight() <= 0) return true;
+        if (canvas->GetLayers().empty()) return true;
+        if (canvas->GetLayers().size() == 1) {
+            const auto& L = canvas->GetLayers()[0];
+            if (L.name == "Background" &&
+                (!L.tileCache || L.tileCache->IsEmpty()) &&
+                !L.IsFill() && !L.hasMask)
+                return true;
+        }
+        return false;
+    };
+
     bool ok = false;
-    if (kind == texset::MapKind::Diffuse &&
-        (canvas->GetLayers().empty() || canvas->GetWidth() <= 0)) {
+    if (kind == texset::MapKind::Diffuse && isBlankStarter()) {
         ok = canvas->LoadImageToLayer(device, filepath);
         if (ok && !canvas->GetLayers().empty()) {
             auto& L = canvas->GetLayers().back();
@@ -126,13 +140,16 @@ bool Project::ImportMapFile(texset::MapKind kind, const std::string& filepath,
     if (ok) {
         int w = canvas->GetWidth();
         int h = canvas->GetHeight();
-        // Native size from last layer if available
-        if (!canvas->GetLayers().empty() && canvas->GetLayers().back().tileCache) {
-            // document size already used for layer; keep slot size as native intent
-            // Prefer EnableMap with document size (UV space)
+        // Prefer native map size on slot when available (export / pack)
+        if (!canvas->GetLayers().empty()) {
+            const auto& L = canvas->GetLayers().back();
+            if (L.nativeMapCache && L.nativeMapW > 0 && L.nativeMapH > 0 &&
+                L.nativeMapKind == kind) {
+                w = L.nativeMapW;
+                h = L.nativeMapH;
+            }
         }
         set->EnableMap(kind, w, h, filepath);
-        // Note: mapComposites intentionally NOT used — maps are layers.
         (void)soloRole;
         canvas->SetDocumentModified(true);
         if (texset::TextureSet* s = textureSets.Active())
@@ -233,9 +250,13 @@ int Project::SetupAdvancedFromBaseTexture(
         set->name = setName.empty() ? group : setName;
     }
 
-    // 3) Load base Diffuse as first real layer
+    // 3) Drop blank starter layers so Diffuse sets document size from the file
+    //    (never keep default 1024/4096 blank and UV-upsample maps into it).
+    canvas->ClearAllLayersNoUndo();
+    canvas->ClearUndoHistory();
+
+    // 4) Load base Diffuse as first real layer (adopts native W×H)
     if (!ImportMapFile(texset::MapKind::Diffuse, basePath)) {
-        // Fallback: raw load if ImportMapFile path failed empty canvas edge-case
         if (!canvas->LoadImageToLayer(device, basePath)) {
             Logger::Get().ErrorTag("project", "Failed to load base Diffuse: " + basePath);
             return 0;
@@ -247,15 +268,17 @@ int Project::SetupAdvancedFromBaseTexture(
         }
     }
     canvas->SetProjectType(Canvas::ProjectType::Advanced);
+    canvas->ClearUndoHistory(); // don't keep setup deletes/creates in history
     SyncTextureSetsFromCanvas();
 
     int loaded = 1;
     Logger::Get().InfoTag("project",
         "Advanced base Diffuse loaded " + std::to_string(canvas->GetWidth()) + "x" +
         std::to_string(canvas->GetHeight()) + " stem=" + group +
-        " layers=" + std::to_string(canvas->GetLayers().size()));
+        " layers=" + std::to_string(canvas->GetLayers().size()) +
+        " (document size = Diffuse native)");
 
-    // 4) Sibling maps in same folder matching group stem
+    // 5) Sibling maps in same folder matching group stem
     fs::path dir = baseFs.parent_path();
     std::error_code ec;
     struct Found { texset::MapKind kind; std::string path; };
@@ -310,7 +333,7 @@ int Project::SetupAdvancedFromBaseTexture(
         }
     }
 
-    // 5) Wire UI/view state
+    // 6) Wire UI/view state
     if (texset::TextureSet* set = textureSets.Active()) {
         canvas->SetActiveSetMaps(set->maps);
         set->activeMap = texset::MapKind::Diffuse;

@@ -110,25 +110,46 @@ LayerMaskCommand::LayerMaskCommand(const std::string& name, int layerIdx,
     , m_OldHas(oldHasMask), m_NewHas(newHasMask)
     , m_OldMask(std::move(oldMask)), m_NewMask(std::move(newMask)) {}
 
-void LayerMaskCommand::Apply(Canvas* canvas, bool hasMask, const std::vector<uint8_t>& mask) {
+LayerMaskCommand::LayerMaskCommand(const std::string& name, int layerIdx,
+                                   bool oldHasMask, std::vector<MaskTileSnapshot> oldTiles,
+                                   bool newHasMask, std::vector<MaskTileSnapshot> newTiles,
+                                   int maskW, int maskH)
+    : m_Name(name), m_LayerIdx(layerIdx)
+    , m_OldHas(oldHasMask), m_NewHas(newHasMask)
+    , m_UseTiles(true), m_MaskW(maskW), m_MaskH(maskH)
+    , m_OldTiles(std::move(oldTiles)), m_NewTiles(std::move(newTiles)) {}
+
+void LayerMaskCommand::Apply(Canvas* canvas, bool hasMask, const std::vector<uint8_t>& mask,
+                             const std::vector<MaskTileSnapshot>* tiles) {
     if (!canvas || m_LayerIdx < 0 || m_LayerIdx >= (int)canvas->m_Layers.size()) return;
     auto& L = canvas->m_Layers[m_LayerIdx];
     if (hasMask) {
         L.hasMask = true;
-        L.mask = mask;
-        // Full re-upload (dirty rect may be empty after delete/create round-trip)
-        L.maskDirtyX0 = 0;
-        L.maskDirtyY0 = 0;
-        L.maskDirtyX1 = canvas->m_Width > 0 ? canvas->m_Width - 1 : -1;
-        L.maskDirtyY1 = canvas->m_Height > 0 ? canvas->m_Height - 1 : -1;
+        if (tiles && m_UseTiles) {
+            if (!L.maskTiles) L.maskTiles = std::make_unique<MaskTiles>();
+            L.maskTiles->Init(m_MaskW > 0 ? m_MaskW : canvas->m_Width,
+                              m_MaskH > 0 ? m_MaskH : canvas->m_Height, 255);
+            L.maskTiles->Clear();
+            L.maskTiles->RestoreTiles(*tiles);
+            L.maskTiles->Flatten(L.mask);
+            L.maskTiles->GetDirty(L.maskDirtyX0, L.maskDirtyY0, L.maskDirtyX1, L.maskDirtyY1);
+        } else {
+            L.mask = mask;
+            if (!L.maskTiles) L.maskTiles = std::make_unique<MaskTiles>();
+            L.maskTiles->ImportFlat(L.mask, canvas->m_Width, canvas->m_Height);
+            L.maskDirtyX0 = 0;
+            L.maskDirtyY0 = 0;
+            L.maskDirtyX1 = canvas->m_Width > 0 ? canvas->m_Width - 1 : -1;
+            L.maskDirtyY1 = canvas->m_Height > 0 ? canvas->m_Height - 1 : -1;
+        }
         L.maskNeedsUpload = true;
-        // Drop stale GPU mask so size/format mismatches cannot skip restore on redo
         if (L.maskTexture) { L.maskTexture->Release(); L.maskTexture = nullptr; }
         if (L.maskSRV) { L.maskSRV->Release(); L.maskSRV = nullptr; }
     } else {
         if (L.maskTexture) { L.maskTexture->Release(); L.maskTexture = nullptr; }
         if (L.maskSRV) { L.maskSRV->Release(); L.maskSRV = nullptr; }
         L.mask.clear();
+        L.maskTiles.reset();
         L.hasMask = false;
         L.maskNeedsUpload = false;
         L.maskDirtyX0 = 0; L.maskDirtyY0 = 0;
@@ -140,12 +161,185 @@ void LayerMaskCommand::Apply(Canvas* canvas, bool hasMask, const std::vector<uin
     canvas->m_IsDocumentModified = true;
 }
 
-void LayerMaskCommand::Undo(Canvas* canvas) { Apply(canvas, m_OldHas, m_OldMask); }
-void LayerMaskCommand::Redo(Canvas* canvas) { Apply(canvas, m_NewHas, m_NewMask); }
+void LayerMaskCommand::Undo(Canvas* canvas) {
+    Apply(canvas, m_OldHas, m_OldMask, m_UseTiles ? &m_OldTiles : nullptr);
+}
+void LayerMaskCommand::Redo(Canvas* canvas) {
+    Apply(canvas, m_NewHas, m_NewMask, m_UseTiles ? &m_NewTiles : nullptr);
+}
 
 size_t LayerMaskCommand::GetOverheadBytes() const {
-    return sizeof(LayerMaskCommand) + m_Name.capacity()
-         + m_OldMask.capacity() + m_NewMask.capacity();
+    size_t n = sizeof(LayerMaskCommand) + m_Name.capacity()
+             + m_OldMask.capacity() + m_NewMask.capacity();
+    auto tileBytes = [](const std::vector<MaskTileSnapshot>& v) {
+        size_t b = v.capacity() * sizeof(MaskTileSnapshot);
+        for (const auto& t : v) if (t.data) b += t.data->capacity();
+        return b;
+    };
+    n += tileBytes(m_OldTiles) + tileBytes(m_NewTiles);
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// LayerMaskPaintCommand
+// ---------------------------------------------------------------------------
+
+LayerMaskPaintCommand::LayerMaskPaintCommand(const std::string& name, int layerIdx,
+                                             std::vector<MaskTileSnapshot> oldTiles,
+                                             std::vector<MaskTileSnapshot> newTiles)
+    : m_Name(name), m_LayerIdx(layerIdx)
+    , m_OldTiles(std::move(oldTiles)), m_NewTiles(std::move(newTiles)) {}
+
+void LayerMaskPaintCommand::Apply(Canvas* canvas, const std::vector<MaskTileSnapshot>& tiles) {
+    if (!canvas || m_LayerIdx < 0 || m_LayerIdx >= (int)canvas->m_Layers.size()) return;
+    auto& L = canvas->m_Layers[m_LayerIdx];
+    if (!L.hasMask) return;
+    if (!L.maskTiles) {
+        L.maskTiles = std::make_unique<MaskTiles>();
+        L.maskTiles->Init(canvas->m_Width, canvas->m_Height, 255);
+        if (!L.mask.empty())
+            L.maskTiles->ImportFlat(L.mask, canvas->m_Width, canvas->m_Height);
+    }
+    L.maskTiles->RestoreTiles(tiles);
+    L.maskTiles->Flatten(L.mask);
+    L.maskTiles->GetDirty(L.maskDirtyX0, L.maskDirtyY0, L.maskDirtyX1, L.maskDirtyY1);
+    L.maskNeedsUpload = true;
+    canvas->MarkCompositeDirty();
+    canvas->m_IsDocumentModified = true;
+}
+
+void LayerMaskPaintCommand::Undo(Canvas* canvas) { Apply(canvas, m_OldTiles); }
+void LayerMaskPaintCommand::Redo(Canvas* canvas) { Apply(canvas, m_NewTiles); }
+
+size_t LayerMaskPaintCommand::GetOverheadBytes() const {
+    size_t n = sizeof(LayerMaskPaintCommand) + m_Name.capacity();
+    for (const auto& t : m_OldTiles) if (t.data) n += t.data->capacity();
+    for (const auto& t : m_NewTiles) if (t.data) n += t.data->capacity();
+    n += (m_OldTiles.capacity() + m_NewTiles.capacity()) * sizeof(MaskTileSnapshot);
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// LayerStackCommand
+// ---------------------------------------------------------------------------
+
+LayerStackCommand::LayerStackCommand(const std::string& name, Kind kind, Snap snap)
+    : m_Name(name), m_Kind(kind), m_Snap(std::move(snap)) {}
+
+void LayerStackCommand::RemoveAt(Canvas* canvas, int index) {
+    if (!canvas || index < 0 || index >= (int)canvas->m_Layers.size()) return;
+    auto& L = canvas->m_Layers[index];
+    if (L.texture) { L.texture->Release(); L.texture = nullptr; }
+    if (L.srv) { L.srv->Release(); L.srv = nullptr; }
+    if (L.maskTexture) { L.maskTexture->Release(); L.maskTexture = nullptr; }
+    if (L.maskSRV) { L.maskSRV->Release(); L.maskSRV = nullptr; }
+    if (L.thumbSRV) { L.thumbSRV->Release(); L.thumbSRV = nullptr; }
+    if (L.thumbTex) { L.thumbTex->Release(); L.thumbTex = nullptr; }
+    for (auto& l : canvas->m_Layers) {
+        if (l.parentGroupId == index) l.parentGroupId = -1;
+        else if (l.parentGroupId > index) l.parentGroupId--;
+    }
+    canvas->m_Layers.erase(canvas->m_Layers.begin() + index);
+    if (canvas->m_Layers.empty()) canvas->m_ActiveLayerIdx = -1;
+    else canvas->m_ActiveLayerIdx = std::clamp(canvas->m_ActiveLayerIdx, 0,
+                                               (int)canvas->m_Layers.size() - 1);
+    canvas->MarkCompositeDirty();
+    canvas->m_IsDocumentModified = true;
+}
+
+void LayerStackCommand::InsertSnap(Canvas* canvas) {
+    if (!canvas) return;
+    int at = std::clamp(m_Snap.index, 0, (int)canvas->m_Layers.size());
+    Layer L;
+    L.name = m_Snap.name;
+    L.type = static_cast<Layer::Type>(m_Snap.type);
+    L.isGroup = m_Snap.isGroup;
+    L.visible = m_Snap.visible;
+    L.opacity = m_Snap.opacity;
+    L.blendMode = m_Snap.blendMode;
+    L.alphaRewrite = m_Snap.alphaRewrite;
+    L.parentGroupId = m_Snap.parentGroupId;
+    L.groupExpanded = m_Snap.groupExpanded;
+    L.fill = m_Snap.fill;
+    L.filters = m_Snap.filters;
+    L.styles = m_Snap.styles;
+    L.smartSourcePath = m_Snap.smartPath;
+    L.smartSourceBytes = m_Snap.smartBytes;
+    L.smartScale = m_Snap.smartScale;
+    L.workSpace = m_Snap.workSpace;
+    L.filtersDirty = !L.filters.empty();
+    L.stylesDirty = !L.styles.empty();
+    L.presentationDirty = true;
+    L.hasMask = m_Snap.hasMask;
+    if (m_Snap.hasMask) {
+        if (!m_Snap.maskTiles.empty()) {
+            L.maskTiles = std::make_unique<MaskTiles>();
+            L.maskTiles->Init(m_Snap.maskW > 0 ? m_Snap.maskW : canvas->m_Width,
+                              m_Snap.maskH > 0 ? m_Snap.maskH : canvas->m_Height, 255);
+            L.maskTiles->RestoreTiles(m_Snap.maskTiles);
+            L.maskTiles->Flatten(L.mask);
+        } else {
+            L.mask = m_Snap.maskFlat;
+            L.maskTiles = std::make_unique<MaskTiles>();
+            L.maskTiles->ImportFlat(L.mask, canvas->m_Width, canvas->m_Height);
+        }
+        L.maskNeedsUpload = true;
+    }
+    if (!L.isGroup && !L.IsFill()) {
+        L.tileCache = std::make_unique<TileCache>();
+        L.tileCache->Init(canvas->m_Width, canvas->m_Height, canvas->m_CanvasFormat);
+        for (const auto& d : m_Snap.tiles)
+            L.tileCache->RestoreTile(d.tileX, d.tileY, d.newState);
+        L.needsUpload = true;
+    }
+    if (m_Snap.hasNative && m_Snap.nativeW > 0 && m_Snap.nativeH > 0) {
+        L.nativeMapCache = std::make_unique<TileCache>();
+        L.nativeMapCache->Init(m_Snap.nativeW, m_Snap.nativeH, canvas->m_CanvasFormat);
+        for (const auto& d : m_Snap.nativeTiles)
+            L.nativeMapCache->RestoreTile(d.tileX, d.tileY, d.newState);
+        L.nativeMapW = m_Snap.nativeW;
+        L.nativeMapH = m_Snap.nativeH;
+        L.nativeMapKind = m_Snap.nativeKind;
+    }
+    for (auto& existing : canvas->m_Layers) {
+        if (existing.parentGroupId >= at)
+            existing.parentGroupId++;
+    }
+    canvas->m_Layers.insert(canvas->m_Layers.begin() + at, std::move(L));
+    canvas->m_ActiveLayerIdx = at;
+    canvas->MarkCompositeDirty();
+    canvas->m_IsDocumentModified = true;
+}
+
+void LayerStackCommand::Undo(Canvas* canvas) {
+    if (!canvas) return;
+    if (m_Kind == Kind::Insert)
+        RemoveAt(canvas, m_Snap.index);
+    else
+        InsertSnap(canvas);
+}
+
+void LayerStackCommand::Redo(Canvas* canvas) {
+    if (!canvas) return;
+    if (m_Kind == Kind::Insert)
+        InsertSnap(canvas);
+    else
+        RemoveAt(canvas, m_Snap.index);
+}
+
+size_t LayerStackCommand::GetOverheadBytes() const {
+    size_t n = sizeof(LayerStackCommand) + m_Name.capacity() + m_Snap.name.capacity()
+             + m_Snap.maskFlat.capacity() + m_Snap.smartBytes.capacity()
+             + m_Snap.tiles.capacity() * sizeof(TileDelta)
+             + m_Snap.nativeTiles.capacity() * sizeof(TileDelta);
+    for (const auto& t : m_Snap.maskTiles) if (t.data) n += t.data->capacity();
+    return n;
+}
+
+void LayerStackCommand::CollectTileData(std::unordered_set<const TileData*>& seen) const {
+    auto add = [&](const TileSnapshot& s) { if (s.data) seen.insert(s.data.get()); };
+    for (const auto& d : m_Snap.tiles) { add(d.oldState); add(d.newState); }
+    for (const auto& d : m_Snap.nativeTiles) { add(d.oldState); add(d.newState); }
 }
 
 // ---------------------------------------------------------------------------

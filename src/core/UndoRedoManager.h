@@ -1,7 +1,9 @@
 #pragma once
 
 #include "TileCache.h"
+#include "MaskTiles.h"
 #include "../layer/LayerTypes.h"
+#include "../texset/TextureSetTypes.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -71,22 +73,99 @@ private:
     bool m_NewHasSelection;
 };
 
-// Layer mask create / paint / delete
+// Layer mask create / delete (full mask only when structure changes)
 class LayerMaskCommand : public UndoCommand {
 public:
     LayerMaskCommand(const std::string& name, int layerIdx,
                      bool oldHasMask, std::vector<uint8_t> oldMask,
                      bool newHasMask, std::vector<uint8_t> newMask);
+    // Prefer tiled snap when available (smaller for mostly-white masks)
+    LayerMaskCommand(const std::string& name, int layerIdx,
+                     bool oldHasMask, std::vector<MaskTileSnapshot> oldTiles,
+                     bool newHasMask, std::vector<MaskTileSnapshot> newTiles,
+                     int maskW, int maskH);
     std::string GetName() const override { return m_Name; }
     void Undo(Canvas* canvas) override;
     void Redo(Canvas* canvas) override;
     size_t GetOverheadBytes() const override;
 private:
-    void Apply(Canvas* canvas, bool hasMask, const std::vector<uint8_t>& mask);
+    void Apply(Canvas* canvas, bool hasMask, const std::vector<uint8_t>& mask,
+               const std::vector<MaskTileSnapshot>* tiles);
     std::string m_Name;
     int m_LayerIdx = -1;
     bool m_OldHas = false, m_NewHas = false;
+    bool m_UseTiles = false;
+    int m_MaskW = 0, m_MaskH = 0;
     std::vector<uint8_t> m_OldMask, m_NewMask;
+    std::vector<MaskTileSnapshot> m_OldTiles, m_NewTiles;
+};
+
+// Mask paint/erase: only dirty-rect tiles (COW), not full 2× document mask
+class LayerMaskPaintCommand : public UndoCommand {
+public:
+    LayerMaskPaintCommand(const std::string& name, int layerIdx,
+                          std::vector<MaskTileSnapshot> oldTiles,
+                          std::vector<MaskTileSnapshot> newTiles);
+    std::string GetName() const override { return m_Name; }
+    void Undo(Canvas* canvas) override;
+    void Redo(Canvas* canvas) override;
+    size_t GetOverheadBytes() const override;
+private:
+    void Apply(Canvas* canvas, const std::vector<MaskTileSnapshot>& tiles);
+    std::string m_Name;
+    int m_LayerIdx = -1;
+    std::vector<MaskTileSnapshot> m_OldTiles, m_NewTiles;
+};
+
+// Layer insert / remove (create, delete, duplicate)
+class LayerStackCommand : public UndoCommand {
+public:
+    enum class Kind : uint8_t { Insert = 0, Remove = 1 };
+
+    struct Snap {
+        int index = 0;
+        std::string name;
+        uint8_t type = 0;
+        bool isGroup = false;
+        bool visible = true;
+        float opacity = 1.f;
+        BlendMode blendMode = BlendMode::Normal;
+        bool alphaRewrite = true;
+        int parentGroupId = -1;
+        bool groupExpanded = true;
+        bool hasMask = false;
+        std::vector<uint8_t> maskFlat;
+        std::vector<MaskTileSnapshot> maskTiles;
+        int maskW = 0, maskH = 0;
+        FillLayerParams fill;
+        std::vector<LayerFilter> filters;
+        std::vector<LayerStyle> styles;
+        std::string smartPath;
+        std::vector<uint8_t> smartBytes;
+        float smartScale = 1.f;
+        texset::LayerWorkSpace workSpace{};
+        // Content tiles (newState = content; old empty for insert capture)
+        std::vector<TileDelta> tiles;
+        // Native map storage
+        bool hasNative = false;
+        int nativeW = 0, nativeH = 0;
+        texset::MapKind nativeKind = texset::MapKind::Diffuse;
+        std::vector<TileDelta> nativeTiles;
+    };
+
+    LayerStackCommand(const std::string& name, Kind kind, Snap snap);
+    std::string GetName() const override { return m_Name; }
+    void Undo(Canvas* canvas) override;
+    void Redo(Canvas* canvas) override;
+    size_t GetOverheadBytes() const override;
+    void CollectTileData(std::unordered_set<const TileData*>& seen) const override;
+
+private:
+    void InsertSnap(Canvas* canvas);
+    void RemoveAt(Canvas* canvas, int index);
+    std::string m_Name;
+    Kind m_Kind = Kind::Insert;
+    Snap m_Snap;
 };
 
 // Full document geometry change (crop / canvas edit): stores per-layer tile maps + size.

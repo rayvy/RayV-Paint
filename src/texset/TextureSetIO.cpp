@@ -89,7 +89,7 @@ bool ExportTileCacheToFile(const TileCache& cache, const std::string& filepath) 
 }
 
 bool ExportMapToFile(const TextureSet& /*set*/, MapKind /*kind*/, const std::string& /*filepath*/) {
-    // mapComposites removed — use ExportAllMaps with packed layer pixels
+    // Use ExportAllMaps with packed layer pixels (ComposePackedMapRGBA8)
     return false;
 }
 

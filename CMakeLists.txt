@@ -95,6 +95,8 @@ set(SOURCES
     src/layer/LayerStyles.h
     src/core/TileCache.cpp
     src/core/TileCache.h
+    src/core/MaskTiles.cpp
+    src/core/MaskTiles.h
     src/core/Logger.cpp
     src/core/Logger.h
     src/core/MemoryStats.cpp

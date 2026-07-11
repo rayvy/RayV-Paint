@@ -26,6 +26,8 @@
 #include <nlohmann/json.hpp>
 #include <thread>
 #include <filesystem>
+#include <unordered_map>
+#include <unordered_set>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -403,9 +405,11 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
     return true;
 }
 
+// Interactive style/filter bake proxy. Full-res only for small docs.
+// Was threshold 4096 → 4K did FULL float bake (multi×256MiB) → lag/OOM/crash on FX.
 static void ComputeCompositePreviewSize(int canvasW, int canvasH, int& outW, int& outH) {
-    constexpr int kProxyThreshold = 4096;
-    constexpr int kProxyMaxDim = 2048;
+    constexpr int kProxyThreshold = 2048; // >2K → proxy
+    constexpr int kProxyMaxDim = 1536;    // viewport bake budget
 
     int maxDim = std::max(canvasW, canvasH);
     if (maxDim <= kProxyThreshold) {
@@ -868,9 +872,13 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
         return;
     }
 
-    std::vector<uint8_t> oldMask = layer.hasMask ? layer.mask : std::vector<uint8_t>{};
     bool oldHas = layer.hasMask;
-    // Photoshop default: white mask = fully reveal layer content.
+    std::vector<MaskTileSnapshot> oldTiles;
+    if (oldHas && layer.maskTiles && layer.maskTiles->Valid())
+        oldTiles = layer.maskTiles->SnapshotAll();
+    // Photoshop default: white mask = fully reveal (sparse tiles = empty = default 255)
+    layer.maskTiles = std::make_unique<MaskTiles>();
+    layer.maskTiles->Init(m_Width, m_Height, 255);
     layer.mask.assign((size_t)m_Width * m_Height, 255);
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
@@ -883,8 +891,10 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
         UpdateLayerMaskTexture(device, index);
     }
     m_CompositeDirty = true;
+    // White mask = empty tile set (cheap undo)
     m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
-        "Add Mask", index, oldHas, std::move(oldMask), true, layer.mask));
+        "Add Mask", index, oldHas, std::move(oldTiles),
+        true, std::vector<MaskTileSnapshot>{}, m_Width, m_Height));
     m_IsDocumentModified = true;
     Logger::Get().InfoTag("io", "Created layer mask on '" + layer.name + "' (paint target = mask)");
 }
@@ -893,8 +903,10 @@ void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     if (index < 0 || index >= m_Layers.size()) return;
     Layer& layer = m_Layers[index];
 
-    std::vector<uint8_t> oldMask = layer.hasMask ? layer.mask : std::vector<uint8_t>{};
     bool oldHas = layer.hasMask;
+    std::vector<MaskTileSnapshot> oldTiles;
+    if (oldHas && layer.maskTiles && layer.maskTiles->Valid())
+        oldTiles = layer.maskTiles->SnapshotAll();
 
     layer.mask.assign((size_t)m_Width * m_Height, 0);
     if (m_HasSelection && m_SelectionMask.size() == (size_t)m_Width * m_Height) {
@@ -902,6 +914,9 @@ void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     } else {
         layer.mask.assign((size_t)m_Width * m_Height, 255);
     }
+    layer.maskTiles = std::make_unique<MaskTiles>();
+    layer.maskTiles->ImportFlat(layer.mask, m_Width, m_Height);
+    auto newTiles = layer.maskTiles->SnapshotAll();
 
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
@@ -915,7 +930,8 @@ void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     }
     m_CompositeDirty = true;
     m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
-        "Add Mask from Selection", index, oldHas, std::move(oldMask), true, layer.mask));
+        "Add Mask from Selection", index, oldHas, std::move(oldTiles),
+        true, std::move(newTiles), m_Width, m_Height));
     m_IsDocumentModified = true;
 
     Logger::Get().Info("Created layer mask from selection for layer: " + layer.name);
@@ -925,10 +941,20 @@ void Canvas::DeleteLayerMask(int index) {
     if (index < 0 || index >= m_Layers.size()) return;
     Layer& layer = m_Layers[index];
     if (!layer.hasMask) return;
-    auto oldMask = layer.mask;
+    std::vector<MaskTileSnapshot> oldTiles;
+    if (layer.maskTiles && layer.maskTiles->Valid())
+        oldTiles = layer.maskTiles->SnapshotAll();
+    else if (!layer.mask.empty()) {
+        // migrate flat → tiles for compact snap
+        MaskTiles tmp;
+        tmp.Init(m_Width, m_Height, 255);
+        tmp.ImportFlat(layer.mask, m_Width, m_Height);
+        oldTiles = tmp.SnapshotAll();
+    }
     if (layer.maskTexture) { layer.maskTexture->Release(); layer.maskTexture = nullptr; }
     if (layer.maskSRV) { layer.maskSRV->Release(); layer.maskSRV = nullptr; }
     layer.mask.clear();
+    layer.maskTiles.reset();
     layer.hasMask = false;
     layer.maskNeedsUpload = false;
     if (m_PaintTarget == PaintTarget::LayerMask && m_ActiveLayerIdx == index) {
@@ -936,7 +962,8 @@ void Canvas::DeleteLayerMask(int index) {
     }
     m_CompositeDirty = true;
     m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
-        "Delete Mask", index, true, std::move(oldMask), false, std::vector<uint8_t>{}));
+        "Delete Mask", index, true, std::move(oldTiles),
+        false, std::vector<MaskTileSnapshot>{}, m_Width, m_Height));
     m_IsDocumentModified = true;
     Logger::Get().Info("Deleted layer mask for layer: " + layer.name);
 }
@@ -962,9 +989,25 @@ void Canvas::EnsureActiveLayerMaskAllocated() {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
     Layer& layer = m_Layers[m_ActiveLayerIdx];
     const size_t need = (size_t)m_Width * (size_t)m_Height;
-    if (!layer.hasMask || layer.mask.size() != need) {
-        layer.mask.assign(need, 255);
+    if (!layer.hasMask) {
         layer.hasMask = true;
+        layer.maskTiles = std::make_unique<MaskTiles>();
+        layer.maskTiles->Init(m_Width, m_Height, 255); // sparse white
+        layer.mask.assign(need, 255);
+    } else {
+        if (!layer.maskTiles) {
+            layer.maskTiles = std::make_unique<MaskTiles>();
+            layer.maskTiles->Init(m_Width, m_Height, 255);
+            if (layer.mask.size() == need)
+                layer.maskTiles->ImportFlat(layer.mask, m_Width, m_Height);
+        } else if (!layer.maskTiles->Valid() ||
+                   layer.maskTiles->Width() != m_Width || layer.maskTiles->Height() != m_Height) {
+            layer.maskTiles->Init(m_Width, m_Height, 255);
+            if (layer.mask.size() == need)
+                layer.maskTiles->ImportFlat(layer.mask, m_Width, m_Height);
+        }
+        if (layer.mask.size() != need)
+            layer.maskTiles->Flatten(layer.mask);
     }
 }
 
@@ -972,24 +1015,15 @@ void Canvas::PaintMaskStamp(float cx, float cy, const BrushSettings& brush) {
     EnsureActiveLayerMaskAllocated();
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
     Layer& layer = m_Layers[m_ActiveLayerIdx];
-    if (!layer.hasMask || layer.mask.empty()) return;
-
-    const size_t maskN = (size_t)m_Width * (size_t)m_Height;
-    if (layer.mask.size() != maskN) {
-        // Safety: never index a mismatched buffer (resize / race).
-        layer.mask.assign(maskN, 255);
-    }
+    if (!layer.hasMask || !layer.maskTiles) return;
 
     const float radius = std::max(1.f, brush.radius);
     const float hardness = std::clamp(brush.hardness, 0.f, 1.f);
     const float opacity = std::clamp(brush.opacity, 0.f, 1.f);
-    // Mask paint: brush color luminance → white paint reveals, black hides.
-    // Eraser forces black (hide). Default white brush when painting mask.
     float paintVal = 1.f;
     if (brush.erase) {
         paintVal = 0.f;
     } else {
-        // Use RGB average so any brush color maps to gray; pure white/black intentional.
         paintVal = std::clamp((brush.color[0] + brush.color[1] + brush.color[2]) / 3.f, 0.f, 1.f);
     }
 
@@ -1000,7 +1034,7 @@ void Canvas::PaintMaskStamp(float cx, float cy, const BrushSettings& brush) {
     const int y1 = std::min(m_Height - 1, (int)std::ceil(cy) + rCeil);
     if (x0 > x1 || y0 > y1) return;
 
-    const float softStart = radius * hardness; // hard core radius
+    const float softStart = radius * hardness;
     const float r2 = radius * radius;
 
     for (int y = y0; y <= y1; ++y) {
@@ -1013,27 +1047,22 @@ void Canvas::PaintMaskStamp(float cx, float cy, const BrushSettings& brush) {
             float w = 1.f;
             if (dist > softStart && radius > softStart) {
                 w = 1.f - (dist - softStart) / (radius - softStart);
-                w = w * w * (3.f - 2.f * w); // smoothstep
+                w = w * w * (3.f - 2.f * w);
             }
             w *= opacity;
             if (w <= 0.f) continue;
-            size_t idx = (size_t)y * (size_t)m_Width + (size_t)x;
-            float cur = layer.mask[idx] / 255.f;
+            float cur = layer.maskTiles->Get(x, y) / 255.f;
             float out = cur * (1.f - w) + paintVal * w;
-            layer.mask[idx] = (uint8_t)(std::clamp(out, 0.f, 1.f) * 255.f + 0.5f);
+            uint8_t v = (uint8_t)(std::clamp(out, 0.f, 1.f) * 255.f + 0.5f);
+            layer.maskTiles->Set(x, y, v);
+            // Keep flat cache in sync for pack/styles (cheap per-pixel)
+            if (layer.mask.size() == (size_t)m_Width * (size_t)m_Height)
+                layer.mask[(size_t)y * m_Width + x] = v;
         }
     }
 
-    // Expand dirty rect for partial GPU upload (avoids full-texture recreate every dab).
-    if (layer.maskDirtyX1 < layer.maskDirtyX0) {
-        layer.maskDirtyX0 = x0; layer.maskDirtyY0 = y0;
-        layer.maskDirtyX1 = x1; layer.maskDirtyY1 = y1;
-    } else {
-        layer.maskDirtyX0 = std::min(layer.maskDirtyX0, x0);
-        layer.maskDirtyY0 = std::min(layer.maskDirtyY0, y0);
-        layer.maskDirtyX1 = std::max(layer.maskDirtyX1, x1);
-        layer.maskDirtyY1 = std::max(layer.maskDirtyY1, y1);
-    }
+    layer.maskTiles->GetDirty(layer.maskDirtyX0, layer.maskDirtyY0,
+                              layer.maskDirtyX1, layer.maskDirtyY1);
     layer.maskNeedsUpload = true;
     m_CompositeDirty = true;
 }
@@ -1265,6 +1294,71 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
     MemoryStats::LogSnapshot("after_RecreateLayerTexture");
 }
 
+LayerStackCommand::Snap Canvas::CaptureLayerSnap(const Layer& L, int index, int docW, int docH,
+                                                 CanvasPixelFormat fmt) {
+    LayerStackCommand::Snap s;
+    s.index = index;
+    s.name = L.name;
+    s.type = (uint8_t)L.type;
+    s.isGroup = L.isGroup;
+    s.visible = L.visible;
+    s.opacity = L.opacity;
+    s.blendMode = L.blendMode;
+    s.alphaRewrite = L.alphaRewrite;
+    s.parentGroupId = L.parentGroupId;
+    s.groupExpanded = L.groupExpanded;
+    s.fill = L.fill;
+    s.filters = L.filters;
+    s.styles = L.styles;
+    s.smartPath = L.smartSourcePath;
+    s.smartBytes = L.smartSourceBytes;
+    s.smartScale = L.smartScale;
+    s.workSpace = L.workSpace;
+    s.hasMask = L.hasMask;
+    s.maskW = docW; s.maskH = docH;
+    if (L.hasMask) {
+        if (L.maskTiles && L.maskTiles->Valid()) {
+            s.maskTiles = L.maskTiles->SnapshotAll();
+            L.maskTiles->Flatten(s.maskFlat);
+        } else {
+            s.maskFlat = L.mask;
+        }
+    }
+    if (L.tileCache && !L.isGroup) {
+        int txN = L.tileCache->GetTilesX();
+        int tyN = L.tileCache->GetTilesY();
+        for (int ty = 0; ty < tyN; ++ty) {
+            for (int tx = 0; tx < txN; ++tx) {
+                if (!L.tileCache->HasTile(tx, ty)) continue;
+                TileDelta d;
+                d.layerIdx = index;
+                d.tileX = tx; d.tileY = ty;
+                d.newState = L.tileCache->SnapshotTile(tx, ty);
+                s.tiles.push_back(std::move(d));
+            }
+        }
+    }
+    if (L.nativeMapCache && L.nativeMapW > 0 && L.nativeMapH > 0) {
+        s.hasNative = true;
+        s.nativeW = L.nativeMapW;
+        s.nativeH = L.nativeMapH;
+        s.nativeKind = L.nativeMapKind;
+        int txN = L.nativeMapCache->GetTilesX();
+        int tyN = L.nativeMapCache->GetTilesY();
+        for (int ty = 0; ty < tyN; ++ty) {
+            for (int tx = 0; tx < txN; ++tx) {
+                if (!L.nativeMapCache->HasTile(tx, ty)) continue;
+                TileDelta d;
+                d.tileX = tx; d.tileY = ty;
+                d.newState = L.nativeMapCache->SnapshotTile(tx, ty);
+                s.nativeTiles.push_back(std::move(d));
+            }
+        }
+    }
+    (void)fmt;
+    return s;
+}
+
 void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
     Layer newLayer;
     newLayer.name    = name;
@@ -1282,9 +1376,14 @@ void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
         RecreateLayerTexture(device, newLayer);
     }
 
+    int insertAt = (int)m_Layers.size();
     m_Layers.push_back(std::move(newLayer));
-    m_ActiveLayerIdx = (int)m_Layers.size() - 1;
+    m_ActiveLayerIdx = insertAt;
     m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    auto snap = CaptureLayerSnap(m_Layers[insertAt], insertAt, m_Width, m_Height, m_CanvasFormat);
+    m_UndoRedoManager.PushCommand(std::make_shared<LayerStackCommand>(
+        "New Layer", LayerStackCommand::Kind::Insert, std::move(snap)));
     Logger::Get().Info("Created new layer: " + name);
 }
 
@@ -1343,27 +1442,46 @@ bool Canvas::ImportImageAsMapLayer(ID3D11Device* device, const std::string& file
     layer.workSpace.channelWriteMask = 0xF;
     layer.workSpace.SetMap(mapKind, true);
 
-    // Place in document UV space (canvas size)
+    // Native map storage when resolution ≠ document (export prefers this)
+    if (imgW != m_Width || imgH != m_Height) {
+        layer.nativeMapCache = std::make_unique<TileCache>();
+        if (loaded->GetFormat() == m_CanvasFormat) {
+            layer.nativeMapCache = std::move(loaded);
+            loaded.reset();
+        } else {
+            layer.nativeMapCache->Init(imgW, imgH, m_CanvasFormat);
+            for (int y = 0; y < imgH; ++y)
+                for (int x = 0; x < imgW; ++x) {
+                    float px[4]; loaded->GetPixelF(x, y, px);
+                    layer.nativeMapCache->SetPixelF(x, y, px);
+                }
+        }
+        layer.nativeMapW = imgW;
+        layer.nativeMapH = imgH;
+        layer.nativeMapKind = mapKind;
+    }
+
+    // Document UV space for viewport / paint
     layer.tileCache = std::make_unique<TileCache>();
     layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
-    if (imgW == m_Width && imgH == m_Height && loaded->GetFormat() == m_CanvasFormat) {
-        layer.tileCache = std::move(loaded);
-    } else {
-        // Scale-ish: nearest copy into canvas (preserves UV alignment for export)
-        layer.tileCache->CopyFrom(*loaded, 0, 0, 0, 0, imgW, imgH);
-        // If smaller map (e.g. Normal 1k on 2k canvas), pixels sit top-left;
-        // UV sampling in export maps by UV so for viewport stretch we fill by UV:
-        if (imgW != m_Width || imgH != m_Height) {
-            layer.tileCache->Clear();
-            layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
-            for (int y = 0; y < m_Height; ++y) {
-                int sy = std::min(imgH - 1, (int)((y + 0.5f) / m_Height * imgH));
+    if (imgW == m_Width && imgH == m_Height && loaded) {
+        if (loaded->GetFormat() == m_CanvasFormat)
+            layer.tileCache = std::move(loaded);
+        else {
+            for (int y = 0; y < m_Height; ++y)
                 for (int x = 0; x < m_Width; ++x) {
-                    int sx = std::min(imgW - 1, (int)((x + 0.5f) / m_Width * imgW));
-                    float px[4];
-                    loaded->GetPixelF(sx, sy, px);
+                    float px[4]; loaded->GetPixelF(x, y, px);
                     layer.tileCache->SetPixelF(x, y, px);
                 }
+        }
+    } else if (layer.nativeMapCache) {
+        for (int y = 0; y < m_Height; ++y) {
+            int sy = std::min(layer.nativeMapH - 1, (int)((y + 0.5f) / m_Height * layer.nativeMapH));
+            for (int x = 0; x < m_Width; ++x) {
+                int sx = std::min(layer.nativeMapW - 1, (int)((x + 0.5f) / m_Width * layer.nativeMapW));
+                float px[4];
+                layer.nativeMapCache->GetPixelF(sx, sy, px);
+                layer.tileCache->SetPixelF(x, y, px);
             }
         }
     }
@@ -1376,14 +1494,20 @@ bool Canvas::ImportImageAsMapLayer(ID3D11Device* device, const std::string& file
     m_IsDocumentModified = true;
     Logger::Get().InfoTag("texset",
         "Map layer '" + m_Layers.back().name + "' → " + texset::MapKindName(mapKind) +
-        " (" + std::to_string(imgW) + "x" + std::to_string(imgH) + ")");
+        " (" + std::to_string(imgW) + "x" + std::to_string(imgH) +
+        (m_Layers.back().nativeMapCache ? " native kept" : "") + ")");
     return true;
 }
 
 void Canvas::DeleteLayer(int index) {
     if (index < 0 || index >= m_Layers.size()) return;
-    
+
     Logger::Get().Info("Deleted layer: " + m_Layers[index].name);
+
+    // Capture before destroy for undo
+    auto snap = CaptureLayerSnap(m_Layers[index], index, m_Width, m_Height, m_CanvasFormat);
+    m_UndoRedoManager.PushCommand(std::make_shared<LayerStackCommand>(
+        "Delete Layer", LayerStackCommand::Kind::Remove, std::move(snap)));
 
     if (m_Layers[index].texture) m_Layers[index].texture->Release();
     if (m_Layers[index].srv) m_Layers[index].srv->Release();
@@ -1391,8 +1515,7 @@ void Canvas::DeleteLayer(int index) {
     if (m_Layers[index].maskSRV) m_Layers[index].maskSRV->Release();
     if (m_Layers[index].thumbSRV) { m_Layers[index].thumbSRV->Release(); m_Layers[index].thumbSRV = nullptr; }
     if (m_Layers[index].thumbTex) { m_Layers[index].thumbTex->Release(); m_Layers[index].thumbTex = nullptr; }
-    
-    // Adjust parentGroupId references for remaining layers
+
     for (auto& l : m_Layers) {
         if (l.parentGroupId == index) {
             l.parentGroupId = -1;
@@ -1410,6 +1533,7 @@ void Canvas::DeleteLayer(int index) {
     }
 
     m_CompositeDirty = true;
+    m_IsDocumentModified = true;
 }
 
 int Canvas::MergeLayerDown(ID3D11Device* device, int upperIdx) {
@@ -1636,9 +1760,14 @@ int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
     dup.presentationDirty = true;
 
     if (dup.IsFill()) {
-        if (src.hasMask && !src.mask.empty()) {
+        if (src.hasMask) {
             dup.hasMask = true;
             dup.mask = src.mask;
+            if (src.maskTiles && src.maskTiles->Valid()) {
+                dup.maskTiles = std::make_unique<MaskTiles>();
+                dup.maskTiles->Init(m_Width, m_Height, 255);
+                dup.maskTiles->RestoreTiles(src.maskTiles->SnapshotAll());
+            }
             dup.maskNeedsUpload = true;
         }
         if (device && m_Width > 0 && m_Height > 0) {
@@ -1652,9 +1781,28 @@ int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
             auto pixels = ExportLayerF(src, m_Width, m_Height);
             SetLayerPixelsF(dup, pixels, m_Width, m_Height, m_CanvasFormat);
         }
-        if (src.hasMask && !src.mask.empty()) {
+        if (src.nativeMapCache && src.nativeMapW > 0) {
+            dup.nativeMapCache = std::make_unique<TileCache>();
+            dup.nativeMapCache->Init(src.nativeMapW, src.nativeMapH, m_CanvasFormat);
+            // COW-share tiles via snapshot restore
+            int txN = src.nativeMapCache->GetTilesX();
+            int tyN = src.nativeMapCache->GetTilesY();
+            for (int ty = 0; ty < tyN; ++ty)
+                for (int tx = 0; tx < txN; ++tx)
+                    if (src.nativeMapCache->HasTile(tx, ty))
+                        dup.nativeMapCache->RestoreTile(tx, ty, src.nativeMapCache->SnapshotTile(tx, ty));
+            dup.nativeMapW = src.nativeMapW;
+            dup.nativeMapH = src.nativeMapH;
+            dup.nativeMapKind = src.nativeMapKind;
+        }
+        if (src.hasMask) {
             dup.hasMask = true;
             dup.mask = src.mask;
+            if (src.maskTiles && src.maskTiles->Valid()) {
+                dup.maskTiles = std::make_unique<MaskTiles>();
+                dup.maskTiles->Init(m_Width, m_Height, 255);
+                dup.maskTiles->RestoreTiles(src.maskTiles->SnapshotAll());
+            }
             dup.maskNeedsUpload = true;
         }
         if (device && m_Width > 0 && m_Height > 0) {
@@ -1677,6 +1825,12 @@ int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
 
     m_ActiveLayerIdx = insertAt;
     m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    {
+        auto snap = CaptureLayerSnap(m_Layers[insertAt], insertAt, m_Width, m_Height, m_CanvasFormat);
+        m_UndoRedoManager.PushCommand(std::make_shared<LayerStackCommand>(
+            "Duplicate Layer", LayerStackCommand::Kind::Insert, std::move(snap)));
+    }
     Logger::Get().Info("Duplicated layer -> " + m_Layers[insertAt].name);
     return insertAt;
 }
@@ -1910,13 +2064,11 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
             m_LastDabY = currRawY;
             m_PrevStabilizedX = currRawX;
             m_PrevStabilizedY = currRawY;
-            // Snapshot mask for undo
-            if (layer.hasMask)
-                m_MaskStrokeBackup = layer.mask;
-            else
-                m_MaskStrokeBackup.clear();
-            m_MaskStrokeBackupValid = true;
-            // Default mask brush: white (reveal). Eraser paints black.
+            // COW tile snap of full mask grid (absent tiles = white default, tiny overhead)
+            m_MaskStrokeBackupTiles.clear();
+            m_MaskStrokeBackupValid = layer.hasMask && layer.maskTiles && layer.maskTiles->Valid();
+            if (m_MaskStrokeBackupValid)
+                m_MaskStrokeBackupTiles = layer.maskTiles->SnapshotAll();
             if (!activeBrush.erase) {
                 activeBrush.color[0] = activeBrush.color[1] = activeBrush.color[2] = 1.f;
             }
@@ -1981,21 +2133,48 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         } else if (phase == StrokePhase::End) {
             m_IsStrokeActive = false;
             m_IsDocumentModified = true;
-            // Undo for mask strokes (full-mask snapshot — simple & reliable)
+            // Mask paint undo: only tiles that actually changed (COW pointers)
             if (m_MaskStrokeBackupValid && m_ActiveLayerIdx >= 0 &&
                 m_ActiveLayerIdx < (int)m_Layers.size() &&
-                m_Layers[m_ActiveLayerIdx].hasMask) {
+                m_Layers[m_ActiveLayerIdx].hasMask &&
+                m_Layers[m_ActiveLayerIdx].maskTiles) {
                 auto& L = m_Layers[m_ActiveLayerIdx];
-                if (L.mask != m_MaskStrokeBackup) {
-                    m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
+                auto newAll = L.maskTiles->SnapshotAll();
+                std::unordered_map<uint32_t, MaskTileSnapshot> oldMap, newMap;
+                for (auto& t : m_MaskStrokeBackupTiles)
+                    oldMap[(uint32_t)t.tileX | ((uint32_t)t.tileY << 16)] = t;
+                for (auto& t : newAll)
+                    newMap[(uint32_t)t.tileX | ((uint32_t)t.tileY << 16)] = t;
+                std::vector<MaskTileSnapshot> oldCh, newCh;
+                // Union of keys
+                std::unordered_set<uint32_t> keys;
+                for (auto& kv : oldMap) keys.insert(kv.first);
+                for (auto& kv : newMap) keys.insert(kv.first);
+                for (uint32_t k : keys) {
+                    auto o = oldMap.find(k);
+                    auto n = newMap.find(k);
+                    const MaskTileSnapshot* op = o != oldMap.end() ? &o->second : nullptr;
+                    const MaskTileSnapshot* np = n != newMap.end() ? &n->second : nullptr;
+                    auto od = op ? op->data.get() : nullptr;
+                    auto nd = np ? np->data.get() : nullptr;
+                    if (od == nd) continue;
+                    MaskTileSnapshot oSnap, nSnap;
+                    oSnap.tileX = nSnap.tileX = (int)(k & 0xFFFF);
+                    oSnap.tileY = nSnap.tileY = (int)(k >> 16);
+                    if (op) oSnap = *op;
+                    if (np) nSnap = *np;
+                    oldCh.push_back(std::move(oSnap));
+                    newCh.push_back(std::move(nSnap));
+                }
+                if (!oldCh.empty()) {
+                    m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskPaintCommand>(
                         brush.erase ? "Mask Erase" : "Mask Paint",
                         m_ActiveLayerIdx,
-                        true, m_MaskStrokeBackup,
-                        true, L.mask));
+                        std::move(oldCh), std::move(newCh)));
                 }
             }
             m_MaskStrokeBackupValid = false;
-            m_MaskStrokeBackup.clear();
+            m_MaskStrokeBackupTiles.clear();
         }
         return;
     }
@@ -2471,20 +2650,18 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
         if (!srv) return false;
         const bool isFirst = firstVisible && m_LayerBlendStateReplace;
         ID3D11BlendState* blend = nullptr;
-        // Fill: per-map channel write mask (unchecked channel = no overwrite, not black)
+        // Fill: per-map channel write mask (unchecked = leave underlay; never black-fill)
         uint8_t fillWrite = 0xF;
         if (layer.IsFill()) {
             float tmp[4];
             if (!layer.fill.ResolveForMap(m_ActiveSetMaps, m_ViewMapKind, tmp, &fillWrite))
                 return false;
+            // First layer + partial mask: still use replace only on enabled channels
+            // so disabled channels keep clear-color underlay (typically transparent).
             ID3D11Device* dev = nullptr;
             context->GetDevice(&dev);
             blend = GetFillWriteBlend(dev, fillWrite, isFirst);
             if (dev) dev->Release();
-            // If not writing A, still use SRC_ALPHA path with A from color for coverage of RGB writes
-            if (!isFirst && !(fillWrite & 8) && (fillWrite & 7)) {
-                // RGB write, no A: use normal RGB blend with write mask without A
-            }
         } else if (isFirst) {
             blend = m_LayerBlendStateReplace;
         } else if (!layer.alphaRewrite && m_LayerBlendStateAlphaPreserve) {
@@ -3338,6 +3515,14 @@ bool Canvas::ComposePackedMapRGBA8(texset::MapKind kind,
                 float sr, sg, sb, sa;
                 if (useSolid) {
                     sr = solid[0]; sg = solid[1]; sb = solid[2]; sa = solid[3];
+                } else if (layer.nativeMapCache && layer.nativeMapW > 0 && layer.nativeMapH > 0 &&
+                   layer.nativeMapKind == kind) {
+                    // Prefer native-resolution storage for this map
+                    int nx = std::min(layer.nativeMapW - 1, (int)((x + 0.5f) / outW * layer.nativeMapW));
+                    int ny = std::min(layer.nativeMapH - 1, (int)((y + 0.5f) / outH * layer.nativeMapH));
+                    float px[4];
+                    layer.nativeMapCache->GetPixelF(nx, ny, px);
+                    sr = px[0]; sg = px[1]; sb = px[2]; sa = px[3];
                 } else if (layer.tileCache) {
                     float px[4];
                     layer.tileCache->GetPixelF(cx, cy, px);
@@ -3346,8 +3531,12 @@ bool Canvas::ComposePackedMapRGBA8(texset::MapKind kind,
                     continue;
                 }
                 sa *= opacity;
-                if (hasMask)
-                    sa *= layer.mask[(size_t)cy * m_Width + cx] / 255.f;
+                if (hasMask) {
+                    if (layer.maskTiles && layer.maskTiles->Valid())
+                        sa *= layer.maskTiles->Get(cx, cy) / 255.f;
+                    else if (layer.mask.size() == (size_t)m_Width * m_Height)
+                        sa *= layer.mask[(size_t)cy * m_Width + cx] / 255.f;
+                }
                 if (sa <= 0.001f) continue;
                 uint8_t* dp = outRgba.data() + ((size_t)y * outW + x) * 4;
                 blendOver(dp, sr, sg, sb, sa, writeMask);
@@ -3532,6 +3721,21 @@ std::string Canvas::GetUndoName() const {
 
 std::string Canvas::GetRedoName() const {
     return m_UndoRedoManager.GetRedoName();
+}
+
+void Canvas::ClearAllLayersNoUndo() {
+    for (auto& L : m_Layers) {
+        if (L.texture) { L.texture->Release(); L.texture = nullptr; }
+        if (L.srv) { L.srv->Release(); L.srv = nullptr; }
+        if (L.maskTexture) { L.maskTexture->Release(); L.maskTexture = nullptr; }
+        if (L.maskSRV) { L.maskSRV->Release(); L.maskSRV = nullptr; }
+        if (L.thumbSRV) { L.thumbSRV->Release(); L.thumbSRV = nullptr; }
+        if (L.thumbTex) { L.thumbTex->Release(); L.thumbTex = nullptr; }
+    }
+    m_Layers.clear();
+    m_ActiveLayerIdx = -1;
+    m_PaintTarget = PaintTarget::LayerContent;
+    m_CompositeDirty = true;
 }
 
 void Canvas::ClearUndoHistory() {
@@ -6612,11 +6816,16 @@ void Canvas::RebuildLayerPresentation(Layer& layer, bool fullQuality) {
     if (!fullQuality && m_IsStrokeActive) {
         return;
     }
-    // Debounce interactive rebuilds (slider drag)
+    // Debounce interactive rebuilds (slider drag / add FX)
     if (!fullQuality && m_PresentationRebuildDeferred) {
         if (std::chrono::steady_clock::now() < m_PresentationRebuildNotBefore)
             return;
         m_PresentationRebuildDeferred = false;
+    }
+    if (m_Width <= 0 || m_Height <= 0) {
+        layer.stylesDirty = false;
+        layer.presentationDirty = false;
+        return;
     }
     if (layer.filtersDirty)
         RebuildFilteredPixels(layer);
@@ -6628,51 +6837,88 @@ void Canvas::RebuildLayerPresentation(Layer& layer, bool fullQuality) {
         return;
     }
 
-    // Content after filters (or raw) at full res
-    std::vector<float> content;
-    if (layer.filteredCache && !layer.filteredCache->IsEmpty() && !layer.filters.empty()) {
-        content.resize((size_t)m_Width * m_Height * 4);
-        layer.filteredCache->ExportRGBA32F(content.data(), m_Width, m_Height);
-    } else {
-        content = ResolveLayerContentF(layer);
+    // Guard flat float buffers (4K RGBA32F content alone ≈ 256 MiB; styles allocate more).
+    if (!CanAllocateFlatComposite(m_Width, m_Height, "RebuildLayerPresentation")) {
+        Logger::Get().ErrorTag("fx",
+            "Layer styles bake refused at " + std::to_string(m_Width) + "x" +
+            std::to_string(m_Height) + " — reduce document size or disable styles.");
+        layer.stylesDirty = false;
+        layer.presentationDirty = false;
+        return;
     }
 
-    // Bake styles at proxy size (≤2048) for viewport — full-res for export/rasterize.
+    // Content after filters (or raw). Prefer proxy path for large docs —
+    // sample at bake res only (never allocate full 4K float then downsample).
     int bakeW = m_Width, bakeH = m_Height;
     if (!fullQuality)
         ComputeCompositePreviewSize(m_Width, m_Height, bakeW, bakeH);
+
     const bool useProxy = (bakeW != m_Width || bakeH != m_Height);
     const float scaleX = useProxy ? (float)bakeW / (float)m_Width : 1.f;
     const float scaleY = useProxy ? (float)bakeH / (float)m_Height : 1.f;
 
     std::vector<float> bakeContent;
     std::vector<uint8_t> bakeMask;
-    if (useProxy) {
-        bakeContent.resize((size_t)bakeW * bakeH * 4);
-        for (int y = 0; y < bakeH; ++y) {
-            int sy = std::min(m_Height - 1, (int)(y / scaleY + 0.5f));
-            for (int x = 0; x < bakeW; ++x) {
-                int sx = std::min(m_Width - 1, (int)(x / scaleX + 0.5f));
-                size_t di = ((size_t)y * bakeW + x) * 4;
-                size_t si = ((size_t)sy * m_Width + sx) * 4;
-                bakeContent[di + 0] = content[si + 0];
-                bakeContent[di + 1] = content[si + 1];
-                bakeContent[di + 2] = content[si + 2];
-                bakeContent[di + 3] = content[si + 3];
+    try {
+        bakeContent.resize((size_t)bakeW * bakeH * 4, 0.f);
+        const TileCache* srcCache = nullptr;
+        if (layer.filteredCache && !layer.filteredCache->IsEmpty() && !layer.filters.empty())
+            srcCache = layer.filteredCache.get();
+        else if (layer.tileCache && !layer.tileCache->IsEmpty())
+            srcCache = layer.tileCache.get();
+
+        if (layer.IsFill()) {
+            float c[4];
+            layer.fill.ResolveRgba(c);
+            for (size_t i = 0, n = (size_t)bakeW * bakeH; i < n; ++i) {
+                bakeContent[i * 4 + 0] = c[0];
+                bakeContent[i * 4 + 1] = c[1];
+                bakeContent[i * 4 + 2] = c[2];
+                bakeContent[i * 4 + 3] = c[3];
             }
-        }
-        if (layer.hasMask && layer.mask.size() == (size_t)m_Width * m_Height) {
-            bakeMask.resize((size_t)bakeW * bakeH);
+        } else if (srcCache) {
             for (int y = 0; y < bakeH; ++y) {
-                int sy = std::min(m_Height - 1, (int)(y / scaleY + 0.5f));
+                int sy = useProxy
+                    ? std::min(m_Height - 1, (int)(y / scaleY + 0.5f))
+                    : y;
                 for (int x = 0; x < bakeW; ++x) {
-                    int sx = std::min(m_Width - 1, (int)(x / scaleX + 0.5f));
-                    bakeMask[(size_t)y * bakeW + x] = layer.mask[(size_t)sy * m_Width + sx];
+                    int sx = useProxy
+                        ? std::min(m_Width - 1, (int)(x / scaleX + 0.5f))
+                        : x;
+                    float px[4];
+                    srcCache->GetPixelF(sx, sy, px);
+                    size_t di = ((size_t)y * bakeW + x) * 4;
+                    bakeContent[di + 0] = px[0];
+                    bakeContent[di + 1] = px[1];
+                    bakeContent[di + 2] = px[2];
+                    bakeContent[di + 3] = px[3];
                 }
             }
         }
-    } else {
-        bakeContent = std::move(content);
+        if (layer.hasMask) {
+            bakeMask.resize((size_t)bakeW * bakeH, 255);
+            for (int y = 0; y < bakeH; ++y) {
+                int sy = useProxy
+                    ? std::min(m_Height - 1, (int)(y / scaleY + 0.5f))
+                    : y;
+                for (int x = 0; x < bakeW; ++x) {
+                    int sx = useProxy
+                        ? std::min(m_Width - 1, (int)(x / scaleX + 0.5f))
+                        : x;
+                    uint8_t mv = 255;
+                    if (layer.maskTiles && layer.maskTiles->Valid())
+                        mv = layer.maskTiles->Get(sx, sy);
+                    else if (layer.mask.size() == (size_t)m_Width * m_Height)
+                        mv = layer.mask[(size_t)sy * m_Width + sx];
+                    bakeMask[(size_t)y * bakeW + x] = mv;
+                }
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        Logger::Get().ErrorTag("fx", "OOM preparing style bake buffer");
+        layer.stylesDirty = false;
+        layer.presentationDirty = false;
+        return;
     }
 
     // Scale style geometry to bake resolution
@@ -6694,13 +6940,36 @@ void Canvas::RebuildLayerPresentation(Layer& layer, bool fullQuality) {
     pp.maskBytes = useProxy ? bakeMask.size() : layer.mask.size();
     pp.previewQuality = !fullQuality;
 
-    auto presSmall = layer_fx::BuildPresentation(
-        bakeContent, bakeW, bakeH, {}, scaledStyles, pp);
+    std::vector<float> presSmall;
+    try {
+        presSmall = layer_fx::BuildPresentation(
+            bakeContent, bakeW, bakeH, {}, scaledStyles, pp);
+    } catch (const std::bad_alloc&) {
+        Logger::Get().ErrorTag("fx", "OOM during style bake " +
+            std::to_string(bakeW) + "x" + std::to_string(bakeH));
+        layer.stylesDirty = false;
+        layer.presentationDirty = false;
+        return;
+    }
 
     // Upsample back to document size for GPU layer texture
     std::vector<float> presFull;
     if (useProxy) {
-        presFull.resize((size_t)m_Width * m_Height * 4);
+        try {
+            presFull.resize((size_t)m_Width * m_Height * 4);
+        } catch (const std::bad_alloc&) {
+            Logger::Get().ErrorTag("fx", "OOM upsampling style presentation");
+            // Keep proxy-sized presentation cache only
+            if (!layer.presentationCache)
+                layer.presentationCache = std::make_unique<TileCache>();
+            layer.presentationCache->Init(bakeW, bakeH, m_CanvasFormat);
+            layer.presentationCache->ImportRGBA32F(presSmall.data(), bakeW, bakeH);
+            layer.presentationCache->MarkAllDirty();
+            layer.stylesDirty = false;
+            layer.presentationDirty = false;
+            layer.needsUpload = true;
+            return;
+        }
         for (int y = 0; y < m_Height; ++y) {
             int sy = std::min(bakeH - 1, (int)(y * scaleY));
             for (int x = 0; x < m_Width; ++x) {
@@ -6943,10 +7212,16 @@ void Canvas::CreateFillLayer(ID3D11Device* device, const std::string& name, cons
         EnsureFillLayerGpu(device, layer);
     }
 
+    int insertAt = (int)m_Layers.size();
     m_Layers.push_back(std::move(layer));
-    m_ActiveLayerIdx = (int)m_Layers.size() - 1;
+    m_ActiveLayerIdx = insertAt;
     m_CompositeDirty = true;
     m_IsDocumentModified = true;
+    {
+        auto snap = CaptureLayerSnap(m_Layers[insertAt], insertAt, m_Width, m_Height, m_CanvasFormat);
+        m_UndoRedoManager.PushCommand(std::make_shared<LayerStackCommand>(
+            "New Fill Layer", LayerStackCommand::Kind::Insert, std::move(snap)));
+    }
     Logger::Get().Info("Created fill layer: " + name);
 }
 
@@ -6977,10 +7252,9 @@ int Canvas::AddLayerStyle(int layerIdx, StyleType type) {
         s.outlinePos = OutlinePosition::Outside;
     }
     layer.styles.push_back(s);
-    layer.stylesDirty = true;
-    layer.presentationDirty = true;
-    m_CompositeDirty = true;
     m_IsDocumentModified = true;
+    // Debounced bake — never full-res float composite on the same click (crash/lag on 4K+)
+    RequestPresentationRebuild(layerIdx);
     return (int)layer.styles.size() - 1;
 }
 
@@ -7542,13 +7816,6 @@ bool Canvas::CropCanvasToRect(ID3D11Device* device, int x, int y, int w, int h) 
         }
         UpdateSelectionMaskTexture(device);
     }
-
-    // Document-level undo: push a command that re-extends is incomplete without full snapshot.
-    // Record as layer mutations for active layer only is insufficient.
-    // Store a PaintStrokeCommand per layer by re-snapshotting is too late (already cropped).
-    // Mark modified; geometry undo uses a simple "restore size + note" via Clear for v1 integrity:
-    // We'll push one command that captures NOTHING but name — BAD.
-    // Better: build Multi-layer command before mutation — redo this properly next.
 
     m_CompositeDirty = true;
     m_IsDocumentModified = true;

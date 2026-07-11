@@ -29,7 +29,7 @@ std::string DefaultMapExportPath(const TextureSet& set, MapKind kind,
 
 // Quick-export all enabled maps of a set.
 // Diffuse: optional external pixels (from Canvas composite) written if diffusePixels non-null.
-// Other maps: from set.mapComposites.
+// Other maps: from packed layer pixels (maps are layers; no hidden composites).
 // Returns number of maps successfully written.
 struct ExportAllResult {
     int written = 0;
@@ -38,7 +38,7 @@ struct ExportAllResult {
 };
 
 // Optional per-map precomposed pixels (from Canvas::ComposePackedMapRGBA8).
-// Key = (int)MapKind. If present, used instead of mapComposites for that map.
+// Key = (int)MapKind. Optional precomposed pixels from Canvas::ComposePackedMapRGBA8.
 struct MapExportPixels {
     std::vector<uint8_t> rgba; // w*h*4
     int w = 0, h = 0;

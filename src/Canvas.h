@@ -10,6 +10,7 @@
 #include <memory>
 #include <chrono>
 #include "core/TileCache.h"
+#include "core/MaskTiles.h"
 #include "core/PaintEngine.h"
 #include "core/DdsHelper.h"
 #include "core/UndoRedoManager.h"
@@ -68,14 +69,21 @@ struct Layer {
     bool presentationDirty = true;
 
     // Mask: single-channel, same canvas dimensions.
-    // Values 0-255 (RGBA8 docs) or float reinterpreted as uint8 for GPU (R8_UNORM).
+    // Prefer sparse MaskTiles (COW); flat `mask` is a cache for legacy / pack paths.
     std::vector<uint8_t> mask;
+    std::unique_ptr<class MaskTiles> maskTiles;
     ID3D11Texture2D* maskTexture = nullptr;
     ID3D11ShaderResourceView* maskSRV = nullptr;
     bool hasMask = false;
     bool maskNeedsUpload = false;
     // Dirty rect for GPU upload (x1 < x0 ⇒ full upload). Keeps maskSRV pointer stable.
     int maskDirtyX0 = 0, maskDirtyY0 = 0, maskDirtyX1 = -1, maskDirtyY1 = -1;
+
+    // Native-resolution map storage (import at map size ≠ document).
+    // Viewport/paint use tileCache at document UV; export prefers nativeMapCache when valid.
+    std::unique_ptr<TileCache> nativeMapCache;
+    int nativeMapW = 0, nativeMapH = 0;
+    texset::MapKind nativeMapKind = texset::MapKind::Diffuse;
 
     // Group support
     bool isGroup        = false; // group header — no pixel data
@@ -132,6 +140,8 @@ public:
     friend class DocumentGeometryCommand;
     friend class RasterizeCommand;
     friend class LayerMaskCommand;
+    friend class LayerMaskPaintCommand;
+    friend class LayerStackCommand;
     friend class PaintStrokeCommand;
 
     bool Initialize(ID3D11Device* device);
@@ -193,6 +203,9 @@ public:
 
     // Layer Management
     void CreateNewLayer(ID3D11Device* device, const std::string& name);
+    // Capture layer for undo (tiles COW + mask tiles). Friend of LayerStackCommand.
+    static LayerStackCommand::Snap CaptureLayerSnap(const Layer& L, int index, int docW, int docH,
+                                                    CanvasPixelFormat fmt);
     // Import image/DDS as a real paint layer bound to one map (LightMap/Normal/…).
     // Visible in Layers panel; participates only when that map is active in viewport.
     // Pixels are placed in document UV space (scaled to canvas size if needed).
@@ -437,6 +450,8 @@ public:
     std::string GetUndoName() const;
     std::string GetRedoName() const;
     void ClearUndoHistory();
+    // Drop all layers + GPU without undo (project setup / replace base)
+    void ClearAllLayersNoUndo();
     bool IsDocumentModified() const { return m_IsDocumentModified; }
     void SetDocumentModified(bool modified) { m_IsDocumentModified = modified; }
     std::string GetCurrentProjectFilePath() const { return m_CurrentProjectFilePath; }
@@ -579,9 +594,10 @@ private:
     texset::ChannelRole m_ViewSoloRole = texset::ChannelRole::None;
     std::vector<texset::MapSlot> m_ActiveSetMaps; // soft labels + map sizes
 
-    // Mask stroke undo buffer
-    std::vector<uint8_t> m_MaskStrokeBackup;
+    // Mask stroke undo: tiled COW snapshots of region touched this stroke
+    std::vector<MaskTileSnapshot> m_MaskStrokeBackupTiles;
     bool m_MaskStrokeBackupValid = false;
+    int m_MaskStrokeX0 = 0, m_MaskStrokeY0 = 0, m_MaskStrokeX1 = -1, m_MaskStrokeY1 = -1;
 
     // Optional underlay (legacy; prefer map layers)
     ID3D11Texture2D* m_ViewUnderlayTex = nullptr;
