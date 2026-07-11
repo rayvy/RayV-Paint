@@ -63,7 +63,10 @@ namespace UI {
         bool showModSetup = false;     // INI/dump/semantics launcher (separate from Properties)
         bool preview3DNeedReload = false;
         bool openAboutModal = false;
-        int  layerEffectsFocusIdx = -1; // selected FX in Layer Effects panel
+        // Layer Effects modal selection: kind 0=style, 1=filter, -1=none
+        int  layerEffectsFocusIdx = -1;
+        int  layerEffectsSelKind = -1; // 0 style, 1 filter, -1 none
+        int  layerEffectsSelIdx = -1;
         int  layerPreviewRefreshFrames = 0; // double-refresh after paint/edit
 
         // Modal visibility triggers

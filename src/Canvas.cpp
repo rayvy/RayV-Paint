@@ -1,4 +1,5 @@
 #include "Canvas.h"
+#include "layer/LayerStyles.h"
 #include "core/TileCache.h"
 #include "core/HalfFloat.h"
 #include "core/Logger.h"
@@ -61,6 +62,7 @@ static void SetLayerPixelsF(Layer& layer, const std::vector<float>& pixels, int 
     layer.filtersDirty = true;
 }
 static bool LayerHasPixels(const Layer& layer) {
+    if (layer.IsFill()) return true;
     return layer.tileCache && !layer.tileCache->IsEmpty();
 }
 static void EnsureLayerTileCache(Layer& layer, int w, int h, CanvasPixelFormat fmt) {
@@ -222,18 +224,32 @@ static inline void BlendLayerPixelF(float* dest, float sr, float sg, float sb, f
 }
 
 static bool LayerEffectivelyVisible(const std::vector<Layer>& layers, const Layer& layer) {
-    if (layer.isGroup || !layer.visible) return false;
+    if (!layer.visible) return false;
+    if (layer.isGroup) return false; // groups composed via children walk
     if (layer.parentGroupId >= 0 && layer.parentGroupId < (int)layers.size()) {
-        if (!layers[layer.parentGroupId].visible) return false;
+        // Parent visibility checked by top-level walk; still skip if parent hidden
+        int p = layer.parentGroupId;
+        while (p >= 0 && p < (int)layers.size()) {
+            if (!layers[p].visible) return false;
+            p = layers[p].parentGroupId;
+        }
     }
-    return LayerHasPixels(layer);
+    return LayerHasPixels(layer) || layer.IsFill();
 }
 
 static const TileCache* LayerExportCache(const Layer& layer) {
+    // Prefer baked presentation (styles + content) when available
+    if (layer.HasEnabledStyles() && layer.presentationCache && !layer.presentationCache->IsEmpty())
+        return layer.presentationCache.get();
     if (!layer.filters.empty() && layer.filteredCache && !layer.filteredCache->IsEmpty()) {
         return layer.filteredCache.get();
     }
     return layer.tileCache.get();
+}
+
+static bool LayerNeedsPresentationBake(const Layer& layer) {
+    return layer.HasEnabledStyles() ||
+           (layer.IsFill() && (LayerFilterListHasEnabled(layer.filters) || layer.HasEnabledStyles()));
 }
 
 // Tile-stream composite with non-destructive filters + blend modes (matches viewport).
@@ -293,13 +309,24 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
 
             bool firstLayer = true;
             for (const Layer* layer : vis) {
+                // Baked presentation already includes fillOpacity + styles + mask
+                const bool baked = layer->HasEnabledStyles() &&
+                    layer->presentationCache && !layer->presentationCache->IsEmpty();
                 const TileCache* cache = LayerExportCache(*layer);
-                if (!cache) continue;
 
-                const bool useMask = layer->hasMask && layer->mask.size() == (size_t)w * h;
-                const float opacity = layer->opacity;
+                const bool useMask = !baked && layer->hasMask && layer->mask.size() == (size_t)w * h;
+                // Opacity: content fill only when not baked; styles path draws at 1
+                const float opacity = baked ? 1.f : layer->opacity;
                 const BlendMode mode = layer->blendMode;
-                const uint8_t* tile = (cache->GetFormat() == CanvasPixelFormat::RGBA8)
+
+                float fillSolid[4] = {0,0,0,0};
+                const bool solidFill = layer->IsFill() && !cache;
+                if (solidFill)
+                    layer->fill.ResolveRgba(fillSolid);
+
+                if (!cache && !solidFill) continue;
+
+                const uint8_t* tile = (!solidFill && cache && cache->GetFormat() == CanvasPixelFormat::RGBA8)
                     ? cache->GetTileData(tx, ty) : nullptr;
 
                 for (int ly = 0; ly < th; ++ly) {
@@ -307,7 +334,9 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
                     for (int lx = 0; lx < tw; ++lx) {
                         const int x = x0 + lx;
                         float sr, sg, sb, saPix;
-                        if (tile) {
+                        if (solidFill) {
+                            sr = fillSolid[0]; sg = fillSolid[1]; sb = fillSolid[2]; saPix = fillSolid[3];
+                        } else if (tile) {
                             const uint8_t* sp = tile + ((size_t)ly * TILE_SIZE + lx) * 4;
                             sr = sp[0] / 255.f; sg = sp[1] / 255.f; sb = sp[2] / 255.f;
                             saPix = sp[3] / 255.f;
@@ -322,8 +351,6 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
                         uint8_t* dp = out.data() + ((size_t)y * w + x) * 4;
 
                         if (firstLayer) {
-                            // Initialize document buffer: always keep RGB (even if A=0).
-                            // A is written as real alpha * opacity (may stay 0).
                             float aWrite = saPix * opacity;
                             if (useMask) aWrite *= layer->mask[(size_t)y * w + x] / 255.f;
                             dp[0] = (uint8_t)(std::clamp(sr, 0.f, 1.f) * 255.f + 0.5f);
@@ -331,7 +358,6 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
                             dp[2] = (uint8_t)(std::clamp(sb, 0.f, 1.f) * 255.f + 0.5f);
                             dp[3] = (uint8_t)(std::clamp(aWrite, 0.f, 1.f) * 255.f + 0.5f);
                         } else {
-                            // sa = morph strength when !alphaRewrite; 0 → no RGB change
                             if (sa <= 0.f) continue;
                             BlendLayerPixelU8(dp, sr, sg, sb, sa, mode, layer->alphaRewrite);
                         }
@@ -777,6 +803,7 @@ void Canvas::CreateCompositeResources(ID3D11Device* device) {
     m_HasSelection = false;
     m_SelectionMaskNeedsUpload = false;
     m_CompositeDirty = true;
+    CreateGroupCompositeResources(device);
     MemoryStats::LogSnapshot("after_CreateCompositeResources");
 }
 
@@ -1395,10 +1422,24 @@ int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
     dup.smartSourceBytes = src.smartSourceBytes;
     dup.smartSourcePath = src.smartSourcePath;
     dup.smartScale = src.smartScale;
+    dup.fill = src.fill;
     dup.filters = src.filters;
     dup.filtersDirty = true;
+    dup.styles = src.styles;
+    dup.stylesDirty = true;
+    dup.presentationDirty = true;
 
-    if (!dup.isGroup) {
+    if (dup.IsFill()) {
+        if (src.hasMask && !src.mask.empty()) {
+            dup.hasMask = true;
+            dup.mask = src.mask;
+            dup.maskNeedsUpload = true;
+        }
+        if (device && m_Width > 0 && m_Height > 0) {
+            if (!m_CompositeTexture) CreateCompositeResources(device);
+            EnsureFillLayerGpu(device, dup);
+        }
+    } else if (!dup.isGroup) {
         dup.tileCache = std::make_unique<TileCache>();
         dup.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
         if (src.tileCache && !src.tileCache->IsEmpty()) {
@@ -1568,6 +1609,16 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
 
     auto& layer = m_Layers[m_ActiveLayerIdx];
+
+    // Fill / Group: content paint blocked; mask paint still allowed.
+    if (m_PaintTarget == PaintTarget::LayerContent && !layer.CanPaintContent()) {
+        if (phase == StrokePhase::Begin) {
+            Logger::Get().Info(layer.IsFill()
+                ? "Paint blocked: Fill Layer content is not paintable — paint the mask instead."
+                : "Paint blocked: layer content is not paintable.");
+        }
+        return;
+    }
 
     BrushSettings activeBrush = brush;
 
@@ -1757,6 +1808,7 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                                m_HasSelection ? m_SelectionMask : std::vector<uint8_t>{});
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
         m_Layers[m_ActiveLayerIdx].filtersDirty = true;
+        // Styles presentation rebaked on stroke End (not every dab)
         m_Layers[m_ActiveLayerIdx].thumbDirty = true;
         m_CompositeDirty = true;
         m_ChannelPreviewDirty = true;
@@ -1821,6 +1873,14 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         m_IsStrokeActive = false;
         m_CompositeDirty = true;
         m_ChannelPreviewDirty = true;
+        if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
+            auto& al = m_Layers[m_ActiveLayerIdx];
+            al.filtersDirty = true;
+            if (al.HasEnabledStyles()) {
+                al.presentationDirty = true;
+                al.stylesDirty = true;
+            }
+        }
         if (!m_ActiveStrokeDeltas.empty()) {
             auto& layer = m_Layers[m_ActiveLayerIdx];
             std::vector<TileDelta> deltas;
@@ -1956,22 +2016,86 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
         for (size_t i = 0; i < m_Layers.size(); ++i) {
             auto& layer = m_Layers[i];
             if (layer.isGroup) continue;
+
+            // Fill layer: solid 1×1 or full presentation
+            if (layer.IsFill()) {
+                bool fillDirty = layer.needsUpload || layer.stylesDirty || layer.presentationDirty ||
+                                 layer.filtersDirty || !layer.texture || !layer.srv;
+                if (fillDirty) {
+                    EnsureFillLayerGpu(device, layer);
+                    needsCompositeRebuild = true;
+                    layer.thumbDirty = true;
+                    m_ChannelPreviewDirty = true;
+                }
+                // If presentation baked, upload full tiles into full-size texture
+                if (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters)) {
+                    if (layer.filtersDirty) RebuildFilteredPixels(layer);
+                    if (layer.presentationDirty || layer.stylesDirty)
+                        RebuildLayerPresentation(layer);
+                    TileCache* src = nullptr;
+                    if (layer.presentationCache && !layer.presentationCache->IsEmpty())
+                        src = layer.presentationCache.get();
+                    else if (layer.filteredCache && !layer.filteredCache->IsEmpty())
+                        src = layer.filteredCache.get();
+                    if (src) {
+                        if (!layer.texture || [&]() {
+                                D3D11_TEXTURE2D_DESC d{}; layer.texture->GetDesc(&d);
+                                return d.Width != (UINT)m_Width || d.Height != (UINT)m_Height;
+                            }()) {
+                            RecreateLayerTexture(device, layer);
+                        }
+                        src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int) {
+                            D3D11_BOX box;
+                            box.left = tx * TILE_SIZE; box.top = ty * TILE_SIZE; box.front = 0;
+                            box.right = std::min(box.left + TILE_SIZE, (UINT)m_Width);
+                            box.bottom = std::min(box.top + TILE_SIZE, (UINT)m_Height);
+                            box.back = 1;
+                            context->UpdateSubresource(layer.texture, 0, &box, data,
+                                TILE_SIZE * (UINT)src->GetBytesPerPixel(), 0);
+                        });
+                        src->ClearAllDirty();
+                        layer.needsUpload = false;
+                        needsCompositeRebuild = true;
+                    }
+                }
+                if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
+                    UpdateLayerMaskTexture(device, static_cast<int>(i));
+                    needsCompositeRebuild = true;
+                }
+                continue;
+            }
+
             if (!layer.texture) {
-                if (layer.needsUpload || (layer.tileCache && layer.tileCache->GetTileCount() > 0)) {
-                    // Keep retrying texture creation for large docs if first attempt failed.
+                if (layer.needsUpload || (layer.tileCache && layer.tileCache->GetTileCount() > 0) ||
+                    layer.HasEnabledStyles()) {
                     RecreateLayerTexture(device, layer);
                 }
                 if (!layer.texture) continue;
             }
 
-            // Pick source cache (filtered or raw)
+            // Rebuild filters / styles presentation
+            bool filtersWereDirty = !layer.filters.empty() && layer.filtersDirty;
+            bool stylesWereDirty = layer.HasEnabledStyles() &&
+                (layer.stylesDirty || layer.presentationDirty);
+            // During stroke: skip expensive filter full-rebuild every dab when styles exist
+            // (styles already gated inside RebuildLayerPresentation)
+            if (!layer.filters.empty() && layer.filtersDirty) {
+                if (!(m_IsStrokeActive && layer.HasEnabledStyles()))
+                    RebuildFilteredPixels(layer);
+            }
+            if (layer.HasEnabledStyles() && !m_IsStrokeActive)
+                RebuildLayerPresentation(layer);
+
+            // Pick source cache: presentation > filtered > raw
+            // During stroke with styles: show live content (no presentation) for responsiveness
             TileCache* src = nullptr;
             bool layerNeedsUpload = layer.needsUpload;
-            bool filtersWereDirty = !layer.filters.empty() && layer.filtersDirty;
-            if (!layer.filters.empty()) {
-                RebuildFilteredPixels(layer); // may rebuild filteredCache
+            const bool usePres = layer.HasEnabledStyles() && !m_IsStrokeActive &&
+                layer.presentationCache && !layer.presentationCache->IsEmpty();
+            if (usePres)
+                src = layer.presentationCache.get();
+            else if (!layer.filters.empty() && layer.filteredCache && !layer.filtersDirty)
                 src = layer.filteredCache.get();
-            }
             if (!src) src = layer.tileCache.get();
             if (!src) continue;
 
@@ -1979,7 +2103,6 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             size_t dirtyUploaded = 0;
             const bool hadPending = src->HasPendingGpuWork() || layerNeedsUpload;
             auto uploadStart = std::chrono::high_resolution_clock::now();
-            // Upload dirty tiles + pending GPU clears (zero tiles after undo erase).
             src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
                 layerHadUploads = true;
                 ++dirtyUploaded;
@@ -2006,9 +2129,9 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     "Uploaded " + std::to_string(dirtyUploaded) + " dirty tiles in " +
                     std::to_string(ms) + " ms");
             }
-            if (layerHadUploads || filtersWereDirty || layerNeedsUpload || hadPending) {
+            if (layerHadUploads || filtersWereDirty || stylesWereDirty || layerNeedsUpload || hadPending) {
                 needsCompositeRebuild = true;
-                layer.thumbDirty = true; // list thumbs + channel previews stale
+                layer.thumbDirty = true;
                 m_ChannelPreviewDirty = true;
             }
 
@@ -2069,12 +2192,157 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     context->PSSetConstantBuffers(0, 1, &m_ConstantBuffer);
 
     // Draw visible layers bottom-to-top.
-    // First layer: REPLACE full RGBA (RGB present even if A=0 — packing / PS-like buffer).
-    // Later layers: SRC_ALPHA; Alpha Rewrite OFF preserves dest A (A = RGB strength only).
+    // Top-level only: children of groups are drawn into group RT first (isolation).
+    // First layer: REPLACE full RGBA. Later: SRC_ALPHA.
+    // layer.opacity = content/fill opacity; styles bake their own opacity into presentation.
     bool firstVisible = true;
+    auto drawLayerSrv = [&](Layer& layer, ID3D11ShaderResourceView* srv, bool useMask, float opacityMul) {
+        if (!srv) return false;
+        const bool isFirst = firstVisible && m_LayerBlendStateReplace;
+        ID3D11BlendState* blend = nullptr;
+        if (isFirst) blend = m_LayerBlendStateReplace;
+        else if (!layer.alphaRewrite && m_LayerBlendStateAlphaPreserve)
+            blend = m_LayerBlendStateAlphaPreserve;
+        else blend = m_LayerBlendState;
+        context->OMSetBlendState(blend, nullptr, 0xFFFFFFFF);
+
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            LayerBuffer* lb = (LayerBuffer*)mapped.pData;
+            float hasMaskVal = (useMask && layer.hasMask && layer.maskSRV) ? 1.0f : 0.0f;
+            lb->layerParams = DirectX::XMFLOAT4(opacityMul, hasMaskVal, 0.0f, 0.0f);
+            lb->transformParams = DirectX::XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
+            float flags = (layer.alphaRewrite ? 1.f : 0.f) + (isFirst ? 2.f : 0.f);
+            lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
+            context->Unmap(m_LayerConstantBuffer, 0);
+        }
+        context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
+        context->PSSetShaderResources(0, 1, &srv);
+        if (useMask && layer.hasMask && layer.maskSRV)
+            context->PSSetShaderResources(1, 1, &layer.maskSRV);
+        else {
+            ID3D11ShaderResourceView* nullSRV = nullptr;
+            context->PSSetShaderResources(1, 1, &nullSRV);
+        }
+        if (layer.blendMode != BlendMode::Normal && m_CompositeHistoryTexture && m_CompositeHistorySRV) {
+            context->CopyResource(m_CompositeHistoryTexture, m_CompositeTexture);
+            context->PSSetShaderResources(2, 1, &m_CompositeHistorySRV);
+        } else {
+            ID3D11ShaderResourceView* nullHist = nullptr;
+            context->PSSetShaderResources(2, 1, &nullHist);
+        }
+        context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr);
+        context->DrawIndexed(6, 0, 0);
+        ID3D11ShaderResourceView* nullSRV2 = nullptr;
+        context->PSSetShaderResources(2, 1, &nullSRV2);
+        firstVisible = false;
+        return true;
+    };
+
+    // Ensure group composite resources for groups with children
+    ID3D11Device* groupDev = nullptr;
+    context->GetDevice(&groupDev);
+    if (groupDev && !m_GroupCompositeRTV && m_CompositeWidth > 0)
+        CreateGroupCompositeResources(groupDev);
+
     for (size_t i = 0; i < m_Layers.size(); ++i) {
         Layer& layer = m_Layers[i];
-        if (layer.visible && layer.srv) {
+        // Only top-level entries; grouped children rendered inside parent group
+        if (layer.parentGroupId >= 0) continue;
+        if (!layer.visible) continue;
+
+        if (layer.isGroup) {
+            // Virtual rasterize children into group RT, then blend group as unit
+            if (!m_GroupCompositeRTV || !m_GroupCompositeSRV) continue;
+            float clearG[4] = {0,0,0,0};
+            context->ClearRenderTargetView(m_GroupCompositeRTV, clearG);
+
+            // Draw direct children bottom→top into group RT (flat, no nested group RT stack v1)
+            bool groupHadContent = false;
+            bool firstInGroup = true;
+            for (size_t ci = 0; ci < m_Layers.size(); ++ci) {
+                Layer& child = m_Layers[ci];
+                if ((int)child.parentGroupId != (int)i || !child.visible || child.isGroup) continue;
+                if (!child.srv) continue;
+
+                const bool childBaked = child.HasEnabledStyles();
+                float childOp = childBaked ? 1.f : child.opacity;
+                bool childMask = !childBaked && child.hasMask && child.maskSRV;
+
+                // Temporarily retarget draws into group RT
+                context->OMSetRenderTargets(1, &m_GroupCompositeRTV, nullptr);
+                ID3D11BlendState* blend = firstInGroup && m_LayerBlendStateReplace
+                    ? m_LayerBlendStateReplace
+                    : ((!child.alphaRewrite && m_LayerBlendStateAlphaPreserve)
+                        ? m_LayerBlendStateAlphaPreserve : m_LayerBlendState);
+                context->OMSetBlendState(blend, nullptr, 0xFFFFFFFF);
+                D3D11_MAPPED_SUBRESOURCE mapped;
+                if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                    LayerBuffer* lb = (LayerBuffer*)mapped.pData;
+                    float hasMaskVal = childMask ? 1.f : 0.f;
+                    lb->layerParams = DirectX::XMFLOAT4(childOp, hasMaskVal, 0.f, 0.f);
+                    lb->transformParams = DirectX::XMFLOAT4(1.f, 1.f, 0.f, 0.f);
+                    float flags = (child.alphaRewrite ? 1.f : 0.f) + (firstInGroup ? 2.f : 0.f);
+                    lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)child.blendMode, flags);
+                    context->Unmap(m_LayerConstantBuffer, 0);
+                }
+                context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
+                context->PSSetShaderResources(0, 1, &child.srv);
+                if (childMask)
+                    context->PSSetShaderResources(1, 1, &child.maskSRV);
+                else {
+                    ID3D11ShaderResourceView* n = nullptr;
+                    context->PSSetShaderResources(1, 1, &n);
+                }
+                // Child blend modes sample group history — skip non-Normal into group for v1 simplicity
+                ID3D11ShaderResourceView* nullHist = nullptr;
+                context->PSSetShaderResources(2, 1, &nullHist);
+                context->DrawIndexed(6, 0, 0);
+                firstInGroup = false;
+                groupHadContent = true;
+            }
+
+            if (!groupHadContent && !layer.HasEnabledStyles() && layer.filters.empty())
+                continue;
+
+            // Group pixel filters + styles: CPU bake into temporary if needed
+            if ((layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters)) && groupDev) {
+                // Readback group RT is expensive; for v1 apply styles on presentation from CPU flatten
+                // Fallback: draw group RT as-is without group filters if bake not ready
+                // (full group FX bake is done at export/rasterize; viewport shows children sum)
+            }
+
+            // Draw group composite into main with group opacity (fill) — styles independent not applied yet on GPU group
+            context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr);
+            const bool gFirst = firstVisible && m_LayerBlendStateReplace;
+            ID3D11BlendState* gBlend = gFirst ? m_LayerBlendStateReplace : m_LayerBlendState;
+            context->OMSetBlendState(gBlend, nullptr, 0xFFFFFFFF);
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                LayerBuffer* lb = (LayerBuffer*)mapped.pData;
+                lb->layerParams = DirectX::XMFLOAT4(layer.opacity, 0.f, 0.f, 0.f);
+                lb->transformParams = DirectX::XMFLOAT4(1.f, 1.f, 0.f, 0.f);
+                float flags = 1.f + (gFirst ? 2.f : 0.f);
+                lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
+                context->Unmap(m_LayerConstantBuffer, 0);
+            }
+            context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
+            context->PSSetShaderResources(0, 1, &m_GroupCompositeSRV);
+            {
+                ID3D11ShaderResourceView* n = nullptr;
+                context->PSSetShaderResources(1, 1, &n);
+                context->PSSetShaderResources(2, 1, &n);
+            }
+            if (layer.blendMode != BlendMode::Normal && m_CompositeHistoryTexture && m_CompositeHistorySRV) {
+                context->CopyResource(m_CompositeHistoryTexture, m_CompositeTexture);
+                context->PSSetShaderResources(2, 1, &m_CompositeHistorySRV);
+            }
+            context->DrawIndexed(6, 0, 0);
+            firstVisible = false;
+            continue;
+        }
+
+        if (layer.srv) {
             if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
                 ID3D11Device* device = nullptr;
                 context->GetDevice(&device);
@@ -2084,51 +2352,13 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 }
             }
 
-            const bool isFirst = firstVisible && m_LayerBlendStateReplace;
-            ID3D11BlendState* blend = nullptr;
-            if (isFirst) {
-                blend = m_LayerBlendStateReplace;
-            } else if (!layer.alphaRewrite && m_LayerBlendStateAlphaPreserve) {
-                blend = m_LayerBlendStateAlphaPreserve;
-            } else {
-                blend = m_LayerBlendState;
-            }
-            context->OMSetBlendState(blend, nullptr, 0xFFFFFFFF);
-
-            D3D11_MAPPED_SUBRESOURCE mapped;
-            if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-                LayerBuffer* lb = (LayerBuffer*)mapped.pData;
-                float hasMaskVal = (layer.hasMask && layer.maskSRV) ? 1.0f : 0.0f;
-                // zw = translation only when floating; keep 0 for normal layers
-                lb->layerParams = DirectX::XMFLOAT4(layer.opacity, hasMaskVal, 0.0f, 0.0f);
-                lb->transformParams = DirectX::XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
-                // w flags: +1 alphaRewrite, +2 firstLayer (bottom buffer init)
-                float flags = (layer.alphaRewrite ? 1.f : 0.f) + (isFirst ? 2.f : 0.f);
-                lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
-                context->Unmap(m_LayerConstantBuffer, 0);
-            }
-            context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
-            context->PSSetShaderResources(0, 1, &layer.srv);
-            if (layer.hasMask && layer.maskSRV) {
-                context->PSSetShaderResources(1, 1, &layer.maskSRV);
-            } else {
-                ID3D11ShaderResourceView* nullSRV = nullptr;
-                context->PSSetShaderResources(1, 1, &nullSRV);
-            }
-            // Blend modes need previous composite as t2. Never bind m_CompositeSRV
-            // while m_CompositeRTV is the RT — copy to history texture first.
-            if (layer.blendMode != BlendMode::Normal && m_CompositeHistoryTexture && m_CompositeHistorySRV) {
-                context->CopyResource(m_CompositeHistoryTexture, m_CompositeTexture);
-                context->PSSetShaderResources(2, 1, &m_CompositeHistorySRV);
-            } else {
-                ID3D11ShaderResourceView* nullHist = nullptr;
-                context->PSSetShaderResources(2, 1, &nullHist);
-            }
-            context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr);
-            context->DrawIndexed(6, 0, 0);
-            ID3D11ShaderResourceView* nullSRV2 = nullptr;
-            context->PSSetShaderResources(2, 1, &nullSRV2);
-            firstVisible = false;
+            // Styles baked → opacity=1, mask already in presentation
+            // During stroke: live content path with fill opacity
+            const bool baked = layer.HasEnabledStyles() && !m_IsStrokeActive &&
+                layer.presentationCache && !layer.presentationCache->IsEmpty();
+            const float op = baked ? 1.f : layer.opacity;
+            const bool useMask = !baked && layer.hasMask && layer.maskSRV;
+            drawLayerSrv(layer, layer.srv, useMask, op);
 
             if (m_IsMovingPixels && i == m_StartActiveLayerIdx && m_FloatingSRV) {
                 float uOff = (float)m_FloatingOffsetX / (float)m_Width;
@@ -2178,6 +2408,8 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             }
         }
     }
+
+    if (groupDev) groupDev->Release();
 
     // Restore previous target
     context->OMSetRenderTargets(1, &prevRTV, prevDSV);
@@ -2904,6 +3136,7 @@ static const char* LayerTypeToString(Layer::Type t) {
     case Layer::Type::Group: return "group";
     case Layer::Type::SmartObject: return "smart_object";
     case Layer::Type::VectorSvg: return "vector_svg";
+    case Layer::Type::Fill: return "fill";
     default: return "raster";
     }
 }
@@ -2911,7 +3144,46 @@ static Layer::Type LayerTypeFromString(const std::string& s) {
     if (s == "group") return Layer::Type::Group;
     if (s == "smart_object") return Layer::Type::SmartObject;
     if (s == "vector_svg") return Layer::Type::VectorSvg;
+    if (s == "fill") return Layer::Type::Fill;
     return Layer::Type::Raster;
+}
+
+static const char* StyleTypeToString(StyleType t) {
+    switch (t) {
+    case StyleType::Outline: return "Outline";
+    default: return "Shadow";
+    }
+}
+static StyleType StyleTypeFromString(const std::string& s) {
+    if (s == "Outline" || s == "outline") return StyleType::Outline;
+    return StyleType::Shadow;
+}
+
+static const char* FillTargetToString(FillChannelTarget t) {
+    switch (t) {
+    case FillChannelTarget::Transparency: return "Transparency";
+    case FillChannelTarget::Metallic: return "Metallic";
+    case FillChannelTarget::Roughness: return "Roughness";
+    default: return "Diffuse";
+    }
+}
+static FillChannelTarget FillTargetFromString(const std::string& s) {
+    if (s == "Transparency") return FillChannelTarget::Transparency;
+    if (s == "Metallic") return FillChannelTarget::Metallic;
+    if (s == "Roughness") return FillChannelTarget::Roughness;
+    return FillChannelTarget::Diffuse;
+}
+static const char* FillModeToString(FillValueMode m) {
+    switch (m) {
+    case FillValueMode::Grayscale01: return "Grayscale01";
+    case FillValueMode::GrayscaleSigned: return "GrayscaleSigned";
+    default: return "RGB";
+    }
+}
+static FillValueMode FillModeFromString(const std::string& s) {
+    if (s == "Grayscale01") return FillValueMode::Grayscale01;
+    if (s == "GrayscaleSigned") return FillValueMode::GrayscaleSigned;
+    return FillValueMode::RGB;
 }
 
 static json LayerToJson(const Layer& layer) {
@@ -2930,6 +3202,19 @@ static json LayerToJson(const Layer& layer) {
     j["has_smart_source"] = !layer.smartSourceBytes.empty();
     j["has_mask"] = layer.hasMask && !layer.mask.empty();
 
+    if (layer.type == Layer::Type::Fill || layer.IsFill()) {
+        json fj;
+        fj["target"] = FillTargetToString(layer.fill.target);
+        fj["mode"] = FillModeToString(layer.fill.mode);
+        fj["color"] = { layer.fill.color[0], layer.fill.color[1], layer.fill.color[2], layer.fill.color[3] };
+        fj["gray"] = layer.fill.gray;
+        fj["use_texture"] = layer.fill.useTexture;
+        fj["texture_path"] = layer.fill.texturePath;
+        fj["tex_scale"] = { layer.fill.texScale[0], layer.fill.texScale[1] };
+        fj["tex_offset"] = { layer.fill.texOffset[0], layer.fill.texOffset[1] };
+        j["fill"] = fj;
+    }
+
     json filters = json::array();
     for (const auto& f : layer.filters) {
         json fj;
@@ -2937,9 +3222,43 @@ static json LayerToJson(const Layer& layer) {
         fj["enabled"] = f.enabled;
         fj["p"] = { f.p[0], f.p[1], f.p[2], f.p[3] };
         if (!f.lut.empty()) fj["lut"] = f.lut;
+        if (!f.lutR.empty()) fj["lut_r"] = f.lutR;
+        if (!f.lutG.empty()) fj["lut_g"] = f.lutG;
+        if (!f.lutB.empty()) fj["lut_b"] = f.lutB;
+        if (!f.lutA.empty()) fj["lut_a"] = f.lutA;
+        if (f.type == FilterType::Curves)
+            fj["curves_channels"] = (int)f.curvesChannels;
         filters.push_back(fj);
     }
     j["filters"] = filters;
+
+    json styles = json::array();
+    for (const auto& s : layer.styles) {
+        json sj;
+        sj["type"] = StyleTypeToString(s.type);
+        sj["enabled"] = s.enabled;
+        sj["opacity"] = s.opacity;
+        sj["shadow_color"] = { s.shadowColor[0], s.shadowColor[1], s.shadowColor[2], s.shadowColor[3] };
+        sj["distance"] = s.distance;
+        sj["angle"] = s.angleDeg;
+        sj["offset"] = { s.offsetX, s.offsetY };
+        sj["spread"] = s.spread;
+        sj["size"] = s.size;
+        sj["outline_color"] = { s.outlineColor[0], s.outlineColor[1], s.outlineColor[2], s.outlineColor[3] };
+        sj["outline_size"] = s.outlineSize;
+        sj["outline_position"] = (int)s.outlinePos;
+        sj["outline_fill_mode"] = (int)s.outlineFill;
+        sj["outline_texture_path"] = s.outlineTexturePath;
+        if (!s.outlineGradient.empty()) {
+            json g = json::array();
+            for (const auto& st : s.outlineGradient) {
+                g.push_back({ {"t", st.t}, {"rgba", {st.rgba[0], st.rgba[1], st.rgba[2], st.rgba[3]}} });
+            }
+            sj["outline_gradient"] = g;
+        }
+        styles.push_back(sj);
+    }
+    j["styles"] = styles;
     return j;
 }
 
@@ -2966,6 +3285,31 @@ static void LayerFromJson(Layer& layer, const json& j) {
     if (j.contains("smart_scale")) layer.smartScale = j["smart_scale"].get<float>();
     if (j.contains("has_mask")) layer.hasMask = j["has_mask"].get<bool>();
 
+    if (j.contains("fill") && j["fill"].is_object()) {
+        const auto& fj = j["fill"];
+        if (fj.contains("target") && fj["target"].is_string())
+            layer.fill.target = FillTargetFromString(fj["target"].get<std::string>());
+        if (fj.contains("mode") && fj["mode"].is_string())
+            layer.fill.mode = FillModeFromString(fj["mode"].get<std::string>());
+        if (fj.contains("color") && fj["color"].is_array()) {
+            for (int i = 0; i < 4 && i < (int)fj["color"].size(); ++i)
+                layer.fill.color[i] = fj["color"][i].get<float>();
+        }
+        if (fj.contains("gray")) layer.fill.gray = fj["gray"].get<float>();
+        if (fj.contains("use_texture")) layer.fill.useTexture = fj["use_texture"].get<bool>();
+        if (fj.contains("texture_path")) layer.fill.texturePath = fj["texture_path"].get<std::string>();
+        if (fj.contains("tex_scale") && fj["tex_scale"].is_array() && fj["tex_scale"].size() >= 2) {
+            layer.fill.texScale[0] = fj["tex_scale"][0].get<float>();
+            layer.fill.texScale[1] = fj["tex_scale"][1].get<float>();
+        }
+        if (fj.contains("tex_offset") && fj["tex_offset"].is_array() && fj["tex_offset"].size() >= 2) {
+            layer.fill.texOffset[0] = fj["tex_offset"][0].get<float>();
+            layer.fill.texOffset[1] = fj["tex_offset"][1].get<float>();
+        }
+        if (layer.type != Layer::Type::Group)
+            layer.type = Layer::Type::Fill;
+    }
+
     layer.filters.clear();
     if (j.contains("filters") && j["filters"].is_array()) {
         for (const auto& fj : j["filters"]) {
@@ -2980,13 +3324,71 @@ static void LayerFromJson(Layer& layer, const json& j) {
                     f.p[i] = fj["p"][i].get<float>();
                 }
             }
-            if (fj.contains("lut") && fj["lut"].is_array()) {
+            if (fj.contains("lut") && fj["lut"].is_array())
                 f.lut = fj["lut"].get<std::vector<float>>();
-            }
+            if (fj.contains("lut_r") && fj["lut_r"].is_array())
+                f.lutR = fj["lut_r"].get<std::vector<float>>();
+            if (fj.contains("lut_g") && fj["lut_g"].is_array())
+                f.lutG = fj["lut_g"].get<std::vector<float>>();
+            if (fj.contains("lut_b") && fj["lut_b"].is_array())
+                f.lutB = fj["lut_b"].get<std::vector<float>>();
+            if (fj.contains("lut_a") && fj["lut_a"].is_array())
+                f.lutA = fj["lut_a"].get<std::vector<float>>();
+            if (fj.contains("curves_channels"))
+                f.curvesChannels = (uint8_t)fj["curves_channels"].get<int>();
+            else if (f.type == FilterType::Curves)
+                f.curvesChannels = 0x7; // RGB on, A off
             layer.filters.push_back(std::move(f));
         }
     }
     layer.filtersDirty = !layer.filters.empty();
+
+    layer.styles.clear();
+    if (j.contains("styles") && j["styles"].is_array()) {
+        for (const auto& sj : j["styles"]) {
+            LayerStyle s;
+            if (sj.contains("type")) {
+                if (sj["type"].is_string()) s.type = StyleTypeFromString(sj["type"].get<std::string>());
+                else if (sj["type"].is_number_integer()) s.type = static_cast<StyleType>(sj["type"].get<int>());
+            }
+            if (sj.contains("enabled")) s.enabled = sj["enabled"].get<bool>();
+            if (sj.contains("opacity")) s.opacity = sj["opacity"].get<float>();
+            auto read4 = [&](const char* key, float* dst) {
+                if (sj.contains(key) && sj[key].is_array()) {
+                    for (int i = 0; i < 4 && i < (int)sj[key].size(); ++i)
+                        dst[i] = sj[key][i].get<float>();
+                }
+            };
+            read4("shadow_color", s.shadowColor);
+            read4("outline_color", s.outlineColor);
+            if (sj.contains("distance")) s.distance = sj["distance"].get<float>();
+            if (sj.contains("angle")) s.angleDeg = sj["angle"].get<float>();
+            if (sj.contains("offset") && sj["offset"].is_array() && sj["offset"].size() >= 2) {
+                s.offsetX = sj["offset"][0].get<float>();
+                s.offsetY = sj["offset"][1].get<float>();
+            }
+            if (sj.contains("spread")) s.spread = sj["spread"].get<float>();
+            if (sj.contains("size")) s.size = sj["size"].get<float>();
+            if (sj.contains("outline_size")) s.outlineSize = sj["outline_size"].get<float>();
+            if (sj.contains("outline_position")) s.outlinePos = static_cast<OutlinePosition>(sj["outline_position"].get<int>());
+            if (sj.contains("outline_fill_mode")) s.outlineFill = static_cast<OutlineFillMode>(sj["outline_fill_mode"].get<int>());
+            if (sj.contains("outline_texture_path")) s.outlineTexturePath = sj["outline_texture_path"].get<std::string>();
+            if (sj.contains("outline_gradient") && sj["outline_gradient"].is_array()) {
+                for (const auto& g : sj["outline_gradient"]) {
+                    GradientStop st;
+                    if (g.contains("t")) st.t = g["t"].get<float>();
+                    if (g.contains("rgba") && g["rgba"].is_array()) {
+                        for (int i = 0; i < 4 && i < (int)g["rgba"].size(); ++i)
+                            st.rgba[i] = g["rgba"][i].get<float>();
+                    }
+                    s.outlineGradient.push_back(st);
+                }
+            }
+            layer.styles.push_back(std::move(s));
+        }
+    }
+    layer.stylesDirty = !layer.styles.empty();
+    layer.presentationDirty = true;
 }
 
 static bool WriteZlibBlob(std::ostream& out, const void* data, size_t uncompressedBytes) {
@@ -3270,19 +3672,30 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
             }
 
             if (!layer.isGroup) {
-                if (pixelBytes.size() % sizeof(float) != 0) {
-                    Logger::Get().Error("Corrupt layer pixel blob for " + layer.name);
-                    return false;
-                }
-                std::vector<float> layerPixels(pixelBytes.size() / sizeof(float));
-                std::memcpy(layerPixels.data(), pixelBytes.data(), pixelBytes.size());
+                if (layer.IsFill()) {
+                    // Pixel blob is unused (fill is parametric); still consumed for format sync.
+                    layer.tileCache.reset();
+                    layer.presentationDirty = true;
+                    layer.stylesDirty = !layer.styles.empty();
+                    layer.filtersDirty = !layer.filters.empty();
+                    EnsureFillLayerGpu(device, layer);
+                } else {
+                    if (pixelBytes.size() % sizeof(float) != 0) {
+                        Logger::Get().Error("Corrupt layer pixel blob for " + layer.name);
+                        return false;
+                    }
+                    std::vector<float> layerPixels(pixelBytes.size() / sizeof(float));
+                    std::memcpy(layerPixels.data(), pixelBytes.data(), pixelBytes.size());
 
-                layer.tileCache = std::make_unique<TileCache>();
-                layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
-                layer.tileCache->ImportRGBA32F(layerPixels.data(), m_Width, m_Height);
-                layer.tileCache->MarkAllDirty();
-                layer.needsUpload = true;
-                RecreateLayerTexture(device, layer);
+                    layer.tileCache = std::make_unique<TileCache>();
+                    layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+                    layer.tileCache->ImportRGBA32F(layerPixels.data(), m_Width, m_Height);
+                    layer.tileCache->MarkAllDirty();
+                    layer.needsUpload = true;
+                    layer.presentationDirty = true;
+                    layer.stylesDirty = !layer.styles.empty();
+                    RecreateLayerTexture(device, layer);
+                }
             }
 
             // v2: mask blob after pixels when has_mask
@@ -5528,6 +5941,7 @@ void Canvas::ApplyNoise(float strength, bool colorNoise) {
 void Canvas::SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s) {
     if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
     Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (!layer.CanPaintContent()) return;
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
     int r=std::max(1,(int)s.radius);
 
@@ -5578,54 +5992,287 @@ void Canvas::SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const Smud
 }
 
 // ============================================================
-//  Non-destructive Filters
+//  Non-destructive Filters + Styles presentation
 // ============================================================
+
+std::vector<float> Canvas::ResolveLayerContentF(const Layer& layer) const {
+    if (layer.IsFill()) {
+        std::vector<float> buf;
+        layer_fx::FillSolidBuffer(buf, m_Width, m_Height, layer.fill);
+        return buf;
+    }
+    return ExportLayerF(layer, m_Width, m_Height);
+}
+
+bool Canvas::IsTopLevelLayer(const Layer& layer) {
+    return layer.parentGroupId < 0;
+}
 
 void Canvas::RebuildFilteredPixels(Layer& layer) {
     if (!layer.filtersDirty) return;
-    if (layer.filters.empty() || !LayerHasPixels(layer)) {
+    if (layer.filters.empty() || (!LayerHasPixels(layer) && !layer.IsFill())) {
         layer.filteredCache.reset();
-        layer.filtersDirty=false;
+        layer.filtersDirty = false;
+        layer.presentationDirty = true;
         return;
     }
-    std::vector<float> tmp = ExportLayerF(layer, m_Width, m_Height);
-    int w=m_Width,h=m_Height;
-    for (auto& f : layer.filters) {
-        if (!f.enabled) continue;
-        switch (f.type) {
-        case FilterType::Blur: { int rr=std::max(1,(int)f.p[0]); for(int p=0;p<3;++p){BoxBlurH(tmp,w,h,rr);BoxBlurV(tmp,w,h,rr);} } break;
-        case FilterType::HSV: {
-            for(int i=0;i<w*h;++i){
-                size_t idx=(size_t)i*4; float hr,hs,hv;
-                RGBtoHSV(tmp[idx],tmp[idx+1],tmp[idx+2],hr,hs,hv);
-                hr=fmodf(hr+f.p[0]+1.f,1.f); hs=std::clamp(hs+f.p[1],0.f,1.f); hv=std::clamp(hv+f.p[2],0.f,1.f);
-                float r2,g2,b2; HSVtoRGB(hr,hs,hv,r2,g2,b2); tmp[idx]=r2;tmp[idx+1]=g2;tmp[idx+2]=b2;
-            }
-        } break;
-        case FilterType::Curves: {
-            if ((int)f.lut.size()==256) {
-                auto sam=[&](float v)->float{ float fi=v*255.f; int ii=std::clamp((int)fi,0,254); float t=fi-ii; return f.lut[ii]*(1.f-t)+f.lut[ii+1]*t; };
-                for(int i=0;i<w*h;++i){ size_t idx=(size_t)i*4; for(int c=0;c<3;++c) tmp[idx+c]=sam(tmp[idx+c]); }
-            }
-        } break;
-        case FilterType::AlphaInvert: for(int i=0;i<w*h;++i) tmp[(size_t)i*4+3]=1.f-tmp[(size_t)i*4+3]; break;
-        case FilterType::Noise: {
-            std::mt19937 rng2(1337); std::uniform_real_distribution<float> dist2(-1.f,1.f);
-            bool col=(f.p[1]>0.5f);
-            for(int i=0;i<w*h;++i){ size_t idx=(size_t)i*4;
-                if(col){for(int c=0;c<3;++c) tmp[idx+c]=std::clamp(tmp[idx+c]+dist2(rng2)*f.p[0],0.f,1.f);}
-                else { float n=dist2(rng2)*f.p[0]; for(int c=0;c<3;++c) tmp[idx+c]=std::clamp(tmp[idx+c]+n,0.f,1.f); }
-            }
-        } break;
-        }
-    }
-    if (!layer.filteredCache) {
+    std::vector<float> tmp = ResolveLayerContentF(layer);
+    layer_fx::ApplyPixelFilters(tmp, m_Width, m_Height, layer.filters);
+    if (!layer.filteredCache)
         layer.filteredCache = std::make_unique<TileCache>();
-    }
     layer.filteredCache->Init(m_Width, m_Height, m_CanvasFormat);
     layer.filteredCache->ImportRGBA32F(tmp.data(), m_Width, m_Height);
     layer.filteredCache->MarkAllDirty();
-    layer.filtersDirty=false;
+    layer.filtersDirty = false;
+    layer.presentationDirty = true;
+}
+
+void Canvas::RebuildLayerPresentation(Layer& layer, bool fullQuality) {
+    if (!fullQuality && !layer.presentationDirty && !layer.stylesDirty && !layer.filtersDirty)
+        return;
+    // Never full-rebake styles mid-stroke — paint stays live without styles until End.
+    if (!fullQuality && m_IsStrokeActive) {
+        return;
+    }
+    if (layer.filtersDirty)
+        RebuildFilteredPixels(layer);
+
+    if (!layer.HasEnabledStyles()) {
+        layer.presentationCache.reset();
+        layer.stylesDirty = false;
+        layer.presentationDirty = false;
+        return;
+    }
+
+    // Content after filters (or raw) at full res
+    std::vector<float> content;
+    if (layer.filteredCache && !layer.filteredCache->IsEmpty() && !layer.filters.empty()) {
+        content.resize((size_t)m_Width * m_Height * 4);
+        layer.filteredCache->ExportRGBA32F(content.data(), m_Width, m_Height);
+    } else {
+        content = ResolveLayerContentF(layer);
+    }
+
+    // Bake styles at proxy size (≤2048) for viewport — full-res for export/rasterize.
+    int bakeW = m_Width, bakeH = m_Height;
+    if (!fullQuality)
+        ComputeCompositePreviewSize(m_Width, m_Height, bakeW, bakeH);
+    const bool useProxy = (bakeW != m_Width || bakeH != m_Height);
+    const float scaleX = useProxy ? (float)bakeW / (float)m_Width : 1.f;
+    const float scaleY = useProxy ? (float)bakeH / (float)m_Height : 1.f;
+
+    std::vector<float> bakeContent;
+    std::vector<uint8_t> bakeMask;
+    if (useProxy) {
+        bakeContent.resize((size_t)bakeW * bakeH * 4);
+        for (int y = 0; y < bakeH; ++y) {
+            int sy = std::min(m_Height - 1, (int)(y / scaleY + 0.5f));
+            for (int x = 0; x < bakeW; ++x) {
+                int sx = std::min(m_Width - 1, (int)(x / scaleX + 0.5f));
+                size_t di = ((size_t)y * bakeW + x) * 4;
+                size_t si = ((size_t)sy * m_Width + sx) * 4;
+                bakeContent[di + 0] = content[si + 0];
+                bakeContent[di + 1] = content[si + 1];
+                bakeContent[di + 2] = content[si + 2];
+                bakeContent[di + 3] = content[si + 3];
+            }
+        }
+        if (layer.hasMask && layer.mask.size() == (size_t)m_Width * m_Height) {
+            bakeMask.resize((size_t)bakeW * bakeH);
+            for (int y = 0; y < bakeH; ++y) {
+                int sy = std::min(m_Height - 1, (int)(y / scaleY + 0.5f));
+                for (int x = 0; x < bakeW; ++x) {
+                    int sx = std::min(m_Width - 1, (int)(x / scaleX + 0.5f));
+                    bakeMask[(size_t)y * bakeW + x] = layer.mask[(size_t)sy * m_Width + sx];
+                }
+            }
+        }
+    } else {
+        bakeContent = std::move(content);
+    }
+
+    // Scale style geometry to bake resolution
+    std::vector<LayerStyle> scaledStyles = layer.styles;
+    for (auto& st : scaledStyles) {
+        st.distance *= scaleX; // approx isotropic
+        st.offsetX *= scaleX;
+        st.offsetY *= scaleY;
+        st.size *= (scaleX + scaleY) * 0.5f;
+        st.outlineSize *= (scaleX + scaleY) * 0.5f;
+    }
+
+    layer_fx::PresentationParams pp;
+    pp.fillOpacity = layer.opacity;
+    pp.bakeFillOpacity = true;
+    pp.hasMask = useProxy ? !bakeMask.empty() : (layer.hasMask && !layer.mask.empty());
+    pp.mask = useProxy ? (bakeMask.empty() ? nullptr : bakeMask.data())
+                       : (pp.hasMask ? layer.mask.data() : nullptr);
+    pp.maskBytes = useProxy ? bakeMask.size() : layer.mask.size();
+    pp.previewQuality = !fullQuality;
+
+    auto presSmall = layer_fx::BuildPresentation(
+        bakeContent, bakeW, bakeH, {}, scaledStyles, pp);
+
+    // Upsample back to document size for GPU layer texture
+    std::vector<float> presFull;
+    if (useProxy) {
+        presFull.resize((size_t)m_Width * m_Height * 4);
+        for (int y = 0; y < m_Height; ++y) {
+            int sy = std::min(bakeH - 1, (int)(y * scaleY));
+            for (int x = 0; x < m_Width; ++x) {
+                int sx = std::min(bakeW - 1, (int)(x * scaleX));
+                size_t di = ((size_t)y * m_Width + x) * 4;
+                size_t si = ((size_t)sy * bakeW + sx) * 4;
+                presFull[di + 0] = presSmall[si + 0];
+                presFull[di + 1] = presSmall[si + 1];
+                presFull[di + 2] = presSmall[si + 2];
+                presFull[di + 3] = presSmall[si + 3];
+            }
+        }
+    } else {
+        presFull = std::move(presSmall);
+    }
+
+    if (!layer.presentationCache)
+        layer.presentationCache = std::make_unique<TileCache>();
+    layer.presentationCache->Init(m_Width, m_Height, m_CanvasFormat);
+    layer.presentationCache->ImportRGBA32F(presFull.data(), m_Width, m_Height);
+    layer.presentationCache->MarkAllDirty();
+    layer.stylesDirty = false;
+    layer.presentationDirty = false;
+    layer.needsUpload = true;
+}
+
+void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
+    if (!device || !layer.IsFill()) return;
+
+    if (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters)) {
+        RebuildLayerPresentation(layer);
+        if (!layer.texture)
+            RecreateLayerTexture(device, layer);
+        // Upload happens in ComposeLayers via presentation/filtered/tile dirty
+        return;
+    }
+
+    // Cheap path: 1×1 solid color texture (sampled at any UV)
+    float c[4];
+    layer.fill.ResolveRgba(c);
+    if (layer.texture) {
+        // Recreate if not 1×1
+        D3D11_TEXTURE2D_DESC desc{};
+        layer.texture->GetDesc(&desc);
+        if (desc.Width != 1 || desc.Height != 1) {
+            layer.texture->Release(); layer.texture = nullptr;
+            if (layer.srv) { layer.srv->Release(); layer.srv = nullptr; }
+        }
+    }
+    if (!layer.texture) {
+        D3D11_TEXTURE2D_DESC desc = {};
+        desc.Width = 1; desc.Height = 1; desc.MipLevels = 1; desc.ArraySize = 1;
+        desc.Format = GetLayerDxgiFormat();
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &layer.texture))) return;
+        device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
+    }
+    // Pack pixel
+    ID3D11DeviceContext* ctx = nullptr;
+    device->GetImmediateContext(&ctx);
+    if (ctx) {
+        if (m_CanvasFormat == CanvasPixelFormat::RGBA8) {
+            uint8_t px[4] = {
+                (uint8_t)(std::clamp(c[0],0.f,1.f)*255.f+0.5f),
+                (uint8_t)(std::clamp(c[1],0.f,1.f)*255.f+0.5f),
+                (uint8_t)(std::clamp(c[2],0.f,1.f)*255.f+0.5f),
+                (uint8_t)(std::clamp(c[3],0.f,1.f)*255.f+0.5f)
+            };
+            ctx->UpdateSubresource(layer.texture, 0, nullptr, px, 4, 0);
+        } else {
+            ctx->UpdateSubresource(layer.texture, 0, nullptr, c, 16, 0);
+        }
+        ctx->Release();
+    }
+    layer.needsUpload = false;
+}
+
+void Canvas::CreateFillLayer(ID3D11Device* device, const std::string& name, const FillLayerParams& params) {
+    Layer layer;
+    layer.name = name;
+    layer.visible = true;
+    layer.opacity = 1.f;
+    layer.type = Layer::Type::Fill;
+    layer.isGroup = false;
+    layer.fill = params;
+    layer.alphaRewrite = true;
+    // No paint tiles for fill content
+    layer.tileCache.reset();
+    layer.filtersDirty = false;
+    layer.stylesDirty = false;
+    layer.presentationDirty = false;
+
+    if (device && m_Width > 0 && m_Height > 0) {
+        if (!m_CompositeTexture) CreateCompositeResources(device);
+        EnsureFillLayerGpu(device, layer);
+    }
+
+    m_Layers.push_back(std::move(layer));
+    m_ActiveLayerIdx = (int)m_Layers.size() - 1;
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    Logger::Get().Info("Created fill layer: " + name);
+}
+
+bool Canvas::IsFillLayer(int layerIdx) const {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    return m_Layers[layerIdx].IsFill();
+}
+
+bool Canvas::CanPaintLayerContent(int layerIdx) const {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    return m_Layers[layerIdx].CanPaintContent();
+}
+
+int Canvas::AddLayerStyle(int layerIdx, StyleType type) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return -1;
+    Layer& layer = m_Layers[layerIdx];
+    LayerStyle s;
+    s.type = type;
+    s.enabled = true;
+    if (type == StyleType::Shadow) {
+        s.opacity = 0.75f;
+        s.distance = 8.f;
+        s.size = 8.f;
+        s.angleDeg = 120.f;
+    } else {
+        s.opacity = 1.f;
+        s.outlineSize = 2.f;
+        s.outlinePos = OutlinePosition::Outside;
+    }
+    layer.styles.push_back(s);
+    layer.stylesDirty = true;
+    layer.presentationDirty = true;
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    return (int)layer.styles.size() - 1;
+}
+
+void Canvas::RemoveLayerStyle(int layerIdx, int styleIdx) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[layerIdx];
+    if (styleIdx < 0 || styleIdx >= (int)layer.styles.size()) return;
+    layer.styles.erase(layer.styles.begin() + styleIdx);
+    layer.stylesDirty = true;
+    layer.presentationDirty = true;
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+}
+
+void Canvas::MarkLayerStylesDirty(int layerIdx) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return;
+    m_Layers[layerIdx].stylesDirty = true;
+    m_Layers[layerIdx].presentationDirty = true;
+    m_CompositeDirty = true;
 }
 
 // ============================================================
@@ -5634,8 +6281,11 @@ void Canvas::RebuildFilteredPixels(Layer& layer) {
 
 void Canvas::CreateGroupCompositeResources(ID3D11Device* device) {
     ReleaseGroupCompositeResources();
+    // Match proxy composite size (not full 16K) — same as main composite RT.
+    const int gw = std::max(1, m_CompositeWidth > 0 ? m_CompositeWidth : m_Width);
+    const int gh = std::max(1, m_CompositeHeight > 0 ? m_CompositeHeight : m_Height);
     D3D11_TEXTURE2D_DESC desc={};
-    desc.Width=m_Width; desc.Height=m_Height; desc.MipLevels=1; desc.ArraySize=1;
+    desc.Width=(UINT)gw; desc.Height=(UINT)gh; desc.MipLevels=1; desc.ArraySize=1;
     desc.Format=GetLayerDxgiFormat(); desc.SampleDesc.Count=1;
     desc.Usage=D3D11_USAGE_DEFAULT; desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
     if (SUCCEEDED(device->CreateTexture2D(&desc,nullptr,&m_GroupCompositeTexture))) {
@@ -6648,14 +7298,189 @@ bool Canvas::ImportSvgAsSmartObject(ID3D11Device* device, const std::string& fil
 bool Canvas::RasterizeLayer(ID3D11Device* device, int layerIdx) {
     if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
     auto& layer = m_Layers[layerIdx];
-    if (layer.type == Layer::Type::Raster && !layer.isGroup) return true;
-    if (layer.isGroup) return false;
+    if (layer.isGroup)
+        return RasterizeGroup(device, layerIdx);
+
+    // Already plain raster with nothing to bake
+    if (layer.type == Layer::Type::Raster && layer.filters.empty() && layer.styles.empty() && !layer.IsFill())
+        return true;
+
+    // Bake content + filters + styles into pixels (full quality)
+    if (layer.filtersDirty) RebuildFilteredPixels(layer);
+    if (layer.HasEnabledStyles()) {
+        layer.presentationDirty = true;
+        RebuildLayerPresentation(layer, /*fullQuality=*/true);
+    }
+
+    std::vector<float> baked;
+    if (layer.HasEnabledStyles() && layer.presentationCache && !layer.presentationCache->IsEmpty()) {
+        baked.resize((size_t)m_Width * m_Height * 4);
+        layer.presentationCache->ExportRGBA32F(baked.data(), m_Width, m_Height);
+    } else if (!layer.filters.empty() && layer.filteredCache && !layer.filteredCache->IsEmpty()) {
+        baked.resize((size_t)m_Width * m_Height * 4);
+        layer.filteredCache->ExportRGBA32F(baked.data(), m_Width, m_Height);
+        // Apply opacity into alpha when baking without styles
+        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i)
+            baked[i * 4 + 3] *= layer.opacity;
+        if (layer.hasMask && layer.mask.size() == (size_t)m_Width * m_Height) {
+            for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i)
+                baked[i * 4 + 3] *= layer.mask[i] / 255.f;
+        }
+    } else if (layer.IsFill()) {
+        layer_fx::FillSolidBuffer(baked, m_Width, m_Height, layer.fill);
+        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i)
+            baked[i * 4 + 3] *= layer.opacity;
+        if (layer.hasMask && layer.mask.size() == (size_t)m_Width * m_Height) {
+            for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i)
+                baked[i * 4 + 3] *= layer.mask[i] / 255.f;
+        }
+    } else {
+        // Smart object / etc. — keep existing tiles, just drop type
+        baked = ExportLayerF(layer, m_Width, m_Height);
+    }
+
     layer.type = Layer::Type::Raster;
+    layer.isGroup = false;
     layer.smartSourceBytes.clear();
     layer.smartSourcePath.clear();
+    layer.fill = FillLayerParams{};
+    layer.filters.clear();
+    layer.styles.clear();
+    layer.filteredCache.reset();
+    layer.presentationCache.reset();
+    layer.filtersDirty = false;
+    layer.stylesDirty = false;
+    layer.presentationDirty = false;
+
+    if (!layer.tileCache) {
+        layer.tileCache = std::make_unique<TileCache>();
+        layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+    }
+    layer.tileCache->ImportRGBA32F(baked.data(), m_Width, m_Height);
+    layer.tileCache->MarkAllDirty();
     layer.needsUpload = true;
+    layer.opacity = 1.f; // baked in
+
+    if (device) RecreateLayerTexture(device, layer);
+
     m_CompositeDirty = true;
     m_IsDocumentModified = true;
-    Logger::Get().Info("RasterizeLayer " + layer.name);
+    Logger::Get().Info("RasterizeLayer baked: " + layer.name);
+    return true;
+}
+
+bool Canvas::RasterizeGroup(ID3D11Device* device, int groupIdx) {
+    if (groupIdx < 0 || groupIdx >= (int)m_Layers.size()) return false;
+    if (!m_Layers[groupIdx].isGroup) return false;
+
+    const std::string groupName = m_Layers[groupIdx].name;
+    const float groupOpacity = m_Layers[groupIdx].opacity;
+    const auto groupFilters = m_Layers[groupIdx].filters;
+    const auto groupStyles = m_Layers[groupIdx].styles;
+    const bool groupHasMask = m_Layers[groupIdx].hasMask;
+    std::vector<uint8_t> groupMask = m_Layers[groupIdx].mask;
+
+    auto isUnderGroup = [&](int layerIdx, int gIdx) {
+        int p = m_Layers[layerIdx].parentGroupId;
+        while (p >= 0 && p < (int)m_Layers.size()) {
+            if (p == gIdx) return true;
+            p = m_Layers[p].parentGroupId;
+        }
+        return false;
+    };
+
+    // Bake children presentations first
+    for (int i = 0; i < (int)m_Layers.size(); ++i) {
+        if (i == groupIdx || m_Layers[i].isGroup || !isUnderGroup(i, groupIdx)) continue;
+        if (m_Layers[i].filtersDirty) RebuildFilteredPixels(m_Layers[i]);
+        if (m_Layers[i].HasEnabledStyles()) {
+            m_Layers[i].presentationDirty = true;
+            RebuildLayerPresentation(m_Layers[i], /*fullQuality=*/true);
+        }
+    }
+
+    std::vector<float> acc((size_t)m_Width * m_Height * 4, 0.f);
+    for (int i = 0; i < (int)m_Layers.size(); ++i) {
+        Layer& L = m_Layers[i];
+        if (L.isGroup || !L.visible || !isUnderGroup(i, groupIdx)) continue;
+
+        std::vector<float> content;
+        if (L.HasEnabledStyles() && L.presentationCache && !L.presentationCache->IsEmpty()) {
+            content.resize((size_t)m_Width * m_Height * 4);
+            L.presentationCache->ExportRGBA32F(content.data(), m_Width, m_Height);
+        } else {
+            content = ResolveLayerContentF(L);
+            if (!L.filters.empty() && L.filteredCache && !L.filteredCache->IsEmpty()) {
+                content.resize((size_t)m_Width * m_Height * 4);
+                L.filteredCache->ExportRGBA32F(content.data(), m_Width, m_Height);
+            }
+            layer_fx::PresentationParams pp;
+            pp.fillOpacity = L.opacity;
+            pp.bakeFillOpacity = true;
+            pp.hasMask = L.hasMask && !L.mask.empty();
+            pp.mask = pp.hasMask ? L.mask.data() : nullptr;
+            pp.maskBytes = L.mask.size();
+            content = layer_fx::BuildPresentation(content, m_Width, m_Height, {}, {}, pp);
+        }
+        layer_fx::CompositeOver(acc.data(), content.data(), m_Width * m_Height);
+    }
+
+    if (!groupFilters.empty() || LayerStyleListHasEnabled(groupStyles)) {
+        layer_fx::PresentationParams pp;
+        pp.fillOpacity = groupOpacity;
+        pp.bakeFillOpacity = true;
+        pp.hasMask = groupHasMask && !groupMask.empty();
+        pp.mask = pp.hasMask ? groupMask.data() : nullptr;
+        pp.maskBytes = groupMask.size();
+        acc = layer_fx::BuildPresentation(acc, m_Width, m_Height, groupFilters, groupStyles, pp);
+    } else {
+        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i)
+            acc[i * 4 + 3] *= groupOpacity;
+    }
+
+    // Collect children indices, delete high→low (DeleteLayer remaps parent ids)
+    std::vector<int> childIdx;
+    for (int i = 0; i < (int)m_Layers.size(); ++i) {
+        if (i != groupIdx && isUnderGroup(i, groupIdx))
+            childIdx.push_back(i);
+    }
+    std::sort(childIdx.begin(), childIdx.end(), std::greater<int>());
+    int deletedBelow = 0;
+    for (int di : childIdx) {
+        if (di < groupIdx) deletedBelow++;
+        DeleteLayer(di);
+    }
+    groupIdx -= deletedBelow;
+
+    if (groupIdx < 0 || groupIdx >= (int)m_Layers.size() ||
+        !(m_Layers[groupIdx].isGroup && m_Layers[groupIdx].name == groupName)) {
+        groupIdx = -1;
+        for (int i = 0; i < (int)m_Layers.size(); ++i)
+            if (m_Layers[i].isGroup && m_Layers[i].name == groupName) { groupIdx = i; break; }
+    }
+    if (groupIdx < 0) return false;
+
+    Layer& g = m_Layers[groupIdx];
+    g.isGroup = false;
+    g.type = Layer::Type::Raster;
+    g.filters.clear();
+    g.styles.clear();
+    g.filteredCache.reset();
+    g.presentationCache.reset();
+    g.filtersDirty = false;
+    g.stylesDirty = false;
+    g.presentationDirty = false;
+    g.opacity = 1.f;
+    g.tileCache = std::make_unique<TileCache>();
+    g.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+    g.tileCache->ImportRGBA32F(acc.data(), m_Width, m_Height);
+    g.tileCache->MarkAllDirty();
+    g.needsUpload = true;
+    if (device) RecreateLayerTexture(device, g);
+
+    m_ActiveLayerIdx = groupIdx;
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    Logger::Get().Info("RasterizeGroup flattened: " + g.name);
     return true;
 }

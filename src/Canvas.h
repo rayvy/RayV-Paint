@@ -7,25 +7,13 @@
 #include <string>
 #include <atomic>
 #include <functional>
+#include <memory>
 #include "core/TileCache.h"
 #include "core/PaintEngine.h"
 #include "core/DdsHelper.h"
 #include "core/UndoRedoManager.h"
 #include "modio/ModTypes.h"
-
-// ---- Blend Modes ----
-enum class BlendMode : uint8_t {
-    Normal = 0,
-    Multiply,
-    Screen,
-    Overlay,
-    Add,
-    Subtract,
-    Darken,
-    Lighten,
-    HardLight,
-    SoftLight
-};
+#include "layer/LayerTypes.h"
 
 // What the brush/smudge tools write into for the active layer (Photoshop-like).
 enum class PaintTarget : uint8_t {
@@ -37,25 +25,10 @@ enum class PaintTarget : uint8_t {
 // progress01 is in [0,1]; stage is a short stable tag e.g. "decode", "layers", "upload".
 using LoadProgressFn = std::function<void(float progress01, const char* stage)>;
 
-// ---- Non-destructive Layer Filters ----
-enum class FilterType : uint8_t {
-    Blur = 0,
-    HSV,
-    Curves,
-    AlphaInvert,
-    Noise
-};
-
-struct LayerFilter {
-    FilterType type = FilterType::Blur;
-    bool enabled    = true;
-    float p[4]      = {};  // generic params: blur=p[0] radius; hsv=p[0..2] H/S/V; noise=p[0] strength,p[1] colorNoise
-    std::vector<float> lut; // 256 floats [0..1] for Curves (same LUT applied to R,G,B)
-};
-
 struct Layer {
     std::string name;
     bool visible = true;
+    // Content / fill opacity. Does NOT multiply LayerStyles (shadow/outline use style.opacity).
     float opacity = 1.0f;
     BlendMode blendMode = BlendMode::Normal;
 
@@ -65,7 +38,7 @@ struct Layer {
     bool alphaRewrite = true;
 
     // Primary pixel data (replaces std::vector<float> pixels).
-    // nullptr for group header layers (isGroup == true).
+    // nullptr for group header layers (isGroup == true) and optional for Fill.
     std::unique_ptr<TileCache> tileCache;
 
     ID3D11Texture2D* texture = nullptr;
@@ -78,11 +51,18 @@ struct Layer {
     bool thumbDirty = true;
     int thumbSize = 0;
 
-    // Non-destructive filters
+    // Non-destructive pixel filters (Blur, Curves, …)
     std::vector<LayerFilter> filters;
-    // Cache: tileCache with filters applied. Rebuilt when filtersDirty=true.
+    // Cache: content with filters applied (no styles). Rebuilt when filtersDirty=true.
     std::unique_ptr<TileCache> filteredCache;
     bool filtersDirty = true;
+
+    // Layer styles (Shadow, Outline) — independent opacity from layer.opacity
+    std::vector<LayerStyle> styles;
+    // When styles present: baked presentation (styles + content*opacity) for single GPU draw at opacity=1.
+    std::unique_ptr<TileCache> presentationCache;
+    bool stylesDirty = true;
+    bool presentationDirty = true;
 
     // Mask: single-channel, same canvas dimensions.
     // Values 0-255 (RGBA8 docs) or float reinterpreted as uint8 for GPU (R8_UNORM).
@@ -99,13 +79,27 @@ struct Layer {
     int  parentGroupId  = -1;    // -1 = top-level
     bool groupExpanded  = true;
 
-    // Layer type (Raster default; Group when isGroup; SmartObject/VectorSvg for vectors)
-    enum class Type : uint8_t { Raster = 0, Group = 1, SmartObject = 2, VectorSvg = 3 };
+    // Layer type (Raster default; Group when isGroup; Fill; SmartObject/VectorSvg)
+    enum class Type : uint8_t {
+        Raster = 0,
+        Group  = 1,
+        SmartObject = 2,
+        VectorSvg   = 3,
+        Fill   = 4
+    };
     Type type = Type::Raster;
+    // Fill params (type == Fill)
+    FillLayerParams fill;
     // Source bytes for smart objects / SVG (empty for pure raster).
     std::vector<uint8_t> smartSourceBytes;
     std::string smartSourcePath;
     float smartScale = 1.0f;
+
+    bool IsFill() const { return type == Type::Fill; }
+    bool CanPaintContent() const {
+        return !isGroup && type != Type::Fill && type != Type::Group;
+    }
+    bool HasEnabledStyles() const { return LayerStyleListHasEnabled(styles); }
 };
 
 
@@ -176,10 +170,22 @@ public:
 
     // Layer types / smart objects (Layer::Type)
     bool ImportSvgAsSmartObject(ID3D11Device* device, const std::string& filepath);
+    // Bake filters/styles/fill into raster tiles. Groups: flatten children into one raster.
     bool RasterizeLayer(ID3D11Device* device, int layerIdx);
+    bool RasterizeGroup(ID3D11Device* device, int groupIdx);
 
     // Layer Management
     void CreateNewLayer(ID3D11Device* device, const std::string& name);
+    // Substance-like fill layer: full-canvas color, no content paint; mask paintable.
+    void CreateFillLayer(ID3D11Device* device, const std::string& name,
+                         const FillLayerParams& params = {});
+    bool IsFillLayer(int layerIdx) const;
+    bool CanPaintLayerContent(int layerIdx) const;
+
+    // Layer styles API
+    int  AddLayerStyle(int layerIdx, StyleType type);
+    void RemoveLayerStyle(int layerIdx, int styleIdx);
+    void MarkLayerStylesDirty(int layerIdx);
     void DeleteLayer(int index);
     // Clone layer (or group header) inserted after source. Returns new index, or -1.
     int  DuplicateLayer(ID3D11Device* device, int index);
@@ -559,6 +565,15 @@ private:
 
     // Applies filters to layer.pixels → layer.filteredPixels (rebuilds if filtersDirty)
     void RebuildFilteredPixels(Layer& layer);
+    // Rebuild presentation cache when styles/filters/fill require baked buffer for GPU.
+    // fullQuality=true: document-res bake (export/rasterize). false: proxy preview.
+    void RebuildLayerPresentation(Layer& layer, bool fullQuality = false);
+    // Resolve raw content (tiles or fill solid) to float RGBA W×H.
+    std::vector<float> ResolveLayerContentF(const Layer& layer) const;
+    // Ensure Fill layer has a GPU texture (1×1 solid or full presentation).
+    void EnsureFillLayerGpu(ID3D11Device* device, Layer& layer);
+    // True if layer should be drawn as top-level (parentGroupId < 0 or parent missing).
+    static bool IsTopLevelLayer(const Layer& layer);
 
 
     bool ExtractAndSetICCProfile(const std::string& pngPath);
