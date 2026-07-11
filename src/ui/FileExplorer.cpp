@@ -2,18 +2,38 @@
 #include "../core/ProjectManager.h"
 #include "../core/Logger.h"
 #include "../core/PathUtil.h"
+#include "../core/ImageManager.h"
+#include "../core/DdsHelper.h"
 #include "../texset/TextureSetIO.h"
 #include "widgets/UiTooltip.h"
+#include "style/UiTokens.h"
 
 #include <imgui.h>
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cmath>
+#include <ctime>
 #include <cstring>
-#include <filesystem>
 #include <cstdio>
+#include <filesystem>
+#include <unordered_map>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shlobj.h>
+#pragma comment(lib, "shell32.lib")
+#endif
 
 namespace fs = std::filesystem;
 namespace UI {
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 static std::string DefaultStartDir() {
     try {
@@ -31,6 +51,7 @@ static std::string ToLower(std::string s) {
 
 static bool IsImageExt(const std::string& ext) {
     std::string e = ToLower(ext);
+    if (!e.empty() && e[0] != '.') e = "." + e;
     return e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".tga" ||
            e == ".bmp" || e == ".dds";
 }
@@ -43,23 +64,427 @@ static std::string JoinPath(const std::string& a, const std::string& b) {
     }
 }
 
-static void ListDirectory(const std::string& dir, std::vector<std::string>& outDirs,
-                          std::vector<std::string>& outFiles) {
-    outDirs.clear();
-    outFiles.clear();
+static std::string ParentDir(const std::string& dir) {
+    try {
+        fs::path p = PathUtil::FromUtf8(dir);
+        if (p.has_parent_path() && p.parent_path() != p)
+            return PathUtil::WideToUtf8(p.parent_path().wstring());
+    } catch (...) {}
+    return dir;
+}
+
+static std::string FormatSize(uint64_t bytes) {
+    char buf[48];
+    if (bytes < 1024ull)
+        std::snprintf(buf, sizeof(buf), "%llu B", (unsigned long long)bytes);
+    else if (bytes < 1024ull * 1024ull)
+        std::snprintf(buf, sizeof(buf), "%.1f KB", bytes / 1024.0);
+    else if (bytes < 1024ull * 1024ull * 1024ull)
+        std::snprintf(buf, sizeof(buf), "%.1f MB", bytes / (1024.0 * 1024.0));
+    else
+        std::snprintf(buf, sizeof(buf), "%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0));
+    return buf;
+}
+
+static std::string FormatTime(int64_t epochSec) {
+    if (epochSec <= 0) return "—";
+    std::time_t t = (std::time_t)epochSec;
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d %02d:%02d",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
+    return buf;
+}
+
+texset::MapKind GuessMapKindFromFilename(const std::string& filename) {
+    std::string fl = ToLower(filename);
+    if (fl.find("lightmap") != std::string::npos || fl.find("light_map") != std::string::npos ||
+        fl.find("_light") != std::string::npos)
+        return texset::MapKind::LightMap;
+    if (fl.find("materialmap") != std::string::npos || fl.find("material_map") != std::string::npos ||
+        fl.find("_material") != std::string::npos)
+        return texset::MapKind::MaterialMap;
+    if (fl.find("normalmap") != std::string::npos || fl.find("normal_map") != std::string::npos ||
+        fl.find("_normal") != std::string::npos || fl.find("_nml") != std::string::npos)
+        return texset::MapKind::NormalMap;
+    if (fl.find("glow") != std::string::npos || fl.find("emiss") != std::string::npos)
+        return texset::MapKind::GlowMap;
+    if (fl.find("extra") != std::string::npos)
+        return texset::MapKind::ExtraMap;
+    if (fl.find("wengine") != std::string::npos || fl.find("fxmap") != std::string::npos)
+        return texset::MapKind::WengineFX;
+    return texset::MapKind::Diffuse;
+}
+
+// ---------------------------------------------------------------------------
+// Directory listing
+// ---------------------------------------------------------------------------
+
+struct FsEntry {
+    std::string name;
+    std::string fullPath;
+    bool isDir = false;
+    bool isImage = false;
+    uint64_t size = 0;
+    int64_t mtime = 0;
+    std::string typeLabel; // "Folder" / "PNG" / "DDS" …
+};
+
+static int64_t FileTimeToEpoch(const fs::file_time_type& ft) {
+    try {
+        auto sctp = std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+            ft - fs::file_time_type::clock::now() + std::chrono::system_clock::now());
+        return (int64_t)std::chrono::system_clock::to_time_t(sctp);
+    } catch (...) {
+        return 0;
+    }
+}
+
+static void ListDirectory(const std::string& dir, bool showHidden, std::vector<FsEntry>& out) {
+    out.clear();
     std::error_code ec;
     fs::path p = PathUtil::FromUtf8(dir);
     if (!fs::exists(p, ec) || !fs::is_directory(p, ec)) return;
-    for (auto& ent : fs::directory_iterator(p, ec)) {
-        if (ec) break;
+
+    for (auto& ent : fs::directory_iterator(p, fs::directory_options::skip_permission_denied, ec)) {
+        if (ec) { ec.clear(); continue; }
         std::string name = PathUtil::WideToUtf8(ent.path().filename().wstring());
-        if (name.empty() || name[0] == '.') continue;
-        if (ent.is_directory()) outDirs.push_back(name);
-        else outFiles.push_back(name);
+        if (name.empty()) continue;
+        if (!showHidden && name[0] == '.') continue;
+
+        FsEntry e;
+        e.name = name;
+        e.fullPath = PathUtil::WideToUtf8(ent.path().wstring());
+        e.isDir = ent.is_directory(ec);
+        if (ec) { ec.clear(); continue; }
+
+        if (!e.isDir) {
+            auto st = ent.file_size(ec);
+            e.size = ec ? 0 : (uint64_t)st;
+            ec.clear();
+            std::string ext;
+            try { ext = ent.path().extension().string(); } catch (...) {}
+            e.isImage = IsImageExt(ext);
+            std::string el = ToLower(ext);
+            if (!el.empty() && el[0] == '.') el = el.substr(1);
+            for (auto& c : el) c = (char)std::toupper((unsigned char)c);
+            e.typeLabel = el.empty() ? "File" : el;
+        } else {
+            e.typeLabel = "Folder";
+        }
+
+        try {
+            auto ft = ent.last_write_time(ec);
+            if (!ec) e.mtime = FileTimeToEpoch(ft);
+        } catch (...) {}
+        out.push_back(std::move(e));
     }
-    std::sort(outDirs.begin(), outDirs.end());
-    std::sort(outFiles.begin(), outFiles.end());
 }
+
+static void SortEntries(std::vector<FsEntry>& entries, ExplorerSortBy by, bool asc) {
+    std::sort(entries.begin(), entries.end(), [&](const FsEntry& a, const FsEntry& b) {
+        // Folders first always
+        if (a.isDir != b.isDir) return a.isDir > b.isDir;
+        int cmp = 0;
+        switch (by) {
+        case ExplorerSortBy::Date:
+            cmp = (a.mtime < b.mtime) ? -1 : (a.mtime > b.mtime ? 1 : 0);
+            break;
+        case ExplorerSortBy::Size:
+            cmp = (a.size < b.size) ? -1 : (a.size > b.size ? 1 : 0);
+            break;
+        case ExplorerSortBy::Type:
+            cmp = ToLower(a.typeLabel).compare(ToLower(b.typeLabel));
+            break;
+        case ExplorerSortBy::Name:
+        default:
+            cmp = ToLower(a.name).compare(ToLower(b.name));
+            break;
+        }
+        if (cmp == 0) cmp = ToLower(a.name).compare(ToLower(b.name));
+        return asc ? (cmp < 0) : (cmp > 0);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Bookmarks + drives
+// ---------------------------------------------------------------------------
+
+struct Bookmark {
+    std::string label;
+    std::string path;
+    bool isDrive = false;
+};
+
+#ifdef _WIN32
+static std::string KnownFolderPath(REFKNOWNFOLDERID id) {
+    PWSTR w = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, nullptr, &w)) && w) {
+        std::string u8 = PathUtil::WideToUtf8(w);
+        CoTaskMemFree(w);
+        return u8;
+    }
+    return {};
+}
+#endif
+
+static void BuildBookmarks(std::vector<Bookmark>& out) {
+    out.clear();
+#ifdef _WIN32
+    struct { REFKNOWNFOLDERID id; const char* lab; } kfs[] = {
+        { FOLDERID_Desktop,   "Desktop" },
+        { FOLDERID_Documents, "Documents" },
+        { FOLDERID_Downloads, "Downloads" },
+        { FOLDERID_Pictures,  "Pictures" },
+        { FOLDERID_Videos,    "Videos" },
+        { FOLDERID_Music,     "Music" },
+    };
+    for (auto& k : kfs) {
+        std::string p = KnownFolderPath(k.id);
+        if (!p.empty()) out.push_back({ k.lab, p, false });
+    }
+    // Logical drives
+    DWORD mask = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i) {
+        if (!(mask & (1u << i))) continue;
+        char letter = (char)('A' + i);
+        char root[4] = { letter, ':', '\\', 0 };
+        UINT t = GetDriveTypeA(root);
+        if (t == DRIVE_NO_ROOT_DIR) continue;
+        const char* kind = "Drive";
+        if (t == DRIVE_REMOVABLE) kind = "Removable";
+        else if (t == DRIVE_CDROM) kind = "CD/DVD";
+        else if (t == DRIVE_REMOTE) kind = "Network";
+        else if (t == DRIVE_FIXED) kind = "Local Disk";
+        char lab[32];
+        std::snprintf(lab, sizeof(lab), "%c: (%s)", letter, kind);
+        out.push_back({ lab, std::string(root), true });
+    }
+#else
+    out.push_back({ "Home", DefaultStartDir(), false });
+    out.push_back({ "Root", "/", true });
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Thumbnail cache (lazy, capped)
+// ---------------------------------------------------------------------------
+
+struct Thumb {
+    ID3D11ShaderResourceView* srv = nullptr;
+    ID3D11Texture2D* tex = nullptr;
+    bool failed = false;
+    uint64_t lastUse = 0;
+};
+
+static std::unordered_map<std::string, Thumb> g_Thumbs;
+static uint64_t g_ThumbClock = 1;
+static constexpr size_t kMaxThumbs = 64;
+static constexpr int kThumbMaxPx = 128;
+
+static void ReleaseThumb(Thumb& t) {
+    if (t.srv) { t.srv->Release(); t.srv = nullptr; }
+    if (t.tex) { t.tex->Release(); t.tex = nullptr; }
+}
+
+static void ClearAllThumbs() {
+    for (auto& kv : g_Thumbs) ReleaseThumb(kv.second);
+    g_Thumbs.clear();
+}
+
+static void EvictThumbsIfNeeded() {
+    while (g_Thumbs.size() > kMaxThumbs) {
+        auto oldest = g_Thumbs.end();
+        uint64_t best = UINT64_MAX;
+        for (auto it = g_Thumbs.begin(); it != g_Thumbs.end(); ++it) {
+            if (it->second.lastUse < best) { best = it->second.lastUse; oldest = it; }
+        }
+        if (oldest == g_Thumbs.end()) break;
+        ReleaseThumb(oldest->second);
+        g_Thumbs.erase(oldest);
+    }
+}
+
+static void DownscaleRGBA(const uint8_t* src, int sw, int sh,
+                          std::vector<uint8_t>& dst, int& dw, int& dh, int maxSide) {
+    float scale = 1.f;
+    if (sw > maxSide || sh > maxSide)
+        scale = (float)maxSide / (float)std::max(sw, sh);
+    dw = std::max(1, (int)(sw * scale + 0.5f));
+    dh = std::max(1, (int)(sh * scale + 0.5f));
+    dst.assign((size_t)dw * dh * 4, 0);
+    for (int y = 0; y < dh; ++y) {
+        int sy = std::min(sh - 1, y * sh / dh);
+        for (int x = 0; x < dw; ++x) {
+            int sx = std::min(sw - 1, x * sw / dw);
+            size_t di = ((size_t)y * dw + x) * 4;
+            size_t si = ((size_t)sy * sw + sx) * 4;
+            dst[di+0]=src[si+0]; dst[di+1]=src[si+1]; dst[di+2]=src[si+2]; dst[di+3]=src[si+3];
+        }
+    }
+}
+
+static bool CreateThumbSrv(ID3D11Device* device, const uint8_t* rgba, int w, int h, Thumb& out) {
+    if (!device || !rgba || w <= 0 || h <= 0) return false;
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = (UINT)w; td.Height = (UINT)h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init = {};
+    init.pSysMem = rgba;
+    init.SysMemPitch = (UINT)w * 4;
+    if (FAILED(device->CreateTexture2D(&td, &init, &out.tex)) || !out.tex) return false;
+    if (FAILED(device->CreateShaderResourceView(out.tex, nullptr, &out.srv)) || !out.srv) {
+        out.tex->Release(); out.tex = nullptr;
+        return false;
+    }
+    return true;
+}
+
+static ID3D11ShaderResourceView* GetThumb(ID3D11Device* device, const std::string& path, bool wantLoad) {
+    if (!device || path.empty()) return nullptr;
+    auto it = g_Thumbs.find(path);
+    if (it != g_Thumbs.end()) {
+        it->second.lastUse = ++g_ThumbClock;
+        return it->second.failed ? nullptr : it->second.srv;
+    }
+    if (!wantLoad) return nullptr;
+
+    Thumb t;
+    t.lastUse = ++g_ThumbClock;
+
+    std::string ext;
+    try { ext = fs::path(PathUtil::Utf8ToWide(path)).extension().string(); } catch (...) {}
+    ext = ToLower(ext);
+
+    std::vector<uint8_t> rgba;
+    int w = 0, h = 0;
+    bool ok = false;
+
+    if (ext == ".dds") {
+        DdsImage img;
+        if (DdsHelper::LoadDDS(path, img) && img.width > 0 && img.height > 0 && !img.pixels.empty()) {
+            std::vector<uint8_t> full((size_t)img.width * img.height * 4);
+            for (int i = 0, n = img.width * img.height; i < n; ++i) {
+                full[i*4+0] = (uint8_t)std::clamp(img.pixels[i*4+0] * 255.f, 0.f, 255.f);
+                full[i*4+1] = (uint8_t)std::clamp(img.pixels[i*4+1] * 255.f, 0.f, 255.f);
+                full[i*4+2] = (uint8_t)std::clamp(img.pixels[i*4+2] * 255.f, 0.f, 255.f);
+                full[i*4+3] = (uint8_t)std::clamp(img.pixels[i*4+3] * 255.f, 0.f, 255.f);
+            }
+            DownscaleRGBA(full.data(), img.width, img.height, rgba, w, h, kThumbMaxPx);
+            ok = true;
+        }
+    } else {
+        std::vector<uint8_t> full;
+        int fw = 0, fh = 0;
+        if (ImageManager::LoadImageFromFile(path, full, fw, fh) && fw > 0 && fh > 0) {
+            DownscaleRGBA(full.data(), fw, fh, rgba, w, h, kThumbMaxPx);
+            ok = true;
+        }
+    }
+
+    if (ok && CreateThumbSrv(device, rgba.data(), w, h, t)) {
+        EvictThumbsIfNeeded();
+        g_Thumbs[path] = t;
+        return g_Thumbs[path].srv;
+    }
+    t.failed = true;
+    g_Thumbs[path] = t;
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Navigation helpers
+// ---------------------------------------------------------------------------
+
+static void NavigateTo(FileExplorerState& st, const std::string& dir) {
+    if (dir.empty() || dir == st.currentDir) return;
+    if (!st.currentDir.empty())
+        st.backStack.push_back(st.currentDir);
+    st.forwardStack.clear();
+    st.currentDir = dir;
+    st.selectedPath.clear();
+}
+
+static void NavigateUp(FileExplorerState& st) {
+    NavigateTo(st, ParentDir(st.currentDir));
+}
+
+static void NavigateBack(FileExplorerState& st) {
+    if (st.backStack.empty()) return;
+    st.forwardStack.push_back(st.currentDir);
+    st.currentDir = st.backStack.back();
+    st.backStack.pop_back();
+    st.selectedPath.clear();
+}
+
+static void NavigateForward(FileExplorerState& st) {
+    if (st.forwardStack.empty()) return;
+    st.backStack.push_back(st.currentDir);
+    st.currentDir = st.forwardStack.back();
+    st.forwardStack.pop_back();
+    st.selectedPath.clear();
+}
+
+// Multi-select helpers
+static bool IsMultiSelected(const FileExplorerState& st, const std::string& path) {
+    for (const auto& p : st.multiSelect)
+        if (ToLower(p) == ToLower(path)) return true;
+    return false;
+}
+
+static void ToggleMulti(FileExplorerState& st, const std::string& path, bool isImage) {
+    if (!isImage) return;
+    auto it = std::find_if(st.multiSelect.begin(), st.multiSelect.end(),
+        [&](const std::string& p) { return ToLower(p) == ToLower(path); });
+    if (it != st.multiSelect.end()) {
+        st.multiSelect.erase(it);
+        st.importBatch.erase(
+            std::remove_if(st.importBatch.begin(), st.importBatch.end(),
+                [&](const ImportBatchItem& b) { return ToLower(b.path) == ToLower(path); }),
+            st.importBatch.end());
+    } else {
+        st.multiSelect.push_back(path);
+        ImportBatchItem item;
+        item.path = path;
+        item.kind = GuessMapKindFromFilename(path);
+        st.importBatch.push_back(item);
+    }
+    st.selectedPath = path;
+}
+
+static void SelectSingle(FileExplorerState& st, const std::string& path, bool isImage) {
+    st.selectedPath = path;
+    st.multiSelect.clear();
+    st.importBatch.clear();
+    if (isImage) {
+        st.multiSelect.push_back(path);
+        ImportBatchItem item;
+        item.path = path;
+        item.kind = GuessMapKindFromFilename(path);
+        // For single import mode, prefer explicit importMapKind if user set it
+        if (st.mode == FileExplorerMode::ImportTexture && !st.importMultiSelect)
+            item.kind = st.importMapKind;
+        st.importBatch.push_back(item);
+    }
+}
+
+static ImportBatchItem* FindBatch(FileExplorerState& st, const std::string& path) {
+    for (auto& b : st.importBatch)
+        if (ToLower(b.path) == ToLower(path)) return &b;
+    return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Open / Close
+// ---------------------------------------------------------------------------
 
 void FileExplorerOpen(FileExplorerState& st, FileExplorerMode mode, const std::string& startDir) {
     st.open = true;
@@ -67,20 +492,32 @@ void FileExplorerOpen(FileExplorerState& st, FileExplorerMode mode, const std::s
     st.status.clear();
     st.selectedPath.clear();
     st.multiSelect.clear();
+    st.importBatch.clear();
+    st.backStack.clear();
+    st.forwardStack.clear();
     if (!startDir.empty())
         st.currentDir = startDir;
     else if (st.currentDir.empty())
         st.currentDir = DefaultStartDir();
-    // Sensible defaults for Advanced create
+
     if (mode == FileExplorerMode::ProjectCreate && st.projectType == 1 && st.templateIdx == 0)
-        st.templateIdx = 1; // ZZZ
+        st.templateIdx = 1;
+    if (mode == FileExplorerMode::ImportTexture)
+        st.importMultiSelect = true;
+    if (mode == FileExplorerMode::ExportTemplate || mode == FileExplorerMode::PickFolder) {
+        if (!st.exportRoot[0])
+            std::snprintf(st.exportRoot, sizeof(st.exportRoot), "%s", st.currentDir.c_str());
+    }
 }
 
 void FileExplorerClose(FileExplorerState& st) {
     st.open = false;
 }
 
-// ---- Project create ----
+// ---------------------------------------------------------------------------
+// Apply actions
+// ---------------------------------------------------------------------------
+
 bool FileExplorerApplyProjectCreate(FileExplorerState& st, ID3D11Device* device) {
     if (!device) {
         st.status = "No GPU device";
@@ -88,7 +525,6 @@ bool FileExplorerApplyProjectCreate(FileExplorerState& st, ID3D11Device* device)
     }
     auto& pm = ProjectManager::Get();
 
-    // Reuse blank tab if possible, else new
     Project* proj = pm.ActiveProject();
     if (!proj || !proj->IsBlank()) {
         int id = pm.CreateEmptyProject();
@@ -107,7 +543,6 @@ bool FileExplorerApplyProjectCreate(FileExplorerState& st, ID3D11Device* device)
     const char* templates[] = { "Default", "ZZZ", "GI" };
     int ti = std::clamp(st.templateIdx, 0, 2);
 
-    // ---- Simple ----
     if (st.projectType == 0) {
         canvas.SetProjectType(Canvas::ProjectType::Simple);
         if (st.baseDiffusePath[0]) {
@@ -125,11 +560,9 @@ bool FileExplorerApplyProjectCreate(FileExplorerState& st, ID3D11Device* device)
             s->name = st.projectName;
         proj->SyncTextureSetsFromCanvas();
         st.status = "Simple project ready";
-        Logger::Get().InfoTag("project", "Created Simple project");
         return true;
     }
 
-    // ---- Advanced Mod: type only for now (INI later) ----
     if (st.projectType == 2) {
         canvas.SetProjectType(Canvas::ProjectType::AdvancedModMode);
         proj->ApplyActiveSetTemplate(templates[ti]);
@@ -139,7 +572,47 @@ bool FileExplorerApplyProjectCreate(FileExplorerState& st, ID3D11Device* device)
         return true;
     }
 
-    // ---- Advanced multi-map ----
+    // Advanced: either base + auto siblings, or explicit multi-batch
+    if (!st.autoPullSiblingMaps && !st.importBatch.empty()) {
+        // Manual multi-map assignment
+        std::string diffusePath = st.baseDiffusePath;
+        if (diffusePath.empty()) {
+            for (const auto& b : st.importBatch)
+                if (b.kind == texset::MapKind::Diffuse) { diffusePath = b.path; break; }
+        }
+        if (diffusePath.empty() && !st.importBatch.empty())
+            diffusePath = st.importBatch[0].path;
+
+        if (diffusePath.empty()) {
+            st.status = "Select at least one texture (Diffuse preferred)";
+            return false;
+        }
+
+        canvas.SetProjectType(Canvas::ProjectType::Advanced);
+        proj->ApplyActiveSetTemplate(templates[ti]);
+        if (texset::TextureSet* s = proj->textureSets.Active())
+            s->name = st.projectName;
+
+        int n = 0;
+        // Load diffuse first for canvas size
+        if (proj->ImportMapFile(texset::MapKind::Diffuse, diffusePath))
+            ++n;
+        for (const auto& b : st.importBatch) {
+            if (ToLower(b.path) == ToLower(diffusePath) && b.kind == texset::MapKind::Diffuse)
+                continue;
+            if (proj->ImportMapFile(b.kind, b.path))
+                ++n;
+        }
+        canvas.SetActiveSetMaps(
+            proj->textureSets.Active() ? proj->textureSets.Active()->maps
+                                       : std::vector<texset::MapSlot>{});
+        canvas.SetViewMapKind(texset::MapKind::Diffuse);
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "Advanced project: %d map(s) loaded (manual)", n);
+        st.status = buf;
+        return n > 0;
+    }
+
     if (!st.baseDiffusePath[0]) {
         st.status = "Select a base Diffuse texture";
         return false;
@@ -153,7 +626,6 @@ bool FileExplorerApplyProjectCreate(FileExplorerState& st, ID3D11Device* device)
         return false;
     }
 
-    // Optional: if auto-pull disabled, strip non-diffuse maps after base load
     if (!st.autoPullSiblingMaps) {
         if (texset::TextureSet* set = proj->textureSets.Active()) {
             for (auto& m : set->maps) {
@@ -177,7 +649,43 @@ bool FileExplorerApplyProjectCreate(FileExplorerState& st, ID3D11Device* device)
 
 bool FileExplorerApplyImport(FileExplorerState& st, Project* project, Canvas& canvas,
                              ID3D11Device* device) {
-    if (!project || st.selectedPath.empty()) return false;
+    if (!project) return false;
+
+    // Multi-batch path
+    if (!st.importBatch.empty() && (st.importMultiSelect || st.importBatch.size() > 1)
+        && !st.importRemapMode) {
+        int okN = 0;
+        for (const auto& b : st.importBatch) {
+            if (b.path.empty()) continue;
+            if (b.kind == texset::MapKind::Diffuse && device) {
+                // If no canvas size yet, full load
+                if (canvas.GetWidth() <= 0) {
+                    if (canvas.LoadImageToLayer(device, b.path)) {
+                        if (canvas.GetProjectType() == Canvas::ProjectType::Simple &&
+                            project->textureSets.Active() &&
+                            project->textureSets.Active()->maps.size() > 1)
+                            canvas.SetProjectType(Canvas::ProjectType::Advanced);
+                        project->SyncTextureSetsFromCanvas();
+                        ++okN;
+                    }
+                    continue;
+                }
+            }
+            texset::ChannelRole solo = st.importExtractSolo ? st.importSoloRole : texset::ChannelRole::None;
+            if (project->ImportMapFile(b.kind, b.path, solo))
+                ++okN;
+        }
+        if (okN > 0 && canvas.GetProjectType() == Canvas::ProjectType::Simple)
+            canvas.SetProjectType(Canvas::ProjectType::Advanced);
+        if (texset::TextureSet* set = project->textureSets.Active())
+            canvas.SetActiveSetMaps(set->maps);
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "Imported %d map(s)", okN);
+        st.status = buf;
+        return okN > 0;
+    }
+
+    if (st.selectedPath.empty()) return false;
     const std::string path = st.selectedPath;
 
     if (st.importRemapMode) {
@@ -198,9 +706,12 @@ bool FileExplorerApplyImport(FileExplorerState& st, Project* project, Canvas& ca
         return true;
     }
 
-    if (st.importMapKind == texset::MapKind::Diffuse && device) {
+    texset::MapKind kind = st.importMapKind;
+    if (ImportBatchItem* b = FindBatch(st, path))
+        kind = b->kind;
+
+    if (kind == texset::MapKind::Diffuse && device) {
         bool ok = canvas.LoadImageToLayer(device, path);
-        // Preserve Advanced if already set
         if (canvas.GetProjectType() == Canvas::ProjectType::Simple &&
             project->textureSets.Active() &&
             project->textureSets.Active()->maps.size() > 1) {
@@ -212,7 +723,7 @@ bool FileExplorerApplyImport(FileExplorerState& st, Project* project, Canvas& ca
     }
 
     texset::ChannelRole solo = st.importExtractSolo ? st.importSoloRole : texset::ChannelRole::None;
-    bool ok = project->ImportMapFile(st.importMapKind, path, solo);
+    bool ok = project->ImportMapFile(kind, path, solo);
     if (ok && canvas.GetProjectType() == Canvas::ProjectType::Simple)
         canvas.SetProjectType(Canvas::ProjectType::Advanced);
     if (texset::TextureSet* set = project->textureSets.Active())
@@ -222,8 +733,21 @@ bool FileExplorerApplyImport(FileExplorerState& st, Project* project, Canvas& ca
 }
 
 bool FileExplorerApplyExportTemplate(FileExplorerState& st, Project* project) {
-    if (!project || !st.exportRoot[0]) return false;
+    if (!project) return false;
+
+    // Prefer exportRoot; fall back to current folder selection
     std::string root = st.exportRoot;
+    if (root.empty()) root = st.currentDir;
+    if (root.empty()) {
+        st.status = "Pick an export folder";
+        return false;
+    }
+
+    // Ensure directory exists
+    try {
+        fs::create_directories(PathUtil::FromUtf8(root));
+    } catch (...) {}
+
     std::string pattern = st.namePattern[0] ? st.namePattern : "{set}{suffix}";
 
     auto applySet = [&](texset::TextureSet& set) {
@@ -257,242 +781,571 @@ bool FileExplorerApplyExportTemplate(FileExplorerState& st, Project* project) {
     } else if (texset::TextureSet* a = project->textureSets.Active()) {
         applySet(*a);
     }
-    if (project->canvas)
+
+    if (project->canvas) {
+        project->canvas->SetExportPath(JoinPath(root, "export"));
         project->canvas->SetDocumentModified(true);
-    st.status = "Export paths assigned";
+        if (st.exportAndRun) {
+            int n = project->QuickExportAllMaps(root);
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "Exported %d map(s) → %s", n, root.c_str());
+            st.status = buf;
+            return n > 0;
+        }
+    }
+    st.status = std::string("Export folder set: ") + root;
     return true;
 }
 
-// Collect image files in dir for base combo
-static void CollectImages(const std::string& dir, std::vector<std::string>& outNames) {
-    outNames.clear();
-    std::error_code ec;
-    fs::path p = PathUtil::FromUtf8(dir);
-    if (!fs::is_directory(p, ec)) return;
-    for (auto& ent : fs::directory_iterator(p, ec)) {
-        if (!ent.is_regular_file()) continue;
-        if (!IsImageExt(ent.path().extension().string())) continue;
-        outNames.push_back(PathUtil::WideToUtf8(ent.path().filename().wstring()));
+// ---------------------------------------------------------------------------
+// UI drawing
+// ---------------------------------------------------------------------------
+
+static float IconCellSize(ExplorerViewMode m) {
+    switch (m) {
+    case ExplorerViewMode::SmallIcons:  return 48.f;
+    case ExplorerViewMode::MediumIcons: return 88.f;
+    case ExplorerViewMode::LargeIcons:  return 140.f;
+    default: return 0.f;
     }
-    std::sort(outNames.begin(), outNames.end());
+}
+
+static void DrawFolderGlyph(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImU32 col) {
+    float w = p1.x - p0.x, h = p1.y - p0.y;
+    float tabH = h * 0.22f;
+    float tabW = w * 0.38f;
+    ImVec2 pts[6] = {
+        { p0.x, p0.y + tabH },
+        { p0.x, p1.y },
+        { p1.x, p1.y },
+        { p1.x, p0.y + tabH },
+        { p0.x + tabW + 2.f, p0.y + tabH },
+        { p0.x + tabW * 0.85f, p0.y },
+    };
+    // Simple folder shape
+    dl->AddRectFilled(ImVec2(p0.x, p0.y + tabH), p1, col, 3.f);
+    dl->AddRectFilled(ImVec2(p0.x, p0.y), ImVec2(p0.x + tabW, p0.y + tabH + 2.f), col, 2.f);
+    (void)pts;
+}
+
+static void DrawFileGlyph(ImDrawList* dl, ImVec2 p0, ImVec2 p1, ImU32 col, const char* ext) {
+    dl->AddRectFilled(p0, p1, col, 3.f);
+    dl->AddRect(p0, p1, IM_COL32(255, 255, 255, 40), 3.f);
+    if (ext && ext[0]) {
+        ImVec2 ts = ImGui::CalcTextSize(ext);
+        dl->AddText(ImVec2((p0.x + p1.x - ts.x) * 0.5f, (p0.y + p1.y - ts.y) * 0.5f),
+                    IM_COL32(220, 220, 230, 200), ext);
+    }
+}
+
+static bool DrawNavArrowButton(const char* id, const char* label, bool enabled) {
+    if (!enabled) ImGui::BeginDisabled();
+    bool hit = ImGui::Button(label, ImVec2(28, 0));
+    if (!enabled) ImGui::EndDisabled();
+    (void)id;
+    return hit && enabled;
 }
 
 bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                       ID3D11Device* device) {
     if (!st.open) return false;
 
-    const char* title = "Files";
+    const char* title = "File Explorer";
     switch (st.mode) {
     case FileExplorerMode::ProjectCreate: title = "New Project"; break;
-    case FileExplorerMode::ImportTexture: title = "Import Texture"; break;
-    case FileExplorerMode::ExportTemplate: title = "Export Template"; break;
+    case FileExplorerMode::ImportTexture: title = "Import Maps"; break;
+    case FileExplorerMode::ExportTemplate: title = "Export Folder"; break;
     case FileExplorerMode::PickFolder: title = "Select Folder"; break;
     default: break;
     }
 
     bool confirmed = false;
-    ImGui::SetNextWindowSize(ImVec2(780, 540), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSizeConstraints(ImVec2(560, 400), ImVec2(2000, 2000));
-    if (!ImGui::Begin(title, &st.open, ImGuiWindowFlags_NoCollapse)) {
+    ImGui::SetNextWindowSize(ImVec2(960, 620), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(720, 460), ImVec2(2400, 1800));
+    // Non-modal floating window so Setup / other UI stay usable
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+    if (!ImGui::Begin(title, &st.open, flags)) {
         ImGui::End();
         return false;
     }
 
+    const auto& tok = Ui::Tokens();
     const bool isCreate = (st.mode == FileExplorerMode::ProjectCreate);
-    const float leftW = isCreate ? ImGui::GetContentRegionAvail().x * 0.48f : -1.f;
+    const bool isImport = (st.mode == FileExplorerMode::ImportTexture);
+    const bool isExport = (st.mode == FileExplorerMode::ExportTemplate ||
+                           st.mode == FileExplorerMode::PickFolder);
+    const bool filterImages = isCreate || isImport;
 
-    // ================= LEFT: browser =================
-    ImGui::BeginChild("##browser", ImVec2(isCreate ? leftW : 0, isCreate ? -48.f : -48.f), true);
-
-    // Path bar
+    // ---- Toolbar: nav + path + view ----
     {
+        // UTF-8 arrows (← → ↑) instead of "Up" text buttons
+        if (DrawNavArrowButton("##back", "\xE2\x86\x90", !st.backStack.empty()))
+            NavigateBack(st);
+        if (ImGui::IsItemHovered()) Ui::Tooltip("Back");
+        ImGui::SameLine(0, 4);
+        if (DrawNavArrowButton("##fwd", "\xE2\x86\x92", !st.forwardStack.empty()))
+            NavigateForward(st);
+        if (ImGui::IsItemHovered()) Ui::Tooltip("Forward");
+        ImGui::SameLine(0, 4);
+        if (DrawNavArrowButton("##up", "\xE2\x86\x91", true))
+            NavigateUp(st);
+        if (ImGui::IsItemHovered()) Ui::Tooltip("Parent folder");
+        ImGui::SameLine(0, 8);
+
         char dirBuf[512];
         std::snprintf(dirBuf, sizeof(dirBuf), "%s", st.currentDir.c_str());
-        ImGui::SetNextItemWidth(-90.f);
-        if (ImGui::InputText("##dir", dirBuf, sizeof(dirBuf), ImGuiInputTextFlags_EnterReturnsTrue))
-            st.currentDir = dirBuf;
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 220.f);
+        if (ImGui::InputText("##dir", dirBuf, sizeof(dirBuf), ImGuiInputTextFlags_EnterReturnsTrue)) {
+            std::error_code ec;
+            if (fs::is_directory(PathUtil::FromUtf8(dirBuf), ec))
+                NavigateTo(st, dirBuf);
+            else
+                st.status = "Invalid path";
+        }
         ImGui::SameLine();
-        if (ImGui::Button("Up")) {
+        // View mode
+        const char* views[] = { "List", "S", "M", "L" };
+        int vm = (int)st.viewMode;
+        ImGui::SetNextItemWidth(90.f);
+        if (ImGui::Combo("##view", &vm, views, 4))
+            st.viewMode = (ExplorerViewMode)vm;
+        if (ImGui::IsItemHovered()) Ui::Tooltip("View: List / Small / Medium / Large icons");
+        ImGui::SameLine();
+        const char* sorts[] = { "Name", "Date", "Size", "Type" };
+        int sb = (int)st.sortBy;
+        ImGui::SetNextItemWidth(80.f);
+        if (ImGui::Combo("##sort", &sb, sorts, 4))
+            st.sortBy = (ExplorerSortBy)sb;
+        ImGui::SameLine();
+        if (ImGui::SmallButton(st.sortAsc ? "A-Z" : "Z-A"))
+            st.sortAsc = !st.sortAsc;
+    }
+
+    ImGui::Separator();
+
+    // Layout: bookmarks | browser | side form
+    float sideFormW = (isCreate || isImport || isExport) ? 280.f : 0.f;
+    float bookmarkW = 168.f;
+    float footerH = 52.f;
+    float bodyH = ImGui::GetContentRegionAvail().y - footerH;
+
+    // ---- Bookmarks ----
+    ImGui::BeginChild("##bookmarks", ImVec2(bookmarkW, bodyH), true);
+    ImGui::TextDisabled("Places");
+    ImGui::Separator();
+    static std::vector<Bookmark> s_bookmarks;
+    static bool s_bmInit = false;
+    if (!s_bmInit) { BuildBookmarks(s_bookmarks); s_bmInit = true; }
+
+    bool sawDrive = false;
+    for (const auto& bm : s_bookmarks) {
+        if (bm.isDrive && !sawDrive) {
+            ImGui::Spacing();
+            ImGui::TextDisabled("Drives");
+            ImGui::Separator();
+            sawDrive = true;
+        }
+        bool active = ToLower(st.currentDir) == ToLower(bm.path) ||
+                      (st.currentDir.size() >= bm.path.size() &&
+                       ToLower(st.currentDir.substr(0, bm.path.size())) == ToLower(bm.path) &&
+                       !bm.isDrive);
+        if (active)
+            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(tok.accent.x, tok.accent.y, tok.accent.z, 0.35f));
+        if (ImGui::Selectable(bm.label.c_str(), active))
+            NavigateTo(st, bm.path);
+        if (active) ImGui::PopStyleColor();
+    }
+    if (ImGui::SmallButton("Refresh places")) {
+        BuildBookmarks(s_bookmarks);
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    // ---- Browser ----
+    float browserW = ImGui::GetContentRegionAvail().x - (sideFormW > 0 ? sideFormW + 8.f : 0.f);
+    ImGui::BeginChild("##browser", ImVec2(browserW, bodyH), true);
+
+    std::vector<FsEntry> entries;
+    ListDirectory(st.currentDir, st.showHidden, entries);
+    SortEntries(entries, st.sortBy, st.sortAsc);
+
+    // Filter: for import/create show folders + images only
+    if (filterImages) {
+        entries.erase(std::remove_if(entries.begin(), entries.end(),
+            [](const FsEntry& e) { return !e.isDir && !e.isImage; }), entries.end());
+    }
+
+    const bool multiMode = isImport && st.importMultiSelect;
+    ImGuiIO& io = ImGui::GetIO();
+
+    auto onActivate = [&](const FsEntry& e) {
+        if (e.isDir) {
+            NavigateTo(st, e.fullPath);
+            if (isExport)
+                std::snprintf(st.exportRoot, sizeof(st.exportRoot), "%s", e.fullPath.c_str());
+            return;
+        }
+        if (multiMode && (io.KeyCtrl || io.KeyShift)) {
+            ToggleMulti(st, e.fullPath, e.isImage);
+        } else {
+            SelectSingle(st, e.fullPath, e.isImage);
+        }
+        if (isCreate && e.isImage) {
+            std::snprintf(st.baseDiffusePath, sizeof(st.baseDiffusePath), "%s", e.fullPath.c_str());
+            std::snprintf(st.importFolder, sizeof(st.importFolder), "%s", st.currentDir.c_str());
             try {
-                fs::path p = PathUtil::FromUtf8(st.currentDir);
-                if (p.has_parent_path())
-                    st.currentDir = PathUtil::WideToUtf8(p.parent_path().wstring());
+                std::string stem = PathUtil::WideToUtf8(
+                    fs::path(PathUtil::Utf8ToWide(e.name)).stem().wstring());
+                auto low = ToLower(stem);
+                for (const char* t : {"diffuse","lightmap","materialmap","normalmap",
+                                      "_diffuse","_lightmap","_materialmap","_normalmap"}) {
+                    auto pos = low.rfind(t);
+                    if (pos != std::string::npos && pos + std::strlen(t) == low.size()) {
+                        stem = stem.substr(0, pos);
+                        while (!stem.empty() && (stem.back()=='_'||stem.back()=='-')) stem.pop_back();
+                        break;
+                    }
+                }
+                if (!stem.empty() && stem.size() < sizeof(st.projectName))
+                    std::snprintf(st.projectName, sizeof(st.projectName), "%s", stem.c_str());
             } catch (...) {}
         }
-    }
-
-    std::vector<std::string> dirs, files;
-    ListDirectory(st.currentDir, dirs, files);
-
-    ImGui::BeginChild("##list", ImVec2(0, 0), false);
-    for (const auto& d : dirs) {
-        ImGui::PushID(("d" + d).c_str());
-        if (ImGui::Selectable(("  " + d).c_str(), false, ImGuiSelectableFlags_AllowDoubleClick)) {
-            if (ImGui::IsMouseDoubleClicked(0)) {
-                st.currentDir = JoinPath(st.currentDir, d);
-                std::snprintf(st.importFolder, sizeof(st.importFolder), "%s", st.currentDir.c_str());
-            }
+        if (isExport) {
+            // Selecting a file → use its parent folder
+            std::snprintf(st.exportRoot, sizeof(st.exportRoot), "%s", st.currentDir.c_str());
         }
-        ImGui::PopID();
-    }
-    for (const auto& f : files) {
-        bool isImg = false;
-        try { isImg = IsImageExt(fs::path(f).extension().string()); } catch (...) {}
-        if ((st.mode == FileExplorerMode::ImportTexture || isCreate) && !isImg) continue;
+    };
 
-        std::string full = JoinPath(st.currentDir, f);
-        bool sel = (st.selectedPath == full) ||
-                   (isCreate && st.baseDiffusePath[0] &&
-                    ToLower(st.baseDiffusePath) == ToLower(full));
-
-        ImGui::PushID(("f" + f).c_str());
-        if (ImGui::Selectable(f.c_str(), sel, ImGuiSelectableFlags_AllowDoubleClick)) {
-            st.selectedPath = full;
-            if (isCreate && isImg) {
-                // Single click = base Diffuse candidate
-                std::snprintf(st.baseDiffusePath, sizeof(st.baseDiffusePath), "%s", full.c_str());
-                std::snprintf(st.importFolder, sizeof(st.importFolder), "%s", st.currentDir.c_str());
-                // Suggest project name from file
-                try {
-                    std::string stem = PathUtil::WideToUtf8(fs::path(PathUtil::Utf8ToWide(f)).stem().wstring());
-                    // crude strip
-                    auto low = ToLower(stem);
-                    for (const char* t : {"diffuse","lightmap","materialmap","normalmap","_diffuse","_lightmap"}) {
-                        auto pos = low.rfind(t);
-                        if (pos != std::string::npos && pos + std::strlen(t) == low.size()) {
-                            stem = stem.substr(0, pos);
-                            while (!stem.empty() && (stem.back()=='_'||stem.back()=='-')) stem.pop_back();
-                            break;
-                        }
-                    }
-                    if (!stem.empty() && stem.size() < sizeof(st.projectName))
-                        std::snprintf(st.projectName, sizeof(st.projectName), "%s", stem.c_str());
-                } catch (...) {}
-            }
-            if (st.mode == FileExplorerMode::ExportTemplate) {
-                // selecting a folder path already handled; file's parent as root
-                std::snprintf(st.exportRoot, sizeof(st.exportRoot), "%s", st.currentDir.c_str());
-            }
+    auto onDouble = [&](const FsEntry& e) {
+        if (e.isDir) {
+            NavigateTo(st, e.fullPath);
+            return;
         }
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0) &&
-            st.mode == FileExplorerMode::ImportTexture) {
-            st.selectedPath = full;
+        if (isImport && e.isImage) {
+            SelectSingle(st, e.fullPath, true);
             confirmed = FileExplorerApplyImport(st, project, canvas, device);
-            if (confirmed) st.open = false;
+            if (confirmed) FileExplorerClose(st);
         }
-        ImGui::PopID();
-    }
-    ImGui::EndChild();
-    ImGui::EndChild();
+        if (isCreate && e.isImage) {
+            std::snprintf(st.baseDiffusePath, sizeof(st.baseDiffusePath), "%s", e.fullPath.c_str());
+        }
+    };
 
-    // ================= RIGHT: create form =================
-    if (isCreate) {
-        ImGui::SameLine();
-        ImGui::BeginChild("##form", ImVec2(0, -48.f), true);
+    const float cell = IconCellSize(st.viewMode);
+    const bool iconView = (st.viewMode != ExplorerViewMode::Details);
 
-        ImGui::TextUnformatted("New Project");
-        ImGui::Separator();
+    if (!iconView) {
+        // Details table
+        if (ImGui::BeginTable("##fstable", 4,
+                ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
+                ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 72);
+            ImGui::TableSetupColumn("Date modified", ImGuiTableColumnFlags_WidthFixed, 130);
+            ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80);
+            ImGui::TableHeadersRow();
 
-        ImGui::InputText("Name", st.projectName, sizeof(st.projectName));
-
-        const char* types[] = { "Simple", "Advanced", "Advanced Mod Mode" };
-        ImGui::Combo("Mode", &st.projectType, types, 3);
-
-        if (st.projectType == 1) {
-            const char* temps[] = { "Default", "ZZZ", "GI" };
-            ImGui::Combo("Template", &st.templateIdx, temps, 3);
-            if (ImGui::IsItemHovered())
-                Ui::Tooltip("Channel packing defaults for the texture set");
-
-            ImGui::Spacing();
-            ImGui::TextUnformatted("Base Diffuse");
-            ImGui::TextWrapped("%s", st.baseDiffusePath[0] ? st.baseDiffusePath : "(click a texture on the left)");
-            ImGui::Checkbox("Auto-pull sibling maps", &st.autoPullSiblingMaps);
-            if (ImGui::IsItemHovered())
-                Ui::Tooltip("LightMap / MaterialMap / NormalMap with the same name stem");
-
-            // Preview detected siblings
-            if (st.baseDiffusePath[0] && st.autoPullSiblingMaps) {
-                ImGui::Spacing();
-                ImGui::TextDisabled("Will import:");
-                ImGui::BulletText("Diffuse ← base");
-                // Show other images in folder that share stem keywords
-                std::vector<std::string> imgs;
-                CollectImages(st.currentDir, imgs);
-                std::string baseLow = ToLower(st.baseDiffusePath);
-                for (const auto& fn : imgs) {
-                    std::string full = JoinPath(st.currentDir, fn);
-                    if (ToLower(full) == baseLow) continue;
-                    std::string fl = ToLower(fn);
-                    const char* tag = nullptr;
-                    if (fl.find("light") != std::string::npos) tag = "LightMap";
-                    else if (fl.find("material") != std::string::npos) tag = "MaterialMap";
-                    else if (fl.find("normal") != std::string::npos) tag = "NormalMap";
-                    if (tag)
-                        ImGui::BulletText("%s ← %s", tag, fn.c_str());
+            ImGuiListClipper clipper;
+            clipper.Begin((int)entries.size());
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                    const FsEntry& e = entries[i];
+                    ImGui::PushID(i);
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    bool sel = (st.selectedPath == e.fullPath) || IsMultiSelected(st, e.fullPath);
+                    std::string label = (e.isDir ? "[dir] " : "") + e.name;
+                    if (ImGui::Selectable(label.c_str(), sel,
+                            ImGuiSelectableFlags_SpanAllColumns |
+                            ImGuiSelectableFlags_AllowDoubleClick)) {
+                        onActivate(e);
+                    }
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+                        onDouble(e);
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(e.typeLabel.c_str());
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(FormatTime(e.mtime).c_str());
+                    ImGui::TableNextColumn();
+                    if (e.isDir) ImGui::TextDisabled("—");
+                    else ImGui::TextUnformatted(FormatSize(e.size).c_str());
+                    ImGui::PopID();
                 }
             }
-        } else if (st.projectType == 0) {
-            ImGui::TextDisabled("Optional start image — click left to set");
-            if (st.baseDiffusePath[0])
-                ImGui::TextWrapped("%s", st.baseDiffusePath);
-        } else {
-            ImGui::TextDisabled("Advanced Mod: bind INI later in Mod Setup");
+            ImGui::EndTable();
         }
+    } else {
+        // Icon grid
+        float avail = ImGui::GetContentRegionAvail().x;
+        float spacing = 10.f;
+        float cellW = cell + 8.f;
+        int cols = std::max(1, (int)((avail + spacing) / (cellW + spacing)));
+        int col = 0;
+        ImDrawList* dl = ImGui::GetWindowDrawList();
 
-        ImGui::EndChild();
-    } else if (st.mode == FileExplorerMode::ImportTexture) {
+        for (int i = 0; i < (int)entries.size(); ++i) {
+            const FsEntry& e = entries[i];
+            ImGui::PushID(i);
+            if (col > 0) ImGui::SameLine(0, spacing);
+
+            bool sel = (st.selectedPath == e.fullPath) || IsMultiSelected(st, e.fullPath);
+            ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImVec2 box(cellW, cell + 28.f);
+
+            ImGui::InvisibleButton("##cell", box);
+            bool hovered = ImGui::IsItemHovered();
+            bool clicked = ImGui::IsItemClicked();
+            bool dbl = hovered && ImGui::IsMouseDoubleClicked(0);
+
+            ImU32 bg = sel ? IM_COL32(60, 100, 180, 90)
+                           : (hovered ? IM_COL32(255, 255, 255, 18) : 0);
+            if (bg) dl->AddRectFilled(p0, ImVec2(p0.x + box.x, p0.y + box.y), bg, 6.f);
+            if (sel) dl->AddRect(p0, ImVec2(p0.x + box.x, p0.y + box.y),
+                                 IM_COL32(90, 140, 255, 200), 6.f, 0, 1.5f);
+
+            float pad = 6.f;
+            ImVec2 ip0(p0.x + (cellW - cell) * 0.5f + 2.f, p0.y + pad);
+            ImVec2 ip1(ip0.x + cell - 4.f, ip0.y + cell - 4.f);
+
+            if (e.isDir) {
+                DrawFolderGlyph(dl, ip0, ip1, IM_COL32(230, 190, 80, 220));
+            } else if (e.isImage) {
+                ID3D11ShaderResourceView* srv = GetThumb(device, e.fullPath, hovered || sel ||
+                    st.viewMode == ExplorerViewMode::LargeIcons ||
+                    st.viewMode == ExplorerViewMode::MediumIcons);
+                if (srv) {
+                    dl->AddImage((ImTextureID)srv, ip0, ip1);
+                    dl->AddRect(ip0, ip1, IM_COL32(0, 0, 0, 80), 2.f);
+                } else {
+                    DrawFileGlyph(dl, ip0, ip1, IM_COL32(50, 55, 65, 255), e.typeLabel.c_str());
+                }
+            } else {
+                DrawFileGlyph(dl, ip0, ip1, IM_COL32(55, 58, 68, 255), e.typeLabel.c_str());
+            }
+
+            // Name under icon
+            ImVec2 ts = ImGui::CalcTextSize(e.name.c_str(), nullptr, false, cellW - 4.f);
+            float tx = p0.x + 2.f;
+            float ty = p0.y + cell + 2.f;
+            ImVec4 clip(p0.x, ty, p0.x + cellW, p0.y + box.y);
+            dl->PushClipRect(ImVec2(clip.x, clip.y), ImVec2(clip.z, clip.w), true);
+            // Truncate visually
+            std::string shown = e.name;
+            if (ts.x > cellW - 6.f) {
+                while (shown.size() > 3 && ImGui::CalcTextSize((shown + "…").c_str()).x > cellW - 6.f)
+                    shown.pop_back();
+                shown += "…";
+            }
+            dl->AddText(ImVec2(tx, ty), IM_COL32(230, 230, 235, 255), shown.c_str());
+            dl->PopClipRect();
+
+            if (clicked) onActivate(e);
+            if (dbl) onDouble(e);
+
+            if (hovered) {
+                char tip[512];
+                if (e.isDir)
+                    std::snprintf(tip, sizeof(tip), "%s\nFolder", e.name.c_str());
+                else
+                    std::snprintf(tip, sizeof(tip), "%s\n%s  ·  %s  ·  %s",
+                                  e.name.c_str(), e.typeLabel.c_str(),
+                                  FormatSize(e.size).c_str(), FormatTime(e.mtime).c_str());
+                Ui::Tooltip(tip);
+            }
+
+            ImGui::PopID();
+            if (++col >= cols) col = 0;
+        }
+    }
+
+    ImGui::EndChild();
+
+    // ---- Side form ----
+    if (sideFormW > 0.f) {
         ImGui::SameLine();
-        ImGui::BeginChild("##impform", ImVec2(0, -48.f), true);
-        ImGui::TextUnformatted("Import");
-        const char* kinds[] = {
-            "Diffuse", "LightMap", "MaterialMap", "NormalMap",
-            "ExtraMap", "GlowMap", "WengineFX"
-        };
-        int ki = (int)st.importMapKind;
-        if (ImGui::Combo("As map", &ki, kinds, 7))
-            st.importMapKind = (texset::MapKind)ki;
-        ImGui::Checkbox("Remap channels", &st.importRemapMode);
-        if (st.importRemapMode) {
-            int di = (int)st.remapDestMap;
-            if (ImGui::Combo("Into map", &di, kinds, 7))
-                st.remapDestMap = (texset::MapKind)di;
-            const char* chn[] = { "R", "G", "B", "A" };
-            for (int i = 0; i < 4; ++i) {
-                ImGui::PushID(i);
-                ImGui::Checkbox(chn[i], &st.remap[i].enabled);
-                ImGui::SameLine();
-                int ri = texset::ChannelRoleToComboIndex(st.remap[i].dstRole);
-                ImGui::SetNextItemWidth(-1);
-                if (ImGui::Combo("##rr", &ri, texset::ChannelRoleComboNames(),
-                                 texset::ChannelRoleComboCount()))
-                    st.remap[i].dstRole = texset::ChannelRoleFromComboIndex(ri);
-                st.remap[i].srcChannel = (texset::Chan)i;
+        ImGui::BeginChild("##sideform", ImVec2(sideFormW, bodyH), true);
+
+        if (isCreate) {
+            ImGui::TextUnformatted("New Project");
+            ImGui::Separator();
+            ImGui::InputText("Name", st.projectName, sizeof(st.projectName));
+            const char* types[] = { "Simple", "Advanced", "Advanced Mod Mode" };
+            ImGui::Combo("Mode", &st.projectType, types, 3);
+
+            if (st.projectType == 1) {
+                const char* temps[] = { "Default", "ZZZ", "GI" };
+                ImGui::Combo("Template", &st.templateIdx, temps, 3);
+                ImGui::Spacing();
+                ImGui::TextUnformatted("Base Diffuse");
+                ImGui::TextWrapped("%s", st.baseDiffusePath[0] ? st.baseDiffusePath : "(select a texture)");
+                ImGui::Checkbox("Auto-pull sibling maps", &st.autoPullSiblingMaps);
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("Auto-find LightMap / MaterialMap / NormalMap by name stem");
+
+                if (st.autoPullSiblingMaps && st.baseDiffusePath[0]) {
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("Will import:");
+                    ImGui::BulletText("Diffuse ← base");
+                    for (const auto& e : entries) {
+                        if (e.isDir || !e.isImage) continue;
+                        if (ToLower(e.fullPath) == ToLower(st.baseDiffusePath)) continue;
+                        texset::MapKind gk = GuessMapKindFromFilename(e.name);
+                        if (gk != texset::MapKind::Diffuse)
+                            ImGui::BulletText("%s ← %s", texset::MapKindName(gk), e.name.c_str());
+                    }
+                } else if (!st.autoPullSiblingMaps) {
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("Manual map assignment");
+                    ImGui::TextWrapped("Ctrl+click textures, then set map kind per file:");
+                    const char* kinds[] = {
+                        "Diffuse", "LightMap", "MaterialMap", "NormalMap",
+                        "ExtraMap", "GlowMap", "WengineFX"
+                    };
+                    for (int bi = 0; bi < (int)st.importBatch.size(); ++bi) {
+                        auto& b = st.importBatch[bi];
+                        ImGui::PushID(bi);
+                        std::string shortN;
+                        try {
+                            shortN = PathUtil::WideToUtf8(
+                                fs::path(PathUtil::Utf8ToWide(b.path)).filename().wstring());
+                        } catch (...) { shortN = b.path; }
+                        ImGui::TextUnformatted(shortN.c_str());
+                        int ki = (int)b.kind;
+                        ImGui::SetNextItemWidth(-1);
+                        if (ImGui::Combo("##mk", &ki, kinds, 7))
+                            b.kind = (texset::MapKind)ki;
+                        ImGui::PopID();
+                    }
+                    if (st.importBatch.empty())
+                        ImGui::TextDisabled("(Ctrl+click files to add)");
+                }
+            } else if (st.projectType == 0) {
+                ImGui::TextDisabled("Optional start image");
+                if (st.baseDiffusePath[0])
+                    ImGui::TextWrapped("%s", st.baseDiffusePath);
+            } else {
+                ImGui::TextDisabled("Advanced Mod: bind INI later in Mod Setup");
+            }
+        } else if (isImport) {
+            ImGui::TextUnformatted("Import Maps");
+            ImGui::Separator();
+            ImGui::Checkbox("Multi-select", &st.importMultiSelect);
+            if (ImGui::IsItemHovered())
+                Ui::Tooltip("Ctrl+click to select several textures");
+
+            const char* kinds[] = {
+                "Diffuse", "LightMap", "MaterialMap", "NormalMap",
+                "ExtraMap", "GlowMap", "WengineFX"
+            };
+
+            if (!st.importMultiSelect) {
+                int ki = (int)st.importMapKind;
+                if (ImGui::Combo("As map", &ki, kinds, 7))
+                    st.importMapKind = (texset::MapKind)ki;
+            }
+
+            ImGui::Checkbox("Remap channels", &st.importRemapMode);
+            if (st.importRemapMode) {
+                int di = (int)st.remapDestMap;
+                if (ImGui::Combo("Into map", &di, kinds, 7))
+                    st.remapDestMap = (texset::MapKind)di;
+                const char* chn[] = { "R", "G", "B", "A" };
+                for (int i = 0; i < 4; ++i) {
+                    ImGui::PushID(i);
+                    ImGui::Checkbox(chn[i], &st.remap[i].enabled);
+                    ImGui::SameLine();
+                    int ri = texset::ChannelRoleToComboIndex(st.remap[i].dstRole);
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::Combo("##rr", &ri, texset::ChannelRoleComboNames(),
+                                     texset::ChannelRoleComboCount()))
+                        st.remap[i].dstRole = texset::ChannelRoleFromComboIndex(ri);
+                    st.remap[i].srcChannel = (texset::Chan)i;
+                    ImGui::PopID();
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Selection (%d)", (int)st.importBatch.size());
+            for (int bi = 0; bi < (int)st.importBatch.size(); ++bi) {
+                auto& b = st.importBatch[bi];
+                ImGui::PushID(1000 + bi);
+                std::string shortN;
+                try {
+                    shortN = PathUtil::WideToUtf8(
+                        fs::path(PathUtil::Utf8ToWide(b.path)).filename().wstring());
+                } catch (...) { shortN = b.path; }
+                ImGui::TextUnformatted(shortN.c_str());
+                if (st.importMultiSelect && !st.importRemapMode) {
+                    int ki = (int)b.kind;
+                    ImGui::SetNextItemWidth(-1);
+                    if (ImGui::Combo("##mk", &ki, kinds, 7))
+                        b.kind = (texset::MapKind)ki;
+                }
                 ImGui::PopID();
             }
+            if (st.importBatch.empty())
+                ImGui::TextDisabled("Click a texture to select");
+        } else if (isExport) {
+            ImGui::TextUnformatted("Export folder");
+            ImGui::Separator();
+            ImGui::TextWrapped("Choose a folder — maps will be written there. No need to pick a file.");
+            ImGui::Spacing();
+            if (ImGui::Button("Use current folder", ImVec2(-1, 0))) {
+                std::snprintf(st.exportRoot, sizeof(st.exportRoot), "%s", st.currentDir.c_str());
+            }
+            ImGui::InputText("Folder", st.exportRoot, sizeof(st.exportRoot));
+            ImGui::InputText("Pattern", st.namePattern, sizeof(st.namePattern));
+            if (ImGui::IsItemHovered())
+                Ui::Tooltip("{set} {map} {suffix}");
+            ImGui::Checkbox("All texture sets", &st.exportAllSets);
+            ImGui::Checkbox("Export now after apply", &st.exportAndRun);
+            if (ImGui::IsItemHovered())
+                Ui::Tooltip("Assign paths and run Quick Export into this folder");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Current:");
+            ImGui::TextWrapped("%s", st.exportRoot[0] ? st.exportRoot : st.currentDir.c_str());
         }
-        if (!st.selectedPath.empty())
-            ImGui::TextWrapped("%s", st.selectedPath.c_str());
-        ImGui::EndChild();
-    } else if (st.mode == FileExplorerMode::ExportTemplate) {
-        ImGui::SameLine();
-        ImGui::BeginChild("##expform", ImVec2(0, -48.f), true);
-        ImGui::TextUnformatted("Export root");
-        ImGui::InputText("##root", st.exportRoot, sizeof(st.exportRoot));
-        ImGui::InputText("Pattern", st.namePattern, sizeof(st.namePattern));
-        ImGui::Checkbox("All sets", &st.exportAllSets);
+
+        // Preview pane for selected image
+        if (!st.selectedPath.empty() && device) {
+            bool isImg = false;
+            try {
+                isImg = IsImageExt(fs::path(PathUtil::Utf8ToWide(st.selectedPath)).extension().string());
+            } catch (...) {}
+            if (isImg) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextDisabled("Preview");
+                if (ID3D11ShaderResourceView* srv = GetThumb(device, st.selectedPath, true)) {
+                    float pw = ImGui::GetContentRegionAvail().x;
+                    ImGui::Image((ImTextureID)srv, ImVec2(pw, pw * 0.75f));
+                }
+                try {
+                    auto p = PathUtil::FromUtf8(st.selectedPath);
+                    auto sz = fs::file_size(p);
+                    auto ft = fs::last_write_time(p);
+                    ImGui::Text("%s", FormatSize((uint64_t)sz).c_str());
+                    ImGui::Text("%s", FormatTime(FileTimeToEpoch(ft)).c_str());
+                    ImGui::TextDisabled("%s", p.extension().string().c_str());
+                } catch (...) {}
+            }
+        }
+
         ImGui::EndChild();
     }
 
-    // Footer
+    // ---- Footer ----
     if (!st.status.empty()) {
-        ImGui::TextColored(ImVec4(0.6f, 0.85f, 0.6f, 1.f), "%s", st.status.c_str());
+        ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.55f, 1.f), "%s", st.status.c_str());
         ImGui::SameLine();
     }
 
-    float footerRight = 200.f;
-    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - footerRight);
-    if (ImGui::Button("Cancel", ImVec2(90, 0)))
+    float right = 220.f;
+    ImGui::SetCursorPosX(ImGui::GetWindowWidth() - right - 16.f);
+    if (ImGui::Button("Cancel", ImVec2(96, 0)))
         FileExplorerClose(st);
     ImGui::SameLine();
 
@@ -500,18 +1353,23 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
     const char* okLabel = "OK";
     if (st.mode == FileExplorerMode::ProjectCreate) {
         okLabel = "Create";
-        if (st.projectType == 1 && !st.baseDiffusePath[0])
-            canOk = false;
+        if (st.projectType == 1) {
+            if (st.autoPullSiblingMaps && !st.baseDiffusePath[0]) canOk = false;
+            if (!st.autoPullSiblingMaps && st.importBatch.empty() && !st.baseDiffusePath[0]) canOk = false;
+        }
     } else if (st.mode == FileExplorerMode::ImportTexture) {
-        okLabel = "Import";
-        canOk = !st.selectedPath.empty();
+        okLabel = st.importBatch.size() > 1 ? "Import All" : "Import";
+        canOk = !st.selectedPath.empty() || !st.importBatch.empty();
     } else if (st.mode == FileExplorerMode::ExportTemplate) {
-        okLabel = "Apply";
-        canOk = st.exportRoot[0] != 0;
+        okLabel = st.exportAndRun ? "Export" : "Set Folder";
+        canOk = st.exportRoot[0] != 0 || !st.currentDir.empty();
+    } else if (st.mode == FileExplorerMode::PickFolder) {
+        okLabel = "Select";
+        canOk = !st.currentDir.empty();
     }
 
     if (!canOk) ImGui::BeginDisabled();
-    if (ImGui::Button(okLabel, ImVec2(90, 0))) {
+    if (ImGui::Button(okLabel, ImVec2(100, 0))) {
         switch (st.mode) {
         case FileExplorerMode::ProjectCreate:
             confirmed = FileExplorerApplyProjectCreate(st, device);
@@ -520,7 +1378,14 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             confirmed = FileExplorerApplyImport(st, project, canvas, device);
             break;
         case FileExplorerMode::ExportTemplate:
+            if (!st.exportRoot[0])
+                std::snprintf(st.exportRoot, sizeof(st.exportRoot), "%s", st.currentDir.c_str());
             confirmed = FileExplorerApplyExportTemplate(st, project);
+            break;
+        case FileExplorerMode::PickFolder:
+            std::snprintf(st.exportRoot, sizeof(st.exportRoot), "%s", st.currentDir.c_str());
+            st.selectedPath = st.currentDir;
+            confirmed = true;
             break;
         default:
             confirmed = !st.selectedPath.empty();

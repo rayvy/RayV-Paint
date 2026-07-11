@@ -3649,13 +3649,16 @@ namespace UI {
             Ui::EndDockPanel();
         }
 
-        // ---- Project Setup popup (tabbed) ----
+        // ---- Project Setup (non-modal window — modal blocked nested File Explorer) ----
         if (state.openProjectSetup) {
-            ImGui::OpenPopup("Project Setup##ps");
+            state.showProjectSetup = true;
             state.openProjectSetup = false;
         }
-        ImGui::SetNextWindowSize(ImVec2(560, 480), ImGuiCond_FirstUseEver);
-        if (ImGui::BeginPopupModal("Project Setup##ps", nullptr, 0)) {
+        if (state.showProjectSetup) {
+            ImGui::SetNextWindowSize(ImVec2(560, 480), ImGuiCond_FirstUseEver);
+            if (!ImGui::Begin("Project Setup", &state.showProjectSetup, ImGuiWindowFlags_NoCollapse)) {
+                ImGui::End();
+            } else {
             Project* proj = ProjectManager::Get().ActiveProject();
             texset::TextureSet* set = proj ? proj->textureSets.Active() : nullptr;
 
@@ -3742,8 +3745,10 @@ namespace UI {
                             if (proj) proj->ApplyActiveSetTemplate(temps[ti]);
                             canvas.SetDocumentModified(true);
                         }
-                        if (ImGui::Button("Import maps…"))
+                        if (ImGui::Button("Import maps…")) {
+                            // Non-modal Setup + non-modal Explorer → both usable
                             UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
+                        }
                     } else ImGui::TextDisabled("No texture set");
                     ImGui::EndTabItem();
                 }
@@ -3820,12 +3825,12 @@ namespace UI {
                             ImGui::EndTable();
                         }
                         ImGui::Spacing();
-                        if (ImGui::Button("Folder template…"))
+                        if (ImGui::Button("Choose export folder…"))
                             UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ExportTemplate);
                         ImGui::SameLine();
                         if (ImGui::Button("Export All Now"))
                             state.openQuickExportTrigger = true;
-                        ImGui::TextDisabled("BC7/BC5 → .dds via texconv · PNG → .png");
+                        ImGui::TextDisabled("Pick a folder (not a file). BC7/BC5 → .dds · PNG → .png");
                     }
                     ImGui::EndTabItem();
                 }
@@ -3833,11 +3838,12 @@ namespace UI {
             }
             ImGui::Separator();
             if (ImGui::Button("Close", ImVec2(120, 0)))
-                ImGui::CloseCurrentPopup();
-            ImGui::EndPopup();
+                state.showProjectSetup = false;
+            ImGui::End();
+            } // else Begin
         }
 
-        // File Explorer / project wizard
+        // File Explorer / project wizard (always non-modal floating window)
         if (state.openNewProjectWizard) {
             state.openNewProjectWizard = false;
             UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ProjectCreate);

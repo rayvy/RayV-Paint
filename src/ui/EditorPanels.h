@@ -73,7 +73,8 @@ namespace UI {
         int  importMapSoloRole = 0; // 0=Full RGBA
         bool openAboutModal = false;
         bool openNewProjectWizard = false;
-        bool openProjectSetup = false;
+        bool openProjectSetup = false;   // one-shot trigger → opens showProjectSetup
+        bool showProjectSetup = false;   // non-modal window (so File Explorer can open on top)
         int  projectSetupTab = 0; // 0 Maps 1 Labels 2 Export
         FileExplorerState fileExplorer;
         // Layer Effects modal selection: kind 0=style, 1=filter, -1=none
