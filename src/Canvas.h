@@ -627,6 +627,10 @@ private:
     ID3D11BlendState* m_LayerBlendStateAlphaPreserve = nullptr;
     // Bottom layer init: ONE/ZERO full RGBA replace (RGB survives A=0)
     ID3D11BlendState* m_LayerBlendStateReplace = nullptr;
+    // Per-channel write masks for Fill (unchecked channel = no overwrite). Index = channelMask 0..15
+    ID3D11BlendState* m_FillWriteMaskBlend[16] = {};
+    ID3D11BlendState* m_FillWriteMaskReplace[16] = {};
+    ID3D11BlendState* GetFillWriteBlend(ID3D11Device* device, uint8_t channelMask, bool replace);
     ID3D11RasterizerState* m_RasterizerState = nullptr;
 
     PaintTarget m_PaintTarget = PaintTarget::LayerContent;

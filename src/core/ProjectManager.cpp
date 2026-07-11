@@ -2,6 +2,7 @@
 #include "Logger.h"
 #include "PathUtil.h"
 #include "ImageManager.h"
+#include "ConfigManager.h"
 #include "../texset/TextureSetIO.h"
 
 #include <algorithm>
@@ -40,10 +41,8 @@ bool Project::IsBlank() const {
     if (!canvas) return true;
     if (canvas->IsDocumentModified()) return false;
     if (!canvas->GetCurrentProjectFilePath().empty()) return false;
-    // No layers or empty canvas still counts as blank starter tab.
-    if (canvas->GetWidth() <= 0 || canvas->GetHeight() <= 0) return true;
-    if (canvas->GetLayers().empty()) return true;
-    return false;
+    // Untitled + unmodified = reusable starter tab (even with default 1024×1024 Background).
+    return true;
 }
 
 void Project::SyncTextureSetsFromCanvas() {
@@ -444,15 +443,31 @@ int ProjectManager::CreateEmptyProject() {
                             std::to_string(proj->id));
         return -1;
     }
+    // Default blank canvas (not 0×0) so paint / fill work immediately
+    {
+        int dw = ConfigManager::Get().GetDefaultWidth();
+        int dh = ConfigManager::Get().GetDefaultHeight();
+        if (dw < 1) dw = 1024;
+        if (dh < 1) dh = 1024;
+        proj->canvas->ResizeCanvas(m_Device, dw, dh);
+        proj->canvas->CreateNewLayer(m_Device, "Background");
+        // Fresh blank is not "modified" yet
+        proj->canvas->SetDocumentModified(false);
+    }
     // Texture Set library (Simple = 1 Diffuse set)
     proj->textureSets.EnsureSimpleDefault();
-    if (texset::TextureSet* s = proj->textureSets.Active())
+    if (texset::TextureSet* s = proj->textureSets.Active()) {
         s->name = proj->GetTabTitle();
+        s->EnableMap(texset::MapKind::Diffuse, proj->canvas->GetWidth(), proj->canvas->GetHeight());
+    }
+    proj->canvas->SetActiveSetMaps(
+        proj->textureSets.Active() ? proj->textureSets.Active()->maps
+                                   : std::vector<texset::MapSlot>{});
 
     const int id = proj->id;
     m_Projects.push_back(std::move(proj));
     m_ActiveId = id;
-    Logger::Get().Info("Project created id=" + std::to_string(id));
+    Logger::Get().Info("Project created id=" + std::to_string(id) + " blank canvas ready");
     return id;
 }
 

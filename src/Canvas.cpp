@@ -727,6 +727,7 @@ bool Canvas::Initialize(ID3D11Device* device) {
     if (FAILED(hr)) {
         return false;
     }
+    // Fill write-mask blend states are created lazily in GetFillWriteBlend
 
     // Create rasterizer state with CullMode = D3D11_CULL_NONE
     D3D11_RASTERIZER_DESC rd = {};
@@ -762,6 +763,10 @@ void Canvas::Shutdown() {
     if (m_LayerBlendState) { m_LayerBlendState->Release(); m_LayerBlendState = nullptr; }
     if (m_LayerBlendStateAlphaPreserve) { m_LayerBlendStateAlphaPreserve->Release(); m_LayerBlendStateAlphaPreserve = nullptr; }
     if (m_LayerBlendStateReplace) { m_LayerBlendStateReplace->Release(); m_LayerBlendStateReplace = nullptr; }
+    for (int i = 0; i < 16; ++i) {
+        if (m_FillWriteMaskBlend[i]) { m_FillWriteMaskBlend[i]->Release(); m_FillWriteMaskBlend[i] = nullptr; }
+        if (m_FillWriteMaskReplace[i]) { m_FillWriteMaskReplace[i]->Release(); m_FillWriteMaskReplace[i] = nullptr; }
+    }
     if (m_RasterizerState) { m_RasterizerState->Release(); m_RasterizerState = nullptr; }
 
     if (m_SelectionMaskTexture) { m_SelectionMaskTexture->Release(); m_SelectionMaskTexture = nullptr; }
@@ -2466,10 +2471,27 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
         if (!srv) return false;
         const bool isFirst = firstVisible && m_LayerBlendStateReplace;
         ID3D11BlendState* blend = nullptr;
-        if (isFirst) blend = m_LayerBlendStateReplace;
-        else if (!layer.alphaRewrite && m_LayerBlendStateAlphaPreserve)
+        // Fill: per-map channel write mask (unchecked channel = no overwrite, not black)
+        uint8_t fillWrite = 0xF;
+        if (layer.IsFill()) {
+            float tmp[4];
+            if (!layer.fill.ResolveForMap(m_ActiveSetMaps, m_ViewMapKind, tmp, &fillWrite))
+                return false;
+            ID3D11Device* dev = nullptr;
+            context->GetDevice(&dev);
+            blend = GetFillWriteBlend(dev, fillWrite, isFirst);
+            if (dev) dev->Release();
+            // If not writing A, still use SRC_ALPHA path with A from color for coverage of RGB writes
+            if (!isFirst && !(fillWrite & 8) && (fillWrite & 7)) {
+                // RGB write, no A: use normal RGB blend with write mask without A
+            }
+        } else if (isFirst) {
+            blend = m_LayerBlendStateReplace;
+        } else if (!layer.alphaRewrite && m_LayerBlendStateAlphaPreserve) {
             blend = m_LayerBlendStateAlphaPreserve;
-        else blend = m_LayerBlendState;
+        } else {
+            blend = m_LayerBlendState;
+        }
         context->OMSetBlendState(blend, nullptr, 0xFFFFFFFF);
 
         D3D11_MAPPED_SUBRESOURCE mapped;
@@ -3272,19 +3294,23 @@ bool Canvas::ComposePackedMapRGBA8(texset::MapKind kind,
         }
     }
 
-    // Blend layers that write this map only
-    auto blendOver = [](uint8_t* dp, float sr, float sg, float sb, float sa) {
-        if (sa <= 0.f) return;
+    // Blend layers that write this map only. writeMask: which dest channels to touch (0xF = all).
+    auto blendOver = [](uint8_t* dp, float sr, float sg, float sb, float sa, uint8_t writeMask = 0xF) {
+        if (sa <= 0.f || writeMask == 0) return;
         float dr = dp[0] / 255.f, dg = dp[1] / 255.f, db = dp[2] / 255.f, da = dp[3] / 255.f;
         float outA = sa + da * (1.f - sa);
-        if (outA <= 1e-6f) return;
-        float or_ = (sr * sa + dr * da * (1.f - sa)) / outA;
-        float og = (sg * sa + dg * da * (1.f - sa)) / outA;
-        float ob = (sb * sa + db * da * (1.f - sa)) / outA;
-        dp[0] = (uint8_t)(std::clamp(or_, 0.f, 1.f) * 255.f + 0.5f);
-        dp[1] = (uint8_t)(std::clamp(og, 0.f, 1.f) * 255.f + 0.5f);
-        dp[2] = (uint8_t)(std::clamp(ob, 0.f, 1.f) * 255.f + 0.5f);
-        dp[3] = (uint8_t)(std::clamp(outA, 0.f, 1.f) * 255.f + 0.5f);
+        if (outA <= 1e-6f && (writeMask & 8)) return;
+        auto mix = [&](float s, float d) {
+            return (s * sa + d * da * (1.f - sa)) / std::max(outA, 1e-6f);
+        };
+        if (writeMask & 1)
+            dp[0] = (uint8_t)(std::clamp(mix(sr, dr), 0.f, 1.f) * 255.f + 0.5f);
+        if (writeMask & 2)
+            dp[1] = (uint8_t)(std::clamp(mix(sg, dg), 0.f, 1.f) * 255.f + 0.5f);
+        if (writeMask & 4)
+            dp[2] = (uint8_t)(std::clamp(mix(sb, db), 0.f, 1.f) * 255.f + 0.5f);
+        if (writeMask & 8)
+            dp[3] = (uint8_t)(std::clamp(outA, 0.f, 1.f) * 255.f + 0.5f);
     };
 
     for (const auto& layer : m_Layers) {
@@ -3294,8 +3320,9 @@ bool Canvas::ComposePackedMapRGBA8(texset::MapKind kind,
 
         float solid[4] = {0, 0, 0, 1};
         bool useSolid = false;
+        uint8_t writeMask = 0xF;
         if (layer.IsFill()) {
-            if (!layer.fill.ResolveForMap(maps, kind, solid))
+            if (!layer.fill.ResolveForMap(maps, kind, solid, &writeMask))
                 continue;
             useSolid = true;
         }
@@ -3323,7 +3350,7 @@ bool Canvas::ComposePackedMapRGBA8(texset::MapKind kind,
                     sa *= layer.mask[(size_t)cy * m_Width + cx] / 255.f;
                 if (sa <= 0.001f) continue;
                 uint8_t* dp = outRgba.data() + ((size_t)y * outW + x) * 4;
-                blendOver(dp, sr, sg, sb, sa);
+                blendOver(dp, sr, sg, sb, sa, writeMask);
             }
         }
     }
@@ -3673,6 +3700,7 @@ static json LayerToJson(const Layer& layer) {
                 layer.fill.mapColor[i].rgba[0], layer.fill.mapColor[i].rgba[1],
                 layer.fill.mapColor[i].rgba[2], layer.fill.mapColor[i].rgba[3]
             };
+            mj["channel_mask"] = (int)layer.fill.mapColor[i].channelMask;
             maps.push_back(mj);
         }
         fj["map_colors"] = maps;
@@ -3795,6 +3823,8 @@ static void LayerFromJson(Layer& layer, const json& j) {
                     for (int c = 0; c < 4 && c < (int)mj["rgba"].size(); ++c)
                         layer.fill.mapColor[i].rgba[c] = mj["rgba"][c].get<float>();
                 }
+                if (mj.contains("channel_mask"))
+                    layer.fill.mapColor[i].channelMask = (uint8_t)std::clamp(mj["channel_mask"].get<int>(), 0, 15);
             }
         } else if (fj.contains("roles") && fj["roles"].is_array()) {
             for (const auto& rj : fj["roles"]) {
@@ -6695,6 +6725,43 @@ void Canvas::RebuildLayerPresentation(Layer& layer, bool fullQuality) {
     layer.stylesDirty = false;
     layer.presentationDirty = false;
     layer.needsUpload = true;
+}
+
+ID3D11BlendState* Canvas::GetFillWriteBlend(ID3D11Device* device, uint8_t channelMask, bool replace) {
+    if (!device) return replace ? m_LayerBlendStateReplace : m_LayerBlendState;
+    uint8_t m = channelMask & 0xF;
+    if (m == 0xF)
+        return replace ? m_LayerBlendStateReplace : m_LayerBlendState;
+
+    ID3D11BlendState** slot = replace ? &m_FillWriteMaskReplace[m] : &m_FillWriteMaskBlend[m];
+    if (*slot) return *slot;
+
+    UINT write = 0;
+    if (m & 1) write |= D3D11_COLOR_WRITE_ENABLE_RED;
+    if (m & 2) write |= D3D11_COLOR_WRITE_ENABLE_GREEN;
+    if (m & 4) write |= D3D11_COLOR_WRITE_ENABLE_BLUE;
+    if (m & 8) write |= D3D11_COLOR_WRITE_ENABLE_ALPHA;
+    if (write == 0) return replace ? m_LayerBlendStateReplace : m_LayerBlendState;
+
+    D3D11_BLEND_DESC bd = {};
+    bd.RenderTarget[0].BlendEnable = TRUE;
+    if (replace) {
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    } else {
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    }
+    bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bd.RenderTarget[0].RenderTargetWriteMask = (UINT8)write;
+    if (FAILED(device->CreateBlendState(&bd, slot)) || !*slot)
+        return replace ? m_LayerBlendStateReplace : m_LayerBlendState;
+    return *slot;
 }
 
 void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {

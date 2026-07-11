@@ -779,7 +779,7 @@ namespace UI {
         // 1. Persistent Header (Main Menu Bar)
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                if (ImGui::MenuItem("New Project…", "Ctrl+T")) {
+                if (ImGui::MenuItem("New Project…", KeymapManager::Get().GetActionShortcutString("NewProject").c_str())) {
                     state.openNewProjectWizard = true;
                 }
                 if (ImGui::MenuItem("New Blank Tab")) {
@@ -789,10 +789,10 @@ namespace UI {
                     UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
                 }
                 if (ImGui::MenuItem("Open Project (.rayp)", KeymapManager::Get().GetActionShortcutString("OpenProject").c_str())) {
-                    state.openLoadRaypModal = true;
+                    UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::OpenProject);
                 }
                 if (ImGui::MenuItem("Save Project (.rayp)", KeymapManager::Get().GetActionShortcutString("SaveProject").c_str())) {
-                    state.openSaveRaypModal = true;
+                    UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::SaveProject);
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Import Image...", "Ctrl+I")) {
@@ -801,15 +801,35 @@ namespace UI {
                 if (ImGui::MenuItem("Quick Export", KeymapManager::Get().GetActionShortcutString("QuickExport").c_str())) {
                     state.openQuickExportTrigger = true;
                 }
-                if (ImGui::MenuItem("Advanced Export...", KeymapManager::Get().GetActionShortcutString("AdvancedExport").c_str())) {
-                    state.openExportAdvancedModal = true;
+                {
+                    const bool advanced = canvas.GetProjectType() != Canvas::ProjectType::Simple;
+                    const char* aeLabel = advanced ? "Batch Export…" : "Advanced Export…";
+                    if (ImGui::MenuItem(aeLabel, KeymapManager::Get().GetActionShortcutString("AdvancedExport").c_str())) {
+                        if (advanced)
+                            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ExportTemplate);
+                        else {
+                            // Single-file advanced export with format panel in FE
+                            if (!canvas.GetExportPath().empty()) {
+                                try {
+                                    auto p = std::filesystem::path(PathUtil::Utf8ToWide(canvas.GetExportPath()));
+                                    std::string dir = PathUtil::WideToUtf8(p.parent_path().wstring());
+                                    std::string fn = PathUtil::WideToUtf8(p.filename().wstring());
+                                    if (!dir.empty()) state.fileExplorer.currentDir = dir;
+                                    if (!fn.empty())
+                                        std::snprintf(state.fileExplorer.saveFileName,
+                                            sizeof(state.fileExplorer.saveFileName), "%s", fn.c_str());
+                                } catch (...) {}
+                            }
+                            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::AdvancedExport);
+                        }
+                    }
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Load Config...")) {
-                    state.openLoadConfigModal = true;
+                    UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::LoadConfig);
                 }
                 if (ImGui::MenuItem("Save Config...")) {
-                    state.openSaveConfigModal = true;
+                    UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::SaveConfig);
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Settings / Preferences...")) {
@@ -1355,7 +1375,11 @@ namespace UI {
         if (state.openImportModal) { ImGui::OpenPopup("Import Image"); state.openImportModal = false; }
         if (state.openExportDdsModal) { ImGui::OpenPopup("Export DDS"); state.openExportDdsModal = false; }
         if (state.openExportStdModal) { ImGui::OpenPopup("Export Standard Image"); state.openExportStdModal = false; }
-        if (state.openExportAdvancedModal) { ImGui::OpenPopup("Advanced Export Settings"); state.openExportAdvancedModal = false; }
+        if (state.openExportAdvancedModal) {
+            // Prefer File Explorer Advanced Export over legacy modal
+            state.openExportAdvancedModal = false;
+            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::AdvancedExport);
+        }
         if (state.openSettingsModal) { ImGui::OpenPopup("Settings"); state.openSettingsModal = false; }
         if (state.openCanvasSizeModal) { ImGui::OpenPopup("Canvas Edit"); state.openCanvasSizeModal = false; }
         if (state.openSaveRaypModal) { ImGui::OpenPopup("Save Project"); state.openSaveRaypModal = false; }
@@ -2476,20 +2500,6 @@ namespace UI {
                     if (ImGui::IsItemHovered())
                         Ui::Tooltip("Layer Effects (filters + styles)…");
 
-                    // Fill layer color controls (compact)
-                    if (al.IsFill()) {
-                        ImGui::SameLine(0, hdrGap);
-                        if (ImGui::ColorEdit4("##fillcol", al.fill.color,
-                                ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) {
-                            al.needsUpload = true;
-                            if (al.HasEnabledStyles())
-                                canvas.RequestPresentationRebuild(ai);
-                            else
-                                canvas.MarkCompositeDirty();
-                        }
-                        if (ImGui::IsItemHovered()) Ui::Tooltip("Fill Layer color");
-                    }
-
                     if (!al.isGroup && !al.IsFill()) {
                         bool ar = al.alphaRewrite;
                         if (ImGui::Checkbox("Alpha Rewrite##ar_top", &ar)) {
@@ -2507,7 +2517,7 @@ namespace UI {
                     ImGui::PopID();
                     ImGui::Separator();
 
-                    // Fill Layer: enable maps + RGBA each (no role mandatory setup)
+                    // Fill Layer: compact map chips with smart wrap
                     if (al.IsFill()) {
                         ImGui::PushID("##fill_props");
                         al.fill.EnsureDefaults();
@@ -2515,8 +2525,6 @@ namespace UI {
                         if (Project* p = ProjectManager::Get().ActiveProject())
                             tset = p->textureSets.Active();
 
-                        // Solid multi-map fill: only needsUpload (NOT presentationDirty).
-                        // Sticky presentationDirty caused EnsureFillLayerGpu every frame → lag.
                         auto dirtyFill = [&](bool needsPresentation = false) {
                             al.needsUpload = true;
                             if (needsPresentation || al.HasEnabledStyles() ||
@@ -2529,8 +2537,7 @@ namespace UI {
                             canvas.SetDocumentModified(true);
                         };
 
-                        ImGui::TextDisabled("Write maps (RGBA each · one mask)");
-                        // Show enabled maps in project; if simple, just Diffuse
+                        ImGui::TextDisabled("Fill maps · swatch opens color · R/G/B/A = write mask");
                         std::vector<texset::MapKind> mapsToShow;
                         if (tset) {
                             for (const auto& m : tset->maps)
@@ -2539,12 +2546,16 @@ namespace UI {
                         } else {
                             mapsToShow.push_back(texset::MapKind::Diffuse);
                         }
-                        float availW = ImGui::GetContentRegionAvail().x;
-                        int n = std::max(1, (int)mapsToShow.size());
-                        int cols = std::max(1, std::min(n, (int)(availW / 88.f)));
-                        float cellW = (availW - ImGui::GetStyle().ItemSpacing.x * (cols - 1)) / cols;
-                        int col = 0;
-                        for (texset::MapKind mk : mapsToShow) {
+
+                        // Fixed chip size + wrap like ImGui button demo
+                        const float chipW = 168.f;
+                        const float chipH = 52.f;
+                        const float swatch = 20.f;
+                        ImGuiStyle& style = ImGui::GetStyle();
+                        float winVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+
+                        for (int idx = 0; idx < (int)mapsToShow.size(); ++idx) {
+                            texset::MapKind mk = mapsToShow[idx];
                             int mi = (int)mk;
                             auto& mc = al.fill.mapColor[mi];
                             ImGui::PushID(mi);
@@ -2553,62 +2564,82 @@ namespace UI {
                                 if (const texset::MapSlot* sl = tset->GetMap(mk))
                                     lab = sl->DisplayName();
                             }
+
+                            ImGui::BeginChild("##chip", ImVec2(chipW, chipH), true,
+                                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
                             if (mc.enabled)
-                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.48f, 0.80f, 0.75f));
-                            if (ImGui::Button(lab, ImVec2(cellW, 0))) {
-                                mc.enabled = !mc.enabled;
+                                ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.18f, 0.40f, 0.70f, 0.55f));
+                            bool en = mc.enabled;
+                            if (ImGui::Checkbox(lab, &en)) {
+                                mc.enabled = en;
                                 dirtyFill();
                             }
                             if (mc.enabled) ImGui::PopStyleColor();
+
                             if (mc.enabled) {
-                                if (ImGui::ColorEdit4("##mc", mc.rgba,
-                                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel |
-                                        ImGuiColorEditFlags_AlphaBar))
-                                    dirtyFill();
-                            }
-                            ImGui::PopID();
-                            ++col;
-                            if (col < cols) ImGui::SameLine();
-                            else col = 0;
-                        }
-                        ImGui::Spacing();
-                        // Full color picker for active view map / first enabled + pipette
-                        {
-                            int pick = (int)canvas.GetViewMapKind();
-                            if (!al.fill.mapColor[pick].enabled) {
-                                for (int i = 0; i < (int)texset::MapKind::Count; ++i)
-                                    if (al.fill.mapColor[i].enabled) { pick = i; break; }
-                            }
-                            if (al.fill.mapColor[pick].enabled) {
-                                float* col = al.fill.mapColor[pick].rgba;
-                                float before[4] = { col[0], col[1], col[2], col[3] };
-                                ImGui::ColorPicker4("##fillpicker", col,
-                                    ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_DisplayRGB |
-                                    ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_NoSmallPreview);
-                                if (ImGui::IsItemEdited() || ImGui::IsItemDeactivatedAfterEdit()) {
-                                    if (before[0] != col[0] || before[1] != col[1] ||
-                                        before[2] != col[2] || before[3] != col[3])
+                                ImGui::SameLine(0, 4);
+                                if (ImGui::ColorButton("##sw",
+                                        ImVec4(mc.rgba[0], mc.rgba[1], mc.rgba[2], mc.rgba[3]),
+                                        ImGuiColorEditFlags_AlphaPreview | ImGuiColorEditFlags_NoTooltip,
+                                        ImVec2(swatch, swatch))) {
+                                    ImGui::OpenPopup("##fillcolpop");
+                                }
+                                if (ImGui::BeginPopup("##fillcolpop")) {
+                                    float before[4] = { mc.rgba[0], mc.rgba[1], mc.rgba[2], mc.rgba[3] };
+                                    ImGui::ColorPicker4("##fp", mc.rgba,
+                                        ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_DisplayRGB |
+                                        ImGuiColorEditFlags_NoSidePreview);
+                                    if (ImGui::IsItemEdited()) {
+                                        if (before[0] != mc.rgba[0] || before[1] != mc.rgba[1] ||
+                                            before[2] != mc.rgba[2] || before[3] != mc.rgba[3])
+                                            dirtyFill();
+                                    }
+                                    if (ImGui::Button("Pipette", ImVec2(-1, 0))) {
+                                        s_FillPipetteArmed = true;
+                                        s_FillPipetteLayer = ai;
+                                        s_FillPipetteMap = mi;
+                                        // Must close popup so next canvas click is not swallowed by ImGui
+                                        ImGui::CloseCurrentPopup();
+                                    }
+                                    if (ImGui::IsItemHovered())
+                                        Ui::Tooltip("Click canvas to sample (active Channels map)");
+                                    if (s_FillPipetteArmed && s_FillPipetteLayer == ai && s_FillPipetteMap == mi)
+                                        ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "Click canvas…");
+                                    ImGui::EndPopup();
+                                }
+                                // Write mask row
+                                const char* chs[4] = { "R", "G", "B", "A" };
+                                for (int c = 0; c < 4; ++c) {
+                                    ImGui::PushID(c);
+                                    bool on = mc.WritesChannel(c);
+                                    if (c > 0) ImGui::SameLine(0, 4);
+                                    if (ImGui::Checkbox(chs[c], &on)) {
+                                        mc.SetChannel(c, on);
                                         dirtyFill();
+                                    }
+                                    if (ImGui::IsItemHovered())
+                                        Ui::Tooltip(on
+                                            ? "ON: write this channel"
+                                            : "OFF: leave underlay (no overwrite)");
+                                    ImGui::PopID();
                                 }
-                                // Pipette: sample active Channels view into this map's fill color
-                                ImGui::SameLine(0, 8.f);
-                                ImGui::BeginGroup();
-                                if (ImGui::Button("Pipette##fillpip", ImVec2(72.f, 0))) {
-                                    // Sample canvas center of current view (user can Alt+brush too)
-                                    // Arm one-shot: next LMB on canvas writes into this fill slot
-                                    s_FillPipetteArmed = true;
-                                    s_FillPipetteLayer = ai;
-                                    s_FillPipetteMap = pick;
-                                }
-                                if (ImGui::IsItemHovered())
-                                    Ui::Tooltip("Sample from canvas (active Channels map)\nClick button then LMB on viewport");
-                                if (s_FillPipetteArmed && s_FillPipetteLayer == ai && s_FillPipetteMap == pick) {
-                                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "Click canvas…");
-                                }
-                                ImGui::EndGroup();
                             }
+                            ImGui::EndChild();
+
+                            // Wrap to next line only when the next chip would clip
+                            float lastX2 = ImGui::GetItemRectMax().x;
+                            float nextX2 = lastX2 + style.ItemSpacing.x + chipW;
+                            if (idx + 1 < (int)mapsToShow.size() && nextX2 < winVisibleX2)
+                                ImGui::SameLine(0, style.ItemSpacing.x);
+
+                            ImGui::PopID();
                         }
-                        ImGui::TextDisabled("Mask paints all toggled maps at once");
+                        if (s_FillPipetteArmed && s_FillPipetteLayer == ai) {
+                            ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f),
+                                "Pipette armed — click canvas to sample");
+                        }
+                        ImGui::TextDisabled("Unchecked R/G/B/A = no write (underlay stays)");
 
                         bool useTex = al.fill.useTexture;
                         if (ImGui::Checkbox("Use Texture##filltex", &useTex)) {

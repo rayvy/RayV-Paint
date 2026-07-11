@@ -16,6 +16,7 @@
     "LassoSelectTool": "L",
     "LassoToolGroup": "L",
     "MagicWandTool": "W",
+    "NewProject": "Ctrl+N",
     "OpenProject": "Ctrl+O",
     "PanTool": "H",
     "Paste": "Ctrl+V",

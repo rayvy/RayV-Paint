@@ -1022,10 +1022,10 @@ int main(int argc, char* argv[]) {
                 ActiveCanvas().Redo();
             }
             if (KeymapManager::Get().ConsumeActionTrigger("SaveProject")) {
-                uiState.openSaveRaypModal = true;
+                UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::SaveProject);
             }
             if (KeymapManager::Get().ConsumeActionTrigger("OpenProject")) {
-                uiState.openLoadRaypModal = true;
+                UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::OpenProject);
             }
             if (KeymapManager::Get().ConsumeActionTrigger("NewProject")) {
                 uiState.openNewProjectWizard = true;
@@ -1116,6 +1116,16 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("AdjustHSV")) {
                 uiState.showHSVModal = true;
             }
+            // Ctrl+Shift+E: Advanced → Batch Export folder FE; Simple → Advanced Export FE
+            if (KeymapManager::Get().ConsumeActionTrigger("AdvancedExport")) {
+                const bool advanced =
+                    ActiveCanvas().GetProjectType() != Canvas::ProjectType::Simple;
+                if (advanced)
+                    UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::ExportTemplate);
+                else
+                    UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::AdvancedExport);
+            }
+
             if (KeymapManager::Get().ConsumeActionTrigger("QuickExport") || uiState.openQuickExportTrigger) {
                 uiState.openQuickExportTrigger = false;
                 const bool advanced =
@@ -1704,8 +1714,9 @@ int main(int argc, char* argv[]) {
             // Eyedropper: live preview sample + commit on LMB
             static float s_PipettePreview[4] = {0, 0, 0, 1};
             static bool s_PipetteHasPreview = false;
-            // Fill Layer popup pipette (one-shot) takes priority over brush paint
-            if (UI::IsFillPipetteArmed() && isHovered && isInsideCanvas && !isPanning
+            // Fill Layer pipette (one-shot): do not require isHovered — popup may still
+            // hold ImGui focus; use canvas bounds + armed flag only.
+            if (UI::IsFillPipetteArmed() && isInsideCanvas && !isPanning
                 && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging) {
                 ImGui::SetMouseCursor(ImGuiMouseCursor_None);
                 UI::SampleCanvasColor(ActiveCanvas(), canvasX, canvasY, s_PipettePreview);

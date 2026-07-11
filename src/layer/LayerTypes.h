@@ -134,10 +134,19 @@ struct FillRoleSlot {
     }
 };
 
-// One map target: enable + solid RGBA (the law)
+// One map target: enable + solid RGBA + which channels of that map to write
 struct FillMapColor {
     bool enabled = false;
     float rgba[4] = {1.f, 1.f, 1.f, 1.f};
+    // Bit0=R Bit1=G Bit2=B Bit3=A — which channels of THIS map the fill writes
+    uint8_t channelMask = 0xF;
+
+    bool WritesChannel(int c) const { return (channelMask & (uint8_t)(1u << c)) != 0; }
+    void SetChannel(int c, bool on) {
+        uint8_t b = (uint8_t)(1u << c);
+        if (on) channelMask = (uint8_t)(channelMask | b);
+        else channelMask = (uint8_t)(channelMask & ~b);
+    }
 };
 
 struct FillLayerParams {
@@ -197,16 +206,21 @@ struct FillLayerParams {
         out[0] = color[0]; out[1] = color[1]; out[2] = color[2]; out[3] = color[3];
     }
 
-    // Direct map write — no role packing required
+    // Direct map write. Color values always full rgba for enabled map.
+    // outWriteMask: which dest channels to overwrite (unchecked = leave underlay untouched).
+    // Do NOT zero disabled channels into black — that overwrites underlay with black.
     bool ResolveForMap(const std::vector<texset::MapSlot>& /*maps*/, texset::MapKind mapKind,
-                       float outRgba[4]) const {
+                       float outRgba[4], uint8_t* outWriteMask = nullptr) const {
         int i = (int)mapKind;
         if (i < 0 || i >= (int)texset::MapKind::Count) return false;
         if (!mapColor[i].enabled) return false;
+        const uint8_t m = mapColor[i].channelMask;
+        if (m == 0) return false;
         outRgba[0] = mapColor[i].rgba[0];
         outRgba[1] = mapColor[i].rgba[1];
         outRgba[2] = mapColor[i].rgba[2];
         outRgba[3] = mapColor[i].rgba[3];
+        if (outWriteMask) *outWriteMask = m;
         return true;
     }
 

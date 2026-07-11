@@ -1087,6 +1087,97 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
 
 static uint16_t FloatToHalf(float f) { return HalfFloat::FromFloat(f); }
 
+std::string DdsHelper::SniffFormatLabel(const std::string& filename) {
+    std::ifstream file(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filename)), std::ios::binary);
+    if (!file.is_open())
+        file.open(PathUtil::FromUtf8(filename), std::ios::binary);
+    if (!file.is_open()) return {};
+
+    uint32_t magic = 0;
+    file.read(reinterpret_cast<char*>(&magic), 4);
+    if (magic != MAKEFOURCC('D', 'D', 'S', ' ')) return {};
+
+    DDS_HEADER header{};
+    file.read(reinterpret_cast<char*>(&header), sizeof(header));
+    if (!file || header.dwSize != 124) return {};
+
+    char dim[32];
+    std::snprintf(dim, sizeof(dim), "%ux%u", header.dwWidth, header.dwHeight);
+
+    auto withDim = [&](const char* fmt) -> std::string {
+        return std::string(fmt) + " · " + dim;
+    };
+
+    bool isDX10 = (header.ddspf.dwFlags & 0x4) &&
+                  (header.ddspf.dwFourCC == MAKEFOURCC('D', 'X', '1', '0'));
+    if (isDX10) {
+        DDS_HEADER_DXT10 dx10{};
+        file.read(reinterpret_cast<char*>(&dx10), sizeof(dx10));
+        if (!file) return withDim("DX10");
+        switch (dx10.dxgiFormat) {
+        case 2:  return withDim("RGBA32F");
+        case 10: return withDim("RGBA16F");
+        case 11: return withDim("RGBA16");
+        case 28: return withDim("RGBA8");
+        case 41: return withDim("R32F");
+        case 54: return withDim("R16F");
+        case 61: return withDim("R8 / L8");
+        case 49: // R8G8_UNORM
+        case 50: return withDim("R8G8");
+        case 51: return withDim("R8G8B8A8");
+        case 24: // R10G10B10A2
+            return withDim("R10G10B10A2");
+        case 71: case 72: return withDim("BC1");
+        case 74: case 75: return withDim("BC2");
+        case 77: case 78: return withDim("BC3");
+        case 80: case 81: return withDim("BC4");
+        case 83: case 84: return withDim("BC5");
+        case 95: return withDim("BC6H_UF16");
+        case 96: return withDim("BC6H_SF16");
+        case 98: case 99: return withDim("BC7");
+        default: {
+            char b[48];
+            std::snprintf(b, sizeof(b), "DXGI_%u · %s", dx10.dxgiFormat, dim);
+            return b;
+        }
+        }
+    }
+
+    if (header.ddspf.dwFlags & 0x4) {
+        uint32_t cc = header.ddspf.dwFourCC;
+        if (cc == MAKEFOURCC('D','X','T','1')) return withDim("BC1/DXT1");
+        if (cc == MAKEFOURCC('D','X','T','3')) return withDim("BC2/DXT3");
+        if (cc == MAKEFOURCC('D','X','T','5')) return withDim("BC3/DXT5");
+        if (cc == MAKEFOURCC('A','T','I','1') || cc == MAKEFOURCC('B','C','4','U'))
+            return withDim("BC4");
+        if (cc == MAKEFOURCC('A','T','I','2') || cc == MAKEFOURCC('B','C','5','U'))
+            return withDim("BC5");
+        char four[5] = {
+            (char)(cc & 0xFF), (char)((cc >> 8) & 0xFF),
+            (char)((cc >> 16) & 0xFF), (char)((cc >> 24) & 0xFF), 0
+        };
+        return withDim(four);
+    }
+
+    // Uncompressed RGB(A) bitmasks
+    if (header.ddspf.dwRGBBitCount == 8)
+        return withDim("L8");
+    if (header.ddspf.dwRGBBitCount == 16) {
+        // L8A8 common
+        if (header.ddspf.dwABitMask != 0) return withDim("L8A8");
+        return withDim("R5G6B5");
+    }
+    if (header.ddspf.dwRGBBitCount == 32) {
+        if (header.ddspf.dwABitMask) return withDim("RGBA8");
+        return withDim("RGB8");
+    }
+    if (header.ddspf.dwRGBBitCount == 24) return withDim("RGB8");
+
+    char bits[32];
+    std::snprintf(bits, sizeof(bits), "%u-bit", header.ddspf.dwRGBBitCount);
+    return withDim(bits);
+}
+
 bool DdsHelper::SaveDDS(const std::string& filename, const DdsImage& image) {
 #ifdef _WIN32
     std::ofstream file(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filename)), std::ios::binary);
