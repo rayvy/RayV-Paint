@@ -1,6 +1,7 @@
 #pragma once
 
 #include "TileCache.h"
+#include "../layer/LayerTypes.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -100,6 +101,63 @@ private:
     std::string m_Name;
     DocSnap m_Old;
     DocSnap m_New;
+};
+
+// Rasterize bake undo: restores layer type/filters/styles/fill + tile pixels.
+// For groups: also restores deleted children (full float RGBA + meta).
+class RasterizeCommand : public UndoCommand {
+public:
+    struct LayerMeta {
+        std::string name;
+        uint8_t type = 0; // Layer::Type as uint8
+        bool isGroup = false;
+        float opacity = 1.f;
+        BlendMode blendMode = BlendMode::Normal;
+        bool alphaRewrite = true;
+        int parentGroupId = -1;
+        bool groupExpanded = true;
+        bool hasMask = false;
+        std::vector<uint8_t> mask;
+        std::string smartPath;
+        std::vector<uint8_t> smartBytes;
+        float smartScale = 1.f;
+        FillLayerParams fill;
+        std::vector<LayerFilter> filters;
+        std::vector<LayerStyle> styles;
+        // Full pixels for fill/children restore (W*H*4). Empty → tile deltas only.
+        std::vector<float> pixels;
+        bool pixelsValid = false;
+        int insertAt = -1; // original index for reinsertion
+    };
+
+    // Single-layer rasterize
+    RasterizeCommand(const std::string& name, int layerIdx,
+                     LayerMeta oldMeta, LayerMeta newMeta,
+                     std::vector<TileDelta> tileDeltas);
+
+    // Group flatten
+    RasterizeCommand(const std::string& name, int groupIdx,
+                     LayerMeta oldGroupMeta,
+                     std::vector<LayerMeta> removedChildren,
+                     LayerMeta newMeta,
+                     std::vector<TileDelta> tileDeltas);
+
+    std::string GetName() const override { return m_Name; }
+    void Undo(Canvas* canvas) override;
+    void Redo(Canvas* canvas) override;
+    size_t GetOverheadBytes() const override;
+    void CollectTileData(std::unordered_set<const TileData*>& seen) const override;
+
+private:
+    void ApplyMetaToLayer(Canvas* canvas, int layerIdx, const LayerMeta& meta);
+    void ApplyTiles(Canvas* canvas, int layerIdx, bool useNew);
+    std::string m_Name;
+    int m_LayerIdx = -1;
+    bool m_IsGroup = false;
+    LayerMeta m_OldMeta;
+    LayerMeta m_NewMeta;
+    std::vector<LayerMeta> m_RemovedChildren;
+    std::vector<TileDelta> m_Tiles;
 };
 
 class UndoRedoManager {

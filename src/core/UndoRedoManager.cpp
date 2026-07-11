@@ -3,6 +3,8 @@
 #include "Logger.h"
 #include "ConfigManager.h"
 #include "MemoryStats.h"
+#include <algorithm>
+#include <cmath>
 
 // ---------------------------------------------------------------------------
 // UndoCommand helpers
@@ -305,5 +307,255 @@ void UndoRedoManager::EnforceLimits() {
             " overhead=" + MemoryStats::FormatBytes(m_OverheadBytes) +
             " total=" + MemoryStats::FormatBytes(m_CurrentMemoryBytes) +
             (budget ? " budget=" + MemoryStats::FormatBytes(budget) : " budget=unlimited"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RasterizeCommand
+// ---------------------------------------------------------------------------
+
+RasterizeCommand::RasterizeCommand(const std::string& name, int layerIdx,
+                                   LayerMeta oldMeta, LayerMeta newMeta,
+                                   std::vector<TileDelta> tileDeltas)
+    : m_Name(name)
+    , m_LayerIdx(layerIdx)
+    , m_IsGroup(false)
+    , m_OldMeta(std::move(oldMeta))
+    , m_NewMeta(std::move(newMeta))
+    , m_Tiles(std::move(tileDeltas)) {}
+
+RasterizeCommand::RasterizeCommand(const std::string& name, int groupIdx,
+                                   LayerMeta oldGroupMeta,
+                                   std::vector<LayerMeta> removedChildren,
+                                   LayerMeta newMeta,
+                                   std::vector<TileDelta> tileDeltas)
+    : m_Name(name)
+    , m_LayerIdx(groupIdx)
+    , m_IsGroup(true)
+    , m_OldMeta(std::move(oldGroupMeta))
+    , m_NewMeta(std::move(newMeta))
+    , m_RemovedChildren(std::move(removedChildren))
+    , m_Tiles(std::move(tileDeltas)) {}
+
+void RasterizeCommand::ApplyMetaToLayer(Canvas* canvas, int layerIdx, const LayerMeta& meta) {
+    if (!canvas || layerIdx < 0 || layerIdx >= (int)canvas->m_Layers.size()) return;
+    auto& L = canvas->m_Layers[layerIdx];
+    L.name = meta.name;
+    L.type = static_cast<Layer::Type>(meta.type);
+    L.isGroup = meta.isGroup;
+    L.opacity = meta.opacity;
+    L.blendMode = meta.blendMode;
+    L.alphaRewrite = meta.alphaRewrite;
+    L.parentGroupId = meta.parentGroupId;
+    L.groupExpanded = meta.groupExpanded;
+    L.hasMask = meta.hasMask;
+    L.mask = meta.mask;
+    L.maskNeedsUpload = meta.hasMask;
+    L.smartSourcePath = meta.smartPath;
+    L.smartSourceBytes = meta.smartBytes;
+    L.smartScale = meta.smartScale;
+    L.fill = meta.fill;
+    L.filters = meta.filters;
+    L.styles = meta.styles;
+    L.filtersDirty = !L.filters.empty();
+    L.stylesDirty = !L.styles.empty();
+    L.presentationDirty = true;
+    L.filteredCache.reset();
+    L.presentationCache.reset();
+    if (meta.pixelsValid && !meta.pixels.empty()) {
+        if (!L.tileCache) {
+            L.tileCache = std::make_unique<TileCache>();
+            L.tileCache->Init(canvas->m_Width, canvas->m_Height, canvas->m_CanvasFormat);
+        }
+        L.tileCache->ImportRGBA32F(meta.pixels.data(), canvas->m_Width, canvas->m_Height);
+        L.tileCache->MarkAllDirty();
+    } else if (L.isGroup || L.IsFill()) {
+        if (!meta.pixelsValid)
+            L.tileCache.reset();
+    }
+    L.needsUpload = true;
+    L.thumbDirty = true;
+}
+
+void RasterizeCommand::ApplyTiles(Canvas* canvas, int layerIdx, bool useNew) {
+    if (!canvas || layerIdx < 0 || layerIdx >= (int)canvas->m_Layers.size()) return;
+    auto& L = canvas->m_Layers[layerIdx];
+    if (!L.tileCache) {
+        L.tileCache = std::make_unique<TileCache>();
+        L.tileCache->Init(canvas->m_Width, canvas->m_Height, canvas->m_CanvasFormat);
+    }
+    for (const auto& d : m_Tiles) {
+        L.tileCache->RestoreTile(d.tileX, d.tileY, useNew ? d.newState : d.oldState);
+    }
+    L.needsUpload = true;
+    L.filtersDirty = true;
+    L.presentationDirty = true;
+}
+
+void RasterizeCommand::Undo(Canvas* canvas) {
+    if (!canvas) return;
+    if (m_IsGroup) {
+        // Current state is flattened raster at m_LayerIdx � restore group header + children
+        if (m_LayerIdx < 0 || m_LayerIdx >= (int)canvas->m_Layers.size()) return;
+        ApplyMetaToLayer(canvas, m_LayerIdx, m_OldMeta);
+        // Clear raster tiles on group header
+        if (canvas->m_Layers[m_LayerIdx].tileCache)
+            canvas->m_Layers[m_LayerIdx].tileCache->Clear();
+        canvas->m_Layers[m_LayerIdx].tileCache.reset();
+        canvas->m_Layers[m_LayerIdx].isGroup = true;
+        canvas->m_Layers[m_LayerIdx].type = Layer::Type::Group;
+        // Reinsert children high indices first so insertAt stays valid if sorted ascending
+        std::vector<LayerMeta> kids = m_RemovedChildren;
+        std::sort(kids.begin(), kids.end(), [](const LayerMeta& a, const LayerMeta& b) {
+            return a.insertAt < b.insertAt;
+        });
+        for (const auto& ch : kids) {
+            int at = std::clamp(ch.insertAt, 0, (int)canvas->m_Layers.size());
+            Layer L;
+            L.name = ch.name;
+            L.type = static_cast<Layer::Type>(ch.type);
+            L.isGroup = ch.isGroup;
+            L.opacity = ch.opacity;
+            L.blendMode = ch.blendMode;
+            L.alphaRewrite = ch.alphaRewrite;
+            L.parentGroupId = m_LayerIdx; // reparent to restored group
+            L.groupExpanded = ch.groupExpanded;
+            L.hasMask = ch.hasMask;
+            L.mask = ch.mask;
+            L.fill = ch.fill;
+            L.filters = ch.filters;
+            L.styles = ch.styles;
+            L.smartSourcePath = ch.smartPath;
+            L.smartSourceBytes = ch.smartBytes;
+            L.smartScale = ch.smartScale;
+            L.filtersDirty = !L.filters.empty();
+            L.stylesDirty = !L.styles.empty();
+            L.presentationDirty = true;
+            if (ch.pixelsValid && !ch.pixels.empty()) {
+                L.tileCache = std::make_unique<TileCache>();
+                L.tileCache->Init(canvas->m_Width, canvas->m_Height, canvas->m_CanvasFormat);
+                L.tileCache->ImportRGBA32F(ch.pixels.data(), canvas->m_Width, canvas->m_Height);
+                L.tileCache->MarkAllDirty();
+                L.needsUpload = true;
+            }
+            // Remap parent ids after insert
+            for (auto& existing : canvas->m_Layers) {
+                if (existing.parentGroupId >= at)
+                    existing.parentGroupId++;
+            }
+            canvas->m_Layers.insert(canvas->m_Layers.begin() + at, std::move(L));
+            if (m_LayerIdx >= at) m_LayerIdx++; // group index shifts
+        }
+        // Fix children parentGroupId to actual group index
+        for (auto& L : canvas->m_Layers) {
+            // already set to m_LayerIdx during insert � but m_LayerIdx may have shifted
+        }
+        // Re-find group by name
+        for (int i = 0; i < (int)canvas->m_Layers.size(); ++i) {
+            if (canvas->m_Layers[i].isGroup && canvas->m_Layers[i].name == m_OldMeta.name) {
+                m_LayerIdx = i;
+                break;
+            }
+        }
+        for (auto& L : canvas->m_Layers) {
+            if (!L.isGroup && L.parentGroupId >= 0) {
+                // leave as set
+            }
+        }
+        // Set parent of restored children to group
+        for (int i = 0; i < (int)canvas->m_Layers.size(); ++i) {
+            auto& L = canvas->m_Layers[i];
+            if (L.isGroup) continue;
+            // Children we just inserted have parentGroupId = previous m_LayerIdx during insert
+            // Force: any layer that was in m_RemovedChildren by name
+            for (const auto& ch : m_RemovedChildren) {
+                if (L.name == ch.name) {
+                    L.parentGroupId = m_LayerIdx;
+                    break;
+                }
+            }
+        }
+        canvas->m_ActiveLayerIdx = m_LayerIdx;
+    } else {
+        ApplyMetaToLayer(canvas, m_LayerIdx, m_OldMeta);
+        if (!m_OldMeta.pixelsValid)
+            ApplyTiles(canvas, m_LayerIdx, /*useNew=*/false);
+    }
+    if (canvas->m_Layers[m_LayerIdx].texture) {
+        canvas->m_Layers[m_LayerIdx].texture->Release();
+        canvas->m_Layers[m_LayerIdx].texture = nullptr;
+    }
+    if (canvas->m_Layers[m_LayerIdx].srv) {
+        canvas->m_Layers[m_LayerIdx].srv->Release();
+        canvas->m_Layers[m_LayerIdx].srv = nullptr;
+    }
+    canvas->MarkCompositeDirty();
+    canvas->m_IsDocumentModified = true;
+}
+
+void RasterizeCommand::Redo(Canvas* canvas) {
+    if (!canvas) return;
+    if (m_IsGroup) {
+        // Delete children again and re-apply flatten
+        // Find group
+        int gIdx = -1;
+        for (int i = 0; i < (int)canvas->m_Layers.size(); ++i) {
+            if (canvas->m_Layers[i].isGroup && canvas->m_Layers[i].name == m_OldMeta.name) {
+                gIdx = i; break;
+            }
+        }
+        if (gIdx < 0) gIdx = m_LayerIdx;
+        // Delete children under group high>low
+        for (int i = (int)canvas->m_Layers.size() - 1; i >= 0; --i) {
+            if (i == gIdx) continue;
+            int p = canvas->m_Layers[i].parentGroupId;
+            bool under = false;
+            while (p >= 0 && p < (int)canvas->m_Layers.size()) {
+                if (p == gIdx) { under = true; break; }
+                p = canvas->m_Layers[p].parentGroupId;
+            }
+            if (under) {
+                canvas->DeleteLayer(i);
+                if (i < gIdx) gIdx--;
+            }
+        }
+        m_LayerIdx = gIdx;
+        ApplyMetaToLayer(canvas, m_LayerIdx, m_NewMeta);
+        ApplyTiles(canvas, m_LayerIdx, /*useNew=*/true);
+        canvas->m_Layers[m_LayerIdx].isGroup = false;
+        canvas->m_Layers[m_LayerIdx].type = Layer::Type::Raster;
+    } else {
+        ApplyMetaToLayer(canvas, m_LayerIdx, m_NewMeta);
+        ApplyTiles(canvas, m_LayerIdx, /*useNew=*/true);
+    }
+    if (canvas->m_Layers[m_LayerIdx].texture) {
+        canvas->m_Layers[m_LayerIdx].texture->Release();
+        canvas->m_Layers[m_LayerIdx].texture = nullptr;
+    }
+    if (canvas->m_Layers[m_LayerIdx].srv) {
+        canvas->m_Layers[m_LayerIdx].srv->Release();
+        canvas->m_Layers[m_LayerIdx].srv = nullptr;
+    }
+    canvas->MarkCompositeDirty();
+    canvas->m_IsDocumentModified = true;
+}
+
+size_t RasterizeCommand::GetOverheadBytes() const {
+    size_t n = sizeof(RasterizeCommand) + m_Name.capacity() + m_Tiles.capacity() * sizeof(TileDelta);
+    auto addMeta = [&](const LayerMeta& m) {
+        n += m.name.capacity() + m.mask.capacity() + m.smartBytes.capacity()
+           + m.pixels.capacity() * sizeof(float) + m.filters.capacity() * 64
+           + m.styles.capacity() * 128;
+    };
+    addMeta(m_OldMeta);
+    addMeta(m_NewMeta);
+    for (const auto& c : m_RemovedChildren) addMeta(c);
+    return n;
+}
+
+void RasterizeCommand::CollectTileData(std::unordered_set<const TileData*>& seen) const {
+    for (const auto& d : m_Tiles) {
+        if (d.oldState.data) seen.insert(d.oldState.data.get());
+        if (d.newState.data) seen.insert(d.newState.data.get());
     }
 }

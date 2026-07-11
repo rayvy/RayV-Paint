@@ -36,7 +36,8 @@ void BuildShadowRgba(const float* contentRgba, int w, int h,
                      std::vector<float>& shadowRgbaOut,
                      bool previewQuality = false);
 
-// Build outline RGBA from content alpha. Solid color only for now (gradient/texture → solid fallback).
+// Build outline RGBA from content alpha.
+// Supports Solid, Gradient (multi-stop), Texture (RGBA8 wrap sample).
 void BuildOutlineRgba(const float* contentRgba, int w, int h,
                       const LayerStyle& style,
                       std::vector<float>& outlineRgbaOut,
@@ -78,7 +79,11 @@ inline bool NeedsBakedPresentation(const std::vector<LayerStyle>& styles) {
     return LayerStyleListHasEnabled(styles);
 }
 
-// Resolve fill solid content buffer (full W×H). Prefer GPU 1×1 path when no filters/styles.
+// Resolve fill content buffer (full W×H): solid color and/or tiled texture × color.
+// Prefer GPU 1×1 path when solid-only and no filters/styles.
 void FillSolidBuffer(std::vector<float>& out, int w, int h, const FillLayerParams& fill);
+
+// Sample gradient stops at t in [0,1] → rgba
+void SampleGradient(const std::vector<GradientStop>& stops, float t, float outRgba[4]);
 
 } // namespace layer_fx

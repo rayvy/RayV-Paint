@@ -2123,10 +2123,11 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     layer.thumbDirty = true;
                     m_ChannelPreviewDirty = true;
                 }
-                // If presentation baked, upload full tiles into full-size texture
-                if (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters)) {
+                // Full-buffer path: styles, filters, or fill texture
+                if (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters) ||
+                    layer.fill.HasTexture()) {
                     if (layer.filtersDirty) RebuildFilteredPixels(layer);
-                    if (layer.presentationDirty || layer.stylesDirty)
+                    if (layer.HasEnabledStyles() && (layer.presentationDirty || layer.stylesDirty))
                         RebuildLayerPresentation(layer);
                     TileCache* src = nullptr;
                     if (layer.presentationCache && !layer.presentationCache->IsEmpty())
@@ -3404,6 +3405,9 @@ static json LayerToJson(const Layer& layer) {
         sj["outline_position"] = (int)s.outlinePos;
         sj["outline_fill_mode"] = (int)s.outlineFill;
         sj["outline_texture_path"] = s.outlineTexturePath;
+        sj["outline_gradient_map"] = (int)s.outlineGradientMap;
+        sj["outline_tex_scale"] = { s.outlineTexScale[0], s.outlineTexScale[1] };
+        sj["outline_tex_offset"] = { s.outlineTexOffset[0], s.outlineTexOffset[1] };
         if (!s.outlineGradient.empty()) {
             json g = json::array();
             for (const auto& st : s.outlineGradient) {
@@ -3528,6 +3532,15 @@ static void LayerFromJson(Layer& layer, const json& j) {
             if (sj.contains("outline_position")) s.outlinePos = static_cast<OutlinePosition>(sj["outline_position"].get<int>());
             if (sj.contains("outline_fill_mode")) s.outlineFill = static_cast<OutlineFillMode>(sj["outline_fill_mode"].get<int>());
             if (sj.contains("outline_texture_path")) s.outlineTexturePath = sj["outline_texture_path"].get<std::string>();
+            if (sj.contains("outline_gradient_map")) s.outlineGradientMap = (uint8_t)sj["outline_gradient_map"].get<int>();
+            if (sj.contains("outline_tex_scale") && sj["outline_tex_scale"].is_array() && sj["outline_tex_scale"].size() >= 2) {
+                s.outlineTexScale[0] = sj["outline_tex_scale"][0].get<float>();
+                s.outlineTexScale[1] = sj["outline_tex_scale"][1].get<float>();
+            }
+            if (sj.contains("outline_tex_offset") && sj["outline_tex_offset"].is_array() && sj["outline_tex_offset"].size() >= 2) {
+                s.outlineTexOffset[0] = sj["outline_tex_offset"][0].get<float>();
+                s.outlineTexOffset[1] = sj["outline_tex_offset"][1].get<float>();
+            }
             if (sj.contains("outline_gradient") && sj["outline_gradient"].is_array()) {
                 for (const auto& g : sj["outline_gradient"]) {
                     GradientStop st;
@@ -3539,6 +3552,7 @@ static void LayerFromJson(Layer& layer, const json& j) {
                     s.outlineGradient.push_back(st);
                 }
             }
+            // Texture pixels reloaded on demand when path set (not embedded in .rayp for size)
             layer.styles.push_back(std::move(s));
         }
     }
@@ -6307,11 +6321,37 @@ void Canvas::RebuildLayerPresentation(Layer& layer, bool fullQuality) {
 void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
     if (!device || !layer.IsFill()) return;
 
-    if (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters)) {
-        RebuildLayerPresentation(layer);
+    const bool needsFull = layer.HasEnabledStyles() ||
+        LayerFilterListHasEnabled(layer.filters) || layer.fill.HasTexture();
+
+    if (needsFull) {
+        if (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters)) {
+            RebuildLayerPresentation(layer);
+        } else {
+            // Texture fill without FX: bake full buffer into presentationCache for upload
+            auto content = ResolveLayerContentF(layer);
+            layer_fx::PresentationParams pp;
+            pp.fillOpacity = 1.f;
+            pp.bakeFillOpacity = false;
+            pp.hasMask = false;
+            auto body = content;
+            // Apply mask only in shader path; store raw content
+            if (!layer.presentationCache)
+                layer.presentationCache = std::make_unique<TileCache>();
+            layer.presentationCache->Init(m_Width, m_Height, m_CanvasFormat);
+            layer.presentationCache->ImportRGBA32F(body.data(), m_Width, m_Height);
+            layer.presentationCache->MarkAllDirty();
+            layer.needsUpload = true;
+        }
         if (!layer.texture)
             RecreateLayerTexture(device, layer);
-        // Upload happens in ComposeLayers via presentation/filtered/tile dirty
+        // Ensure full-size texture (not leftover 1×1)
+        if (layer.texture) {
+            D3D11_TEXTURE2D_DESC desc{};
+            layer.texture->GetDesc(&desc);
+            if (desc.Width != (UINT)m_Width || desc.Height != (UINT)m_Height)
+                RecreateLayerTexture(device, layer);
+        }
         return;
     }
 
@@ -6319,7 +6359,6 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
     float c[4];
     layer.fill.ResolveRgba(c);
     if (layer.texture) {
-        // Recreate if not 1×1
         D3D11_TEXTURE2D_DESC desc{};
         layer.texture->GetDesc(&desc);
         if (desc.Width != 1 || desc.Height != 1) {
@@ -6337,7 +6376,6 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
         if (FAILED(device->CreateTexture2D(&desc, nullptr, &layer.texture))) return;
         device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
     }
-    // Pack pixel
     ID3D11DeviceContext* ctx = nullptr;
     device->GetImmediateContext(&ctx);
     if (ctx) {
@@ -6355,6 +6393,70 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
         ctx->Release();
     }
     layer.needsUpload = false;
+}
+
+bool Canvas::LoadFillTexture(int layerIdx, const std::string& filepath) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    Layer& layer = m_Layers[layerIdx];
+    if (!layer.IsFill()) return false;
+    if (filepath.empty()) {
+        layer.fill.useTexture = false;
+        layer.fill.texturePath.clear();
+        layer.fill.textureRgba.clear();
+        layer.fill.textureW = layer.fill.textureH = 0;
+        layer.needsUpload = true;
+        layer.presentationDirty = true;
+        m_CompositeDirty = true;
+        m_IsDocumentModified = true;
+        return true;
+    }
+    std::vector<uint8_t> px;
+    int tw = 0, th = 0;
+    if (!ImageManager::LoadImageFromFile(filepath, px, tw, th)) {
+        Logger::Get().Error("LoadFillTexture failed: " + filepath);
+        return false;
+    }
+    layer.fill.useTexture = true;
+    layer.fill.texturePath = filepath;
+    layer.fill.textureRgba = std::move(px);
+    layer.fill.textureW = tw;
+    layer.fill.textureH = th;
+    layer.needsUpload = true;
+    layer.presentationDirty = true;
+    layer.presentationCache.reset();
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    Logger::Get().Info("Fill texture loaded " + std::to_string(tw) + "x" + std::to_string(th));
+    return true;
+}
+
+bool Canvas::LoadOutlineTexture(int layerIdx, int styleIdx, const std::string& filepath) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    Layer& layer = m_Layers[layerIdx];
+    if (styleIdx < 0 || styleIdx >= (int)layer.styles.size()) return false;
+    LayerStyle& st = layer.styles[styleIdx];
+    if (filepath.empty()) {
+        st.outlineTexturePath.clear();
+        st.outlineTextureRgba.clear();
+        st.outlineTextureW = st.outlineTextureH = 0;
+        RequestPresentationRebuild(layerIdx);
+        return true;
+    }
+    std::vector<uint8_t> px;
+    int tw = 0, th = 0;
+    if (!ImageManager::LoadImageFromFile(filepath, px, tw, th)) {
+        Logger::Get().Error("LoadOutlineTexture failed: " + filepath);
+        return false;
+    }
+    st.outlineTexturePath = filepath;
+    st.outlineTextureRgba = std::move(px);
+    st.outlineTextureW = tw;
+    st.outlineTextureH = th;
+    st.outlineFill = OutlineFillMode::Texture;
+    RequestPresentationRebuild(layerIdx);
+    m_IsDocumentModified = true;
+    Logger::Get().Info("Outline texture loaded " + std::to_string(tw) + "x" + std::to_string(th));
+    return true;
 }
 
 void Canvas::CreateFillLayer(ID3D11Device* device, const std::string& name, const FillLayerParams& params) {
@@ -7581,6 +7683,51 @@ bool Canvas::RasterizeLayer(ID3D11Device* device, int layerIdx) {
     if (layer.type == Layer::Type::Raster && layer.filters.empty() && layer.styles.empty() && !layer.IsFill())
         return true;
 
+    auto captureMeta = [&](const Layer& L) -> RasterizeCommand::LayerMeta {
+        RasterizeCommand::LayerMeta m;
+        m.name = L.name;
+        m.type = (uint8_t)L.type;
+        m.isGroup = L.isGroup;
+        m.opacity = L.opacity;
+        m.blendMode = L.blendMode;
+        m.alphaRewrite = L.alphaRewrite;
+        m.parentGroupId = L.parentGroupId;
+        m.groupExpanded = L.groupExpanded;
+        m.hasMask = L.hasMask;
+        m.mask = L.mask;
+        m.smartPath = L.smartSourcePath;
+        m.smartBytes = L.smartSourceBytes;
+        m.smartScale = L.smartScale;
+        m.fill = L.fill;
+        m.filters = L.filters;
+        m.styles = L.styles;
+        if (L.tileCache && !L.tileCache->IsEmpty()) {
+            m.pixels = ExportLayerF(L, m_Width, m_Height);
+            m.pixelsValid = true;
+        } else if (L.IsFill()) {
+            layer_fx::FillSolidBuffer(m.pixels, m_Width, m_Height, L.fill);
+            m.pixelsValid = true;
+        }
+        return m;
+    };
+
+    RasterizeCommand::LayerMeta oldMeta = captureMeta(layer);
+
+    // Snapshot old tiles (grid)
+    std::vector<TileDelta> deltas;
+    const int tilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+    const int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+    deltas.reserve((size_t)tilesX * tilesY);
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX; ++tx) {
+            TileDelta d;
+            d.layerIdx = layerIdx;
+            d.tileX = tx; d.tileY = ty;
+            d.oldState = layer.tileCache ? layer.tileCache->SnapshotTile(tx, ty) : TileSnapshot{};
+            deltas.push_back(std::move(d));
+        }
+    }
+
     // Bake content + filters + styles into pixels (full quality)
     if (layer.filtersDirty) RebuildFilteredPixels(layer);
     if (layer.HasEnabledStyles()) {
@@ -7595,7 +7742,6 @@ bool Canvas::RasterizeLayer(ID3D11Device* device, int layerIdx) {
     } else if (!layer.filters.empty() && layer.filteredCache && !layer.filteredCache->IsEmpty()) {
         baked.resize((size_t)m_Width * m_Height * 4);
         layer.filteredCache->ExportRGBA32F(baked.data(), m_Width, m_Height);
-        // Apply opacity into alpha when baking without styles
         for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i)
             baked[i * 4 + 3] *= layer.opacity;
         if (layer.hasMask && layer.mask.size() == (size_t)m_Width * m_Height) {
@@ -7611,7 +7757,6 @@ bool Canvas::RasterizeLayer(ID3D11Device* device, int layerIdx) {
                 baked[i * 4 + 3] *= layer.mask[i] / 255.f;
         }
     } else {
-        // Smart object / etc. — keep existing tiles, just drop type
         baked = ExportLayerF(layer, m_Width, m_Height);
     }
 
@@ -7635,7 +7780,14 @@ bool Canvas::RasterizeLayer(ID3D11Device* device, int layerIdx) {
     layer.tileCache->ImportRGBA32F(baked.data(), m_Width, m_Height);
     layer.tileCache->MarkAllDirty();
     layer.needsUpload = true;
-    layer.opacity = 1.f; // baked in
+    layer.opacity = 1.f;
+
+    for (auto& d : deltas)
+        d.newState = layer.tileCache->SnapshotTile(d.tileX, d.tileY);
+
+    RasterizeCommand::LayerMeta newMeta = captureMeta(layer);
+    m_UndoRedoManager.PushCommand(std::make_shared<RasterizeCommand>(
+        "Rasterize Layer", layerIdx, std::move(oldMeta), std::move(newMeta), std::move(deltas)));
 
     if (device) RecreateLayerTexture(device, layer);
 
@@ -7664,6 +7816,42 @@ bool Canvas::RasterizeGroup(ID3D11Device* device, int groupIdx) {
         }
         return false;
     };
+
+    auto captureMeta = [&](const Layer& L, int insertAt) -> RasterizeCommand::LayerMeta {
+        RasterizeCommand::LayerMeta m;
+        m.name = L.name;
+        m.type = (uint8_t)L.type;
+        m.isGroup = L.isGroup;
+        m.opacity = L.opacity;
+        m.blendMode = L.blendMode;
+        m.alphaRewrite = L.alphaRewrite;
+        m.parentGroupId = L.parentGroupId;
+        m.groupExpanded = L.groupExpanded;
+        m.hasMask = L.hasMask;
+        m.mask = L.mask;
+        m.smartPath = L.smartSourcePath;
+        m.smartBytes = L.smartSourceBytes;
+        m.smartScale = L.smartScale;
+        m.fill = L.fill;
+        m.filters = L.filters;
+        m.styles = L.styles;
+        m.insertAt = insertAt;
+        if (L.IsFill()) {
+            layer_fx::FillSolidBuffer(m.pixels, m_Width, m_Height, L.fill);
+            m.pixelsValid = true;
+        } else if (L.tileCache && !L.tileCache->IsEmpty()) {
+            m.pixels = ExportLayerF(L, m_Width, m_Height);
+            m.pixelsValid = true;
+        }
+        return m;
+    };
+
+    RasterizeCommand::LayerMeta oldGroupMeta = captureMeta(m_Layers[groupIdx], groupIdx);
+    std::vector<RasterizeCommand::LayerMeta> removedChildren;
+    for (int i = 0; i < (int)m_Layers.size(); ++i) {
+        if (i != groupIdx && isUnderGroup(i, groupIdx))
+            removedChildren.push_back(captureMeta(m_Layers[i], i));
+    }
 
     // Bake children presentations first
     for (int i = 0; i < (int)m_Layers.size(); ++i) {
@@ -7752,6 +7940,26 @@ bool Canvas::RasterizeGroup(ID3D11Device* device, int groupIdx) {
     g.tileCache->ImportRGBA32F(acc.data(), m_Width, m_Height);
     g.tileCache->MarkAllDirty();
     g.needsUpload = true;
+
+    // Tile deltas for undo (old empty → new)
+    std::vector<TileDelta> deltas;
+    const int tilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+    const int tilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX; ++tx) {
+            TileDelta d;
+            d.layerIdx = groupIdx;
+            d.tileX = tx; d.tileY = ty;
+            d.oldState = TileSnapshot{};
+            d.newState = g.tileCache->SnapshotTile(tx, ty);
+            deltas.push_back(std::move(d));
+        }
+    }
+    RasterizeCommand::LayerMeta newMeta = captureMeta(g, groupIdx);
+    m_UndoRedoManager.PushCommand(std::make_shared<RasterizeCommand>(
+        "Rasterize Group", groupIdx, std::move(oldGroupMeta),
+        std::move(removedChildren), std::move(newMeta), std::move(deltas)));
+
     if (device) RecreateLayerTexture(device, g);
 
     m_ActiveLayerIdx = groupIdx;

@@ -78,6 +78,14 @@ struct LayerStyle {
     OutlineFillMode outlineFill = OutlineFillMode::Solid;
     std::vector<GradientStop> outlineGradient;
     std::string outlineTexturePath;
+    // Cached outline texture (RGBA8). Loaded by Canvas when path changes.
+    std::vector<uint8_t> outlineTextureRgba;
+    int outlineTextureW = 0;
+    int outlineTextureH = 0;
+    float outlineTexScale[2] = {1.f, 1.f};
+    float outlineTexOffset[2] = {0.f, 0.f};
+    // Gradient mapping: 0 = distance-from-edge (ring strength), 1 = horizontal, 2 = vertical
+    uint8_t outlineGradientMap = 0;
 };
 
 // ---- Fill Layer ----
@@ -103,8 +111,12 @@ struct FillLayerParams {
     std::string texturePath;
     float texScale[2] = {1.f, 1.f};
     float texOffset[2] = {0.f, 0.f};
+    // Cached fill texture (RGBA8). Loaded by Canvas when path set/changed.
+    std::vector<uint8_t> textureRgba;
+    int textureW = 0;
+    int textureH = 0;
 
-    // Resolve to RGBA in [0,1] for Diffuse path (other targets store-only for now).
+    // Resolve solid color to RGBA in [0,1] for Diffuse path (other targets store-only for now).
     void ResolveRgba(float out[4]) const {
         if (mode == FillValueMode::RGB) {
             out[0] = color[0]; out[1] = color[1]; out[2] = color[2]; out[3] = color[3];
@@ -116,6 +128,10 @@ struct FillLayerParams {
         g = g < 0.f ? 0.f : (g > 1.f ? 1.f : g);
         out[0] = out[1] = out[2] = g;
         out[3] = 1.f;
+    }
+
+    bool HasTexture() const {
+        return useTexture && !textureRgba.empty() && textureW > 0 && textureH > 0;
     }
 };
 

@@ -233,6 +233,62 @@ void BuildShadowRgba(const float* contentRgba, int w, int h,
     }
 }
 
+void SampleGradient(const std::vector<GradientStop>& stops, float t, float outRgba[4]) {
+    outRgba[0] = outRgba[1] = outRgba[2] = 0.f;
+    outRgba[3] = 1.f;
+    if (stops.empty()) return;
+    if (stops.size() == 1) {
+        for (int c = 0; c < 4; ++c) outRgba[c] = stops[0].rgba[c];
+        return;
+    }
+    t = std::clamp(t, 0.f, 1.f);
+    // Assume stops sorted by t
+    if (t <= stops.front().t) {
+        for (int c = 0; c < 4; ++c) outRgba[c] = stops.front().rgba[c];
+        return;
+    }
+    if (t >= stops.back().t) {
+        for (int c = 0; c < 4; ++c) outRgba[c] = stops.back().rgba[c];
+        return;
+    }
+    for (size_t i = 0; i + 1 < stops.size(); ++i) {
+        if (t >= stops[i].t && t <= stops[i + 1].t) {
+            float span = stops[i + 1].t - stops[i].t;
+            float u = (span > 1e-6f) ? (t - stops[i].t) / span : 0.f;
+            for (int c = 0; c < 4; ++c)
+                outRgba[c] = stops[i].rgba[c] * (1.f - u) + stops[i + 1].rgba[c] * u;
+            return;
+        }
+    }
+}
+
+static void SampleTextureRGBA8(const uint8_t* rgba, int tw, int th,
+                               float u, float v, float out[4]) {
+    if (!rgba || tw < 1 || th < 1) {
+        out[0] = out[1] = out[2] = out[3] = 0.f;
+        return;
+    }
+    // Wrap
+    u = u - std::floor(u);
+    v = v - std::floor(v);
+    float fx = u * (float)tw;
+    float fy = v * (float)th;
+    int x0 = ((int)std::floor(fx) % tw + tw) % tw;
+    int y0 = ((int)std::floor(fy) % th + th) % th;
+    int x1 = (x0 + 1) % tw;
+    int y1 = (y0 + 1) % th;
+    float tx = fx - std::floor(fx);
+    float ty = fy - std::floor(fy);
+    auto pix = [&](int x, int y, int c) -> float {
+        return rgba[((size_t)y * tw + x) * 4 + c] / 255.f;
+    };
+    for (int c = 0; c < 4; ++c) {
+        float a = pix(x0, y0, c) * (1.f - tx) + pix(x1, y0, c) * tx;
+        float b = pix(x0, y1, c) * (1.f - tx) + pix(x1, y1, c) * tx;
+        out[c] = a * (1.f - ty) + b * ty;
+    }
+}
+
 void BuildOutlineRgba(const float* contentRgba, int w, int h,
                       const LayerStyle& style,
                       std::vector<float>& outlineRgbaOut,
@@ -249,7 +305,6 @@ void BuildOutlineRgba(const float* contentRgba, int w, int h,
     std::vector<float> ring(n, 0.f);
 
     if (r < 1) {
-        // 1px hairline: edge detect
         for (int y = 0; y < h; ++y) {
             for (int x = 0; x < w; ++x) {
                 float a = alpha[(size_t)y * w + x];
@@ -285,31 +340,72 @@ void BuildOutlineRgba(const float* contentRgba, int w, int h,
         }
     }
 
-    // Soften 1px
     if (r >= 1)
         BoxBlur(ring, w, h, 1, 1, 1);
 
-    float cr = style.outlineColor[0];
-    float cg = style.outlineColor[1];
-    float cb = style.outlineColor[2];
-    float ca = style.outlineColor[3] * style.opacity;
+    // Normalize ring for gradient-along-edge distance: peak of ring ≈ 1 after dilate-subtract
+    float ringMax = 1e-6f;
+    for (float v : ring) ringMax = std::max(ringMax, v);
+    const float invRingMax = 1.f / ringMax;
 
-    // Gradient fallback: use first/last stops if present and mode==Gradient
-    if (style.outlineFill == OutlineFillMode::Gradient && style.outlineGradient.size() >= 2) {
-        // Sample by ring strength as t (distance proxy)
-        const auto& a = style.outlineGradient.front();
-        const auto& b = style.outlineGradient.back();
-        cr = a.rgba[0]; cg = a.rgba[1]; cb = a.rgba[2];
-        // simple: mix by ring value
-        (void)b;
+    const float solidR = style.outlineColor[0];
+    const float solidG = style.outlineColor[1];
+    const float solidB = style.outlineColor[2];
+    const float solidA = style.outlineColor[3];
+    const float op = style.opacity;
+
+    // Prepare gradient stops (default black→white if empty but mode is Gradient)
+    std::vector<GradientStop> stops = style.outlineGradient;
+    if (style.outlineFill == OutlineFillMode::Gradient && stops.size() < 2) {
+        stops = {
+            {0.f, {style.outlineColor[0], style.outlineColor[1], style.outlineColor[2], 1.f}},
+            {1.f, {style.outlineColor[0], style.outlineColor[1], style.outlineColor[2], 0.f}}
+        };
     }
+    std::sort(stops.begin(), stops.end(),
+        [](const GradientStop& a, const GradientStop& b) { return a.t < b.t; });
 
-    for (size_t i = 0; i < n; ++i) {
-        float a = std::clamp(ring[i] * ca, 0.f, 1.f);
-        outlineRgbaOut[i * 4 + 0] = cr;
-        outlineRgbaOut[i * 4 + 1] = cg;
-        outlineRgbaOut[i * 4 + 2] = cb;
-        outlineRgbaOut[i * 4 + 3] = a;
+    const bool useTex = style.outlineFill == OutlineFillMode::Texture &&
+        !style.outlineTextureRgba.empty() && style.outlineTextureW > 0 && style.outlineTextureH > 0;
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            size_t i = (size_t)y * w + x;
+            float ringA = ring[i];
+            if (ringA <= 1e-5f) continue;
+
+            float cr = solidR, cg = solidG, cb = solidB, ca = solidA;
+
+            if (style.outlineFill == OutlineFillMode::Gradient && stops.size() >= 2) {
+                float t = 0.f;
+                if (style.outlineGradientMap == 1)
+                    t = (w > 1) ? (float)x / (float)(w - 1) : 0.f;
+                else if (style.outlineGradientMap == 2)
+                    t = (h > 1) ? (float)y / (float)(h - 1) : 0.f;
+                else
+                    t = std::clamp(ringA * invRingMax, 0.f, 1.f); // distance-from-edge
+                float gr[4];
+                SampleGradient(stops, t, gr);
+                cr = gr[0]; cg = gr[1]; cb = gr[2]; ca = gr[3];
+            } else if (useTex) {
+                float u = (float)x / (float)std::max(1, w) * style.outlineTexScale[0] + style.outlineTexOffset[0];
+                float v = (float)y / (float)std::max(1, h) * style.outlineTexScale[1] + style.outlineTexOffset[1];
+                float tr[4];
+                SampleTextureRGBA8(style.outlineTextureRgba.data(),
+                    style.outlineTextureW, style.outlineTextureH, u, v, tr);
+                // Multiply by solid tint
+                cr = tr[0] * solidR;
+                cg = tr[1] * solidG;
+                cb = tr[2] * solidB;
+                ca = tr[3] * solidA;
+            }
+
+            float a = std::clamp(ringA * ca * op, 0.f, 1.f);
+            outlineRgbaOut[i * 4 + 0] = cr;
+            outlineRgbaOut[i * 4 + 1] = cg;
+            outlineRgbaOut[i * 4 + 2] = cb;
+            outlineRgbaOut[i * 4 + 3] = a;
+        }
     }
 }
 
@@ -496,11 +592,30 @@ void FillSolidBuffer(std::vector<float>& out, int w, int h, const FillLayerParam
     float c[4];
     fill.ResolveRgba(c);
     out.resize((size_t)w * h * 4);
-    for (int i = 0; i < w * h; ++i) {
-        out[(size_t)i * 4 + 0] = c[0];
-        out[(size_t)i * 4 + 1] = c[1];
-        out[(size_t)i * 4 + 2] = c[2];
-        out[(size_t)i * 4 + 3] = c[3];
+
+    if (!fill.HasTexture()) {
+        for (int i = 0; i < w * h; ++i) {
+            out[(size_t)i * 4 + 0] = c[0];
+            out[(size_t)i * 4 + 1] = c[1];
+            out[(size_t)i * 4 + 2] = c[2];
+            out[(size_t)i * 4 + 3] = c[3];
+        }
+        return;
+    }
+
+    // Texture × color tint, tiled with scale/offset
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            float u = (float)x / (float)std::max(1, w) * fill.texScale[0] + fill.texOffset[0];
+            float v = (float)y / (float)std::max(1, h) * fill.texScale[1] + fill.texOffset[1];
+            float tr[4];
+            SampleTextureRGBA8(fill.textureRgba.data(), fill.textureW, fill.textureH, u, v, tr);
+            size_t i = ((size_t)y * w + x) * 4;
+            out[i + 0] = tr[0] * c[0];
+            out[i + 1] = tr[1] * c[1];
+            out[i + 2] = tr[2] * c[2];
+            out[i + 3] = tr[3] * c[3];
+        }
     }
 }
 

@@ -117,6 +117,7 @@ public:
     Canvas();
     ~Canvas();
     friend class DocumentGeometryCommand;
+    friend class RasterizeCommand;
 
     bool Initialize(ID3D11Device* device);
     void Shutdown();
@@ -182,6 +183,10 @@ public:
                          const FillLayerParams& params = {});
     bool IsFillLayer(int layerIdx) const;
     bool CanPaintLayerContent(int layerIdx) const;
+    // Load RGBA texture into Fill layer (or clear if path empty). Returns false on failure.
+    bool LoadFillTexture(int layerIdx, const std::string& filepath);
+    // Load texture for outline style on layer.
+    bool LoadOutlineTexture(int layerIdx, int styleIdx, const std::string& filepath);
 
     // Layer styles API
     int  AddLayerStyle(int layerIdx, StyleType type);

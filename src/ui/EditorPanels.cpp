@@ -2443,6 +2443,38 @@ namespace UI {
                         }
                         if (al.fill.target != FillChannelTarget::Diffuse)
                             ImGui::TextDisabled("Multi-map targets: stored only (system not ready)");
+
+                        bool useTex = al.fill.useTexture;
+                        if (ImGui::Checkbox("Use Texture##filltex", &useTex)) {
+                            if (!useTex)
+                                canvas.LoadFillTexture(ai, "");
+                            else
+                                al.fill.useTexture = true;
+                            al.needsUpload = true;
+                            canvas.MarkCompositeDirty();
+                        }
+                        if (al.fill.useTexture || !al.fill.texturePath.empty()) {
+                            static char fillTexPath[512] = {};
+                            if (al.fill.texturePath.size() < sizeof(fillTexPath))
+                                std::snprintf(fillTexPath, sizeof(fillTexPath), "%s", al.fill.texturePath.c_str());
+                            if (Ui::PathField("##filltexpath", "Fill Texture", fillTexPath, sizeof(fillTexPath),
+                                    ShowOpenFileWin32,
+                                    "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All\0*.*\0",
+                                    "Image tiled across canvas")) {
+                                canvas.LoadFillTexture(ai, fillTexPath);
+                            }
+                            if (Ui::SmartSliderFloat("Scale X##fts", &al.fill.texScale[0], 0.05f, 8.f, 1.f, 0.05f) ||
+                                Ui::SmartSliderFloat("Scale Y##fts", &al.fill.texScale[1], 0.05f, 8.f, 1.f, 0.05f) ||
+                                Ui::SmartSliderFloat("Off X##fto", &al.fill.texOffset[0], -2.f, 2.f, 0.f, 0.05f) ||
+                                Ui::SmartSliderFloat("Off Y##fto", &al.fill.texOffset[1], -2.f, 2.f, 0.f, 0.05f)) {
+                                al.needsUpload = true;
+                                al.presentationDirty = true;
+                                al.presentationCache.reset();
+                                canvas.MarkCompositeDirty();
+                            }
+                            if (al.fill.textureW > 0)
+                                ImGui::TextDisabled("Texture %dx%d", al.fill.textureW, al.fill.textureH);
+                        }
                         ImGui::TextDisabled("Paint content blocked — paint the mask to shape fill");
                         ImGui::PopID();
                         ImGui::Separator();
@@ -3089,7 +3121,7 @@ namespace UI {
                         ImGui::TextUnformatted("Outline");
                         ImGui::Separator();
                         dirty |= Ui::SmartSliderFloat("Opacity##ol", &st.opacity, 0.f, 1.f, 1.f, 0.05f);
-                        dirty |= ImGui::ColorEdit4("Color##ol", st.outlineColor, ImGuiColorEditFlags_NoInputs);
+                        dirty |= ImGui::ColorEdit4("Tint##ol", st.outlineColor, ImGuiColorEditFlags_NoInputs);
                         dirty |= Ui::SmartSliderFloat("Size##ol", &st.outlineSize, 0.f, 100.f, 2.f, 0.5f, "%.1f");
                         int pos = (int)st.outlinePos;
                         const char* posNames[] = {"Outside", "Inside", "Center"};
@@ -3101,10 +3133,51 @@ namespace UI {
                         const char* fillNames[] = {"Solid", "Gradient", "Texture"};
                         if (ImGui::Combo("Fill Mode##ol", &fm, fillNames, 3)) {
                             st.outlineFill = (OutlineFillMode)fm;
+                            if (st.outlineFill == OutlineFillMode::Gradient && st.outlineGradient.size() < 2) {
+                                st.outlineGradient = {
+                                    {0.f, {st.outlineColor[0], st.outlineColor[1], st.outlineColor[2], 1.f}},
+                                    {1.f, {0.f, 0.f, 0.f, 0.f}}
+                                };
+                            }
                             dirty = true;
                         }
-                        if (st.outlineFill != OutlineFillMode::Solid)
-                            ImGui::TextDisabled("Gradient/Texture: solid fallback for now");
+                        if (st.outlineFill == OutlineFillMode::Gradient) {
+                            int gmap = (int)st.outlineGradientMap;
+                            const char* gmaps[] = {"Edge distance", "Horizontal", "Vertical"};
+                            if (ImGui::Combo("Gradient Map##ol", &gmap, gmaps, 3)) {
+                                st.outlineGradientMap = (uint8_t)gmap;
+                                dirty = true;
+                            }
+                            if (st.outlineGradient.size() < 2) {
+                                st.outlineGradient = {
+                                    {0.f, {1.f, 1.f, 1.f, 1.f}},
+                                    {1.f, {0.f, 0.f, 0.f, 1.f}}
+                                };
+                            }
+                            ImGui::Text("Stop 0");
+                            dirty |= ImGui::ColorEdit4("##gs0", st.outlineGradient[0].rgba, ImGuiColorEditFlags_AlphaBar);
+                            dirty |= Ui::SmartSliderFloat("t0##gs", &st.outlineGradient[0].t, 0.f, 1.f, 0.f, 0.05f);
+                            ImGui::Text("Stop 1");
+                            dirty |= ImGui::ColorEdit4("##gs1", st.outlineGradient[1].rgba, ImGuiColorEditFlags_AlphaBar);
+                            dirty |= Ui::SmartSliderFloat("t1##gs", &st.outlineGradient[1].t, 0.f, 1.f, 1.f, 0.05f);
+                        }
+                        if (st.outlineFill == OutlineFillMode::Texture) {
+                            static char olTexPath[512] = {};
+                            if (st.outlineTexturePath.size() < sizeof(olTexPath))
+                                std::snprintf(olTexPath, sizeof(olTexPath), "%s", st.outlineTexturePath.c_str());
+                            if (Ui::PathField("##oltex", "Texture", olTexPath, sizeof(olTexPath),
+                                    ShowOpenFileWin32,
+                                    "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All\0*.*\0",
+                                    "Image for outline fill")) {
+                                canvas.LoadOutlineTexture(ai, state.layerEffectsSelIdx, olTexPath);
+                            }
+                            dirty |= Ui::SmartSliderFloat("Tex Scale X##ol", &st.outlineTexScale[0], 0.05f, 8.f, 1.f, 0.05f);
+                            dirty |= Ui::SmartSliderFloat("Tex Scale Y##ol", &st.outlineTexScale[1], 0.05f, 8.f, 1.f, 0.05f);
+                            dirty |= Ui::SmartSliderFloat("Tex Off X##ol", &st.outlineTexOffset[0], -2.f, 2.f, 0.f, 0.05f);
+                            dirty |= Ui::SmartSliderFloat("Tex Off Y##ol", &st.outlineTexOffset[1], -2.f, 2.f, 0.f, 0.05f);
+                            if (st.outlineTextureW > 0)
+                                ImGui::TextDisabled("Loaded %dx%d", st.outlineTextureW, st.outlineTextureH);
+                        }
                         ImGui::TextDisabled("Independent of layer Fill opacity");
                     }
                     if (dirty) markStyleDirty(layer);
