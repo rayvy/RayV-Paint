@@ -134,7 +134,7 @@ void DrawChannelsPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
         canvas.SetChannelA(a);
 
         if (advanced)
-            ImGui::TextDisabled("Maps switch above В· Setup in header");
+            ImGui::TextDisabled("Maps switch above · Setup in header");
 
         Ui::EndDockPanel();
     (void)device;

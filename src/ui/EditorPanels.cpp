@@ -2,6 +2,7 @@
 #include "FileExplorer.h"
 #include "panels/LayersPanel.h"
 #include "panels/ChannelsPanel.h"
+#include "panels/ToolSettingsPanel.h"
 #include "../core/ConfigManager.h"
 #include "../core/Logger.h"
 #include "../core/KeymapManager.h"
@@ -60,7 +61,7 @@ namespace UI {
     DocumentLoadingState g_LoadingState;
     ProjectTabCloseRequest g_ProjectTabCloseRequest;
 
-    // Fill Layer popup pipette (arm в†’ click canvas once)
+    // Fill Layer popup pipette (arm → click canvas once)
     static bool s_FillPipetteArmed = false;
     static int s_FillPipetteLayer = -1;
     static int s_FillPipetteMap = -1;
@@ -121,7 +122,7 @@ namespace UI {
         int cx = std::clamp((int)canvasX, 0, canvas.GetWidth() - 1);
         int cy = std::clamp((int)canvasY, 0, canvas.GetHeight() - 1);
         // Always sample the active Channels view composite (map-filtered stack).
-        // Matches what the viewport shows вЂ” not the unfiltered all-maps blend.
+        // Matches what the viewport shows — not the unfiltered all-maps blend.
         canvas.SampleCompositePixel(cx, cy, outColor);
     }
 
@@ -272,7 +273,7 @@ namespace UI {
             s_popupOpen = true;
             ImGui::Text("Brush presets");
             ImGui::SameLine();
-            ImGui::TextDisabled("RMB В· Save stores size/opacity/tablet/tip В· drag edges to resize");
+            ImGui::TextDisabled("RMB · Save stores size/opacity/tablet/tip · drag edges to resize");
             ImGui::Separator();
 
             // --- Left: list (wider for stroke dab visibility) ---
@@ -386,15 +387,15 @@ namespace UI {
 
                 ImGui::Separator();
                 ImGui::Text("Tablet pressure");
-                ImGui::Checkbox("в†’ Radius", &brush.pressureRadius); ImGui::SameLine();
-                ImGui::Checkbox("в†’ Hardness", &brush.pressureHardness); ImGui::SameLine();
-                ImGui::Checkbox("в†’ Opacity", &brush.pressureOpacity);
+                ImGui::Checkbox("→ Radius", &brush.pressureRadius); ImGui::SameLine();
+                ImGui::Checkbox("→ Hardness", &brush.pressureHardness); ImGui::SameLine();
+                ImGui::Checkbox("→ Opacity", &brush.pressureOpacity);
 
                 ImGui::Separator();
                 ImGui::Text("Rotation / dynamics");
                 ImGui::TextDisabled("Applied in paint engine (tip rotation + dab scatter/jitter)");
-                ImGui::SliderFloat("Rotation", &brush.rotationDeg, 0.f, 360.f, "%.0fВ°");
-                ImGui::Checkbox("Pressure в†’ Rotation", &brush.pressureRotation);
+                ImGui::SliderFloat("Rotation", &brush.rotationDeg, 0.f, 360.f, "%.0f°");
+                ImGui::Checkbox("Pressure → Rotation", &brush.pressureRotation);
                 ImGui::SliderFloat("Scatter", &brush.scatter, 0.f, 1.f, "%.2f");
                 ImGui::SliderFloat("Angle jitter", &brush.angleJitter, 0.f, 1.f, "%.2f");
 
@@ -443,7 +444,7 @@ namespace UI {
         return Ui::Combo(id, idx, items, count, label);
     }
 
-    // ICC preset combo (presets only вЂ” no free-text path). Returns true if changed.
+    // ICC preset combo (presets only — no free-text path). Returns true if changed.
     static bool DrawIccPresetCombo(Canvas& canvas, const char* label = "ICC Profile") {
         static const Canvas::IccPreset kPresets[] = {
             Canvas::IccPreset::None,
@@ -643,7 +644,7 @@ namespace UI {
 
         ToolbarCenterCursor(size);
         char tip[256];
-        std::snprintf(tip, sizeof(tip), "%s%s%s\nClick: activate/cycle  В·  Hold: pick variant\nRight-click: rebind",
+        std::snprintf(tip, sizeof(tip), "%s%s%s\nClick: activate/cycle  ·  Hold: pick variant\nRight-click: rebind",
             groupTooltip,
             keybindString.empty() ? "" : "  (",
             keybindString.empty() ? "" : (keybindString + ")").c_str());
@@ -657,7 +658,7 @@ namespace UI {
             activeTool = variants[sel].tool;
             s_LastVariantIndex[groupId] = sel;
         } else {
-            // Short click on closed dropdown opens it вЂ” also treat simple IconButton click-activate:
+            // Short click on closed dropdown opens it — also treat simple IconButton click-activate:
             // DropdownIcon uses IconButton internally; if user clicked without selecting (re-activated group)
             // ensure tool is active with last variant
             if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !isActive && !changed) {
@@ -684,13 +685,13 @@ namespace UI {
         // 1. Persistent Header (Main Menu Bar)
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                if (ImGui::MenuItem("New ProjectвЂ¦", KeymapManager::Get().GetActionShortcutString("NewProject").c_str())) {
+                if (ImGui::MenuItem("New Project…", KeymapManager::Get().GetActionShortcutString("NewProject").c_str())) {
                     state.openNewProjectWizard = true;
                 }
                 if (ImGui::MenuItem("New Blank Tab")) {
                     ProjectManager::Get().CreateEmptyProject();
                 }
-                if (ImGui::MenuItem("Import TextureвЂ¦")) {
+                if (ImGui::MenuItem("Import Texture…")) {
                     UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
                 }
                 if (ImGui::MenuItem("Open Project (.rayp)", KeymapManager::Get().GetActionShortcutString("OpenProject").c_str())) {
@@ -708,7 +709,7 @@ namespace UI {
                 }
                 {
                     const bool advanced = canvas.GetProjectType() != Canvas::ProjectType::Simple;
-                    const char* aeLabel = advanced ? "Batch ExportвЂ¦" : "Advanced ExportвЂ¦";
+                    const char* aeLabel = advanced ? "Batch Export…" : "Advanced Export…";
                     if (ImGui::MenuItem(aeLabel, KeymapManager::Get().GetActionShortcutString("AdvancedExport").c_str())) {
                         if (advanced)
                             UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ExportTemplate);
@@ -824,7 +825,7 @@ namespace UI {
                     if (ImGui::MenuItem("32-bit float (F32)", nullptr, cur == BD::F32))
                         canvas.SetDocumentBitDepth(BD::F32);
                     ImGui::Separator();
-                    ImGui::TextDisabled("Working space only вЂ” export packing free.");
+                    ImGui::TextDisabled("Working space only — export packing free.");
                     ImGui::TextDisabled("U8 default for diffuse/BC7. F16/F32 for height/HDR.");
                     ImGui::EndMenu();
                 }
@@ -849,7 +850,7 @@ namespace UI {
                 ImGui::MenuItem("Console logs", nullptr, &state.showConsole);
                 ImGui::Separator();
                 ImGui::MenuItem("Rulers", nullptr, &state.showRulers);
-                ImGui::MenuItem("Mod SetupвЂ¦", nullptr, &state.showModSetup);
+                ImGui::MenuItem("Mod Setup…", nullptr, &state.showModSetup);
                 ImGui::MenuItem("3D Preview", nullptr, &state.showPreview3D);
                 if (ImGui::MenuItem("Reset View")) {
                     canvas.ResetView();
@@ -863,12 +864,12 @@ namespace UI {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Help")) {
-                if (ImGui::MenuItem("About RayV-PaintвЂ¦"))
+                if (ImGui::MenuItem("About RayV-Paint…"))
                     state.openAboutModal = true;
                 ImGui::EndMenu();
             }
 
-            // ---- Right header: mode В· I/O В· map switcher (compact, high-use) ----
+            // ---- Right header: mode · I/O · map switcher (compact, high-use) ----
             {
                 Project* hp = ProjectManager::Get().ActiveProject();
                 auto ptype = canvas.GetProjectType();
@@ -904,7 +905,7 @@ namespace UI {
                             canvas.SetViewMapKind(texset::MapKind::Diffuse);
                     }
                     if (ImGui::IsItemHovered())
-                        Ui::Tooltip("Project mode вЂ” workspace layout");
+                        Ui::Tooltip("Project mode — workspace layout");
                 }
                 ImGui::SameLine(0, 6);
                 if (adv) {
@@ -928,7 +929,7 @@ namespace UI {
             ImGui::EndMainMenuBar();
         }
 
-        // ---- Project tabs (hard-wired under menu bar вЂ” Photoshop-style documents) ----
+        // ---- Project tabs (hard-wired under menu bar — Photoshop-style documents) ----
         {
             const float tabBarH = 28.0f;
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 3.0f));
@@ -1076,7 +1077,7 @@ namespace UI {
             ImGui::EndPopup();
         }
 
-        // Curves Modal вЂ” interactive spline editor (mouse on graph moves points, not window)
+        // Curves Modal — interactive spline editor (mouse on graph moves points, not window)
         if (state.showCurvesModal) ImGui::OpenPopup("Curves##modal");
         if (ImGui::BeginPopupModal("Curves##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             if (state.curvesPointsRGB.empty()) {
@@ -1157,7 +1158,7 @@ namespace UI {
                     std::sort(activePoints.begin(),activePoints.end(),[](auto&a,auto&b){return a.first<b.first;});
                     // re-find dragged index after sort (endpoints fixed at 0/1)
                     if (draggingPt > 0 && draggingPt < (int)activePoints.size()-1) {
-                        // keep draggingPt as sorted index of moved point вЂ” approximate via nearest
+                        // keep draggingPt as sorted index of moved point — approximate via nearest
                     }
                 } else draggingPt=-1;
             }
@@ -1371,7 +1372,7 @@ namespace UI {
             }
             ImGui::Spacing();
             DrawIccPresetCombo(canvas, "ICC Profile (PNG)");
-            ImGui::TextDisabled("Presets only вЂ” no free-text ICC path");
+            ImGui::TextDisabled("Presets only — no free-text ICC path");
             ImGui::Separator();
             if (ImGui::Button("Export", ImVec2(120, 0))) {
                 if (canvas.SaveCanvasStandard(exportPath, canvas.GetExportIccPreset())) {
@@ -1646,7 +1647,7 @@ namespace UI {
             Ui::BeginDockPanel("Toolbar", &state.showToolbar);
 
             // Docked toolbar: Dear ImGui ignores SetNextWindowSizeConstraints on docked
-            // windows вЂ” size is owned by the DockNode. Clamp SizeRef every frame so the
+            // windows — size is owned by the DockNode. Clamp SizeRef every frame so the
             // strip stays thin while docked (floating still uses constraints above).
             if (ImGuiWindow* tw = ImGui::GetCurrentWindow()) {
                 if (tw->DockNode && !tw->DockNode->IsFloatingNode() && tw->DockNode->HostWindow) {
@@ -1753,7 +1754,7 @@ namespace UI {
             RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             if (activeTool == ActiveTool::Pan) markAccent();
 
-            // Floating square outline вЂ” jumps tool-to-tool (EaseOutCubic via exp-smooth)
+            // Floating square outline — jumps tool-to-tool (EaseOutCubic via exp-smooth)
             {
                 static ImVec2 s_accMin(0, 0), s_accMax(0, 0);
                 static bool s_accInit = false;
@@ -1762,7 +1763,7 @@ namespace UI {
                     if (!s_accInit) {
                         s_accMin = accentMin; s_accMax = accentMax; s_accInit = true;
                     } else {
-                        // Smooth exp toward target (~EaseOut feel); rate ~14 в†’ snappy jump
+                        // Smooth exp toward target (~EaseOut feel); rate ~14 → snappy jump
                         float k = 1.f - std::exp(-dt * 14.f);
                         s_accMin.x += (accentMin.x - s_accMin.x) * k;
                         s_accMin.y += (accentMin.y - s_accMin.y) * k;
@@ -1786,7 +1787,7 @@ namespace UI {
                 ImGui::SameLine(0.0f, gap * 2.0f);
             }
 
-            // Primary / Secondary color chip (replaces Reset View) вЂ” X or click swaps with animation
+            // Primary / Secondary color chip (replaces Reset View) — X or click swaps with animation
             {
                 ToolbarCenterCursor(btnSize);
                 ImVec2 cpos = ImGui::GetCursorScreenPos();
@@ -1803,7 +1804,7 @@ namespace UI {
                 if (chipHover)
                     Ui::Tooltip("Primary / Secondary\nClick or X: swap");
 
-                // After color swap: start at crossed positions (t=1) в†’ ease to rest (t=0)
+                // After color swap: start at crossed positions (t=1) → ease to rest (t=0)
                 static Ui::AnimFloat s_swapT;
                 if (g_ColorSwapPending) {
                     s_swapT.Snap(1.f);
@@ -1898,10 +1899,10 @@ namespace UI {
             Ui::EndDockPanel();
         }
 
-        // 6a. Viewport Navigation вЂ” compact, icon flips, no Reset button (Backspace on hover)
+        // 6a. Viewport Navigation — compact, icon flips, no Reset button (Backspace on hover)
         if (state.showViewportNav) {
             Ui::BeginDockPanel("Viewport Navigation", &state.showViewportNav);
-            ImGui::Text("Zoom %.0f%%   В·   Pan (%.0f, %.0f)",
+            ImGui::Text("Zoom %.0f%%   ·   Pan (%.0f, %.0f)",
                 canvas.GetZoom() * 100.0f, canvas.GetPan().x, canvas.GetPan().y);
             ImGui::Spacing();
             bool flipH = canvas.GetViewportFlipH();
@@ -1914,14 +1915,14 @@ namespace UI {
                     "Flip Vertical (on)", "Flip Vertical (off)"))
                 canvas.SetViewportFlipV(flipV);
             float rotAngle = canvas.GetRotationAngle() * (180.0f / 3.14159265f);
-            if (Ui::SmartSliderFloat("Rotation", &rotAngle, -180.0f, 180.0f, 0.f, 45.f, "%.0fВ°")) {
+            if (Ui::SmartSliderFloat("Rotation", &rotAngle, -180.0f, 180.0f, 0.f, 45.f, "%.0f°")) {
                 canvas.SetRotationAngle(rotAngle * (3.14159265f / 180.0f));
             }
-            ImGui::TextDisabled("Hover slider + Backspace: reset  В·  Ctrl: 45В° snap");
+            ImGui::TextDisabled("Hover slider + Backspace: reset  ·  Ctrl: 45° snap");
             Ui::EndDockPanel();
         }
 
-        // 6b. Properties вЂ” project / export only
+        // 6b. Properties — project / export only
         if (state.showProperties) {
             Ui::BeginDockPanel("Properties", &state.showProperties);
             
@@ -1943,15 +1944,15 @@ namespace UI {
             ImGui::Text("Document Bit Depth:");
             int bd = (int)canvas.GetDocumentBitDepth();
             const char* bdNames[] = {
-                "8-bit (U8) вЂ” default / diffuse",
-                "16-bit float (F16) вЂ” HDR mid",
-                "32-bit float (F32) вЂ” height / full float"
+                "8-bit (U8) — default / diffuse",
+                "16-bit float (F16) — HDR mid",
+                "32-bit float (F32) — height / full float"
             };
             if (UiCombo("##cmb_bitDepth", &bd, bdNames, IM_ARRAYSIZE(bdNames),
                     "Working space for paint storage. Export format stays free.")) {
                 canvas.SetDocumentBitDepth(static_cast<Canvas::DocumentBitDepth>(bd));
             }
-            ImGui::TextDisabled("Canvas %d x %d В· storage %d B/px",
+            ImGui::TextDisabled("Canvas %d x %d · storage %d B/px",
                 canvas.GetWidth(), canvas.GetHeight(),
                 BytesPerPixel(Canvas::FormatForBitDepth(canvas.GetDocumentBitDepth())));
 
@@ -1962,12 +1963,12 @@ namespace UI {
                 canvas.SetCurrentProjectFilePath(propProjPath);
             }
 
-            // Advanced Mod Mode вЂ” setup lives in dedicated window (not Properties)
+            // Advanced Mod Mode — setup lives in dedicated window (not Properties)
             if (canvas.GetProjectType() == Canvas::ProjectType::AdvancedModMode) {
                 ImGui::NewLine();
                 ImGui::Separator();
                 ImGui::Text("Advanced Mod");
-                if (ImGui::Button("Mod SetupвЂ¦##prop_mod"))
+                if (ImGui::Button("Mod Setup…##prop_mod"))
                     state.showModSetup = true;
                 ImGui::SameLine();
                 if (ImGui::Button("3D Preview##prop_3d")) {
@@ -1977,12 +1978,12 @@ namespace UI {
                 if (canvas.IsModParseOk())
                     ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.f), "INI parsed OK");
                 else
-                    ImGui::TextDisabled("INI not applied вЂ” open Mod Setup");
+                    ImGui::TextDisabled("INI not applied — open Mod Setup");
             }
 
             ImGui::NewLine();
             ImGui::Separator();
-            ImGui::Text("Project Output Format (DDS в†” PNG):");
+            ImGui::Text("Project Output Format (DDS ↔ PNG):");
             ImGui::TextDisabled("Sets default Quick Export target for this project.");
 
             char propExportPath[512] = "";
@@ -2075,7 +2076,7 @@ namespace UI {
 
         UI::DrawLayersPanel(state, canvas, device);
 
-        // Layer Effects вЂ” modal (styles + filters, unified list)
+        // Layer Effects — modal (styles + filters, unified list)
         if (state.showLayerEffects)
             ImGui::OpenPopup("Layer Effects##modal");
 
@@ -2367,7 +2368,7 @@ namespace UI {
                         }
                         break;
                     case FilterType::AlphaInvert:
-                        ImGui::TextDisabled("Inverts alpha вЂ” no parameters");
+                        ImGui::TextDisabled("Inverts alpha — no parameters");
                         break;
                     case FilterType::Curves: {
                         auto chToggle = [&](const char* label, int bit) {
@@ -2439,7 +2440,7 @@ namespace UI {
                         }
                         if (dirty)
                             flt.lut = Canvas_BuildSplineLUT(pts);
-                        ImGui::TextDisabled("RMB remove point В· drag to edit");
+                        ImGui::TextDisabled("RMB remove point · drag to edit");
                         break;
                     }
                     }
@@ -2461,7 +2462,7 @@ namespace UI {
 
         UI::DrawChannelsPanel(state, canvas, device);
 
-        // ---- Project Setup (non-modal window вЂ” modal blocked nested File Explorer) ----
+        // ---- Project Setup (non-modal window — modal blocked nested File Explorer) ----
         if (state.openProjectSetup) {
             state.showProjectSetup = true;
             state.openProjectSetup = false;
@@ -2557,8 +2558,8 @@ namespace UI {
                             if (proj) proj->ApplyActiveSetTemplate(temps[ti]);
                             canvas.SetDocumentModified(true);
                         }
-                        if (ImGui::Button("Import mapsвЂ¦")) {
-                            // Non-modal Setup + non-modal Explorer в†’ both usable
+                        if (ImGui::Button("Import maps…")) {
+                            // Non-modal Setup + non-modal Explorer → both usable
                             UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
                         }
                     } else ImGui::TextDisabled("No texture set");
@@ -2637,12 +2638,12 @@ namespace UI {
                             ImGui::EndTable();
                         }
                         ImGui::Spacing();
-                        if (ImGui::Button("Choose export folderвЂ¦"))
+                        if (ImGui::Button("Choose export folder…"))
                             UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ExportTemplate);
                         ImGui::SameLine();
                         if (ImGui::Button("Export All Now"))
                             state.openQuickExportTrigger = true;
-                        ImGui::TextDisabled("Pick a folder (not a file). BC7/BC5 в†’ .dds В· PNG в†’ .png");
+                        ImGui::TextDisabled("Pick a folder (not a file). BC7/BC5 → .dds · PNG → .png");
                     }
                     ImGui::EndTabItem();
                 }
@@ -2665,243 +2666,8 @@ namespace UI {
             UI::DrawFileExplorer(state.fileExplorer, p, canvas, device);
         }
 
-        // 8. Tool Settings вЂ” adaptive height when horizontal (no scrollbar)
-        if (state.showToolSettings) {
-            ImVec2 preAvail = ImGui::GetContentRegionAvail(); // may be 0 before begin
-            Ui::BeginDockPanel("Tool Settings", &state.showToolSettings);
-            // Constrain strip when docked wide
-            if (ImGuiWindow* tw = ImGui::GetCurrentWindow()) {
-                if (tw->DockNode && !tw->DockNode->IsFloatingNode() && tw->Size.x > tw->Size.y) {
-                    float h = std::clamp(tw->Size.y, 28.f, 48.f);
-                    if (std::fabs(tw->Size.y - h) > 1.f && tw->DockNode)
-                        ImGui::DockBuilderSetNodeSize(tw->DockNode->ID, ImVec2(tw->DockNode->Size.x, h));
-                }
-            }
-
-            ImVec2 tsAvail = ImGui::GetContentRegionAvail();
-            bool tsHorizontal = (tsAvail.x >= tsAvail.y * 0.85f);
-            (void)preAvail;
-
-            auto MiniSlider = [&](const char* id, float* v, float mn, float mx, const char* tip, float width = 110.f) {
-                ImGui::SetNextItemWidth(width);
-                ImGui::SliderFloat(id, v, mn, mx, "%.2f");
-                if (ImGui::IsItemHovered()) Ui::Tooltip(tip);
-            };
-
-            bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser);
-
-            if (isBrushLike) {
-                // Brush tips: ids persisted on Canvas (.rayp brush_tip_id / custom pixels)
-                static BrushTip s_CustomTip;
-                static bool s_CustomLoaded = false;
-                static std::string s_LastSyncedTipId;
-
-                auto ApplyTipId = [&](const std::string& id) {
-                    if (id == "hard_round") { brush.tip = &BrushPresets::HardRound(); state.brushTipPreset = 1; }
-                    else if (id == "pencil") { brush.tip = &BrushPresets::Pencil(); state.brushTipPreset = 2; }
-                    else if (id == "airbrush") { brush.tip = &BrushPresets::Airbrush(); state.brushTipPreset = 3; }
-                    else if (id == "custom") {
-                        int sz = 0; std::vector<uint8_t> px;
-                        if (canvas.GetCustomBrushTip(sz, px) && sz > 0) {
-                            s_CustomTip.size = sz;
-                            s_CustomTip.pixels = std::move(px);
-                            s_CustomTip.name = "Custom";
-                            s_CustomTip.spacingMul = 1.0f;
-                            s_CustomLoaded = true;
-                            state.hasCustomBrushTip = true;
-                            brush.tip = &s_CustomTip;
-                        } else {
-                            brush.tip = s_CustomLoaded ? &s_CustomTip : nullptr;
-                        }
-                        state.brushTipPreset = 4;
-                    }
-                    else if (id == "procedural") { brush.tip = nullptr; state.brushTipPreset = 0; }
-                    else { // soft_round default
-                        brush.tip = &BrushPresets::SoftRound();
-                        state.brushTipPreset = 0;
-                    }
-                };
-
-                // Pull tip from project after load / when canvas id changes
-                if (canvas.GetBrushTipId() != s_LastSyncedTipId) {
-                    s_LastSyncedTipId = canvas.GetBrushTipId();
-                    ApplyTipId(s_LastSyncedTipId.empty() ? "soft_round" : s_LastSyncedTipId);
-                }
-
-                const char* tipNames[] = { "Soft", "Hard", "Pencil", "Air", "Custom" };
-                const char* tipIds[] = { "soft_round", "hard_round", "pencil", "airbrush", "custom" };
-                int tipIdx = state.brushTipPreset;
-                ImGui::SetNextItemWidth(72.f);
-                if (UiCombo("##tip", &tipIdx, tipNames, IM_ARRAYSIZE(tipNames))) {
-                    state.brushTipPreset = tipIdx;
-                    if (tipIdx >= 0 && tipIdx < 5) {
-                        canvas.SetBrushTipId(tipIds[tipIdx]);
-                        s_LastSyncedTipId = tipIds[tipIdx];
-                        ApplyTipId(tipIds[tipIdx]);
-                    }
-                }
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Brush tip (saved in project)");
-                ImGui::SameLine();
-                if (ImGui::SmallButton("Load Tip...")) {
-                    char path[512] = "";
-                    if (ShowOpenFileWin32(path, sizeof(path), "Images (*.png;*.jpg;*.bmp;*.tga)\0*.png;*.jpg;*.bmp;*.tga\0All\0*.*\0")) {
-                        std::vector<uint8_t> px; int tw=0, th=0;
-                        if (ImageManager::LoadImageFromFile(path, px, tw, th) && tw > 0 && th > 0) {
-                            int side = std::min(std::min(tw, th), 128);
-                            s_CustomTip.size = side;
-                            s_CustomTip.pixels.assign((size_t)side * side, 0);
-                            s_CustomTip.name = "Custom";
-                            s_CustomTip.spacingMul = 1.0f;
-                            for (int y = 0; y < side; ++y) {
-                                for (int x = 0; x < side; ++x) {
-                                    int sx = x * tw / side;
-                                    int sy = y * th / side;
-                                    size_t si = ((size_t)sy * tw + sx) * 4;
-                                    uint8_t r8 = px[si], g8 = px[si+1], b8 = px[si+2], a8 = px[si+3];
-                                    float lum = (0.2126f*r8 + 0.7152f*g8 + 0.0722f*b8) * (a8 / 255.f);
-                                    s_CustomTip.pixels[(size_t)y * side + x] = (uint8_t)std::clamp(lum, 0.f, 255.f);
-                                }
-                            }
-                            s_CustomLoaded = true;
-                            state.hasCustomBrushTip = true;
-                            state.customBrushTipName = path;
-                            brush.tipSourcePath = path;
-                            state.brushTipPreset = 4;
-                            brush.tip = &s_CustomTip;
-                            canvas.SetCustomBrushTip(side, s_CustomTip.pixels); // also sets id=custom
-                            s_LastSyncedTipId = "custom";
-                        }
-                    }
-                }
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Load grayscale stamp (persisted in .rayp)");
-                ImGui::SameLine();
-
-                float maxR = ConfigManager::Get().GetMaxBrushRadius();
-                MiniSlider("##rad", &brush.radius, 1.f, maxR, "Radius (px)", 100.f);
-                ImGui::SameLine();
-                Ui::IconToggle("##pr", "ts_pressure_radius", &brush.pressureRadius, ImVec2(28, 28),
-                    "Pressure в†’ Radius (on)", "Pressure в†’ Radius (off)");
-                ImGui::SameLine();
-                MiniSlider("##hrd", &brush.hardness, 0.f, 1.f, "Hardness", 80.f);
-                ImGui::SameLine();
-                Ui::IconToggle("##ph", "ts_pressure_hardness", &brush.pressureHardness, ImVec2(28, 28),
-                    "Pressure в†’ Hardness (on)", "Pressure в†’ Hardness (off)");
-                ImGui::SameLine();
-                {
-                    float op = brush.opacity;
-                    if (Ui::VisualSlider("##opcvis", &op, ImVec2(88, 22), Ui::VisualSliderSkin::OpacityChecker, brush.color, "Opacity"))
-                        brush.opacity = op;
-                }
-                ImGui::SameLine();
-                Ui::IconToggle("##po", "ts_pressure_opacity", &brush.pressureOpacity, ImVec2(28, 28),
-                    "Pressure в†’ Opacity (on)", "Pressure в†’ Opacity (off)");
-                ImGui::SameLine();
-                MiniSlider("##spc", &brush.spacing, 0.01f, 5.f, "Spacing", 70.f);
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(60.f);
-                ImGui::SliderInt("##stb", &brush.stabilization, 1, 50);
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Stabilization");
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(70.f);
-                ImGui::SliderFloat("##rot", &brush.rotationDeg, 0.f, 360.f, "R %.0fВ°");
-                if (ImGui::IsItemHovered())
-                    Ui::Tooltip("Brush rotation вЂ” PLACEHOLDER\nNot applied by paint engine yet (saved in presets).\nFuture: Ctrl+Alt+LMB drag to rotate.");
-
-                if (activeTool == ActiveTool::Brush) {
-                    ImGui::SameLine();
-                    bool mirrorH = canvas.GetMirrorHorizontal();
-                    bool mirrorV = canvas.GetMirrorVertical();
-                    if (Ui::IconToggle("##mh", "ts_mirror_h", &mirrorH, ImVec2(28, 28), "Mirror H on", "Mirror H off"))
-                        canvas.SetMirrorHorizontal(mirrorH);
-                    ImGui::SameLine();
-                    if (Ui::IconToggle("##mv", "ts_mirror_v", &mirrorV, ImVec2(28, 28), "Mirror V on", "Mirror V off"))
-                        canvas.SetMirrorVertical(mirrorV);
-                }
-            }
-            else if (activeTool == ActiveTool::MagicWand || activeTool == ActiveTool::SmartSelect || activeTool == ActiveTool::QuickSelect) {
-                if (activeTool == ActiveTool::MagicWand) {
-                    bool changed = false;
-                    MiniSlider("##tol", &state.magicWandTolerance, 0.f, 1.f, "Tolerance", 140.f);
-                    if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
-                    // also live while dragging:
-                    if (ImGui::IsItemActive()) changed = true;
-                    ImGui::SameLine();
-                    if (ImGui::Checkbox("##cont", &state.magicWandContiguous)) changed = true;
-                    if (ImGui::IsItemHovered()) Ui::Tooltip("Contiguous");
-                    if (changed && canvas.HasWandSeed()) {
-                        bool add = ImGui::GetIO().KeyCtrl;
-                        bool subtract = ImGui::GetIO().KeyAlt;
-                        canvas.PreviewWandFromSeed(device, state.magicWandTolerance, add, subtract, state.magicWandContiguous);
-                    }
-                } else if (activeTool == ActiveTool::QuickSelect) {
-                    MiniSlider("##qsr", &brush.radius, 1.f, 200.f, "Quick Select brush size", 140.f);
-                } else {
-                    ImGui::TextDisabled("Smart Select: draw contour");
-                }
-            }
-            else if (activeTool == ActiveTool::BucketFill) {
-                MiniSlider("##bft", &state.bucketFillTolerance, 0.f, 1.f, "Fill Tolerance", 140.f);
-            }
-            else if (IsSelectTool(activeTool) || IsLassoTool(activeTool)) {
-                if (activeTool == ActiveTool::PolygonalLasso)
-                    ImGui::TextDisabled("Click vertices В· Enter/Dbl close В· Esc cancel  В·  Ctrl: add  В·  Alt: sub");
-                else if (activeTool == ActiveTool::RectSelect || activeTool == ActiveTool::EllipseSelect)
-                    ImGui::TextDisabled("Ctrl: add  В·  Alt: subtract  В·  Shift: 1:1 proportions");
-                else
-                    ImGui::TextDisabled("Ctrl: add  В·  Alt: subtract");
-            }
-            else if (activeTool == ActiveTool::Gradient) {
-                ImGui::TextDisabled("Drag: Primary в†’ Secondary");
-            }
-            else if (activeTool == ActiveTool::Pipette) {
-                ImGui::TextDisabled("Hover: live sample HUD  В·  Click: set primary color  В·  Alt+brush also samples");
-            }
-            else if (activeTool == ActiveTool::Smudge) {
-                // No color controls вЂ” smudge only radius / strength / spacing
-                MiniSlider("##smr", &state.smudge.radius, 1.f, 150.f, "Smudge Radius", 110.f);
-                ImGui::SameLine();
-                MiniSlider("##sms", &state.smudge.strength, 0.f, 1.f, "Strength", 100.f);
-                ImGui::SameLine();
-                MiniSlider("##smp", &state.smudge.spacing, 0.01f, 1.f, "Spacing", 90.f);
-            }
-            else if (activeTool == ActiveTool::MovePixels) {
-                float sx = canvas.GetFloatingScaleX();
-                float sy = canvas.GetFloatingScaleY();
-                float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
-                ImGui::SetNextItemWidth(80.f);
-                if (ImGui::SliderFloat("##sx", &sx, 0.05f, 5.f, "X:%.2f")) canvas.SetFloatingScaleX(sx);
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(80.f);
-                if (ImGui::SliderFloat("##sy", &sy, 0.05f, 5.f, "Y:%.2f")) canvas.SetFloatingScaleY(sy);
-                ImGui::SameLine();
-                ImGui::SetNextItemWidth(90.f);
-                if (ImGui::SliderFloat("##rot", &rotDeg, -180.f, 180.f, "%.0fВ°"))
-                    canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
-                ImGui::SameLine();
-                if (ImGui::Button("в‡„")) canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Flip H");
-                ImGui::SameLine();
-                if (ImGui::Button("в‡…")) canvas.SetFloatingScaleY(-canvas.GetFloatingScaleY());
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Flip V");
-                ImGui::SameLine();
-                if (ImGui::Button("Reset")) {
-                    canvas.SetFloatingScaleX(1.f); canvas.SetFloatingScaleY(1.f); canvas.SetFloatingRotation(0.f);
-                }
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.18f, 1.0f));
-                if (ImGui::Button("OK")) state.commitTransform = true;
-                ImGui::PopStyleColor();
-                ImGui::SameLine();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.18f, 1.0f));
-                if (ImGui::Button("вњ•")) state.cancelTransform = true;
-                ImGui::PopStyleColor();
-            }
-            else {
-                ImGui::TextDisabled("Hand: pan В· RMB/Shift: rotate");
-            }
-
-            Ui::EndDockPanel();
-        }
+        // 8. Tool Settings strip (extracted)
+        UI::DrawToolSettingsPanel(state, canvas, brush, activeTool, device);
 
         // 9. Draw Logging Console Panel
         if (state.showConsole) {
@@ -2930,7 +2696,7 @@ namespace UI {
             Ui::EndDockPanel();
         }
 
-        // 10. Colors вЂ” adaptive SV + Hue/Alpha; primary & secondary
+        // 10. Colors — adaptive SV + Hue/Alpha; primary & secondary
         if (state.showColors) {
             Ui::BeginDockPanel("Colors", &state.showColors);
 
@@ -3030,9 +2796,9 @@ namespace UI {
                         std::clamp(editCol[2], 0.f, 1.f), h, s, v);
                 }
                 if (ImGui::IsItemHovered())
-                    Ui::Tooltip("RGBA 0вЂ“255\nExact values for matching seams across texture sets");
+                    Ui::Tooltip("RGBA 0–255\nExact values for matching seams across texture sets");
 
-                // HEX field вЂ” keep buffer in sync when color changes from picker/sliders
+                // HEX field — keep buffer in sync when color changes from picker/sliders
                 static char s_HexBuf[16] = "#FFFFFF";
                 static float s_LastHexCol[4] = { -1.f, -1.f, -1.f, -1.f };
                 const bool colChanged =
@@ -3046,7 +2812,7 @@ namespace UI {
                 {
                     // Format without alpha if fully opaque (shorter, PS-like); with AA if needed
                     int r = toU8(editCol[0]), g = toU8(editCol[1]), b = toU8(editCol[2]), a = toU8(editCol[3]);
-                    // Defer write until we know if ##hex is active вЂ” use previous frame flag
+                    // Defer write until we know if ##hex is active — use previous frame flag
                     static bool s_HexWasActive = false;
                     if (colChanged && !s_HexWasActive) {
                         if (a >= 255)
@@ -3129,11 +2895,11 @@ namespace UI {
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 1.0f), "Float color (no 0..1 clamp)");
                 ImGui::SetNextItemWidth(svW);
-                // v_min == v_max в†’ ImGui does not clamp (HDR / height values).
+                // v_min == v_max → ImGui does not clamp (HDR / height values).
                 ImGui::DragFloat4("##hdr_rgba", editCol, 0.01f, 0.f, 0.f, "%.4f");
                 if (ImGui::IsItemHovered())
                     Ui::Tooltip("RGBA linear values for F16/F32 documents.\nHeight maps often use R only with values outside 0..1.");
-                if (ImGui::SmallButton("Mono Rв†’RGB")) {
+                if (ImGui::SmallButton("Mono R→RGB")) {
                     editCol[1] = editCol[0];
                     editCol[2] = editCol[0];
                 }
@@ -3160,7 +2926,7 @@ namespace UI {
                         ImGuiColorEditFlags_AlphaPreview | (s_EditSecondary ? ImGuiColorEditFlags_None : 0), ImVec2(28, 28))) {
                     s_EditSecondary = true;
                 }
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Secondary\nClick to edit В· X: swap");
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Secondary\nClick to edit · X: swap");
 
                 ImGui::SetCursorScreenPos(base);
                 if (ImGui::ColorButton("##pri", clampCol(brush.color),
@@ -3169,7 +2935,7 @@ namespace UI {
                 }
                 if (ImGui::IsItemHovered()) Ui::Tooltip(floatDoc
                     ? "Primary (display clamped 0..1)\nUse float RGBA fields for HDR values"
-                    : "Primary\nClick to edit В· HEX/RGB fields for exact match");
+                    : "Primary\nClick to edit · HEX/RGB fields for exact match");
 
                 ImGui::SetCursorScreenPos(ImVec2(base.x + 56.f, base.y + 8.f));
                 if (ImGui::SmallButton("X##sw")) {
@@ -3179,7 +2945,7 @@ namespace UI {
                     std::swap(brush.color[3], g_SecondaryColor[3]);
                     g_ColorSwapPending = true;
                 }
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Swap primary в†” secondary (X)");
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Swap primary ↔ secondary (X)");
                 ImGui::SameLine();
                 ImGui::TextDisabled(s_EditSecondary ? "Editing secondary" : "Editing primary");
                 ImGui::Dummy(ImVec2(1, 28));
@@ -3268,7 +3034,7 @@ namespace UI {
             }
         }
 
-        // ---- Mod Setup (INI / dump / semantics) вЂ” separate from Properties ----
+        // ---- Mod Setup (INI / dump / semantics) — separate from Properties ----
         if (state.showModSetup) {
             ImGui::SetNextWindowSize(ImVec2(520, 640), ImGuiCond_FirstUseEver);
             if (ImGui::Begin("Mod Setup", &state.showModSetup)) {
@@ -3316,7 +3082,7 @@ namespace UI {
                         scene.DrawCount(), scene.TextureBindCount());
 
                     if (ImGui::TreeNode("Vertex semantics (roles)##mod_sem")) {
-                        ImGui::TextDisabled("TEXCOORD в‰  always UV. Role=None ignores attribute.");
+                        ImGui::TextDisabled("TEXCOORD ≠ always UV. Role=None ignores attribute.");
                         int roleCount = 0;
                         const char* const* roleNames = modio::AttrRoleNameTable(roleCount);
                         auto drawLayoutEditor = [&](const char* label, modio::BufferLayout& layout) {
@@ -3381,7 +3147,7 @@ namespace UI {
                                                 if (ImGui::Checkbox("Batch visible", &bat.visible))
                                                     state.preview3DNeedReload = true;
                                                 for (const auto& t : bat.textures) {
-                                                    ImGui::BulletText("%s в†’ %s%s",
+                                                    ImGui::BulletText("%s → %s%s",
                                                         modio::MaterialSlotName(t.slot),
                                                         t.resourceName.c_str(),
                                                         t.exists ? "" : " [missing]");
@@ -3609,7 +3375,7 @@ namespace UI {
                     nTab(3, "O", "Orientation");
                     nTab(4, "P", "Parts");
                     nTab(5, "D", "Debug");
-                    if (ImGui::Button("В«##np", ImVec2(nTabW - 6, 22)))
+                    if (ImGui::Button("«##np", ImVec2(nTabW - 6, 22)))
                         s_NPanel = 0;
                     if (ImGui::IsItemHovered()) Ui::Tooltip("Collapse N-panel");
                     ImGui::EndGroup();
@@ -3621,9 +3387,9 @@ namespace UI {
                         auto& L = s_Preview.Lighting();
                         float yawDeg = L.yaw * (180.f / 3.14159265f);
                         float pitchDeg = L.pitch * (180.f / 3.14159265f);
-                        if (ImGui::SliderFloat("Yaw", &yawDeg, -180.f, 180.f, "%.0fВ°"))
+                        if (ImGui::SliderFloat("Yaw", &yawDeg, -180.f, 180.f, "%.0f°"))
                             L.yaw = yawDeg * (3.14159265f / 180.f);
-                        if (ImGui::SliderFloat("Pitch", &pitchDeg, -89.f, 89.f, "%.0fВ°"))
+                        if (ImGui::SliderFloat("Pitch", &pitchDeg, -89.f, 89.f, "%.0f°"))
                             L.pitch = pitchDeg * (3.14159265f / 180.f);
                         ImGui::SliderFloat("Intensity", &L.intensity, 0.f, 2.f);
                         ImGui::SliderFloat("Ambient", &L.ambient, 0.f, 1.f);
@@ -3635,7 +3401,7 @@ namespace UI {
                         if (ImGui::Button("Right")) { L.yaw = 0.9f; L.pitch = 0.4f; }
                     } else if (s_NPanel == 2) {
                         ImGui::TextUnformatted("Shading");
-                        ImGui::TextDisabled("Uber shader В· channel remaps");
+                        ImGui::TextDisabled("Uber shader · channel remaps");
                         auto& lib = preview3d::ShaderPresetLibrary::Get();
                         if (lib.All().empty()) lib.LoadBuiltins();
                         auto& items = s_Preview.Items();
@@ -3666,7 +3432,7 @@ namespace UI {
                                 lib.SavePreset(items[s_SelPart].material, dir);
                             }
 
-                            // Bind diagnostics вЂ” verify multi-texture paths
+                            // Bind diagnostics — verify multi-texture paths
                             if (ImGui::TreeNode("Bound textures (paths)##binds")) {
                                 const char* slotN[] = { "Diffuse", "Normal", "LightMap", "Material" };
                                 auto& it = items[s_SelPart];
@@ -3682,7 +3448,7 @@ namespace UI {
                                     ImGui::SameLine();
                                     ImGui::TextWrapped("%s\n  file: %s",
                                         it.resNames[mi].empty() ? "?" : it.resNames[mi].c_str(),
-                                        ok ? base.c_str() : "(missing вЂ” grey fallback)");
+                                        ok ? base.c_str() : "(missing — grey fallback)");
                                 }
                                 ImGui::TextDisabled(
                                     "LightMap debug uses UV0 now (not UV2).\n"
@@ -3701,7 +3467,7 @@ namespace UI {
                             ImGui::Checkbox("Normal RG only", &mat.normalRGOnly);
                             ImGui::Checkbox("Alpha clip (Material.R)", &mat.alphaClip);
                             if (ImGui::TreeNode("Channel remap##ch")) {
-                                ImGui::TextDisabled("If look is wrong вЂ” remap first, then blame shader.");
+                                ImGui::TextDisabled("If look is wrong — remap first, then blame shader.");
                                 auto editCh = [](const char* label, preview3d::ChannelSource& ch) {
                                     ImGui::PushID(label);
                                     ImGui::AlignTextToFramePadding();
@@ -3740,7 +3506,7 @@ namespace UI {
                                 ImGui::TreePop();
                             }
                         } else {
-                            ImGui::TextDisabled("No mesh вЂ” Apply INI + Reload");
+                            ImGui::TextDisabled("No mesh — Apply INI + Reload");
                         }
                     } else if (s_NPanel == 3) {
                         ImGui::TextUnformatted("Orientation");
@@ -3753,7 +3519,7 @@ namespace UI {
                         ImGui::Checkbox("Flip X", &O.flipX);
                         ImGui::Checkbox("Flip Y", &O.flipY);
                         ImGui::Checkbox("Flip Z", &O.flipZ);
-                        ImGui::SliderFloat("Yaw offset", &O.yawOffsetDeg, -180.f, 180.f, "%.0fВ°");
+                        ImGui::SliderFloat("Yaw offset", &O.yawOffsetDeg, -180.f, 180.f, "%.0f°");
                         if (ImGui::Button("ZZZ default (+Z up)")) {
                             O.upAxis = preview3d::ModelUpAxis::PlusZ;
                             O.flipX = O.flipY = O.flipZ = false;
@@ -3786,12 +3552,12 @@ namespace UI {
                         ImGui::EndDisabled();
                         ImGui::SliderFloat("Outline thick (view)", &P.outlineThickness, 0.2f, 3.0f, "%.2f");
                         ImGui::SliderFloat("Outline ink (albedo*)", &P.outlineAlbedoMul, 0.15f, 0.75f, "%.2f");
-                        ImGui::Checkbox("Outline Г— COLOR.r (thick)", &P.outlineUseVertexColor);
-                        ImGui::TextDisabled("View-space expand в‰€ game (not 3D balloon).\nInk ~0.4 = soft; 0.15 = black.");
+                        ImGui::Checkbox("Outline × COLOR.r (thick)", &P.outlineUseVertexColor);
+                        ImGui::TextDisabled("View-space expand ≈ game (not 3D balloon).\nInk ~0.4 = soft; 0.15 = black.");
                         ImGui::Checkbox("Fixed outline tint", &P.outlineUseFixedTint);
                         if (P.outlineUseFixedTint)
                             ImGui::ColorEdit3("Tint", P.outlineTint, ImGuiColorEditFlags_NoInputs);
-                        ImGui::TextDisabled("Outline в‰  GI math. Mode locked to ZZZ for now.");
+                        ImGui::TextDisabled("Outline ≠ GI math. Mode locked to ZZZ for now.");
 
                         ImGui::Separator();
                         int dbg = s_Preview.GetDebugMode();
@@ -3806,7 +3572,7 @@ namespace UI {
                             state.preview3DNeedReload = true;
                         if (ImGui::Button("Open Mod Setup", ImVec2(-1, 0)))
                             state.showModSetup = true;
-                        ImGui::TextDisabled("LMB orbit В· MMB pan В· Wheel В· Home");
+                        ImGui::TextDisabled("LMB orbit · MMB pan · Wheel · Home");
                     }
                     ImGui::EndChild();
                 }

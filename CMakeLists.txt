@@ -159,6 +159,8 @@ set(SOURCES
     src/ui/panels/LayersPanel.h
     src/ui/panels/ChannelsPanel.cpp
     src/ui/panels/ChannelsPanel.h
+    src/ui/panels/ToolSettingsPanel.cpp
+    src/ui/panels/ToolSettingsPanel.h
     src/ui/style/UiTokens.cpp
     src/ui/style/UiTokens.h
     src/ui/style/UiMotion.cpp

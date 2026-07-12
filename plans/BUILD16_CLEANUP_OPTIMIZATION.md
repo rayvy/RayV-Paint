@@ -177,8 +177,10 @@ S3  Dead modals → File Explorer                   [cleanup] ✅
     + Win32 dialogs → ui/dialogs/Win32FileDialogs ✅
 S4a LayersPanel extract                           [structure] ✅ (~767 lines)
 S4b ChannelsPanel extract                         [structure] ✅ (~135 lines)
-    EditorPanels ~3597 lines (was ~4.6k); RenderAll calls DrawLayers/DrawChannels
-S4c next: ToolSettings / LayerEffects / SetupPanel extracts
+S4c ToolSettingsPanel extract                     [structure] ✅
+    EditorPanels shrinking; RenderAll orchestrates panel draws
+S4d next: LayerEffects / ProjectSetup / Colors extracts
+S4fix Mojibake UTF-8 fix (вЂ/В·/в† → —, ·, →, …)   [bugfix] ✅
 S1  UiColorField + pipette arm single API           [UI kit]
 S5  AssetStore + built-in/user paths               [opt foundation]
 S6  Fill Layer uses AssetStore                     [opt consumer]

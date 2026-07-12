@@ -77,7 +77,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
         };
         auto rangeSelect = [&](int i) {
             if (state.layerSelectAnchor < 0) { setSoleSelection(i); return; }
-            // Visual list is highв†’low; range in index space
+            // Visual list is high→low; range in index space
             int a = state.layerSelectAnchor, b = i;
             if (a > b) std::swap(a, b);
             sel.clear();
@@ -99,7 +99,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 const float hdrGap = 12.f;
                 ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.30f);
                 if (Ui::SmartSliderFloat("##op_top", &al.opacity, 0.f, 1.f, 1.f, 0.05f, "Fill %.2f")) {
-                    // Content/fill opacity вЂ” styles keep independent style.opacity
+                    // Content/fill opacity — styles keep independent style.opacity
                     if (al.HasEnabledStyles() || al.isGroup)
                         canvas.RequestPresentationRebuild(ai);
                     else
@@ -137,7 +137,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 }
                 if (hasFxTop) ImGui::PopStyleColor();
                 if (ImGui::IsItemHovered())
-                    Ui::Tooltip("Layer Effects (filters + styles)вЂ¦");
+                    Ui::Tooltip("Layer Effects (filters + styles)…");
 
                 if (!al.isGroup && !al.IsFill()) {
                     bool ar = al.alphaRewrite;
@@ -148,7 +148,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     if (ImGui::IsItemHovered()) {
                         Ui::Tooltip(
                             "ON: this layer may overwrite alpha when painted / composited.\n"
-                            "OFF: layer A is RGB morph strength only вЂ” underlay A never changes\n"
+                            "OFF: layer A is RGB morph strength only — underlay A never changes\n"
                             "(default for imported decals). Paint keeps layer A non-destructive.");
                     }
                 }
@@ -176,7 +176,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         canvas.SetDocumentModified(true);
                     };
 
-                    ImGui::TextDisabled("Fill maps В· swatch opens color В· R/G/B/A = write mask");
+                    ImGui::TextDisabled("Fill maps · swatch opens color · R/G/B/A = write mask");
                     std::vector<texset::MapKind> mapsToShow;
                     if (tset) {
                         for (const auto& m : tset->maps)
@@ -242,7 +242,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                                 if (ImGui::IsItemHovered())
                                     Ui::Tooltip("Click canvas to sample (active Channels map)");
                                 if (UI::FillPipetteArmedFor(ai, mi))
-                                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "Click canvasвЂ¦");
+                                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "Click canvas…");
                                 ImGui::EndPopup();
                             }
                             // Write mask row
@@ -274,7 +274,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     }
                     if (UI::IsFillPipetteArmed() && UI::FillPipetteArmedFor(ai, -1)) {
                         ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f),
-                            "Pipette armed вЂ” click canvas to sample");
+                            "Pipette armed — click canvas to sample");
                     }
                     ImGui::TextDisabled("Unchecked R/G/B/A = no write (underlay stays)");
 
@@ -309,7 +309,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         if (al.fill.textureW > 0)
                             ImGui::TextDisabled("Texture %dx%d", al.fill.textureW, al.fill.textureH);
                     }
-                    ImGui::TextDisabled("Paint content blocked вЂ” paint the mask to shape fill");
+                    ImGui::TextDisabled("Paint content blocked — paint the mask to shape fill");
                     ImGui::PopID();
                     ImGui::Separator();
                 }
@@ -387,7 +387,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 ImGui::SameLine(0, rowPad);
             }
 
-            // Thumb (fixed size) вЂ” use opaque RGB thumb so A=0 buffers stay visible
+            // Thumb (fixed size) — use opaque RGB thumb so A=0 buffers stay visible
             alignMid(thumb);
             ID3D11ShaderResourceView* thumbSrv = nullptr;
             if (!layer.isGroup)
@@ -422,7 +422,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         canvas.SetPaintTarget(PaintTarget::LayerContent);
                     }
                 }
-                if (ImGui::IsItemHovered()) Ui::Tooltip("Content\nClick: select  В·  Ctrl: multi  В·  Shift: range\nAlt+Click: select opaque");
+                if (ImGui::IsItemHovered()) Ui::Tooltip("Content\nClick: select  ·  Ctrl: multi  ·  Shift: range\nAlt+Click: select opaque");
                 if (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg) {
                     ImVec2 tmin = ImGui::GetItemRectMin();
                     ImVec2 tmax = ImGui::GetItemRectMax();
@@ -458,7 +458,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
             }
             ImGui::SameLine(0, rowPad);
 
-            // Mask column вЂ” always reserved for non-groups (fixed width)
+            // Mask column — always reserved for non-groups (fixed width)
             if (!layer.isGroup) {
                 alignMid(thumb);
                 if (layer.hasMask && layer.maskSRV) {
@@ -475,14 +475,14 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         canvas.SetActiveLayerIndex(i);
                         canvas.SetPaintTarget(PaintTarget::LayerMask);
                         setSoleSelection(i);
-                        // Alt+Click: load mask в†’ selection (PS-like "load selection from mask")
+                        // Alt+Click: load mask → selection (PS-like "load selection from mask")
                         if (io.KeyAlt) {
                             canvas.SelectFromLayerMask(i);
                             canvas.UpdateSelectionMaskTexture(device);
                         }
                     }
                     if (ImGui::IsItemHovered()) {
-                        Ui::Tooltip("Layer Mask\nClick: edit mask  В·  Alt+Click: load mask as selection\nRight-click: Apply / Delete");
+                        Ui::Tooltip("Layer Mask\nClick: edit mask  ·  Alt+Click: load mask as selection\nRight-click: Apply / Delete");
                     }
                     if (ImGui::BeginPopupContextItem("##maskctx")) {
                         if (ImGui::MenuItem("Apply Mask")) canvas.ApplyLayerMask(i);
@@ -689,7 +689,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                             Ui::Tooltip("OFF: A = RGB strength only; underlay/layer A preserved.");
                         }
                     }
-                    // Channel activity (maps + write mask) вЂ” RMB only
+                    // Channel activity (maps + write mask) — RMB only
                     if (!layer.isGroup && canvas.GetProjectType() != Canvas::ProjectType::Simple) {
                         if (ImGui::BeginMenu("Channel Activity")) {
                             auto& ws = layer.workSpace;
@@ -737,7 +737,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
         }
         ImGui::EndChild();
 
-        // Bottom action bar вЂ” Add / Group / Duplicate / Merge / Delete
+        // Bottom action bar — Add / Group / Duplicate / Merge / Delete
         {
             ImGui::Separator();
             const float iconSz = 32.f;
