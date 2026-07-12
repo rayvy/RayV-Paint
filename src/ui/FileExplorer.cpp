@@ -1458,7 +1458,7 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                         ImGui::TextUnformatted(shortN.c_str());
                         int ki = (int)b.kind;
                         ImGui::SetNextItemWidth(-1);
-                        if (ImGui::Combo("##mk", &ki, kinds, 7))
+                        if (Ui::Combo("##mk", &ki, kinds, 7))
                             b.kind = (texset::MapKind)ki;
                         ImGui::PopID();
                     }
@@ -1502,12 +1502,12 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                     ImGui::SameLine();
                     int di = (int)st.remapRoutes[i].destMap;
                     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
-                    if (ImGui::Combo("##dm", &di, kinds, 7))
+                    if (Ui::Combo("##dm", &di, kinds, 7))
                         st.remapRoutes[i].destMap = (texset::MapKind)di;
                     ImGui::SameLine();
                     int dc = st.remapRoutes[i].destChan;
                     ImGui::SetNextItemWidth(-1);
-                    if (ImGui::Combo("##dc", &dc, chn, 4))
+                    if (Ui::Combo("##dc", &dc, chn, 4))
                         st.remapRoutes[i].destChan = dc;
                     ImGui::PopID();
                 }
@@ -1516,7 +1516,7 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             } else {
                 if (!st.importMultiSelect) {
                     int ki = (int)st.importMapKind;
-                    if (ImGui::Combo("As map", &ki, kinds, 7))
+                    if (Ui::Combo("##asmap", &ki, kinds, 7, "As map"))
                         st.importMapKind = (texset::MapKind)ki;
                 }
                 ImGui::Spacing();
@@ -1533,7 +1533,7 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                     if (st.importMultiSelect) {
                         int ki = (int)b.kind;
                         ImGui::SetNextItemWidth(-1);
-                        if (ImGui::Combo("##mk", &ki, kinds, 7))
+                        if (Ui::Combo("##mk", &ki, kinds, 7))
                             b.kind = (texset::MapKind)ki;
                     }
                     ImGui::PopID();

@@ -47,6 +47,9 @@ namespace UI {
 
     // Fill Layer color picker → sample next canvas click into armed map slot.
     bool IsFillPipetteArmed();
+    void ArmFillPipette(int layerIdx, int mapIdx);
+    // mapIdx < 0 → any map on that layer
+    bool FillPipetteArmedFor(int layerIdx, int mapIdx);
     // If armed and LMB on canvas: write sample into fill.mapColor[map] and clear arm. Returns true if consumed.
     bool TryApplyFillPipette(Canvas& canvas, float canvasX, float canvasY);
 

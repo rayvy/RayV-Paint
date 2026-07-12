@@ -172,10 +172,13 @@ Order matters: **wrong doc size was fixed in B15**; B16 opts:
 
 ```
 S0  Write UI_RULES.md + ASSET_BROWSER.md          [docs] ✅
-S2  Ui::Combo kit API + FE hotspots               [DRY]  ✅ started B16
-S3  Dead modals → File Explorer                   [cleanup] ✅ started B16
-    + Win32 dialogs → ui/dialogs/Win32FileDialogs
-S4  Split EditorPanels → ui/panels/*              [structure] next
+S2  Ui::Combo kit API + all call sites            [DRY]  ✅ (0 raw ImGui::Combo left)
+S3  Dead modals → File Explorer                   [cleanup] ✅
+    + Win32 dialogs → ui/dialogs/Win32FileDialogs ✅
+S4a LayersPanel extract                           [structure] ✅ (~767 lines)
+S4b ChannelsPanel extract                         [structure] ✅ (~135 lines)
+    EditorPanels ~3597 lines (was ~4.6k); RenderAll calls DrawLayers/DrawChannels
+S4c next: ToolSettings / LayerEffects / SetupPanel extracts
 S1  UiColorField + pipette arm single API           [UI kit]
 S5  AssetStore + built-in/user paths               [opt foundation]
 S6  Fill Layer uses AssetStore                     [opt consumer]
@@ -212,6 +215,7 @@ Each slice: compile + short manual checklist (below).
 
 ## 7. Handoff note for next session
 
-**Build 15 closed.** Start Build 16 at **S0 docs** then **S1 UiColorField**.  
+**Build 15 closed. Build 16 mid-flight:** S0–S3 + Combo audit + Layers/Channels extract done; Release build green.  
+**Next:** S4c further EditorPanels splits (ToolSettings / Layer Effects / Project Setup) **or** S1 UiColorField.  
 Do **not** open Canvas for fun; touch Canvas only for AssetStore hooks + Fill asset id.  
 User priority quote: *refactor only to reshuffle, dedupe, standardize UI; OOP for UI; Asset Browser forced for Fill lag.*

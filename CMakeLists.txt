@@ -155,6 +155,10 @@ set(SOURCES
     src/ui/FileExplorer.h
     src/ui/dialogs/Win32FileDialogs.cpp
     src/ui/dialogs/Win32FileDialogs.h
+    src/ui/panels/LayersPanel.cpp
+    src/ui/panels/LayersPanel.h
+    src/ui/panels/ChannelsPanel.cpp
+    src/ui/panels/ChannelsPanel.h
     src/ui/style/UiTokens.cpp
     src/ui/style/UiTokens.h
     src/ui/style/UiMotion.cpp
