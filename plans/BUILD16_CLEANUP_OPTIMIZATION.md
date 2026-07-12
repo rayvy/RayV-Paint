@@ -171,11 +171,12 @@ Order matters: **wrong doc size was fixed in B15**; B16 opts:
 ## 4. Suggested slice order (for agents)
 
 ```
-S0  Write UI_RULES.md + ASSET_BROWSER.md          [docs]
+S0  Write UI_RULES.md + ASSET_BROWSER.md          [docs] ✅
+S2  Ui::Combo kit API + FE hotspots               [DRY]  ✅ started B16
+S3  Dead modals → File Explorer                   [cleanup] ✅ started B16
+    + Win32 dialogs → ui/dialogs/Win32FileDialogs
+S4  Split EditorPanels → ui/panels/*              [structure] next
 S1  UiColorField + pipette arm single API           [UI kit]
-S2  Replace raw Combo → UiCombo in FE + Layers     [DRY]
-S3  Delete dead modals (Load/Save Project if FE)   [cleanup]
-S4  Split EditorPanels → panels/* (layers first)   [structure]
 S5  AssetStore + built-in/user paths               [opt foundation]
 S6  Fill Layer uses AssetStore                     [opt consumer]
 S7  Project assets ↔ .rayp packing                 [opt portable]

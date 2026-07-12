@@ -26,4 +26,9 @@ bool DropdownChip(const char* id, const char* previewLabel,
                   const char* const* items, int itemCount, int* selected,
                   DropdownFlags flags = DropdownFlags_ClickAndHold);
 
+// Standard themed combo (replaces raw ImGui::Combo and local UiCombo helpers).
+// Optional label drawn to the left. Returns true if selection changed.
+bool Combo(const char* id, int* idx, const char* const* items, int count,
+           const char* label = nullptr);
+
 } // namespace Ui

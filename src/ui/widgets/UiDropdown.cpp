@@ -223,4 +223,15 @@ bool DropdownChip(const char* id, const char* previewLabel,
     return changed;
 }
 
+bool Combo(const char* id, int* idx, const char* const* items, int count, const char* label) {
+    if (!idx || !items || count <= 0) return false;
+    if (*idx < 0 || *idx >= count) *idx = 0;
+    if (label && label[0]) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(label);
+        ImGui::SameLine();
+    }
+    return DropdownChip(id, items[*idx], items, count, idx, DropdownFlags_ClickAndHold);
+}
+
 } // namespace Ui

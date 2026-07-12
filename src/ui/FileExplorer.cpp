@@ -7,6 +7,7 @@
 #include "../core/ConfigManager.h"
 #include "../texset/TextureSetIO.h"
 #include "widgets/UiTooltip.h"
+#include "widgets/UiDropdown.h"
 #include "style/UiTokens.h"
 #include "EditorPanels.h"
 
@@ -1099,14 +1100,14 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
         const char* views[] = { "List", "S", "M", "L" };
         int vm = (int)st.viewMode;
         ImGui::SetNextItemWidth(72.f);
-        if (ImGui::Combo("##view", &vm, views, 4))
+        if (Ui::Combo("##view", &vm, views, 4))
             st.viewMode = (ExplorerViewMode)vm;
         if (ImGui::IsItemHovered()) Ui::Tooltip("View: List / Small / Medium / Large");
         ImGui::SameLine(0, 4);
         const char* sorts[] = { "Name", "Date", "Size", "Type" };
         int sb = (int)st.sortBy;
         ImGui::SetNextItemWidth(72.f);
-        if (ImGui::Combo("##sort", &sb, sorts, 4))
+        if (Ui::Combo("##sort", &sb, sorts, 4))
             st.sortBy = (ExplorerSortBy)sb;
         ImGui::SameLine(0, 4);
         if (ImGui::SmallButton(st.sortAsc ? "A-Z##az" : "Z-A##az"))
@@ -1415,11 +1416,11 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             ImGui::Separator();
             ImGui::InputText("Name", st.projectName, sizeof(st.projectName));
             const char* types[] = { "Simple", "Advanced", "Advanced Mod Mode" };
-            ImGui::Combo("Mode", &st.projectType, types, 3);
+            Ui::Combo("##ptype", &st.projectType, types, 3, "Mode");
 
             if (st.projectType == 1) {
                 const char* temps[] = { "Default", "ZZZ", "GI" };
-                ImGui::Combo("Template", &st.templateIdx, temps, 3);
+                Ui::Combo("##ptempl", &st.templateIdx, temps, 3, "Template");
                 ImGui::Spacing();
                 ImGui::TextUnformatted("Base Diffuse");
                 ImGui::TextWrapped("%s", st.baseDiffusePath[0] ? st.baseDiffusePath : "(select a texture)");
@@ -1582,7 +1583,7 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                 for (int i = 0; i < (int)(sizeof(formats) / sizeof(formats[0])); ++i)
                     if (cur == formats[i]) fi = i;
                 ImGui::SetNextItemWidth(-1);
-                if (ImGui::Combo("Format", &fi, formats, (int)(sizeof(formats) / sizeof(formats[0]))))
+                if (Ui::Combo("##fmt", &fi, formats, (int)(sizeof(formats) / sizeof(formats[0])), "Format"))
                     canvas.SetExportFormat(formats[fi]);
 
                 bool mips = canvas.GetExportGenerateMipMaps();
@@ -1593,16 +1594,14 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                     int fli = 3;
                     std::string cf = canvas.GetExportMipFilter();
                     for (int i = 0; i < 6; ++i) if (cf == filters[i]) fli = i;
-                    ImGui::SetNextItemWidth(-1);
-                    if (ImGui::Combo("Mip Filter", &fli, filters, 6))
+                    if (Ui::Combo("##mipf", &fli, filters, 6, "Mip Filter"))
                         canvas.SetExportMipFilter(filters[fli]);
                 }
                 const char* speeds[] = { "Fast", "Medium", "Slow", "Best" };
                 int si = 1;
                 std::string cs = canvas.GetExportCompressionSpeed();
                 for (int i = 0; i < 4; ++i) if (cs == speeds[i]) si = i;
-                ImGui::SetNextItemWidth(-1);
-                if (ImGui::Combo("Quality", &si, speeds, 4))
+                if (Ui::Combo("##qual", &si, speeds, 4, "Quality"))
                     canvas.SetExportCompressionSpeed(speeds[si]);
             } else if (ext == "png") {
                 ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.f, 1.f), "PNG settings");
@@ -1610,8 +1609,7 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                 int ii = 0;
                 std::string ic = Canvas::IccPresetName(canvas.GetExportIccPreset());
                 for (int i = 0; i < 5; ++i) if (ic == iccs[i]) ii = i;
-                ImGui::SetNextItemWidth(-1);
-                if (ImGui::Combo("ICC", &ii, iccs, 5))
+                if (Ui::Combo("##icc", &ii, iccs, 5, "ICC"))
                     canvas.SetExportIccPreset(Canvas::IccPresetFromName(iccs[ii]));
             } else {
                 ImGui::TextDisabled("Extension: .%s", ext.c_str());

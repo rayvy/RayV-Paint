@@ -42,96 +42,16 @@ extern float g_ColorSwapAnim;
 extern bool g_ColorSwapPending;
 extern std::vector<float> Canvas_BuildSplineLUT(const std::vector<std::pair<float,float>>& pts);
 
-#ifdef _WIN32
-#include <windows.h>
-#include <commdlg.h>
-#pragma comment(lib, "comdlg32.lib")
-
+#include "dialogs/Win32FileDialogs.h"
 #include "../core/PathUtil.h"
-static std::wstring UTF8ToWString(const std::string& str) { return PathUtil::Utf8ToWide(str); }
-static std::string WStringToUTF8(const std::wstring& wstr) { return PathUtil::WideToUtf8(wstr); }
 
-static std::wstring ConvertFilterToWString(const char* filter) {
-    if (!filter) return L"";
-    std::vector<char> filterBuffer;
-    const char* p = filter;
-    while (true) {
-        if (*p == '\0' && *(p + 1) == '\0') {
-            filterBuffer.push_back('\0');
-            filterBuffer.push_back('\0');
-            break;
-        }
-        filterBuffer.push_back(*p);
-        p++;
-    }
-    int size = static_cast<int>(filterBuffer.size());
-    int size_needed = MultiByteToWideChar(CP_UTF8, 0, filterBuffer.data(), size, NULL, 0);
-    std::wstring wfilter(size_needed, 0);
-    MultiByteToWideChar(CP_UTF8, 0, filterBuffer.data(), size, &wfilter[0], size_needed);
-    return wfilter;
-}
-
+// Thin wrappers so PathField / call sites keep the old names during migration
 static bool ShowOpenFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") {
-    OPENFILENAMEW ofn;
-    wchar_t szFile[512] = { 0 };
-    if (outPath && strlen(outPath) > 0) {
-        std::wstring wpath = UTF8ToWString(outPath);
-        std::wcsncpy(szFile, wpath.c_str(), sizeof(szFile)/sizeof(wchar_t) - 1);
-    }
-    ZeroMemory(&ofn, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFile = szFile;
-    ofn.nMaxFile = sizeof(szFile)/sizeof(wchar_t);
-    std::wstring wfilter = ConvertFilterToWString(filter);
-    ofn.lpstrFilter = wfilter.c_str();
-    ofn.nFilterIndex = 1;
-    ofn.lpstrFileTitle = NULL;
-    ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = NULL;
-    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-
-    if (GetOpenFileNameW(&ofn) == TRUE) {
-        std::string utf8Path = WStringToUTF8(ofn.lpstrFile);
-        std::strncpy(outPath, utf8Path.c_str(), maxLen - 1);
-        outPath[maxLen - 1] = '\0';
-        return true;
-    }
-    return false;
+    return Ui::ShowOpenFile(outPath, maxLen, filter);
 }
-
 static bool ShowSaveFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") {
-    OPENFILENAMEW ofn;
-    wchar_t szFile[512] = { 0 };
-    if (outPath && strlen(outPath) > 0) {
-        std::wstring wpath = UTF8ToWString(outPath);
-        std::wcsncpy(szFile, wpath.c_str(), sizeof(szFile)/sizeof(wchar_t) - 1);
-    }
-    ZeroMemory(&ofn, sizeof(ofn));
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFile = szFile;
-    ofn.nMaxFile = sizeof(szFile)/sizeof(wchar_t);
-    std::wstring wfilter = ConvertFilterToWString(filter);
-    ofn.lpstrFilter = wfilter.c_str();
-    ofn.nFilterIndex = 1;
-    ofn.lpstrFileTitle = NULL;
-    ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = NULL;
-    ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
-
-    if (GetSaveFileNameW(&ofn) == TRUE) {
-        std::string utf8Path = WStringToUTF8(ofn.lpstrFile);
-        std::strncpy(outPath, utf8Path.c_str(), maxLen - 1);
-        outPath[maxLen - 1] = '\0';
-        return true;
-    }
-    return false;
+    return Ui::ShowSaveFile(outPath, maxLen, filter);
 }
-#else
-static bool ShowOpenFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") { return false; }
-static bool ShowSaveFileWin32(char* outPath, size_t maxLen, const char* filter = "All Files (*.*)\0*.*\0") { return false; }
-#endif
 
 namespace UI {
 
@@ -525,17 +445,10 @@ namespace UI {
         }
     }
 
-    // Dual-mode animated dropdown (click list / hold-scrub-release) — use instead of ImGui::Combo
+    // Themed combo — kit API (Ui::Combo). Local alias for call-site brevity.
     static bool UiCombo(const char* id, int* idx, const char* const* items, int count,
                         const char* label = nullptr) {
-        if (!idx || !items || count <= 0) return false;
-        if (*idx < 0 || *idx >= count) *idx = 0;
-        if (label && label[0]) {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextUnformatted(label);
-            ImGui::SameLine();
-        }
-        return Ui::DropdownChip(id, items[*idx], items, count, idx, Ui::DropdownFlags_ClickAndHold);
+        return Ui::Combo(id, idx, items, count, label);
     }
 
     // ICC preset combo (presets only — no free-text path). Returns true if changed.
@@ -559,7 +472,7 @@ namespace UI {
             Canvas::IccPresetName(Canvas::IccPreset::AdobeRGB),
             Canvas::IccPresetName(Canvas::IccPreset::Linear)
         };
-        if (UiCombo("##icc_preset", &cur, names, IM_ARRAYSIZE(names), label)) {
+        if (Ui::Combo("##icc_preset", &cur, names, IM_ARRAYSIZE(names), label)) {
             canvas.SetExportIccPreset(kPresets[cur]);
             return true;
         }
@@ -1371,86 +1284,37 @@ namespace UI {
             ImGui::DockBuilderFinish(dockspace_id);
         }
 
-        // 4. Modals Triggers
-        if (state.openImportModal) { ImGui::OpenPopup("Import Image"); state.openImportModal = false; }
+        // 4. Modal / File Explorer triggers (FE owns project/config/import maps)
+        if (state.openImportModal) {
+            state.openImportModal = false;
+            // Open as texture import browser (also works for single image pick)
+            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
+        }
         if (state.openExportDdsModal) { ImGui::OpenPopup("Export DDS"); state.openExportDdsModal = false; }
         if (state.openExportStdModal) { ImGui::OpenPopup("Export Standard Image"); state.openExportStdModal = false; }
         if (state.openExportAdvancedModal) {
-            // Prefer File Explorer Advanced Export over legacy modal
             state.openExportAdvancedModal = false;
             UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::AdvancedExport);
         }
         if (state.openSettingsModal) { ImGui::OpenPopup("Settings"); state.openSettingsModal = false; }
         if (state.openCanvasSizeModal) { ImGui::OpenPopup("Canvas Edit"); state.openCanvasSizeModal = false; }
-        if (state.openSaveRaypModal) { ImGui::OpenPopup("Save Project"); state.openSaveRaypModal = false; }
-        if (state.openLoadRaypModal) { ImGui::OpenPopup("Load Project"); state.openLoadRaypModal = false; }
-        if (state.openLoadConfigModal) { ImGui::OpenPopup("Load Config"); state.openLoadConfigModal = false; }
-        if (state.openSaveConfigModal) { ImGui::OpenPopup("Save Config"); state.openSaveConfigModal = false; }
+        if (state.openSaveRaypModal) {
+            state.openSaveRaypModal = false;
+            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::SaveProject);
+        }
+        if (state.openLoadRaypModal) {
+            state.openLoadRaypModal = false;
+            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::OpenProject);
+        }
+        if (state.openLoadConfigModal) {
+            state.openLoadConfigModal = false;
+            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::LoadConfig);
+        }
+        if (state.openSaveConfigModal) {
+            state.openSaveConfigModal = false;
+            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::SaveConfig);
+        }
         if (state.showRecoveryModal) { ImGui::OpenPopup("Restore Auto-Saved Session?"); state.showRecoveryModal = false; }
-
-        // Load Config Modal
-        if (ImGui::BeginPopupModal("Load Config", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-            static char loadConfigPath[512] = "config.json";
-            ImGui::Text("Enter config file path (.json):");
-            ImGui::InputText("##loadconfigpath", loadConfigPath, IM_ARRAYSIZE(loadConfigPath));
-            ImGui::Separator();
-            if (ImGui::Button("Load", ImVec2(120, 0))) {
-                if (ConfigManager::Get().Load(loadConfigPath)) {
-                    ApplyTheme(ConfigManager::Get().GetTheme().c_str());
-                    Logger::Get().Info("Config loaded successfully: " + std::string(loadConfigPath));
-                    ImGui::CloseCurrentPopup();
-                } else {
-                    Logger::Get().Error("Failed to load config from: " + std::string(loadConfigPath));
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-
-        // Save Config Modal
-        if (ImGui::BeginPopupModal("Save Config", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-            static char saveConfigPath[512] = "config.json";
-            ImGui::Text("Enter config file path (.json):");
-            ImGui::InputText("##saveconfigpath", saveConfigPath, IM_ARRAYSIZE(saveConfigPath));
-            ImGui::Separator();
-            if (ImGui::Button("Save", ImVec2(120, 0))) {
-                if (ConfigManager::Get().Save(saveConfigPath)) {
-                    Logger::Get().Info("Config saved successfully to: " + std::string(saveConfigPath));
-                    ImGui::CloseCurrentPopup();
-                } else {
-                    Logger::Get().Error("Failed to save config to: " + std::string(saveConfigPath));
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-
-        // Import Popup Modal
-        if (ImGui::BeginPopupModal("Import Image", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-            static char importPath[512] = "";
-            ImGui::Text("Enter absolute path to image:");
-            ImGui::InputText("##importpath", importPath, IM_ARRAYSIZE(importPath));
-            ImGui::SameLine();
-            if (ImGui::Button("Browse...##import")) {
-                ShowOpenFileWin32(importPath, IM_ARRAYSIZE(importPath), "Image Files (*.dds;*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.dds;*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All Files (*.*)\0*.*\0");
-            }
-            ImGui::Separator();
-            if (ImGui::Button("Import", ImVec2(120, 0))) {
-                TriggerBackgroundOpenDocument(importPath, device, canvas);
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
 
         // Export DDS Popup Modal
         if (ImGui::BeginPopupModal("Export DDS", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
@@ -1753,71 +1617,7 @@ namespace UI {
             ImGui::EndPopup();
         }
 
-        // Save Project (.rayp) Modal
-        if (ImGui::BeginPopupModal("Save Project", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-            static char savePath[512] = "project.rayp";
-            ImGui::Text("Enter project file path (.rayp):");
-            ImGui::InputText("##savepathrayp", savePath, IM_ARRAYSIZE(savePath));
-            ImGui::SameLine();
-            if (ImGui::Button("Browse...##saveproject")) {
-                ShowSaveFileWin32(savePath, IM_ARRAYSIZE(savePath), "RayP Projects (*.rayp)\0*.rayp\0All Files (*.*)\0*.*\0");
-            }
-            ImGui::Separator();
-            if (ImGui::Button("Save", ImVec2(120, 0))) {
-                if (Project* proj = ProjectManager::Get().ActiveProject())
-                    proj->InjectTextureSetsIntoCanvas();
-                if (canvas.SaveCanvasRayp(savePath)) {
-                    ImGui::CloseCurrentPopup();
-                }
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
-
-        // Load Project (.rayp) Modal
-        if (ImGui::BeginPopupModal("Load Project", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
-            static char loadPath[512] = "project.rayp";
-            ImGui::Text("Enter project file path (.rayp):");
-            ImGui::InputText("##loadpathrayp", loadPath, IM_ARRAYSIZE(loadPath));
-            ImGui::SameLine();
-            if (ImGui::Button("Browse...##loadproject")) {
-                ShowOpenFileWin32(loadPath, IM_ARRAYSIZE(loadPath), "RayP Projects (*.rayp)\0*.rayp\0All Files (*.*)\0*.*\0");
-            }
-            ImGui::Separator();
-            if (ImGui::Button("Load", ImVec2(120, 0))) {
-                // Open as new project tab (or activate if already open)
-                const std::string path = PathUtil::NormalizeToUtf8Path(loadPath);
-                const int id = ProjectManager::Get().ActivateOrPrepareOpen(path);
-                if (id >= 0) {
-                    if (Project* p = ProjectManager::Get().FindProject(id)) {
-                        if (p->canvas) {
-                            // Reload if blank / different; skip if already this file loaded
-                            bool already = false;
-                            if (!p->IsBlank() && !p->canvas->GetCurrentProjectFilePath().empty()) {
-                                auto lower = [](std::string s) {
-                                    std::transform(s.begin(), s.end(), s.begin(),
-                                        [](unsigned char c) { return (char)std::tolower(c); });
-                                    return s;
-                                };
-                                already = lower(PathUtil::NormalizeToUtf8Path(p->canvas->GetCurrentProjectFilePath()))
-                                       == lower(path);
-                            }
-                            if (!already)
-                                TriggerBackgroundOpenDocument(path, device, *p->canvas);
-                        }
-                    }
-                }
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-        }
+        // Save/Load Project + Config: File Explorer only (see triggers above)
 
         // Restore Backup Modal
         if (ImGui::BeginPopupModal("Restore Auto-Saved Session?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {

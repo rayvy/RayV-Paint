@@ -153,6 +153,8 @@ set(SOURCES
     src/ui/EditorPanels.h
     src/ui/FileExplorer.cpp
     src/ui/FileExplorer.h
+    src/ui/dialogs/Win32FileDialogs.cpp
+    src/ui/dialogs/Win32FileDialogs.h
     src/ui/style/UiTokens.cpp
     src/ui/style/UiTokens.h
     src/ui/style/UiMotion.cpp
