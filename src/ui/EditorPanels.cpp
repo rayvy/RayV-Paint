@@ -2074,57 +2074,44 @@ namespace UI {
             ImGui::NewLine();
             ImGui::Separator();
             ImGui::Text("Project Output Format (DDS ↔ PNG):");
-            ImGui::TextDisabled("Sets default Quick Export target for this project.");
+            ImGui::TextDisabled("Hard container switch — batch + quick export both use this.");
 
             char propExportPath[512] = "";
             std::strncpy(propExportPath, canvas.GetExportPath().c_str(), sizeof(propExportPath));
 
-            // Derive current format family from path extension (default PNG)
-            std::string pathStr = propExportPath;
-            size_t dot = pathStr.find_last_of('.');
-            std::string ext = "";
-            if (dot != std::string::npos) {
-                ext = pathStr.substr(dot + 1);
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            }
-            int outFmt = (ext == "dds") ? 1 : 0; // 0=PNG, 1=DDS
+            int outFmt = (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) ? 1 : 0;
             const char* outFmtNames[] = { "PNG / Standard image", "DDS (compressed)" };
             if (UiCombo("##cmb_outFmt", &outFmt, outFmtNames, IM_ARRAYSIZE(outFmtNames), "Output Type")) {
-                // Switch extension on the export path
-                std::string base = propExportPath;
-                size_t d = base.find_last_of('.');
-                if (d != std::string::npos) base = base.substr(0, d);
-                if (base.empty()) base = "export";
-                base += (outFmt == 1) ? ".dds" : ".png";
-                std::strncpy(propExportPath, base.c_str(), sizeof(propExportPath) - 1);
+                canvas.SetExportContainer(outFmt == 1
+                    ? Canvas::ExportContainer::DDS
+                    : Canvas::ExportContainer::PNG);
+                std::string synced = canvas.GetExportPath();
+                std::strncpy(propExportPath, synced.c_str(), sizeof(propExportPath) - 1);
                 propExportPath[sizeof(propExportPath) - 1] = '\0';
-                canvas.SetExportPath(propExportPath);
-                ext = (outFmt == 1) ? "dds" : "png";
             }
 
             if (Ui::PathField("##exppath", "Export Path", propExportPath, sizeof(propExportPath),
                     ShowSaveFileWin32, "PNG (*.png)\0*.png\0DDS (*.dds)\0*.dds\0All Files (*.*)\0*.*\0")
                 || std::string(propExportPath) != canvas.GetExportPath()) {
                 canvas.SetExportPath(propExportPath);
-                pathStr = propExportPath;
-                dot = pathStr.find_last_of('.');
-                ext.clear();
-                if (dot != std::string::npos) {
-                    ext = pathStr.substr(dot + 1);
-                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                // Infer container from path extension when user picks a file
+                std::string pathStr = propExportPath;
+                size_t d = pathStr.find_last_of('.');
+                if (d != std::string::npos) {
+                    std::string e = pathStr.substr(d + 1);
+                    std::transform(e.begin(), e.end(), e.begin(), ::tolower);
+                    if (e == "dds")
+                        canvas.SetExportContainer(Canvas::ExportContainer::DDS);
+                    else if (e == "png")
+                        canvas.SetExportContainer(Canvas::ExportContainer::PNG);
                 }
+                canvas.SyncExportPathExtension();
+                std::string synced = canvas.GetExportPath();
+                std::strncpy(propExportPath, synced.c_str(), sizeof(propExportPath) - 1);
+                propExportPath[sizeof(propExportPath) - 1] = '\0';
             }
 
-            // Re-read ext after edits
-            pathStr = canvas.GetExportPath();
-            dot = pathStr.find_last_of('.');
-            ext.clear();
-            if (dot != std::string::npos) {
-                ext = pathStr.substr(dot + 1);
-                std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            }
-
-            if (ext == "dds") {
+            if (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) {
                 static const char* formats[] = {
                     "BC7 (sRGB, DX 11+)", "BC7 (Linear, DX 11+)",
                     "BC3 (Linear, DXT5)", "BC1 (Linear, DXT1)",
@@ -2152,6 +2139,12 @@ namespace UI {
                         canvas.SetExportMipFilter(filters[currentFilterIdx]);
                     }
                 }
+                const char* speeds[] = { "Fast", "Medium", "Slow", "Best" };
+                int si = 1;
+                std::string cs = canvas.GetExportCompressionSpeed();
+                for (int i = 0; i < 4; ++i) if (cs == speeds[i]) si = i;
+                if (UiCombo("##cmb_compSpeed", &si, speeds, 4, "Quality"))
+                    canvas.SetExportCompressionSpeed(speeds[si]);
             } else {
                 DrawIccPresetCombo(canvas, "ICC Profile");
             }

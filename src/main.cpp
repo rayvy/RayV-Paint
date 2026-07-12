@@ -1150,43 +1150,13 @@ int main(int argc, char* argv[]) {
                             Logger::Get().Error("Batch export: no maps written");
                     }
                 } else {
-                    // Simple: single file export
-                    std::string path = ActiveCanvas().GetExportPath();
-                    if (path.empty()) {
-                        std::string projPath = ActiveCanvas().GetCurrentProjectFilePath();
-                        if (!projPath.empty()) {
-                            size_t dot = projPath.find_last_of('.');
-                            if (dot != std::string::npos)
-                                path = projPath.substr(0, dot) + ".png";
-                            else
-                                path = projPath + ".png";
-                        } else {
-                            path = "export.png";
-                        }
-                        ActiveCanvas().SetExportPath(path);
-                    }
-                    size_t dot = path.find_last_of('.');
-                    std::string ext = "";
-                    if (dot != std::string::npos) {
-                        ext = path.substr(dot + 1);
-                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                    }
-                    if (ext == "dds") {
-                        if (ActiveCanvas().SaveCanvasCompressed(
-                                path,
-                                ActiveCanvas().GetExportFormat(),
-                                ActiveCanvas().GetExportGenerateMipMaps(),
-                                ActiveCanvas().GetExportMipFilter(),
-                                ActiveCanvas().GetExportCompressionSpeed()))
-                            Logger::Get().Info("Quick exported DDS: " + path);
-                        else
-                            Logger::Get().Error("Quick export DDS failed: " + path);
-                    } else {
-                        if (ActiveCanvas().SaveCanvasStandard(path, ActiveCanvas().GetExportIccPreset()))
-                            Logger::Get().Info("Quick exported: " + path);
-                        else
-                            Logger::Get().Error("Quick export failed: " + path);
-                    }
+                    // Simple: single file export via hard container (DDS/PNG)
+                    std::string used;
+                    if (ActiveCanvas().ExportWithProjectSettings(&used))
+                        Logger::Get().Info("Quick exported: " + used);
+                    else
+                        Logger::Get().Error("Quick export failed: " +
+                            (used.empty() ? ActiveCanvas().GetExportPath() : used));
                 }
             }
             if (KeymapManager::Get().ConsumeActionTrigger("AdvancedExport")) {

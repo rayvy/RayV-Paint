@@ -3457,6 +3457,59 @@ bool Canvas::SaveCanvasCompressed(const std::string& filepath, const std::string
     return TexconvHelper::CompressDDS(tempFile, filepath, settings);
 }
 
+void Canvas::SetExportContainer(ExportContainer c) {
+    if (m_ExportContainer == c) {
+        SyncExportPathExtension();
+        return;
+    }
+    m_ExportContainer = c;
+    SyncExportPathExtension();
+    m_IsDocumentModified = true;
+    Logger::Get().Info(std::string("Export container → ") +
+        (c == ExportContainer::DDS ? "DDS" : "PNG"));
+}
+
+std::string Canvas::SyncExportPathExtension() {
+    const char* wantExt = (m_ExportContainer == ExportContainer::DDS) ? ".dds" : ".png";
+    std::string path = m_ExportPath;
+    if (path.empty()) {
+        path = (m_ExportContainer == ExportContainer::DDS) ? "export.dds" : "export.png";
+        m_ExportPath = path;
+        return m_ExportPath;
+    }
+    size_t slash = path.find_last_of("/\\");
+    size_t dot = path.find_last_of('.');
+    std::string base = path;
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        base = path.substr(0, dot);
+    m_ExportPath = base + wantExt;
+    return m_ExportPath;
+}
+
+bool Canvas::ExportWithProjectSettings(std::string* outPathUsed) {
+    SyncExportPathExtension();
+    std::string path = m_ExportPath;
+    if (path.empty()) {
+        path = (m_ExportContainer == ExportContainer::DDS) ? "export.dds" : "export.png";
+        m_ExportPath = path;
+    }
+    if (outPathUsed) *outPathUsed = path;
+
+    bool ok = false;
+    if (m_ExportContainer == ExportContainer::DDS) {
+        ok = SaveCanvasCompressed(path, m_ExportFormat, m_ExportGenerateMipMaps,
+                                  m_ExportMipFilter, m_ExportCompressionSpeed);
+        if (ok) Logger::Get().Info("Export DDS: " + path + " [" + m_ExportFormat + "]");
+        else Logger::Get().Error("Export DDS failed: " + path);
+    } else {
+        ok = SaveCanvasStandard(path, GetExportIccPreset());
+        if (ok) Logger::Get().Info("Export PNG: " + path + " [ICC " +
+                                   IccPresetName(m_ExportIccPreset) + "]");
+        else Logger::Get().Error("Export PNG failed: " + path);
+    }
+    return ok;
+}
+
 std::vector<float> Canvas::GetCompositePixels() const {
     if (m_Layers.empty()) {
         return std::vector<float>((size_t)m_Width * m_Height * 4, 0.0f);
@@ -4246,6 +4299,7 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         metadata["format_features"] = "blend_filters_mask_groups";
 
         metadata["export_path"] = m_ExportPath;
+        metadata["export_container"] = (m_ExportContainer == ExportContainer::DDS) ? "dds" : "png";
         metadata["export_format"] = m_ExportFormat;
         metadata["export_advanced_mode"] = m_ExportAdvancedMode;
         metadata["export_compression_speed"] = m_ExportCompressionSpeed;
@@ -4413,6 +4467,18 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
         }
 
         if (metadata.contains("export_path")) m_ExportPath = metadata["export_path"].get<std::string>();
+        if (metadata.contains("export_container")) {
+            std::string ec = metadata["export_container"].get<std::string>();
+            for (char& c : ec) c = (char)std::tolower((unsigned char)c);
+            m_ExportContainer = (ec == "dds") ? ExportContainer::DDS : ExportContainer::PNG;
+        } else if (metadata.contains("export_path")) {
+            // Legacy: infer once from path, then container is authoritative
+            std::string p = m_ExportPath;
+            size_t d = p.find_last_of('.');
+            std::string e = (d != std::string::npos) ? p.substr(d + 1) : "";
+            for (char& c : e) c = (char)std::tolower((unsigned char)c);
+            m_ExportContainer = (e == "dds") ? ExportContainer::DDS : ExportContainer::PNG;
+        }
         if (metadata.contains("export_format")) m_ExportFormat = metadata["export_format"].get<std::string>();
         if (metadata.contains("export_advanced_mode")) m_ExportAdvancedMode = metadata["export_advanced_mode"].get<bool>();
         if (metadata.contains("export_compression_speed")) m_ExportCompressionSpeed = metadata["export_compression_speed"].get<std::string>();
@@ -4426,6 +4492,7 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
             // Migrate legacy free-text / name into preset enum
             m_ExportIccPreset = IccPresetFromName(m_ExportPngColorSpace);
         }
+        SyncExportPathExtension();
         if (metadata.contains("brush_tip_id")) m_BrushTipId = metadata["brush_tip_id"].get<std::string>();
 
         // Texture Set library meta → Project reads after load
@@ -4622,6 +4689,7 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
 
     json exportMeta;
     exportMeta["export_path"] = m_ExportPath;
+    exportMeta["export_container"] = (m_ExportContainer == ExportContainer::DDS) ? "dds" : "png";
     exportMeta["export_format"] = m_ExportFormat;
     exportMeta["export_advanced_mode"] = m_ExportAdvancedMode;
     exportMeta["export_compression_speed"] = m_ExportCompressionSpeed;
@@ -4927,27 +4995,19 @@ bool Canvas::SaveProjectAuto() {
     }
 
     if (m_ProjectType == ProjectType::Simple) {
-        std::string path = m_CurrentProjectFilePath;
-        size_t dot = path.find_last_of('.');
-        std::string ext = "";
-        if (dot != std::string::npos) {
-            ext = path.substr(dot + 1);
-            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-        }
-
-        bool success = false;
-        if (ext == "dds") {
-            success = SaveCanvasCompressed(path, m_ExportFormat, m_ExportGenerateMipMaps, m_ExportMipFilter, m_ExportCompressionSpeed);
-        } else {
-            // Contract: PNG via IccPreset only (no free-text path)
-            success = SaveCanvasStandard(path, GetExportIccPreset());
-        }
-
+        // Simple project "save" re-exports via hard container setting (not path guessing).
+        if (!m_ExportPath.empty())
+            m_CurrentProjectFilePath = m_ExportPath;
+        else if (!m_CurrentProjectFilePath.empty())
+            m_ExportPath = m_CurrentProjectFilePath;
+        SyncExportPathExtension();
+        m_CurrentProjectFilePath = m_ExportPath;
+        bool success = ExportWithProjectSettings();
         if (success) {
             m_IsDocumentModified = false;
-            Logger::Get().Info("Simple project saved back to source image: " + path);
+            Logger::Get().Info("Simple project exported: " + m_ExportPath);
         } else {
-            Logger::Get().Error("Failed to save simple project back to: " + path);
+            Logger::Get().Error("Failed to export simple project: " + m_ExportPath);
         }
         return success;
     } else {

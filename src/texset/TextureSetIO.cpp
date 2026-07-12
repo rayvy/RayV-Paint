@@ -7,6 +7,7 @@
 #include "../core/ConfigManager.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <filesystem>
 #include <vector>
@@ -30,6 +31,35 @@ static std::string SanitizeFileToken(std::string s) {
             c = '_';
     }
     return s;
+}
+
+bool IsLosslessImageCodec(MapExportCodec codec) {
+    return codec == MapExportCodec::PNG || codec == MapExportCodec::RGBA8_UNORM;
+}
+
+std::string CodecToFormatString(MapExportCodec codec) {
+    switch (codec) {
+    case MapExportCodec::BC7_UNORM_SRGB: return "BC7_UNORM_SRGB";
+    case MapExportCodec::BC7_UNORM:      return "BC7_UNORM";
+    case MapExportCodec::BC5_UNORM:      return "BC5_UNORM";
+    case MapExportCodec::R8G8_UNORM:     return "R8G8_UNORM";
+    case MapExportCodec::R32_FLOAT:      return "R32_FLOAT";
+    case MapExportCodec::RGBA8_UNORM:    return "RGBA8_UNORM";
+    case MapExportCodec::PNG:
+    default:                            return "BC7_UNORM";
+    }
+}
+
+std::string ForcePathExtension(const std::string& path, const char* extNoDot) {
+    if (!extNoDot || !*extNoDot) return path;
+    std::string e = extNoDot;
+    if (!e.empty() && e[0] == '.') e.erase(e.begin());
+    size_t slash = path.find_last_of("/\\");
+    size_t dot = path.find_last_of('.');
+    std::string base = path;
+    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+        base = path.substr(0, dot);
+    return base + "." + e;
 }
 
 int ChannelIndexForRole(const MapSlot& slot, ChannelRole role) {
@@ -108,57 +138,96 @@ std::string DefaultMapExportPath(const TextureSet& set, MapKind kind,
     return PathUtil::WideToUtf8(out.wstring());
 }
 
-static bool SaveWithCodec(const std::string& path, const uint8_t* rgba, int w, int h,
-                          MapExportCodec codec, bool mips) {
-    std::string ext = ExtLower(path);
-    // Force PNG if codec is PNG/RGBA8
-    if (codec == MapExportCodec::PNG || codec == MapExportCodec::RGBA8_UNORM ||
-        ext == "png" || ext == "tga" || ext == "bmp" || ext == "jpg" || ext == "jpeg") {
-        // Ensure .png if path had .dds but codec is PNG
-        std::string outPath = path;
-        if (ext == "dds" && (codec == MapExportCodec::PNG || codec == MapExportCodec::RGBA8_UNORM)) {
-            size_t d = outPath.find_last_of('.');
-            if (d != std::string::npos) outPath = outPath.substr(0, d) + ".png";
+// Resolve actual write format for one map given optional global batch options.
+static void ResolveExportTarget(const MapSlot& m, const BatchExportOptions* options,
+                                bool& outAsPng, std::string& outFormatStr,
+                                bool& outMips, std::string& outMipFilter,
+                                std::string& outSpeed) {
+    outAsPng = true;
+    outFormatStr.clear();
+    outMips = true;
+    outMipFilter = "Bicubic";
+    outSpeed = "Medium";
+
+    if (options) {
+        outMips = options->generateMipMaps;
+        outMipFilter = options->mipFilter;
+        outSpeed = options->compressionSpeed;
+
+        if (options->container == BatchExportOptions::Container::PNG) {
+            outAsPng = true;
+            return;
         }
-        return ImageManager::SaveRGBA8ToFile(outPath, rgba, w, h);
+
+        // DDS container
+        outAsPng = false;
+        if (options->usePerMapCodec && !IsLosslessImageCodec(m.exportCodec)) {
+            outFormatStr = CodecToFormatString(m.exportCodec);
+        } else {
+            outFormatStr = options->ddsFormat.empty()
+                ? "BC7 (sRGB, DX 11+)"
+                : options->ddsFormat;
+        }
+        return;
     }
 
-    // DDS path via temp + texconv
+    // No global options: decide from per-map codec only
+    if (IsLosslessImageCodec(m.exportCodec)) {
+        outAsPng = true;
+    } else {
+        outAsPng = false;
+        outFormatStr = CodecToFormatString(m.exportCodec);
+        outMips = m.exportMips;
+    }
+}
+
+static bool SavePngWithOptionalIcc(const std::string& path, const uint8_t* rgba, int w, int h,
+                                   const BatchExportOptions* options) {
+    std::string outPath = ForcePathExtension(path, "png");
+    if (options && options->iccBytes && options->iccSize > 0) {
+        return ImageManager::SaveRGBA8ToFile(
+            outPath, rgba, w, h, w * 4,
+            options->iccBytes, options->iccSize,
+            options->iccProfileName ? options->iccProfileName : "sRGB");
+    }
+    return ImageManager::SaveRGBA8ToFile(outPath, rgba, w, h);
+}
+
+static bool SaveDdsWithFormat(const std::string& path, const uint8_t* rgba, int w, int h,
+                              const std::string& formatStr, bool mips,
+                              const std::string& mipFilter, const std::string& speed) {
+    std::string outPath = ForcePathExtension(path, "dds");
+
     std::string tempDir = ConfigManager::GetUserSubdirectory("temp");
-    std::string tempPng = tempDir + "/texset_export_tmp.png";
+    // Unique temp name avoids collisions when exporting multiple maps in one batch
+    static std::atomic<uint32_t> s_tmpSeq{0};
+    std::string tempPng = tempDir + "/texset_export_tmp_" +
+        std::to_string(s_tmpSeq.fetch_add(1)) + ".png";
+
     if (!ImageManager::SaveRGBA8ToFile(tempPng, rgba, w, h))
         return false;
 
-    std::string formatStr = "BC7_UNORM";
-    switch (codec) {
-    case MapExportCodec::BC7_UNORM_SRGB: formatStr = "BC7_UNORM_SRGB"; break;
-    case MapExportCodec::BC7_UNORM: formatStr = "BC7_UNORM"; break;
-    case MapExportCodec::BC5_UNORM: formatStr = "BC5_UNORM"; break;
-    case MapExportCodec::R8G8_UNORM: formatStr = "R8G8_UNORM"; break;
-    case MapExportCodec::R32_FLOAT: formatStr = "R32_FLOAT"; break;
-    default: formatStr = "BC7_UNORM"; break;
-    }
-
-    std::string outPath = path;
-    if (ext != "dds") {
-        size_t d = outPath.find_last_of('.');
-        if (d != std::string::npos) outPath = outPath.substr(0, d) + ".dds";
-        else outPath += ".dds";
-    }
-
     ExportSettings settings;
     settings.isDds = true;
-    settings.ddsFormatStr = formatStr;
+    settings.ddsFormatStr = formatStr.empty() ? "BC7_UNORM" : formatStr;
     settings.advancedMode = true;
-    settings.compressionSpeed = "Medium";
+    settings.compressionSpeed = speed.empty() ? "Medium" : speed;
     settings.generateMipMaps = mips;
-    settings.mipFilter = "Bicubic";
+    settings.mipFilter = mipFilter.empty() ? "Bicubic" : mipFilter;
     settings.exportPath = outPath;
 
-    // Texconv expects input image/dds
     bool ok = TexconvHelper::CompressDDS(tempPng, outPath, settings);
     try { fs::remove(PathUtil::FromUtf8(tempPng)); } catch (...) {}
     return ok;
+}
+
+static bool SaveWithResolved(const std::string& path, const uint8_t* rgba, int w, int h,
+                             bool asPng, const std::string& formatStr, bool mips,
+                             const std::string& mipFilter, const std::string& speed,
+                             const BatchExportOptions* options) {
+    if (asPng)
+        return SavePngWithOptionalIcc(path, rgba, w, h, options);
+    return SaveDdsWithFormat(path, rgba, w, h, formatStr, mips, mipFilter, speed);
 }
 
 ExportAllResult ExportAllMaps(
@@ -168,21 +237,36 @@ ExportAllResult ExportAllMaps(
     const TileCache* diffuseOverride,
     const std::vector<uint8_t>* diffuseRgba8,
     int diffuseW, int diffuseH,
-    const std::unordered_map<int, MapExportPixels>* packedByMap) {
+    const std::unordered_map<int, MapExportPixels>* packedByMap,
+    const BatchExportOptions* options) {
 
     ExportAllResult r;
     for (const auto& m : set.maps) {
         if (!m.enabled) continue;
 
-        std::string path = m.exportPath;
-        std::string useExt = ext;
-        if (m.exportCodec != MapExportCodec::PNG && m.exportCodec != MapExportCodec::RGBA8_UNORM)
-            useExt = "dds";
-        else if (useExt.empty())
-            useExt = "png";
+        bool asPng = true;
+        std::string formatStr;
+        bool mips = m.exportMips;
+        std::string mipFilter = "Bicubic";
+        std::string speed = "Medium";
+        ResolveExportTarget(m, options, asPng, formatStr, mips, mipFilter, speed);
 
+        // Prefer slot mips flag when no global options
+        if (!options)
+            mips = m.exportMips;
+
+        std::string useExt = asPng ? "png" : "dds";
+        if (!options && !ext.empty()) {
+            // Legacy: caller-supplied default only for empty paths when codec is lossless
+            if (asPng) useExt = ext;
+        }
+
+        std::string path = m.exportPath;
         if (path.empty())
             path = DefaultMapExportPath(set, m.kind, baseDir, useExt);
+        // Always align extension with resolved container (fixes stale .png paths with DDS codec)
+        path = ForcePathExtension(path, useExt.c_str());
+
         if (MapSlot* slot = set.GetMap(m.kind))
             slot->exportPath = path;
 
@@ -191,8 +275,8 @@ ExportAllResult ExportAllMaps(
             auto it = packedByMap->find((int)m.kind);
             if (it != packedByMap->end() && it->second.w > 0 &&
                 it->second.rgba.size() >= (size_t)it->second.w * (size_t)it->second.h * 4u) {
-                ok = SaveWithCodec(path, it->second.rgba.data(), it->second.w, it->second.h,
-                                   m.exportCodec, m.exportMips);
+                ok = SaveWithResolved(path, it->second.rgba.data(), it->second.w, it->second.h,
+                                      asPng, formatStr, mips, mipFilter, speed, options);
             }
         }
         if (!ok && m.kind == MapKind::Diffuse) {
@@ -201,18 +285,20 @@ ExportAllResult ExportAllMaps(
                                          (size_t)diffuseOverride->GetHeight() * 4u);
                 diffuseOverride->ExportRGBA8(tmp.data(), diffuseOverride->GetWidth(),
                                              diffuseOverride->GetHeight());
-                ok = SaveWithCodec(path, tmp.data(), diffuseOverride->GetWidth(),
-                                   diffuseOverride->GetHeight(), m.exportCodec, m.exportMips);
+                ok = SaveWithResolved(path, tmp.data(), diffuseOverride->GetWidth(),
+                                      diffuseOverride->GetHeight(), asPng, formatStr,
+                                      mips, mipFilter, speed, options);
             } else if (diffuseRgba8 && diffuseW > 0 && diffuseH > 0) {
-                ok = SaveWithCodec(path, diffuseRgba8->data(), diffuseW, diffuseH,
-                                   m.exportCodec, m.exportMips);
+                ok = SaveWithResolved(path, diffuseRgba8->data(), diffuseW, diffuseH,
+                                      asPng, formatStr, mips, mipFilter, speed, options);
             }
         }
 
         if (ok) {
             ++r.written;
-            r.log += "OK  " + path + "\n";
-            Logger::Get().InfoTag("texset", "Exported " + path);
+            r.log += "OK  " + path + (asPng ? " [PNG]" : (" [DDS " + formatStr + "]")) + "\n";
+            Logger::Get().InfoTag("texset", "Exported " + path +
+                (asPng ? " (PNG)" : (" (DDS " + formatStr + ")")));
         } else {
             ++r.failed;
             r.log += "FAIL " + path + " (" + MapKindName(m.kind) + ")\n";

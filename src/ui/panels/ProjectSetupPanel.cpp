@@ -153,41 +153,107 @@ if (state.showProjectSetup) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Export")) {
+            // Global container: hard DDS ↔ PNG switch for batch export
+            {
+                int cont = (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) ? 1 : 0;
+                const char* contNames[] = { "PNG", "DDS" };
+                ImGui::TextUnformatted("Container");
+                ImGui::SetNextItemWidth(160);
+                if (Ui::Combo("##ps_container", &cont, contNames, 2)) {
+                    canvas.SetExportContainer(cont == 1
+                        ? Canvas::ExportContainer::DDS
+                        : Canvas::ExportContainer::PNG);
+                }
+                ImGui::SameLine();
+                ImGui::TextDisabled(cont == 1
+                    ? "All maps → .dds (per-map codec / global format)"
+                    : "All maps → .png (ICC preset only)");
+            }
+
+            if (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.f, 1.f), "DDS global fallback");
+                static const char* formats[] = {
+                    "BC7 (sRGB, DX 11+)", "BC7 (Linear, DX 11+)",
+                    "BC3 (Linear, DXT5)", "BC1 (Linear, DXT1)",
+                    "BC5 (Linear, Unsigned)", "R8G8B8A8 (Linear, A8B8G8R8)",
+                    "RGBA16_FLOAT", "RGBA32_FLOAT", "R32 (Linear, Float)"
+                };
+                int fi = 0;
+                std::string cur = canvas.GetExportFormat();
+                for (int i = 0; i < IM_ARRAYSIZE(formats); ++i)
+                    if (cur == formats[i]) fi = i;
+                ImGui::SetNextItemWidth(220);
+                if (Ui::Combo("##ps_fmt", &fi, formats, IM_ARRAYSIZE(formats)))
+                    canvas.SetExportFormat(formats[fi]);
+                bool mips = canvas.GetExportGenerateMipMaps();
+                if (ImGui::Checkbox("Mipmaps##ps", &mips))
+                    canvas.SetExportGenerateMipMaps(mips);
+                ImGui::SameLine();
+                const char* speeds[] = { "Fast", "Medium", "Slow", "Best" };
+                int si = 1;
+                std::string cs = canvas.GetExportCompressionSpeed();
+                for (int i = 0; i < 4; ++i) if (cs == speeds[i]) si = i;
+                ImGui::SetNextItemWidth(100);
+                if (Ui::Combo("##ps_qual", &si, speeds, 4))
+                    canvas.SetExportCompressionSpeed(speeds[si]);
+            } else {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.f, 1.f), "PNG ICC preset");
+                const char* iccs[] = { "sRGB", "Linear", "AdobeRGB", "DisplayP3", "None" };
+                int ii = 0;
+                std::string ic = Canvas::IccPresetName(canvas.GetExportIccPreset());
+                for (int i = 0; i < 5; ++i) if (ic == iccs[i]) ii = i;
+                ImGui::SetNextItemWidth(160);
+                if (Ui::Combo("##ps_icc", &ii, iccs, 5))
+                    canvas.SetExportIccPreset(Canvas::IccPresetFromName(iccs[ii]));
+            }
+
             if (set) {
-                if (ImGui::BeginTable("##exptbl", 4, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
-                    ImGui::TableSetupColumn("Map", ImGuiTableColumnFlags_WidthStretch);
-                    ImGui::TableSetupColumn("Space", ImGuiTableColumnFlags_WidthFixed, 80);
-                    ImGui::TableSetupColumn("Codec", ImGuiTableColumnFlags_WidthFixed, 100);
-                    ImGui::TableSetupColumn("Mips", ImGuiTableColumnFlags_WidthFixed, 40);
-                    ImGui::TableHeadersRow();
-                    for (auto& m : set->maps) {
-                        if (!m.enabled) continue;
-                        ImGui::PushID(300 + (int)m.kind);
-                        ImGui::TableNextRow();
-                        ImGui::TableNextColumn();
-                        ImGui::TextUnformatted(m.DisplayName());
-                        ImGui::TableNextColumn();
-                        int cs = (m.colorSpace == texset::MapColorSpace::sRGB) ? 0 : 1;
-                        const char* css[] = { "sRGB", "Linear" };
-                        ImGui::SetNextItemWidth(-1);
-                        if (Ui::Combo("##cs", &cs, css, 2)) {
-                            m.colorSpace = cs == 0 ? texset::MapColorSpace::sRGB : texset::MapColorSpace::Linear;
-                            canvas.SetDocumentModified(true);
+                ImGui::Spacing();
+                ImGui::Separator();
+                // Per-map codecs matter when container is DDS
+                if (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) {
+                    ImGui::TextDisabled("Per-map codecs (override global when not PNG)");
+                    if (ImGui::BeginTable("##exptbl", 4, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+                        ImGui::TableSetupColumn("Map", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableSetupColumn("Space", ImGuiTableColumnFlags_WidthFixed, 80);
+                        ImGui::TableSetupColumn("Codec", ImGuiTableColumnFlags_WidthFixed, 100);
+                        ImGui::TableSetupColumn("Mips", ImGuiTableColumnFlags_WidthFixed, 40);
+                        ImGui::TableHeadersRow();
+                        for (auto& m : set->maps) {
+                            if (!m.enabled) continue;
+                            ImGui::PushID(300 + (int)m.kind);
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::TextUnformatted(m.DisplayName());
+                            ImGui::TableNextColumn();
+                            int cs = (m.colorSpace == texset::MapColorSpace::sRGB) ? 0 : 1;
+                            const char* css[] = { "sRGB", "Linear" };
+                            ImGui::SetNextItemWidth(-1);
+                            if (Ui::Combo("##cs", &cs, css, 2)) {
+                                m.colorSpace = cs == 0 ? texset::MapColorSpace::sRGB : texset::MapColorSpace::Linear;
+                                canvas.SetDocumentModified(true);
+                            }
+                            ImGui::TableNextColumn();
+                            // DDS-only codecs in the list (no PNG — container handles that)
+                            const char* codecs[] = {
+                                "Global", "BC7_sRGB", "BC7", "BC5", "R8G8", "R32", "RGBA8"
+                            };
+                            int ci = (int)m.exportCodec;
+                            if (ci < 0 || ci > 6) ci = 0;
+                            ImGui::SetNextItemWidth(-1);
+                            if (Ui::Combo("##codec", &ci, codecs, 7)) {
+                                // "Global" maps to PNG enum → batch uses canvas global format
+                                m.exportCodec = (texset::MapExportCodec)ci;
+                                canvas.SetDocumentModified(true);
+                            }
+                            ImGui::TableNextColumn();
+                            ImGui::Checkbox("##mips", &m.exportMips);
+                            ImGui::PopID();
                         }
-                        ImGui::TableNextColumn();
-                        const char* codecs[] = { "PNG", "BC7_sRGB", "BC7", "BC5", "R8G8", "R32", "RGBA8" };
-                        int ci = (int)m.exportCodec;
-                        if (ci < 0 || ci > 6) ci = 0;
-                        ImGui::SetNextItemWidth(-1);
-                        if (Ui::Combo("##codec", &ci, codecs, 7)) {
-                            m.exportCodec = (texset::MapExportCodec)ci;
-                            canvas.SetDocumentModified(true);
-                        }
-                        ImGui::TableNextColumn();
-                        ImGui::Checkbox("##mips", &m.exportMips);
-                        ImGui::PopID();
+                        ImGui::EndTable();
                     }
-                    ImGui::EndTable();
                 }
                 ImGui::Spacing();
                 if (ImGui::Button("Choose export folder…"))
@@ -195,7 +261,10 @@ if (state.showProjectSetup) {
                 ImGui::SameLine();
                 if (ImGui::Button("Export All Now"))
                     state.openQuickExportTrigger = true;
-                ImGui::TextDisabled("Pick a folder (not a file). BC7/BC5 → .dds · PNG → .png");
+                ImGui::TextDisabled(
+                    canvas.GetExportContainer() == Canvas::ExportContainer::DDS
+                        ? "Batch writes .dds via texconv (BC7/BC5/…)."
+                        : "Batch writes .png with project ICC preset.");
             }
             ImGui::EndTabItem();
         }

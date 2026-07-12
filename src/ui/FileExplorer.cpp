@@ -528,40 +528,41 @@ void FileExplorerOpen(FileExplorerState& st, FileExplorerMode mode, const std::s
         if (mode == FileExplorerMode::SaveConfig && !st.saveFileName[0])
             std::snprintf(st.saveFileName, sizeof(st.saveFileName), "config.json");
     } else if (mode == FileExplorerMode::AdvancedExport) {
-        // Prefer existing export path basename
-        std::string exp;
-        // filled from canvas when drawing; default:
+        // Prefer existing export path basename; default from container
         if (!st.saveFileName[0])
             std::snprintf(st.saveFileName, sizeof(st.saveFileName), "export.dds");
     }
 }
 
 bool FileExplorerApplyAdvancedExport(FileExplorerState& st, Canvas& canvas) {
+    // Hard container switch owns the extension — not the free-typed name alone.
+    const bool asDds = canvas.GetExportContainer() == Canvas::ExportContainer::DDS;
     std::string name = st.saveFileName;
-    if (name.empty()) name = "export.dds";
-    if (name.find('.') == std::string::npos) name += ".dds";
+    if (name.empty()) name = asDds ? "export.dds" : "export.png";
+    {
+        size_t slash = name.find_last_of("/\\");
+        size_t dot = name.find_last_of('.');
+        std::string base = name;
+        if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+            base = name.substr(0, dot);
+        else if (dot == std::string::npos)
+            base = name;
+        name = base + (asDds ? ".dds" : ".png");
+        std::snprintf(st.saveFileName, sizeof(st.saveFileName), "%s", name.c_str());
+    }
     std::string full = JoinPath(st.currentDir, name);
     canvas.SetExportPath(full);
+    canvas.SyncExportPathExtension();
+    full = canvas.GetExportPath();
+    // Ensure directory is still currentDir when Sync only rewrote extension
+    if (full.find('/') == std::string::npos && full.find('\\') == std::string::npos)
+        full = JoinPath(st.currentDir, full);
+    canvas.SetExportPath(full);
 
-    std::string ext;
-    try {
-        ext = ToLower(fs::path(PathUtil::Utf8ToWide(name)).extension().string());
-        if (!ext.empty() && ext[0] == '.') ext = ext.substr(1);
-    } catch (...) {}
-
-    bool ok = false;
-    if (ext == "dds") {
-        ok = canvas.SaveCanvasCompressed(
-            full,
-            canvas.GetExportFormat(),
-            canvas.GetExportGenerateMipMaps(),
-            canvas.GetExportMipFilter(),
-            canvas.GetExportCompressionSpeed());
-    } else {
-        ok = canvas.SaveCanvasStandard(full, canvas.GetExportIccPreset());
-    }
-    st.status = ok ? ("Exported " + full) : "Export failed";
-    st.selectedPath = full;
+    std::string used;
+    bool ok = canvas.ExportWithProjectSettings(&used);
+    st.status = ok ? ("Exported " + (used.empty() ? full : used)) : "Export failed";
+    st.selectedPath = used.empty() ? full : used;
     return ok;
 }
 
@@ -927,6 +928,11 @@ bool FileExplorerApplyExportTemplate(FileExplorerState& st, Project* project) {
 
     std::string pattern = st.namePattern[0] ? st.namePattern : "{set}{suffix}";
 
+    // Container from canvas hard switch (DDS ↔ PNG), not hard-coded PNG.
+    const bool asDds = project->canvas &&
+        project->canvas->GetExportContainer() == Canvas::ExportContainer::DDS;
+    const char* ext = asDds ? "dds" : "png";
+
     auto applySet = [&](texset::TextureSet& set) {
         for (auto& m : set.maps) {
             if (!m.enabled) continue;
@@ -942,7 +948,6 @@ bool FileExplorerApplyExportTemplate(FileExplorerState& st, Project* project) {
             replaceAll(name, "{map}", texset::MapKindName(m.kind));
             replaceAll(name, "{suffix}", m.nameSuffix.empty()
                 ? (std::string("_") + texset::MapKindName(m.kind)) : m.nameSuffix);
-            std::string ext = "png";
             try {
                 fs::path out = PathUtil::FromUtf8(root) / PathUtil::Utf8ToWide(name + "." + ext);
                 m.exportPath = PathUtil::WideToUtf8(out.wstring());
@@ -1545,19 +1550,54 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             ImGui::TextUnformatted("Advanced Export");
             ImGui::Separator();
             ImGui::TextDisabled("Folder = browser path");
-            ImGui::InputText("File name", st.saveFileName, sizeof(st.saveFileName));
-            ImGui::TextWrapped("%s", JoinPath(st.currentDir, st.saveFileName).c_str());
 
-            std::string name = st.saveFileName;
-            std::string ext;
-            try {
-                ext = ToLower(fs::path(PathUtil::Utf8ToWide(name)).extension().string());
-                if (!ext.empty() && ext[0] == '.') ext = ext.substr(1);
-            } catch (...) {}
+            // DDS ↔ PNG hard toggle (owns extension + format panel)
+            {
+                int cont = (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) ? 1 : 0;
+                const char* contNames[] = { "PNG", "DDS" };
+                ImGui::TextUnformatted("Container");
+                ImGui::SetNextItemWidth(-1);
+                if (Ui::Combo("##container", &cont, contNames, 2, "Container")) {
+                    canvas.SetExportContainer(cont == 1
+                        ? Canvas::ExportContainer::DDS
+                        : Canvas::ExportContainer::PNG);
+                    // Keep save name stem, rewrite extension
+                    std::string name = st.saveFileName;
+                    size_t slash = name.find_last_of("/\\");
+                    size_t dot = name.find_last_of('.');
+                    std::string base = name;
+                    if (dot != std::string::npos && (slash == std::string::npos || dot > slash))
+                        base = name.substr(0, dot);
+                    if (base.empty()) base = "export";
+                    std::string next = base + (cont == 1 ? ".dds" : ".png");
+                    std::snprintf(st.saveFileName, sizeof(st.saveFileName), "%s", next.c_str());
+                }
+            }
+
+            ImGui::InputText("File name", st.saveFileName, sizeof(st.saveFileName));
+            // Live-sync extension if user typed the wrong one
+            {
+                const bool asDds = canvas.GetExportContainer() == Canvas::ExportContainer::DDS;
+                std::string name = st.saveFileName;
+                size_t slash = name.find_last_of("/\\");
+                size_t dot = name.find_last_of('.');
+                std::string base = name, curExt;
+                if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) {
+                    base = name.substr(0, dot);
+                    curExt = ToLower(name.substr(dot + 1));
+                }
+                const char* want = asDds ? "dds" : "png";
+                if (base.empty()) base = "export";
+                if (curExt != want) {
+                    std::string next = base + "." + want;
+                    std::snprintf(st.saveFileName, sizeof(st.saveFileName), "%s", next.c_str());
+                }
+            }
+            ImGui::TextWrapped("%s", JoinPath(st.currentDir, st.saveFileName).c_str());
 
             ImGui::Spacing();
             ImGui::Separator();
-            if (ext == "dds" || ext.empty()) {
+            if (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) {
                 ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.f, 1.f), "DDS settings");
                 static const char* formats[] = {
                     "BC1 (Linear, DXT1)", "BC1 (sRGB, DX 10+)",
@@ -1603,16 +1643,16 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                 for (int i = 0; i < 4; ++i) if (cs == speeds[i]) si = i;
                 if (Ui::Combo("##qual", &si, speeds, 4, "Quality"))
                     canvas.SetExportCompressionSpeed(speeds[si]);
-            } else if (ext == "png") {
+            } else {
                 ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.f, 1.f), "PNG settings");
                 const char* iccs[] = { "sRGB", "Linear", "AdobeRGB", "DisplayP3", "None" };
                 int ii = 0;
                 std::string ic = Canvas::IccPresetName(canvas.GetExportIccPreset());
                 for (int i = 0; i < 5; ++i) if (ic == iccs[i]) ii = i;
-                if (Ui::Combo("##icc", &ii, iccs, 5, "ICC"))
+                ImGui::SetNextItemWidth(-1);
+                if (Ui::Combo("##icc", &ii, iccs, 5, "ICC Profile"))
                     canvas.SetExportIccPreset(Canvas::IccPresetFromName(iccs[ii]));
-            } else {
-                ImGui::TextDisabled("Extension: .%s", ext.c_str());
+                ImGui::TextDisabled("Only ICC preset — no compression options.");
             }
         } else if (isSaveName) {
             ImGui::TextUnformatted(st.mode == FileExplorerMode::SaveProject ? "Save Project" : "Save Config");
@@ -1628,7 +1668,7 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             else
                 ImGui::TextDisabled("Select a file in the list");
         } else if (isExport) {
-            ImGui::TextUnformatted("Export folder");
+            ImGui::TextUnformatted("Batch Export");
             ImGui::Separator();
             ImGui::TextWrapped("Choose a folder — maps will be written there. No need to pick a file.");
             ImGui::Spacing();
@@ -1642,10 +1682,88 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             ImGui::Checkbox("All texture sets", &st.exportAllSets);
             ImGui::Checkbox("Export now after apply", &st.exportAndRun);
             if (ImGui::IsItemHovered())
-                Ui::Tooltip("Assign paths and run Quick Export into this folder");
+                Ui::Tooltip("Assign paths and run batch export into this folder");
+
             ImGui::Spacing();
-            ImGui::TextDisabled("Current:");
+            ImGui::Separator();
+            // DDS ↔ PNG hard toggle for the whole batch
+            {
+                int cont = (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) ? 1 : 0;
+                const char* contNames[] = { "PNG", "DDS" };
+                ImGui::TextUnformatted("Container");
+                ImGui::SetNextItemWidth(-1);
+                if (Ui::Combo("##batch_container", &cont, contNames, 2, "Container")) {
+                    canvas.SetExportContainer(cont == 1
+                        ? Canvas::ExportContainer::DDS
+                        : Canvas::ExportContainer::PNG);
+                }
+            }
+
+            if (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) {
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.f, 1.f), "DDS settings");
+                ImGui::TextDisabled("Global fallback; per-map BC5/BC7 from template still apply.");
+                static const char* formats[] = {
+                    "BC1 (Linear, DXT1)", "BC1 (sRGB, DX 10+)",
+                    "BC2 (Linear, DXT3)", "BC2 (sRGB, DX 10+)",
+                    "BC3 (Linear, DXT5)", "BC3 (sRGB, DX 10+)", "BC3 (Linear, RXGB)",
+                    "BC4 (Linear, Unsigned)", "BC4 (Linear, Unsigned, ATI1)",
+                    "BC5 (Linear, Unsigned)", "BC5 (Linear, Unsigned, ATI2)", "BC5 (Linear, Signed)",
+                    "BC6H (Linear, Unsigned, DX 11+)",
+                    "BC7 (Linear, DX 11+)", "BC7 (sRGB, DX 11+)",
+                    "B8G8R8A8 (Linear, A8R8G8B8)", "B8G8R8A8 (sRGB, DX 10+)",
+                    "B8G8R8X8 (Linear, X8R8G8B8)", "B8G8R8X8 (sRGB, DX 10+)",
+                    "R8G8B8A8 (Linear, A8B8G8R8)", "R8G8B8A8 (sRGB, DX 10+)",
+                    "R8G8B8X8 (Linear, X8B8G8R8)",
+                    "B5G5R5A1 (Linear, A1R5G5B5)", "B4G4R4A4 (Linear, A4R4G4B4)",
+                    "B5G6R5 (Linear, R5G6B5)", "B8G8R8 (Linear, R8G8B8)",
+                    "R8 (Linear, Unsigned, L8)",
+                    "R8G8 (Linear, Unsigned, A8L8)", "R8G8 (Linear, Signed, V8U8)",
+                    "R32 (Linear, Float)",
+                    "RGBA16_FLOAT", "RGBA32_FLOAT", "RGBA8_UNORM"
+                };
+                int fi = 14;
+                std::string cur = canvas.GetExportFormat();
+                for (int i = 0; i < (int)(sizeof(formats) / sizeof(formats[0])); ++i)
+                    if (cur == formats[i]) fi = i;
+                ImGui::SetNextItemWidth(-1);
+                if (Ui::Combo("##batch_fmt", &fi, formats,
+                              (int)(sizeof(formats) / sizeof(formats[0])), "Format"))
+                    canvas.SetExportFormat(formats[fi]);
+
+                bool mips = canvas.GetExportGenerateMipMaps();
+                if (ImGui::Checkbox("Generate Mipmaps##batch", &mips))
+                    canvas.SetExportGenerateMipMaps(mips);
+                if (mips) {
+                    const char* filters[] = { "Point", "Box", "Linear", "Cubic", "Fant", "Lanczos" };
+                    int fli = 3;
+                    std::string cf = canvas.GetExportMipFilter();
+                    for (int i = 0; i < 6; ++i) if (cf == filters[i]) fli = i;
+                    if (Ui::Combo("##batch_mipf", &fli, filters, 6, "Mip Filter"))
+                        canvas.SetExportMipFilter(filters[fli]);
+                }
+                const char* speeds[] = { "Fast", "Medium", "Slow", "Best" };
+                int si = 1;
+                std::string cs = canvas.GetExportCompressionSpeed();
+                for (int i = 0; i < 4; ++i) if (cs == speeds[i]) si = i;
+                if (Ui::Combo("##batch_qual", &si, speeds, 4, "Quality"))
+                    canvas.SetExportCompressionSpeed(speeds[si]);
+            } else {
+                ImGui::TextColored(ImVec4(0.35f, 0.75f, 1.f, 1.f), "PNG settings");
+                const char* iccs[] = { "sRGB", "Linear", "AdobeRGB", "DisplayP3", "None" };
+                int ii = 0;
+                std::string ic = Canvas::IccPresetName(canvas.GetExportIccPreset());
+                for (int i = 0; i < 5; ++i) if (ic == iccs[i]) ii = i;
+                ImGui::SetNextItemWidth(-1);
+                if (Ui::Combo("##batch_icc", &ii, iccs, 5, "ICC Profile"))
+                    canvas.SetExportIccPreset(Canvas::IccPresetFromName(iccs[ii]));
+                ImGui::TextDisabled("All maps → .png with this ICC preset.");
+            }
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Current folder:");
             ImGui::TextWrapped("%s", st.exportRoot[0] ? st.exportRoot : st.currentDir.c_str());
+            ImGui::TextDisabled("Output: .%s",
+                canvas.GetExportContainer() == Canvas::ExportContainer::DDS ? "dds" : "png");
         }
 
         // Preview pane for selected image

@@ -476,6 +476,19 @@ public:
     std::string GetCurrentProjectFilePath() const { return m_CurrentProjectFilePath; }
     void SetCurrentProjectFilePath(const std::string& path) { m_CurrentProjectFilePath = path; }
 
+    // Hard export container — single source of truth (not inferred from path extension).
+    enum class ExportContainer : uint8_t {
+        PNG = 0, // standard image + ICC presets only
+        DDS = 1  // texconv: format / mips / compression quality
+    };
+    ExportContainer GetExportContainer() const { return m_ExportContainer; }
+    void SetExportContainer(ExportContainer c);
+    // Align export path extension with container (.png / .dds). Returns updated path.
+    std::string SyncExportPathExtension();
+    // Write using container: DDS → SaveCanvasCompressed, PNG → SaveCanvasStandard(ICC).
+    // Empty path → uses GetExportPath() or default export.dds / export.png.
+    bool ExportWithProjectSettings(std::string* outPathUsed = nullptr);
+
     std::string GetExportPath() const { return m_ExportPath; }
     void SetExportPath(const std::string& path) { m_ExportPath = path; }
     std::string GetExportFormat() const { return m_ExportFormat; }
@@ -732,7 +745,10 @@ private:
     std::string m_CurrentProjectFilePath;
 
     std::string m_ExportPath = "";
-    std::string m_ExportFormat = "BC7_UNORM_SRGB";
+    // Hard switch: PNG vs DDS (never infer from extension alone).
+    ExportContainer m_ExportContainer = ExportContainer::DDS;
+    // DDS preset string (texconv / UI combo labels)
+    std::string m_ExportFormat = "BC7 (sRGB, DX 11+)";
     // Texture set library JSON (Project.textureSets.MetaToJson) for .rayp round-trip
     std::string m_TextureSetsMetaJson;
     bool m_ExportAdvancedMode = false;

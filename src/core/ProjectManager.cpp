@@ -409,12 +409,46 @@ int Project::QuickExportAllMaps(const std::string& baseDirHint) {
         }
     }
 
-    std::string ext = "png";
+    // Build batch options from canvas ExportContainer (hard DDS/PNG switch).
+    texset::BatchExportOptions opts;
+    const bool asDds =
+        canvas->GetExportContainer() == Canvas::ExportContainer::DDS;
+    opts.container = asDds
+        ? texset::BatchExportOptions::Container::DDS
+        : texset::BatchExportOptions::Container::PNG;
+    opts.ddsFormat = canvas->GetExportFormat();
+    opts.usePerMapCodec = true; // BC5 normals etc. from template still win when DDS
+    opts.generateMipMaps = canvas->GetExportGenerateMipMaps();
+    opts.mipFilter = canvas->GetExportMipFilter();
+    opts.compressionSpeed = canvas->GetExportCompressionSpeed();
+    if (!asDds) {
+        auto preset = canvas->GetExportIccPreset();
+        if (preset != Canvas::IccPreset::None) {
+            const auto& icc = Canvas::GetIccPresetBytes(preset);
+            opts.iccBytes = icc.data();
+            opts.iccSize = icc.size();
+            opts.iccProfileName = Canvas::IccPresetName(preset);
+        }
+    }
+
+    // Align empty/stale map paths to the active container extension
+    const char* wantExt = asDds ? "dds" : "png";
+    for (auto& m : set->maps) {
+        if (!m.enabled) continue;
+        if (m.exportPath.empty()) {
+            m.exportPath = texset::DefaultMapExportPath(*set, m.kind, baseDir, wantExt);
+        } else {
+            m.exportPath = texset::ForcePathExtension(m.exportPath, wantExt);
+        }
+    }
+
+    std::string ext = wantExt;
     auto result = texset::ExportAllMaps(
-        *set, baseDir, ext, nullptr, nullptr, 0, 0, &packed);
+        *set, baseDir, ext, nullptr, nullptr, 0, 0, &packed, &opts);
 
     Logger::Get().InfoTag("texset",
-        "BatchExport maps written=" + std::to_string(result.written) +
+        std::string("BatchExport container=") + (asDds ? "DDS" : "PNG") +
+        " maps written=" + std::to_string(result.written) +
         " failed=" + std::to_string(result.failed) +
         (result.log.empty() ? "" : ("\n" + result.log)));
     return result.written;
