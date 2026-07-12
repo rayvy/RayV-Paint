@@ -1,7 +1,10 @@
 # For Future — open holes before / during combat testing
 
-Date: 2026-07-10  
-Branch: DX11-upgrade  
+Date: 2026-07-12  
+Branch: main (post Build 15)
+
+**Build 16 plan (cleanup / UI kit / Asset Browser):**  
+→ `plans/BUILD16_CLEANUP_OPTIMIZATION.md` · `plans/UI_RULES.md` · `plans/ASSET_BROWSER.md`
 
 **Out of scope here:** exhaustive DDS format matrix, embedding DirectXTex (tracked separately as product goal).
 
@@ -26,7 +29,7 @@ Branch: DX11-upgrade
 |---|------|
 | 7 | SVG smart object = checker placeholder (bytes kept) |
 | 8 | Transform floating = full-doc GPU texture |
-| 9 | Mask paint undo incomplete |
+| 9 | Mask paint undo incomplete *(partially fixed B15 — tiled delta; keep watch)* |
 | 10 | Brush dynamics (flow, size jitter, Phase C–F) unfinished |
 | 11 | Smudge / some tools vs undo history edge cases |
 | 12 | .rayp multi-layer F16 edge cases |
