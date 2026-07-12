@@ -10,6 +10,7 @@
 #include "../widgets/UiTooltip.h"
 #include "../widgets/UiPathField.h"
 #include "../widgets/UiVisualSlider.h"
+#include "../widgets/UiColorField.h"
 #include "../style/UiTokens.h"
 #include "../../core/ProjectManager.h"
 #include "../../core/Logger.h"
@@ -218,33 +219,20 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
 
                         if (mc.enabled) {
                             ImGui::SameLine(0, 4);
-                            if (ImGui::ColorButton("##sw",
-                                    ImVec4(mc.rgba[0], mc.rgba[1], mc.rgba[2], mc.rgba[3]),
-                                    ImGuiColorEditFlags_AlphaPreview | ImGuiColorEditFlags_NoTooltip,
-                                    ImVec2(swatch, swatch))) {
-                                ImGui::OpenPopup("##fillcolpop");
+                            bool pip = false;
+                            if (Ui::ColorField("##fillcol", mc.rgba,
+                                    Ui::ColorFieldFlags_FullPicker | Ui::ColorFieldFlags_AlphaBar |
+                                    Ui::ColorFieldFlags_Pipette,
+                                    nullptr, &pip)) {
+                                dirtyFill();
                             }
-                            if (ImGui::BeginPopup("##fillcolpop")) {
-                                float before[4] = { mc.rgba[0], mc.rgba[1], mc.rgba[2], mc.rgba[3] };
-                                ImGui::ColorPicker4("##fp", mc.rgba,
-                                    ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_DisplayRGB |
-                                    ImGuiColorEditFlags_NoSidePreview);
-                                if (ImGui::IsItemEdited()) {
-                                    if (before[0] != mc.rgba[0] || before[1] != mc.rgba[1] ||
-                                        before[2] != mc.rgba[2] || before[3] != mc.rgba[3])
-                                        dirtyFill();
-                                }
-                                if (ImGui::Button("Pipette", ImVec2(-1, 0))) {
-                                    UI::ArmFillPipette(ai, mi);
-                                    // Must close popup so next canvas click is not swallowed by ImGui
-                                    ImGui::CloseCurrentPopup();
-                                }
-                                if (ImGui::IsItemHovered())
-                                    Ui::Tooltip("Click canvas to sample (active Channels map)");
-                                if (UI::FillPipetteArmedFor(ai, mi))
-                                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "Click canvas…");
-                                ImGui::EndPopup();
+                            if (pip)
+                                UI::ArmFillPipette(ai, mi);
+                            if (UI::FillPipetteArmedFor(ai, mi)) {
+                                ImGui::SameLine(0, 4);
+                                ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "…");
                             }
+                            (void)swatch;
                             // Write mask row
                             const char* chs[4] = { "R", "G", "B", "A" };
                             for (int c = 0; c < 4; ++c) {

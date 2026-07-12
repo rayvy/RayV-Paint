@@ -161,6 +161,12 @@ set(SOURCES
     src/ui/panels/ChannelsPanel.h
     src/ui/panels/ToolSettingsPanel.cpp
     src/ui/panels/ToolSettingsPanel.h
+    src/ui/panels/LayerEffectsPanel.cpp
+    src/ui/panels/LayerEffectsPanel.h
+    src/ui/panels/ProjectSetupPanel.cpp
+    src/ui/panels/ProjectSetupPanel.h
+    src/ui/panels/ColorsPanel.cpp
+    src/ui/panels/ColorsPanel.h
     src/ui/style/UiTokens.cpp
     src/ui/style/UiTokens.h
     src/ui/style/UiMotion.cpp
@@ -181,6 +187,8 @@ set(SOURCES
     src/ui/widgets/UiPathField.h
     src/ui/widgets/UiTooltip.cpp
     src/ui/widgets/UiTooltip.h
+    src/ui/widgets/UiColorField.cpp
+    src/ui/widgets/UiColorField.h
 )
 
 # Shaders

@@ -26,6 +26,7 @@
 | Icon buttons / toggles | `UiIconButton`, `UiIconToggle` |
 | Dropdowns (click + hold) | `UiDropdown` |
 | Sliders | `UiVisualSlider` / SmartSlider patterns |
+| Color + optional pipette | `UiColorField` (`ColorFieldFlags_Pipette` / `FullPicker`) |
 | Tooltips (delay) | `UiTooltip` |
 | Dock panels | `UiPanel` |
 | Path pick | `UiPathField` → prefer **File Explorer** modes for projects/maps |

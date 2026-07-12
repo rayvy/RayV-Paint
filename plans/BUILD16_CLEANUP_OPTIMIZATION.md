@@ -178,10 +178,12 @@ S3  Dead modals → File Explorer                   [cleanup] ✅
 S4a LayersPanel extract                           [structure] ✅ (~767 lines)
 S4b ChannelsPanel extract                         [structure] ✅ (~135 lines)
 S4c ToolSettingsPanel extract                     [structure] ✅
-    EditorPanels shrinking; RenderAll orchestrates panel draws
-S4d next: LayerEffects / ProjectSetup / Colors extracts
+S4d LayerEffects + ProjectSetup + Colors extracts [structure] ✅
+    EditorPanels ~2.7k; panels: Layers/Channels/ToolSettings/FX/Setup/Colors
+S4e next (optional): ModSetup / Properties / ViewportNav / Toolbar
 S4fix Mojibake UTF-8 fix (вЂ/В·/в† → —, ·, →, …)   [bugfix] ✅
-S1  UiColorField + pipette arm single API           [UI kit]
+S1  UiColorField kit + Fill/FX migrate             [UI kit] ✅ started
+    (pipette still ArmFillPipette; unify brush arm later)
 S5  AssetStore + built-in/user paths               [opt foundation]
 S6  Fill Layer uses AssetStore                     [opt consumer]
 S7  Project assets ↔ .rayp packing                 [opt portable]
@@ -217,7 +219,9 @@ Each slice: compile + short manual checklist (below).
 
 ## 7. Handoff note for next session
 
-**Build 15 closed. Build 16 mid-flight:** S0–S3 + Combo audit + Layers/Channels extract done; Release build green.  
-**Next:** S4c further EditorPanels splits (ToolSettings / Layer Effects / Project Setup) **or** S1 UiColorField.  
+**Build 16 mid-flight — structure largely done.** Release green.  
+**Done:** S0–S4d panels + Combo audit + mojibake fix + UiColorField (Fill/FX).  
+**EditorPanels ~2.6k** (was ~4.6k). Panels: Layers, Channels, ToolSettings, LayerEffects, ProjectSetup, Colors.  
+**Next:** S4e optional (ModSetup/Properties) **or** S5–S6 Asset Browser (Fill lag).  
 Do **not** open Canvas for fun; touch Canvas only for AssetStore hooks + Fill asset id.  
 User priority quote: *refactor only to reshuffle, dedupe, standardize UI; OOP for UI; Asset Browser forced for Fill lag.*
