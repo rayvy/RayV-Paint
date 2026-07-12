@@ -182,10 +182,10 @@ S4d LayerEffects + ProjectSetup + Colors extracts [structure] ✅
     EditorPanels ~2.7k; panels: Layers/Channels/ToolSettings/FX/Setup/Colors
 S4e next (optional): ModSetup / Properties / ViewportNav / Toolbar
 S4fix Mojibake UTF-8 fix (вЂ/В·/в† → —, ·, →, …)   [bugfix] ✅
-S1  UiColorField kit + Fill/FX migrate             [UI kit] ✅ started
-    (pipette still ArmFillPipette; unify brush arm later)
-S5  AssetStore + built-in/user paths               [opt foundation]
-S6  Fill Layer uses AssetStore                     [opt consumer]
+S1  UiColorField kit + Fill/FX migrate             [UI kit] ✅
+S5  AssetStore + path keys + refcount              [opt foundation] ✅
+S6  Fill Layer → AssetStore (no private RGBA)      [opt consumer] ✅
+S5b UI Asset Browser shell (pick for Fill)         [opt UI] next
 S7  Project assets ↔ .rayp packing                 [opt portable]
 S8  Motion/token audit on FE + Fill                [UI polish]
 ```
@@ -219,9 +219,7 @@ Each slice: compile + short manual checklist (below).
 
 ## 7. Handoff note for next session
 
-**Build 16 mid-flight — structure largely done.** Release green.  
-**Done:** S0–S4d panels + Combo audit + mojibake fix + UiColorField (Fill/FX).  
-**EditorPanels ~2.6k** (was ~4.6k). Panels: Layers, Channels, ToolSettings, LayerEffects, ProjectSetup, Colors.  
-**Next:** S4e optional (ModSetup/Properties) **or** S5–S6 Asset Browser (Fill lag).  
-Do **not** open Canvas for fun; touch Canvas only for AssetStore hooks + Fill asset id.  
-User priority quote: *refactor only to reshuffle, dedupe, standardize UI; OOP for UI; Asset Browser forced for Fill lag.*
+**Build 16 mid-flight.** Release green.  
+**Done:** structure panels + kit Combo/ColorField + mojibake + **AssetStore + Fill shared textures**.  
+**Next:** S5b Asset Browser UI (pick texture for Fill) → S7 project packing in .rayp.  
+Do **not** re-decode textures per layer; use `AssetStore::AcquireFile` / keys.

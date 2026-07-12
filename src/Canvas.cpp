@@ -9,6 +9,7 @@
 #include "core/IccProfiles.h"
 #include "core/PathUtil.h"
 #include "core/ClipboardHelper.h"
+#include "assets/AssetStore.h"
 // Prefer PathUtil for all disk paths (UTF-8 / wide on Windows).
 #include <opencv2/imgproc.hpp>
 #include "core/ConfigManager.h"
@@ -1509,6 +1510,10 @@ void Canvas::DeleteLayer(int index) {
     m_UndoRedoManager.PushCommand(std::make_shared<LayerStackCommand>(
         "Delete Layer", LayerStackCommand::Kind::Remove, std::move(snap)));
 
+    if (!m_Layers[index].fill.textureAssetKey.empty()) {
+        assets::AssetStore::Get().Release(m_Layers[index].fill.textureAssetKey);
+        m_Layers[index].fill.textureAssetKey.clear();
+    }
     if (m_Layers[index].texture) m_Layers[index].texture->Release();
     if (m_Layers[index].srv) m_Layers[index].srv->Release();
     if (m_Layers[index].maskTexture) m_Layers[index].maskTexture->Release();
@@ -1752,6 +1757,9 @@ int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
     dup.smartSourcePath = src.smartSourcePath;
     dup.smartScale = src.smartScale;
     dup.fill = src.fill;
+    // Shared fill texture: bump AssetStore ref (copy does not Acquire).
+    if (!dup.fill.textureAssetKey.empty())
+        assets::AssetStore::Get().AddRef(dup.fill.textureAssetKey);
     dup.workSpace = src.workSpace; // map participation
     dup.filters = src.filters;
     dup.filtersDirty = true;
@@ -3892,6 +3900,8 @@ static json LayerToJson(const Layer& layer) {
         fj["gray"] = layer.fill.gray;
         fj["use_texture"] = layer.fill.useTexture;
         fj["texture_path"] = layer.fill.texturePath;
+        if (!layer.fill.textureAssetKey.empty())
+            fj["texture_asset_key"] = layer.fill.textureAssetKey;
         fj["tex_scale"] = { layer.fill.texScale[0], layer.fill.texScale[1] };
         fj["tex_offset"] = { layer.fill.texOffset[0], layer.fill.texOffset[1] };
         // Per-map RGBA (primary model)
@@ -4006,6 +4016,8 @@ static void LayerFromJson(Layer& layer, const json& j) {
         if (fj.contains("gray")) layer.fill.gray = fj["gray"].get<float>();
         if (fj.contains("use_texture")) layer.fill.useTexture = fj["use_texture"].get<bool>();
         if (fj.contains("texture_path")) layer.fill.texturePath = fj["texture_path"].get<std::string>();
+        if (fj.contains("texture_asset_key") && fj["texture_asset_key"].is_string())
+            layer.fill.textureAssetKey = fj["texture_asset_key"].get<std::string>();
         if (fj.contains("tex_scale") && fj["tex_scale"].is_array() && fj["tex_scale"].size() >= 2) {
             layer.fill.texScale[0] = fj["tex_scale"][0].get<float>();
             layer.fill.texScale[1] = fj["tex_scale"][1].get<float>();
@@ -4013,6 +4025,21 @@ static void LayerFromJson(Layer& layer, const json& j) {
         if (fj.contains("tex_offset") && fj["tex_offset"].is_array() && fj["tex_offset"].size() >= 2) {
             layer.fill.texOffset[0] = fj["tex_offset"][0].get<float>();
             layer.fill.texOffset[1] = fj["tex_offset"][1].get<float>();
+        }
+        // Rehydrate texture via shared AssetStore (no private multi-MB copy).
+        if (layer.fill.useTexture && !layer.fill.texturePath.empty()) {
+            std::string key = assets::AssetStore::Get().AcquireFile(layer.fill.texturePath);
+            if (!key.empty()) {
+                layer.fill.textureAssetKey = key;
+                if (const assets::TextureAsset* t = assets::AssetStore::Get().Get(key)) {
+                    layer.fill.textureW = t->w;
+                    layer.fill.textureH = t->h;
+                }
+                layer.fill.textureRgba.clear();
+            } else {
+                layer.fill.useTexture = false;
+                layer.fill.textureAssetKey.clear();
+            }
         }
         layer.fill.roles.clear();
         for (int i = 0; i < (int)texset::MapKind::Count; ++i)
@@ -7130,34 +7157,54 @@ bool Canvas::LoadFillTexture(int layerIdx, const std::string& filepath) {
     if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
     Layer& layer = m_Layers[layerIdx];
     if (!layer.IsFill()) return false;
-    if (filepath.empty()) {
-        layer.fill.useTexture = false;
-        layer.fill.texturePath.clear();
+
+    auto releasePrev = [&]() {
+        if (!layer.fill.textureAssetKey.empty()) {
+            assets::AssetStore::Get().Release(layer.fill.textureAssetKey);
+            layer.fill.textureAssetKey.clear();
+        }
         layer.fill.textureRgba.clear();
         layer.fill.textureW = layer.fill.textureH = 0;
+    };
+
+    if (filepath.empty()) {
+        releasePrev();
+        layer.fill.useTexture = false;
+        layer.fill.texturePath.clear();
         layer.needsUpload = true;
         layer.presentationDirty = true;
         m_CompositeDirty = true;
         m_IsDocumentModified = true;
         return true;
     }
-    std::vector<uint8_t> px;
-    int tw = 0, th = 0;
-    if (!ImageManager::LoadImageFromFile(filepath, px, tw, th)) {
+
+    // Shared decode via AssetStore — N fill layers with same path → 1 CPU blob.
+    std::string key = assets::AssetStore::Get().AcquireFile(filepath);
+    if (key.empty()) {
         Logger::Get().Error("LoadFillTexture failed: " + filepath);
         return false;
     }
+    const assets::TextureAsset* tex = assets::AssetStore::Get().Get(key);
+    if (!tex || tex->w <= 0 || tex->h <= 0) {
+        assets::AssetStore::Get().Release(key);
+        Logger::Get().Error("LoadFillTexture: empty asset " + filepath);
+        return false;
+    }
+
+    releasePrev();
     layer.fill.useTexture = true;
     layer.fill.texturePath = filepath;
-    layer.fill.textureRgba = std::move(px);
-    layer.fill.textureW = tw;
-    layer.fill.textureH = th;
+    layer.fill.textureAssetKey = key;
+    layer.fill.textureW = tex->w;
+    layer.fill.textureH = tex->h;
+    // No private textureRgba copy — sample through AssetStore in FillSolidBuffer.
     layer.needsUpload = true;
     layer.presentationDirty = true;
     layer.presentationCache.reset();
     m_CompositeDirty = true;
     m_IsDocumentModified = true;
-    Logger::Get().Info("Fill texture loaded " + std::to_string(tw) + "x" + std::to_string(th));
+    Logger::Get().Info("Fill texture (AssetStore) " + std::to_string(tex->w) + "x" +
+                       std::to_string(tex->h) + " key=" + key);
     return true;
 }
 

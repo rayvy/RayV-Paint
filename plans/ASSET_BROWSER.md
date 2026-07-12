@@ -104,12 +104,14 @@ Solid color Fill stays 1×1 GPU path. Textured Fill must not call full-document 
 
 ## 8. Implementation slices
 
-1. `AssetStore` + path resolution (built-in/user)  
-2. Register + load texture + thumb  
-3. UI browser shell  
-4. Fill wiring + stop full CPU rebake  
-5. Project category + `.rayp`  
-6. Migrate old `texture_path` on document load  
+1. `AssetStore` + path resolution (built-in/user)  ✅ (`src/assets/AssetStore.*`)
+2. Register + load texture + thumb  ✅ (AcquireFile + refcount; thumbs later)
+3. UI browser shell  — next (tabs Built-in | User | Project)
+4. Fill wiring + stop private multi-MB copy  ✅  
+   - `fill.textureAssetKey` + shared sample in `FillSolidBuffer`  
+   - `LoadFillTexture` / load .rayp / Duplicate / Delete refcount
+5. Project category + `.rayp` packing blobs  
+6. Migrate old `texture_path` on document load  ✅ (AcquireFile on deserialize)
 
 ---
 

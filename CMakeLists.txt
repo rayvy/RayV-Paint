@@ -93,6 +93,9 @@ set(SOURCES
     src/layer/LayerTypes.h
     src/layer/LayerStyles.cpp
     src/layer/LayerStyles.h
+    src/assets/AssetTypes.h
+    src/assets/AssetStore.cpp
+    src/assets/AssetStore.h
     src/core/TileCache.cpp
     src/core/TileCache.h
     src/core/MaskTiles.cpp

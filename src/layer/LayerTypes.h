@@ -153,11 +153,13 @@ struct FillLayerParams {
     // Primary model: per-MapKind solid color (Diffuse/LightMap/Material/Normal/…)
     FillMapColor mapColor[(int)texset::MapKind::Count] = {};
 
-    // Optional texture multiply
+    // Optional texture multiply (shared via AssetStore when textureAssetKey set)
     bool useTexture = false;
-    std::string texturePath;
+    std::string texturePath;       // source path (UI + .rayp); may be absolute
+    std::string textureAssetKey;   // AssetStore key (ext:/user:/builtin:…); empty = legacy
     float texScale[2] = {1.f, 1.f};
     float texOffset[2] = {0.f, 0.f};
+    // Legacy private blob — avoided when textureAssetKey is bound (shared cache).
     std::vector<uint8_t> textureRgba;
     int textureW = 0;
     int textureH = 0;
@@ -224,8 +226,11 @@ struct FillLayerParams {
         return true;
     }
 
+    // True when fill multiplies a texture. Prefer AssetStore key; legacy private RGBA still valid.
     bool HasTexture() const {
-        return useTexture && !textureRgba.empty() && textureW > 0 && textureH > 0;
+        if (!useTexture || textureW <= 0 || textureH <= 0) return false;
+        if (!textureAssetKey.empty()) return true;
+        return !textureRgba.empty();
     }
 
     // Migrate old role-based fills → map colors

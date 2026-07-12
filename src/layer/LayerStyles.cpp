@@ -1,4 +1,5 @@
 #include "LayerStyles.h"
+#include "../assets/AssetStore.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -593,7 +594,26 @@ void FillSolidBuffer(std::vector<float>& out, int w, int h, const FillLayerParam
     fill.ResolveRgba(c);
     out.resize((size_t)w * h * 4);
 
-    if (!fill.HasTexture()) {
+    const uint8_t* texPx = nullptr;
+    int tw = 0, th = 0;
+    if (fill.useTexture) {
+        if (!fill.textureAssetKey.empty()) {
+            if (const assets::TextureAsset* a = assets::AssetStore::Get().Get(fill.textureAssetKey)) {
+                if (!a->rgba.empty() && a->w > 0 && a->h > 0) {
+                    texPx = a->rgba.data();
+                    tw = a->w;
+                    th = a->h;
+                }
+            }
+        }
+        if (!texPx && !fill.textureRgba.empty() && fill.textureW > 0 && fill.textureH > 0) {
+            texPx = fill.textureRgba.data();
+            tw = fill.textureW;
+            th = fill.textureH;
+        }
+    }
+
+    if (!texPx) {
         for (int i = 0; i < w * h; ++i) {
             out[(size_t)i * 4 + 0] = c[0];
             out[(size_t)i * 4 + 1] = c[1];
@@ -603,13 +623,13 @@ void FillSolidBuffer(std::vector<float>& out, int w, int h, const FillLayerParam
         return;
     }
 
-    // Texture × color tint, tiled with scale/offset
+    // Texture × color tint, tiled with scale/offset (shared AssetStore blob or legacy private)
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             float u = (float)x / (float)std::max(1, w) * fill.texScale[0] + fill.texOffset[0];
             float v = (float)y / (float)std::max(1, h) * fill.texScale[1] + fill.texOffset[1];
             float tr[4];
-            SampleTextureRGBA8(fill.textureRgba.data(), fill.textureW, fill.textureH, u, v, tr);
+            SampleTextureRGBA8(texPx, tw, th, u, v, tr);
             size_t i = ((size_t)y * w + x) * 4;
             out[i + 0] = tr[0] * c[0];
             out[i + 1] = tr[1] * c[1];
