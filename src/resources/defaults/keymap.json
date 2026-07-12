@@ -1,5 +1,8 @@
 {
+    "AdjustBlur": "Ctrl+Shift+B",
+    "AdjustCurves": "Ctrl+M",
     "AdjustHSV": "Ctrl+U",
+    "AdjustNoise": "Unknown",
     "AdvancedExport": "Ctrl+Shift+E",
     "BrushPopup": "Unknown",
     "BrushTool": "B",

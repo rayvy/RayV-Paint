@@ -14,6 +14,7 @@ Branch: main (post Build 15)
 
 | # | Item | Notes |
 |---|------|--------|
+| 0 | **GPU-driven Layer Effects / Filters** | **TODO (priority).** Today styles + filters are **CPU bake** (`BuildPresentation` / `ApplyPixelFilters` → float buffer → tile upload). Composite is GPU, but FX themselves are not. Peers (Photoshop Live, Substance, game post) run outline/shadow/HSV/curves as **GPU passes** (often dirty-region / stack). Target: full **GPU-driven FX** — no full-doc CPU re-bake on paint; paint base, shader stack for preview, bake only for export/freeze. Especially **styles** (shadow/outline); then **filters** (HSV/curves/blur). Interim mitigations already: stroke skips filter rebuild, Effects Preview off, proxy bake ≤1536. |
 | 1 | **Large docs (4K–16K)** | Full GPU layer texture; flat selection/mask; full-frame float export can OOM |
 | 2 | **Depth dump = U8 view** | D32 opens as grayscale U8 (not raw F32 Z). Height maps: use R32F |
 | 3 | **Bit-depth convert has no undo** | Accidental U8↔F32 cannot be undone |
@@ -62,5 +63,25 @@ Branch: main (post Build 15)
 4. Convert U8↔F32 mid-size only first  
 5. UTF-8 paths  
 6. Long undo chains + transform  
+
+---
+
+## Architecture debt — Layer FX GPU (expanded)
+
+**Status:** TODO · not Build 16 scope unless time · do **after** stability of stroke-skip / Effects Preview OFF.
+
+**Current (CPU-driven):**
+- Styles: `layer_fx::BuildPresentation` on CPU (proxy optional)
+- Filters: full-frame `ApplyPixelFilters` on dirty
+- Then `TileCache` / D3D upload; DX11 only composites baked RGBA
+
+**Target (GPU-driven):**
+1. Keep **base content** tiles as source of truth (paint target unchanged)
+2. Per-layer or stack **FX pass(es)** in HLSL (outline expand, shadow blur separable, HSV/curves LUT textures)
+3. Interactive path: re-run GPU FX only for dirty layers/tiles — **not** full CPU float doc
+4. Export/rasterize: optional high-quality bake or same GPU path readback
+5. Compatibility: existing style/filter params map 1:1; no user-facing API break
+
+**Why:** peer tools feel instant on 1K–2K with FX; our CPU bake cannot scale. Interim UI toggle does not replace this.
 
 Log: `%USERPROFILE%/Documents/RayVPaint/user/rayv_paint.log`

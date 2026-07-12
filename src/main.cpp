@@ -1116,6 +1116,15 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("AdjustHSV")) {
                 uiState.showHSVModal = true;
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("AdjustCurves")) {
+                uiState.showCurvesModal = true;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("AdjustBlur")) {
+                uiState.showBlurModal = true;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("AdjustNoise")) {
+                uiState.showNoiseModal = true;
+            }
             // Ctrl+Shift+E: Advanced → Batch Export folder FE; Simple → Advanced Export FE
             if (KeymapManager::Get().ConsumeActionTrigger("AdvancedExport")) {
                 const bool advanced =
@@ -1841,8 +1850,9 @@ int main(int argc, char* argv[]) {
                 g_MoveAccumulatedOffsetY = 0;
             }
 
-            // Keyboard shortcuts (like Ctrl+D)
-            if ((ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) && !ImGui::GetIO().WantTextInput) {
+            // Keyboard: Ctrl+D = Deselect (safe with empty selection — no null UpdateSubresource)
+            if ((ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) &&
+                !ImGui::GetIO().WantTextInput && !ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyShift) {
                 if (ImGui::IsKeyPressed(ImGuiKey_D)) {
                     ActiveCanvas().ClearSelection();
                     ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);

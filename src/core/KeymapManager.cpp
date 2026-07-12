@@ -124,7 +124,10 @@ void KeymapManager::Initialize() {
     m_Bindings["InvertSelection"]  = KeyCombination{ GLFW_KEY_I, -1, true, true,  false }; // Ctrl+Shift+I
     m_Bindings["InvertColors"]     = KeyCombination{ GLFW_KEY_I, -1, true, false, false }; // Ctrl+I
     m_Bindings["InvertAlpha"]      = KeyCombination{ GLFW_KEY_I, -1, true, false, true  }; // Ctrl+Alt+I
-    m_Bindings["AdjustHSV"]        = KeyCombination{ GLFW_KEY_U, -1, true, false, false };
+    m_Bindings["AdjustHSV"]        = KeyCombination{ GLFW_KEY_U, -1, true, false, false }; // Ctrl+U
+    m_Bindings["AdjustCurves"]     = KeyCombination{ GLFW_KEY_M, -1, true, false, false }; // Ctrl+M
+    m_Bindings["AdjustBlur"]       = KeyCombination{ GLFW_KEY_B, -1, true, true,  false }; // Ctrl+Shift+B
+    m_Bindings["AdjustNoise"]      = KeyCombination{ -1, -1, false, false, false }; // unbound — set in Keybinds panel
     m_Bindings["DuplicateLayer"]   = KeyCombination{ GLFW_KEY_J, -1, true, false, false }; // Ctrl+J like PS
 
     // Tool groups: one key cycles between variants (repeat press)

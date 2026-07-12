@@ -111,7 +111,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     "Normal","Multiply","Screen","Overlay","Add","Subtract","Darken","Lighten","HardLight","SoftLight"
                 };
                 int blendIdx = (int)al.blendMode;
-                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 48.f - hdrGap);
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 92.f - hdrGap * 2.f);
                 if (Ui::Combo("##bl_top", &blendIdx, blendNamesTop, IM_ARRAYSIZE(blendNamesTop))) {
                     al.blendMode = (BlendMode)blendIdx;
                     canvas.MarkCompositeDirty();
@@ -139,6 +139,18 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 if (hasFxTop) ImGui::PopStyleColor();
                 if (ImGui::IsItemHovered())
                     Ui::Tooltip("Layer Effects (filters + styles)…");
+                ImGui::SameLine(0, 4);
+                {
+                    bool fxOn = canvas.GetEffectsPreviewEnabled();
+                    if (!fxOn) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.25f, 0.15f, 0.75f));
+                    if (ImGui::Button(fxOn ? "FX##fxprev" : "off##fxprev", ImVec2(36, 0)))
+                        canvas.SetEffectsPreviewEnabled(!fxOn);
+                    if (!fxOn) ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip(fxOn
+                            ? "Effects preview ON (CPU bake)\nClick to disable for fast paint"
+                            : "Effects preview OFF — raw content\nClick to re-enable bake");
+                }
 
                 if (!al.isGroup && !al.IsFill()) {
                     bool ar = al.alphaRewrite;

@@ -808,14 +808,13 @@ namespace UI {
                 if (ImGui::MenuItem("Invert Alpha", KeymapManager::Get().GetActionShortcutString("InvertAlpha").c_str(), false, hasLayer))
                     canvas.InvertAlpha();
                 ImGui::Separator();
-                if (ImGui::MenuItem("Blur...", nullptr, false, hasLayer))
+                if (ImGui::MenuItem("Blur...", KeymapManager::Get().GetActionShortcutString("AdjustBlur").c_str(), false, hasLayer))
                     state.showBlurModal = true;
-                if (ImGui::MenuItem("HSV Adjust...", "Ctrl+U", false, hasLayer))
+                if (ImGui::MenuItem("HSV Adjust...", KeymapManager::Get().GetActionShortcutString("AdjustHSV").c_str(), false, hasLayer))
                     state.showHSVModal = true;
-                if (ImGui::MenuItem("Curves...", nullptr, false, hasLayer)) {
+                if (ImGui::MenuItem("Curves...", KeymapManager::Get().GetActionShortcutString("AdjustCurves").c_str(), false, hasLayer))
                     state.showCurvesModal = true;
-                }
-                if (ImGui::MenuItem("Add Noise...", nullptr, false, hasLayer))
+                if (ImGui::MenuItem("Add Noise...", KeymapManager::Get().GetActionShortcutString("AdjustNoise").c_str(), false, hasLayer))
                     state.showNoiseModal = true;
                 ImGui::Separator();
                 if (ImGui::BeginMenu("Document Bit Depth")) {
@@ -837,7 +836,10 @@ namespace UI {
             // ---- Select Menu ----
             if (ImGui::BeginMenu("Select")) {
                 if (ImGui::MenuItem("Select All", "Ctrl+A")) canvas.SelectAll();
-                if (ImGui::MenuItem("Deselect",   "Ctrl+D")) canvas.ClearSelection();
+                if (ImGui::MenuItem("Deselect", "Ctrl+D")) {
+                    canvas.ClearSelection();
+                    canvas.UpdateSelectionMaskTexture(device);
+                }
                 if (ImGui::MenuItem("Invert Selection", "Ctrl+Shift+I")) canvas.InvertSelection();
                 ImGui::EndMenu();
             }
@@ -852,6 +854,18 @@ namespace UI {
                 ImGui::MenuItem("Tool Settings", nullptr, &state.showToolSettings);
                 ImGui::MenuItem("Console logs", nullptr, &state.showConsole);
                 ImGui::Separator();
+                {
+                    bool fxPrev = canvas.GetEffectsPreviewEnabled();
+                    if (ImGui::MenuItem("Preview Layer Effects", nullptr, fxPrev)) {
+                        canvas.SetEffectsPreviewEnabled(!fxPrev);
+                    }
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip(
+                            "ON: bake shadows/outlines/filters for display (CPU — can lag).\n"
+                            "OFF: show raw paint content so brush stays fast.\n"
+                            "Effects stay on the layer; toggle ON to re-bake.\n"
+                            "Export always applies full effects.");
+                }
                 ImGui::MenuItem("Rulers", nullptr, &state.showRulers);
                 ImGui::MenuItem("Mod Setup…", nullptr, &state.showModSetup);
                 ImGui::MenuItem("3D Preview", nullptr, &state.showPreview3D);
@@ -1033,56 +1047,117 @@ namespace UI {
             ImGui::EndPopup();
         }
 
-        // ---- Image Adjustment Modals ----
+        // ---- Image Adjustment Modals (live layer+selection preview) ----
+        // One session at a time; cancel restores base snapshot.
+        static bool s_AdjPreviewBegun = false;
+        static bool s_WasAnyAdjModal = false;
+        const bool anyAdjModal = state.showBlurModal || state.showHSVModal ||
+                                 state.showCurvesModal || state.showNoiseModal;
+        auto endAdjSession = [&](bool commit, const char* name) {
+            if (s_AdjPreviewBegun) {
+                if (commit) canvas.CommitAdjustPreview(name ? name : "Adjust");
+                else canvas.CancelAdjustPreview();
+                s_AdjPreviewBegun = false;
+            }
+        };
+        auto ensureAdjPreview = [&]() -> bool {
+            if (s_AdjPreviewBegun) return canvas.IsAdjustPreviewActive();
+            s_AdjPreviewBegun = canvas.BeginAdjustPreview();
+            return s_AdjPreviewBegun;
+        };
+        // Closed via X / Esc without Apply/Cancel buttons
+        if (s_WasAnyAdjModal && !anyAdjModal)
+            endAdjSession(false, nullptr);
+        s_WasAnyAdjModal = anyAdjModal;
 
         // Blur Modal
         if (state.showBlurModal) ImGui::OpenPopup("Blur##modal");
-        if (ImGui::BeginPopupModal("Blur##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::Text("Gaussian Blur (3-pass box)");
-            ImGui::SliderFloat("Radius", &state.blurRadius, 0.5f, 80.0f, "%.1f px");
+        if (ImGui::BeginPopupModal("Blur##modal", &state.showBlurModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (!s_AdjPreviewBegun && ensureAdjPreview())
+                canvas.UpdateAdjustPreviewBlur(state.blurRadius);
+            ImGui::Text("Blur (3-pass box) — preview on active layer");
+            ImGui::TextDisabled("Respects selection; only this layer");
+            if (ImGui::SliderFloat("Radius", &state.blurRadius, 0.5f, 80.0f, "%.1f px")) {
+                if (ensureAdjPreview())
+                    canvas.UpdateAdjustPreviewBlur(state.blurRadius);
+            }
             ImGui::Spacing();
-            if (ImGui::Button("Apply", ImVec2(100,0))) {
-                canvas.ApplyBlur(state.blurRadius);
-                state.showBlurModal = false; ImGui::CloseCurrentPopup();
+            if (ImGui::Button("Apply", ImVec2(100, 0))) {
+                endAdjSession(true, "Blur");
+                state.showBlurModal = false;
+                ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(100,0))) { state.showBlurModal = false; ImGui::CloseCurrentPopup(); }
+            if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+                endAdjSession(false, nullptr);
+                state.showBlurModal = false;
+                ImGui::CloseCurrentPopup();
+            }
             ImGui::EndPopup();
         }
 
         // HSV Modal
         if (state.showHSVModal) ImGui::OpenPopup("HSV Adjust##modal");
-        if (ImGui::BeginPopupModal("HSV Adjust##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::BeginPopupModal("HSV Adjust##modal", &state.showHSVModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (!s_AdjPreviewBegun) ensureAdjPreview();
             ImGui::Text("Hue / Saturation / Value");
-            ImGui::SliderFloat("Hue",        &state.hsvH, -0.5f, 0.5f, "%.3f");
-            ImGui::SliderFloat("Saturation", &state.hsvS, -1.0f, 1.0f, "%.3f");
-            ImGui::SliderFloat("Value",      &state.hsvV, -1.0f, 1.0f, "%.3f");
+            ImGui::TextDisabled("Live preview on active layer · selection mask");
+            bool ch = false;
+            ch |= ImGui::SliderFloat("Hue", &state.hsvH, -0.5f, 0.5f, "%.3f");
+            ch |= ImGui::SliderFloat("Saturation", &state.hsvS, -1.0f, 1.0f, "%.3f");
+            ch |= ImGui::SliderFloat("Value", &state.hsvV, -1.0f, 1.0f, "%.3f");
+            if (ch || ImGui::IsItemDeactivatedAfterEdit()) {
+                if (ensureAdjPreview())
+                    canvas.UpdateAdjustPreviewHSV(state.hsvH, state.hsvS, state.hsvV);
+            }
             ImGui::Spacing();
-            if (ImGui::Button("Apply", ImVec2(100,0))) {
-                canvas.ApplyHSV(state.hsvH, state.hsvS, state.hsvV);
-                state.hsvH=state.hsvS=state.hsvV=0.f;
-                state.showHSVModal=false; ImGui::CloseCurrentPopup();
+            if (ImGui::Button("Apply", ImVec2(100, 0))) {
+                endAdjSession(true, "HSV");
+                state.hsvH = state.hsvS = state.hsvV = 0.f;
+                state.showHSVModal = false;
+                ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel",ImVec2(100,0))){ state.hsvH=state.hsvS=state.hsvV=0.f; state.showHSVModal=false; ImGui::CloseCurrentPopup(); }
+            if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+                endAdjSession(false, nullptr);
+                state.hsvH = state.hsvS = state.hsvV = 0.f;
+                state.showHSVModal = false;
+                ImGui::CloseCurrentPopup();
+            }
             ImGui::EndPopup();
         }
 
         // Noise Modal
         if (state.showNoiseModal) ImGui::OpenPopup("Add Noise##modal");
-        if (ImGui::BeginPopupModal("Add Noise##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            ImGui::SliderFloat("Strength", &state.noiseStrength, 0.0f, 1.0f, "%.3f");
-            ImGui::Checkbox("Color Noise", &state.noiseColor);
+        if (ImGui::BeginPopupModal("Add Noise##modal", &state.showNoiseModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (!s_AdjPreviewBegun) ensureAdjPreview();
+            ImGui::TextDisabled("Live preview (stable seed until Apply)");
+            bool ch = false;
+            ch |= ImGui::SliderFloat("Strength", &state.noiseStrength, 0.0f, 1.0f, "%.3f");
+            ch |= ImGui::Checkbox("Color Noise", &state.noiseColor);
+            if (ch) {
+                if (ensureAdjPreview())
+                    canvas.UpdateAdjustPreviewNoise(state.noiseStrength, state.noiseColor);
+            }
             ImGui::Spacing();
-            if (ImGui::Button("Apply",ImVec2(100,0))){ canvas.ApplyNoise(state.noiseStrength, state.noiseColor); state.showNoiseModal=false; ImGui::CloseCurrentPopup(); }
+            if (ImGui::Button("Apply", ImVec2(100, 0))) {
+                endAdjSession(true, "Noise");
+                state.showNoiseModal = false;
+                ImGui::CloseCurrentPopup();
+            }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel",ImVec2(100,0))){ state.showNoiseModal=false; ImGui::CloseCurrentPopup(); }
+            if (ImGui::Button("Cancel", ImVec2(100, 0))) {
+                endAdjSession(false, nullptr);
+                state.showNoiseModal = false;
+                ImGui::CloseCurrentPopup();
+            }
             ImGui::EndPopup();
         }
 
-        // Curves Modal — interactive spline editor (mouse on graph moves points, not window)
+        // Curves Modal — interactive spline editor + live canvas preview
         if (state.showCurvesModal) ImGui::OpenPopup("Curves##modal");
-        if (ImGui::BeginPopupModal("Curves##modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (ImGui::BeginPopupModal("Curves##modal", &state.showCurvesModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (!s_AdjPreviewBegun) ensureAdjPreview();
             if (state.curvesPointsRGB.empty()) {
                 state.curvesPointsRGB = {{0.f, 0.f}, {1.f, 1.f}};
                 state.curvesLUTRGB = Canvas_BuildSplineLUT(state.curvesPointsRGB);
@@ -1094,15 +1169,15 @@ namespace UI {
 
             static const char* chanNames[] = {"RGB","Alpha"};
             UiCombo("##curves_chan", &state.curvesChannel, chanNames, 2, "Channel");
-            ImGui::SameLine(); ImGui::TextDisabled("(right-click = remove point)");
+            ImGui::SameLine(); ImGui::TextDisabled("Live layer preview · selection");
 
             std::vector<std::pair<float,float>>& activePoints = (state.curvesChannel == 0) ? state.curvesPointsRGB : state.curvesPointsAlpha;
             std::vector<float>& activeLUT = (state.curvesChannel == 0) ? state.curvesLUTRGB : state.curvesLUTAlpha;
 
             const float graphSz = 256.f;
             const float pad = 8.f;
+            bool curvesChanged = false;
 
-            // Child captures mouse so parent modal is not dragged from the graph area
             ImGui::BeginChild("##curves_graph_child", ImVec2(graphSz + pad * 2.f, graphSz + pad * 2.f),
                 ImGuiChildFlags_Borders, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
 
@@ -1148,6 +1223,7 @@ namespace UI {
                 if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && pi!=0 && pi!=(int)activePoints.size()-1) {
                     activePoints.erase(activePoints.begin()+pi);
                     activeLUT = Canvas_BuildSplineLUT(activePoints);
+                    curvesChanged = true;
                     break;
                 }
             }
@@ -1159,13 +1235,9 @@ namespace UI {
                     if (draggingPt==(int)activePoints.size()-1) nx=1.f;
                     activePoints[draggingPt]={nx,ny};
                     std::sort(activePoints.begin(),activePoints.end(),[](auto&a,auto&b){return a.first<b.first;});
-                    // re-find dragged index after sort (endpoints fixed at 0/1)
-                    if (draggingPt > 0 && draggingPt < (int)activePoints.size()-1) {
-                        // keep draggingPt as sorted index of moved point — approximate via nearest
-                    }
+                    curvesChanged = true;
                 } else draggingPt=-1;
             }
-            // Left-click empty graph = add point (InvisibleButton is active, so don't require !IsAnyItemActive)
             if (inGraph && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && draggingPt < 0) {
                 bool onPoint = false;
                 for (auto& pt : activePoints) {
@@ -1178,10 +1250,18 @@ namespace UI {
                     float ny=std::clamp(1.f-(mpos.y-graphPos.y)/graphSz,0.f,1.f);
                     activePoints.push_back({nx,ny});
                     std::sort(activePoints.begin(),activePoints.end(),[](auto&a,auto&b){return a.first<b.first;});
+                    curvesChanged = true;
                 }
             }
 
             ImGui::EndChild();
+
+            if (curvesChanged) {
+                state.curvesLUTRGB = Canvas_BuildSplineLUT(state.curvesPointsRGB);
+                state.curvesLUTAlpha = Canvas_BuildSplineLUT(state.curvesPointsAlpha);
+                if (ensureAdjPreview())
+                    canvas.UpdateAdjustPreviewCurves(state.curvesLUTRGB, state.curvesLUTAlpha);
+            }
 
             float posX=(mpos.x-graphPos.x)/graphSz*255.f, posY=(1.f-(mpos.y-graphPos.y)/graphSz)*255.f;
             if (inGraph) ImGui::Text("(%.0f, %.0f)", posX, posY);
@@ -1190,14 +1270,21 @@ namespace UI {
             if (ImGui::Button("Reset",ImVec2(80,0))){
                 activePoints={{0.f,0.f},{1.f,1.f}};
                 activeLUT = Canvas_BuildSplineLUT(activePoints);
+                state.curvesLUTRGB = Canvas_BuildSplineLUT(state.curvesPointsRGB);
+                state.curvesLUTAlpha = Canvas_BuildSplineLUT(state.curvesPointsAlpha);
+                if (ensureAdjPreview())
+                    canvas.UpdateAdjustPreviewCurves(state.curvesLUTRGB, state.curvesLUTAlpha);
             }
             ImGui::SameLine();
             if (ImGui::Button("Apply",ImVec2(80,0))){
-                canvas.ApplyCurves(state.curvesLUTRGB, state.curvesLUTAlpha);
+                endAdjSession(true, "Curves");
                 state.showCurvesModal=false; ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Cancel",ImVec2(80,0))){ state.showCurvesModal=false; ImGui::CloseCurrentPopup(); }
+            if (ImGui::Button("Cancel",ImVec2(80,0))){
+                endAdjSession(false, nullptr);
+                state.showCurvesModal=false; ImGui::CloseCurrentPopup();
+            }
             ImGui::EndPopup();
         }
 

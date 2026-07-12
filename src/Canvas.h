@@ -227,6 +227,14 @@ public:
     void MarkLayerStylesDirty(int layerIdx);
     // Debounced style/presentation rebuild (call from UI while dragging FX params).
     void RequestPresentationRebuild(int layerIdx);
+
+    // Interactive FX preview (styles + filters). OFF = paint raw content, no CPU bake.
+    // Does not delete FX; re-enable rebuilds presentation. Export always bakes full FX.
+    bool GetEffectsPreviewEnabled() const { return m_EffectsPreviewEnabled; }
+    void SetEffectsPreviewEnabled(bool enabled);
+    // True when this layer's styles/filters should run in the interactive path.
+    bool LayerStylesPreviewActive(const Layer& layer) const;
+    bool LayerFxPreviewActive(const Layer& layer) const;
     void DeleteLayer(int index);
     // Clone layer (or group header) inserted after source. Returns new index, or -1.
     int  DuplicateLayer(ID3D11Device* device, int index);
@@ -285,6 +293,17 @@ public:
     // lutRGB: 256 floats [0..1]; lutAlpha optional 256 floats (empty = leave A unchanged)
     void ApplyCurves(const std::vector<float>& lutRGB, const std::vector<float>& lutAlpha = {});
     void ApplyNoise(float strength, bool colorNoise);
+
+    // Live destructive-adjust preview (active layer + selection). Matches Apply* result.
+    // Begin snapshots base; Update* rewrite layer from base; Commit undoes to snapshot; Cancel restores.
+    bool BeginAdjustPreview();
+    void CancelAdjustPreview();
+    void CommitAdjustPreview(const std::string& actionName);
+    bool IsAdjustPreviewActive() const { return m_AdjustPreviewActive; }
+    void UpdateAdjustPreviewHSV(float dH, float dS, float dV);
+    void UpdateAdjustPreviewCurves(const std::vector<float>& lutRGB, const std::vector<float>& lutAlpha = {});
+    void UpdateAdjustPreviewBlur(float radius);
+    void UpdateAdjustPreviewNoise(float strength, bool colorNoise);
 
     // Layer group management
     void CreateLayerGroup(ID3D11Device* device, const std::string& name);
@@ -681,6 +700,14 @@ private:
 
     // Stroke state tracking
     bool m_IsStrokeActive = false;
+    // When false: skip CPU style/filter bake in interactive path (paint/compose raw).
+    bool m_EffectsPreviewEnabled = true;
+
+    // Destructive Image-adjust modal session (HSV / Curves / Blur / Noise)
+    bool m_AdjustPreviewActive = false;
+    int  m_AdjustPreviewLayerIdx = -1;
+    std::vector<float> m_AdjustPreviewBase; // RGBA32F snapshot of active layer at Begin
+    uint32_t m_AdjustPreviewNoiseSeed = 1;
     float m_LastDabX = 0.0f;
     float m_LastDabY = 0.0f;
     float m_StrokeDistanceAccumulator = 0.0f;

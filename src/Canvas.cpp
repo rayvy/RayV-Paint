@@ -55,7 +55,8 @@ static std::vector<float> ExportLayerF(const Layer& layer, int w, int h) {
     return out;
 }
 static void SetLayerPixelsF(Layer& layer, const std::vector<float>& pixels, int w, int h,
-                             CanvasPixelFormat fmt = CanvasPixelFormat::RGBA8) {
+                             CanvasPixelFormat fmt = CanvasPixelFormat::RGBA8,
+                             bool markFiltersDirty = true) {
     if (!layer.tileCache) {
         layer.tileCache = std::make_unique<TileCache>();
         layer.tileCache->Init(w, h, fmt);
@@ -63,7 +64,8 @@ static void SetLayerPixelsF(Layer& layer, const std::vector<float>& pixels, int 
     layer.tileCache->ImportRGBA32F(pixels.data(), w, h);
     layer.tileCache->MarkAllDirty();
     layer.needsUpload = true;
-    layer.filtersDirty = true;
+    if (markFiltersDirty)
+        layer.filtersDirty = true;
 }
 static bool LayerHasPixels(const Layer& layer) {
     if (layer.IsFill()) return true;
@@ -2484,16 +2486,19 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                         }
                     }
                 }
-                // Full-buffer path: styles, filters, or fill texture (visible only)
-                if (layer.visible && (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters) ||
-                    layer.fill.HasTexture())) {
-                    if (layer.filtersDirty) RebuildFilteredPixels(layer);
-                    if (layer.HasEnabledStyles() && (layer.presentationDirty || layer.stylesDirty))
+                // Full-buffer path: styles, filters, or fill texture (visible only).
+                // When Effects Preview is OFF, skip FX bake (raw/solid/texture only).
+                if (layer.visible && (LayerFxPreviewActive(layer) || layer.fill.HasTexture())) {
+                    if (m_EffectsPreviewEnabled && layer.filtersDirty && !m_IsStrokeActive)
+                        RebuildFilteredPixels(layer);
+                    if (LayerStylesPreviewActive(layer) && (layer.presentationDirty || layer.stylesDirty))
                         RebuildLayerPresentation(layer);
                     TileCache* src = nullptr;
-                    if (layer.presentationCache && !layer.presentationCache->IsEmpty())
+                    if (LayerStylesPreviewActive(layer) && layer.presentationCache &&
+                        !layer.presentationCache->IsEmpty())
                         src = layer.presentationCache.get();
-                    else if (layer.filteredCache && !layer.filteredCache->IsEmpty())
+                    else if (m_EffectsPreviewEnabled && layer.filteredCache &&
+                             !layer.filteredCache->IsEmpty())
                         src = layer.filteredCache.get();
                     if (src) {
                         if (!layer.texture || [&]() {
@@ -2531,28 +2536,28 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 if (!layer.texture) continue;
             }
 
-            // Rebuild filters / styles presentation
-            bool filtersWereDirty = !layer.filters.empty() && layer.filtersDirty;
-            bool stylesWereDirty = layer.HasEnabledStyles() &&
+            // Rebuild filters / styles presentation.
+            // CRITICAL: never full-document RebuildFilteredPixels mid-stroke — even "cheap"
+            // Curves/HSV re-export+refilter entire W×H every dab (felt laggy at 1K).
+            // Same policy as styles: live paint on raw tiles; rebuild once on stroke End.
+            bool filtersWereDirty = m_EffectsPreviewEnabled && !layer.filters.empty() && layer.filtersDirty;
+            bool stylesWereDirty = LayerStylesPreviewActive(layer) &&
                 (layer.stylesDirty || layer.presentationDirty);
-            // During stroke: skip expensive filter full-rebuild every dab when styles exist
-            // (styles already gated inside RebuildLayerPresentation)
-            if (!layer.filters.empty() && layer.filtersDirty) {
-                if (!(m_IsStrokeActive && layer.HasEnabledStyles()))
-                    RebuildFilteredPixels(layer);
-            }
-            if (layer.HasEnabledStyles() && !m_IsStrokeActive)
+            if (m_EffectsPreviewEnabled && !layer.filters.empty() && layer.filtersDirty && !m_IsStrokeActive)
+                RebuildFilteredPixels(layer);
+            if (LayerStylesPreviewActive(layer) && !m_IsStrokeActive)
                 RebuildLayerPresentation(layer);
 
             // Pick source cache: presentation > filtered > raw
-            // During stroke with styles: show live content (no presentation) for responsiveness
+            // During stroke / FX preview OFF / dirty filters: raw tiles (responsive brush)
             TileCache* src = nullptr;
             bool layerNeedsUpload = layer.needsUpload;
-            const bool usePres = layer.HasEnabledStyles() && !m_IsStrokeActive &&
+            const bool usePres = LayerStylesPreviewActive(layer) && !m_IsStrokeActive &&
                 layer.presentationCache && !layer.presentationCache->IsEmpty();
             if (usePres)
                 src = layer.presentationCache.get();
-            else if (!layer.filters.empty() && layer.filteredCache && !layer.filtersDirty)
+            else if (m_EffectsPreviewEnabled && !m_IsStrokeActive && !layer.filters.empty() &&
+                     layer.filteredCache && !layer.filtersDirty)
                 src = layer.filteredCache.get();
             if (!src) src = layer.tileCache.get();
             if (!src) continue;
@@ -2735,7 +2740,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             continue;
 
         if (layer.isGroup) {
-            const bool groupHasFx = layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters);
+            const bool groupHasFx = LayerFxPreviewActive(layer);
 
             // Live Group FX: CPU flatten children + group styles/filters → group texture
             if (groupHasFx && groupDev) {
@@ -2807,7 +2812,8 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 if (!child.ParticipatesInView(viewMap, roleIso, soloRole)) continue;
                 if (!child.srv) continue;
 
-                const bool childBaked = child.HasEnabledStyles() && !m_IsStrokeActive;
+                const bool childBaked = LayerStylesPreviewActive(child) && !m_IsStrokeActive &&
+                    child.presentationCache && !child.presentationCache->IsEmpty();
                 float childOp = childBaked ? 1.f : child.opacity;
                 bool childMask = !childBaked && child.hasMask && child.maskSRV;
 
@@ -2885,8 +2891,8 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             }
 
             // Styles baked → opacity=1, mask already in presentation
-            // During stroke: live content path with fill opacity
-            const bool baked = layer.HasEnabledStyles() && !m_IsStrokeActive &&
+            // During stroke / FX preview OFF: live content path with fill opacity
+            const bool baked = LayerStylesPreviewActive(layer) && !m_IsStrokeActive &&
                 layer.presentationCache && !layer.presentationCache->IsEmpty();
             const float op = baked ? 1.f : layer.opacity;
             const bool useMask = !baked && layer.hasMask && layer.maskSRV;
@@ -5310,17 +5316,21 @@ void Canvas::SetSelectionMask(const std::vector<uint8_t>& mask) {
 }
 
 void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
-    if (!device) return;
-    
+    if (!device || m_Width <= 0 || m_Height <= 0) return;
+
     if (m_SelectionMaskTexture) {
         D3D11_TEXTURE2D_DESC desc = {};
         m_SelectionMaskTexture->GetDesc(&desc);
-        if (desc.Width != m_Width || desc.Height != m_Height || desc.Format != DXGI_FORMAT_R8_UNORM) {
-            m_SelectionMaskTexture->Release(); m_SelectionMaskTexture = nullptr;
-            m_SelectionMaskSRV->Release(); m_SelectionMaskSRV = nullptr;
+        if (desc.Width != (UINT)m_Width || desc.Height != (UINT)m_Height || desc.Format != DXGI_FORMAT_R8_UNORM) {
+            m_SelectionMaskTexture->Release();
+            m_SelectionMaskTexture = nullptr;
+            if (m_SelectionMaskSRV) {
+                m_SelectionMaskSRV->Release();
+                m_SelectionMaskSRV = nullptr;
+            }
         }
     }
-    
+
     if (!m_SelectionMaskTexture) {
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = m_Width;
@@ -5332,21 +5342,34 @@ void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
         desc.SampleDesc.Quality = 0;
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        
+
         HRESULT hr = device->CreateTexture2D(&desc, nullptr, &m_SelectionMaskTexture);
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr) && m_SelectionMaskTexture) {
             device->CreateShaderResourceView(m_SelectionMaskTexture, nullptr, &m_SelectionMaskSRV);
         }
     }
-    
-    if (m_SelectionMaskTexture) {
-        ID3D11DeviceContext* context = nullptr;
-        device->GetImmediateContext(&context);
-        if (context) {
-            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, m_SelectionMask.data(), m_Width * sizeof(uint8_t), 0);
-            context->Release();
-        }
+
+    if (!m_SelectionMaskTexture) return;
+
+    // Never pass empty-vector .data() (nullptr) into UpdateSubresource — Ctrl+D / Deselect crash.
+    const size_t need = (size_t)m_Width * (size_t)m_Height;
+    const uint8_t* src = nullptr;
+    std::vector<uint8_t> zeros;
+    if (m_HasSelection && m_SelectionMask.size() == need) {
+        src = m_SelectionMask.data();
+    } else {
+        zeros.assign(need, 0);
+        src = zeros.data();
     }
+
+    ID3D11DeviceContext* context = nullptr;
+    device->GetImmediateContext(&context);
+    if (context) {
+        context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, src,
+            (UINT)(m_Width * sizeof(uint8_t)), 0);
+        context->Release();
+    }
+    m_SelectionMaskNeedsUpload = false;
 }
 
 void Canvas::ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
@@ -6653,91 +6676,223 @@ void Canvas::InvertColors() {
     Logger::Get().Info("InvertColors");
 }
 
+// Shared buffer ops for Apply* + live adjust preview (active layer + selection).
+static void BufferApplyBlur(std::vector<float>& pixels, int w, int h, float radius,
+                            const std::vector<uint8_t>& selMask, bool hasSel) {
+    int r = std::max(1, (int)radius);
+    std::vector<float> blurred = pixels;
+    for (int pass = 0; pass < 3; ++pass) {
+        BoxBlurH(blurred, w, h, r);
+        BoxBlurV(blurred, w, h, r);
+    }
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float sel = GetSelWeight(selMask, w, x, y, hasSel);
+            if (sel < 1e-4f) continue;
+            size_t idx = ((size_t)y * w + x) * 4;
+            for (int c = 0; c < 4; ++c)
+                pixels[idx + c] = pixels[idx + c] * (1.f - sel) + blurred[idx + c] * sel;
+        }
+}
+
+static void BufferApplyHSV(std::vector<float>& pixels, int w, int h, float dH, float dS, float dV,
+                           const std::vector<uint8_t>& selMask, bool hasSel) {
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float sel = GetSelWeight(selMask, w, x, y, hasSel);
+            if (sel < 1e-4f) continue;
+            size_t idx = ((size_t)y * w + x) * 4;
+            float rr = pixels[idx], gg = pixels[idx + 1], bb = pixels[idx + 2];
+            float hv, s, v;
+            RGBtoHSV(rr, gg, bb, hv, s, v);
+            hv = fmodf(hv + dH + 1.f, 1.f);
+            s = std::clamp(s + dS, 0.f, 1.f);
+            v = std::clamp(v + dV, 0.f, 1.f);
+            float nr, ng, nb;
+            HSVtoRGB(hv, s, v, nr, ng, nb);
+            pixels[idx]     = pixels[idx]     * (1.f - sel) + nr * sel;
+            pixels[idx + 1] = pixels[idx + 1] * (1.f - sel) + ng * sel;
+            pixels[idx + 2] = pixels[idx + 2] * (1.f - sel) + nb * sel;
+        }
+}
+
+static void BufferApplyCurves(std::vector<float>& pixels, int w, int h,
+                              const std::vector<float>& lutRGB, const std::vector<float>& lutAlpha,
+                              const std::vector<uint8_t>& selMask, bool hasSel) {
+    auto sample = [&](const std::vector<float>& lut, float v) -> float {
+        float fi = v * 255.f;
+        int i = std::clamp((int)fi, 0, 254);
+        float t = fi - i;
+        return lut[i] * (1.f - t) + lut[i + 1] * t;
+    };
+    const bool hasA = (int)lutAlpha.size() >= 256;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float sel = GetSelWeight(selMask, w, x, y, hasSel);
+            if (sel < 1e-4f) continue;
+            size_t idx = ((size_t)y * w + x) * 4;
+            for (int c = 0; c < 3; ++c)
+                pixels[idx + c] = pixels[idx + c] * (1.f - sel) + sample(lutRGB, pixels[idx + c]) * sel;
+            if (hasA)
+                pixels[idx + 3] = pixels[idx + 3] * (1.f - sel) + sample(lutAlpha, pixels[idx + 3]) * sel;
+        }
+}
+
+static void BufferApplyNoise(std::vector<float>& pixels, int w, int h, float strength, bool colorNoise,
+                             uint32_t seed, const std::vector<uint8_t>& selMask, bool hasSel) {
+    std::mt19937 rng(seed ? seed : 1u);
+    std::uniform_real_distribution<float> dist(-1.f, 1.f);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            float sel = GetSelWeight(selMask, w, x, y, hasSel);
+            if (sel < 1e-4f) continue;
+            size_t idx = ((size_t)y * w + x) * 4;
+            if (colorNoise) {
+                for (int c = 0; c < 3; ++c)
+                    pixels[idx + c] = std::clamp(pixels[idx + c] + dist(rng) * strength * sel, 0.f, 1.f);
+            } else {
+                float n = dist(rng) * strength * sel;
+                for (int c = 0; c < 3; ++c)
+                    pixels[idx + c] = std::clamp(pixels[idx + c] + n, 0.f, 1.f);
+            }
+        }
+}
+
+bool Canvas::BeginAdjustPreview() {
+    if (m_AdjustPreviewActive) CancelAdjustPreview();
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return false;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    if (layer.isGroup || layer.IsFill()) return false;
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    BackupAllActiveLayerTiles(); // undo base for Commit
+    m_AdjustPreviewBase = ExportLayerF(layer, m_Width, m_Height);
+    m_AdjustPreviewLayerIdx = m_ActiveLayerIdx;
+    m_AdjustPreviewActive = true;
+    m_AdjustPreviewNoiseSeed = (uint32_t)std::chrono::steady_clock::now().time_since_epoch().count() | 1u;
+    return true;
+}
+
+void Canvas::CancelAdjustPreview() {
+    if (!m_AdjustPreviewActive) return;
+    if (m_AdjustPreviewLayerIdx >= 0 && m_AdjustPreviewLayerIdx < (int)m_Layers.size() &&
+        m_AdjustPreviewLayerIdx == m_ActiveLayerIdx) {
+        RestoreActiveLayerMutation();
+    } else {
+        m_ActiveStrokeDeltas.clear();
+    }
+    m_AdjustPreviewActive = false;
+    m_AdjustPreviewLayerIdx = -1;
+    m_AdjustPreviewBase.clear();
+    m_CompositeDirty = true;
+}
+
+void Canvas::CommitAdjustPreview(const std::string& actionName) {
+    if (!m_AdjustPreviewActive) return;
+    // Current pixels are already the preview result; backup still holds pre-adjust tiles.
+    if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
+        auto& layer = m_Layers[m_ActiveLayerIdx];
+        layer.filtersDirty = true;
+        layer.thumbDirty = true;
+        if (layer.HasEnabledStyles()) {
+            layer.presentationDirty = true;
+            layer.stylesDirty = true;
+        }
+    }
+    CommitActiveLayerMutation(actionName);
+    m_AdjustPreviewActive = false;
+    m_AdjustPreviewLayerIdx = -1;
+    m_AdjustPreviewBase.clear();
+    m_CompositeDirty = true;
+    m_ChannelPreviewDirty = true;
+    Logger::Get().Info(actionName + " (commit preview)");
+}
+
+void Canvas::UpdateAdjustPreviewHSV(float dH, float dS, float dV) {
+    if (!m_AdjustPreviewActive || m_ActiveLayerIdx != m_AdjustPreviewLayerIdx) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    auto pixels = m_AdjustPreviewBase;
+    BufferApplyHSV(pixels, m_Width, m_Height, dH, dS, dV, m_SelectionMask, m_HasSelection);
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat, /*markFiltersDirty=*/false);
+    m_CompositeDirty = true;
+}
+
+void Canvas::UpdateAdjustPreviewCurves(const std::vector<float>& lutRGB, const std::vector<float>& lutAlpha) {
+    if (!m_AdjustPreviewActive || m_ActiveLayerIdx != m_AdjustPreviewLayerIdx) return;
+    if ((int)lutRGB.size() < 256) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    auto pixels = m_AdjustPreviewBase;
+    BufferApplyCurves(pixels, m_Width, m_Height, lutRGB, lutAlpha, m_SelectionMask, m_HasSelection);
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat, /*markFiltersDirty=*/false);
+    m_CompositeDirty = true;
+}
+
+void Canvas::UpdateAdjustPreviewBlur(float radius) {
+    if (!m_AdjustPreviewActive || m_ActiveLayerIdx != m_AdjustPreviewLayerIdx) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    auto pixels = m_AdjustPreviewBase;
+    BufferApplyBlur(pixels, m_Width, m_Height, radius, m_SelectionMask, m_HasSelection);
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat, /*markFiltersDirty=*/false);
+    m_CompositeDirty = true;
+}
+
+void Canvas::UpdateAdjustPreviewNoise(float strength, bool colorNoise) {
+    if (!m_AdjustPreviewActive || m_ActiveLayerIdx != m_AdjustPreviewLayerIdx) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    auto pixels = m_AdjustPreviewBase;
+    BufferApplyNoise(pixels, m_Width, m_Height, strength, colorNoise, m_AdjustPreviewNoiseSeed,
+                     m_SelectionMask, m_HasSelection);
+    SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat, /*markFiltersDirty=*/false);
+    m_CompositeDirty = true;
+}
+
 void Canvas::ApplyBlur(float radius) {
-    if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     if (layer.isGroup) return;
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
     BackupAllActiveLayerTiles();
     auto pixels = ExportLayerF(layer, m_Width, m_Height);
-    int r=std::max(1,(int)radius);
-    std::vector<float> blurred=pixels;
-    for (int pass=0;pass<3;++pass){BoxBlurH(blurred,m_Width,m_Height,r);BoxBlurV(blurred,m_Width,m_Height,r);}
-    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
-        if (sel<1e-4f) continue;
-        size_t idx=((size_t)y*m_Width+x)*4;
-        for(int c=0;c<4;++c) pixels[idx+c]=pixels[idx+c]*(1.f-sel)+blurred[idx+c]*sel;
-    }
+    BufferApplyBlur(pixels, m_Width, m_Height, radius, m_SelectionMask, m_HasSelection);
     SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
     CommitActiveLayerMutation("Blur");
-    Logger::Get().Info("ApplyBlur r="+std::to_string(r));
+    Logger::Get().Info("ApplyBlur r=" + std::to_string(std::max(1, (int)radius)));
 }
 
 void Canvas::ApplyHSV(float dH, float dS, float dV) {
-    if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     if (layer.isGroup) return;
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
     BackupAllActiveLayerTiles();
     auto pixels = ExportLayerF(layer, m_Width, m_Height);
-    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
-        if (sel<1e-4f) continue;
-        size_t idx=((size_t)y*m_Width+x)*4;
-        float rr=pixels[idx],gg=pixels[idx+1],bb=pixels[idx+2];
-        float h,s,v; RGBtoHSV(rr,gg,bb,h,s,v);
-        h=fmodf(h+dH+1.f,1.f); s=std::clamp(s+dS,0.f,1.f); v=std::clamp(v+dV,0.f,1.f);
-        float nr,ng,nb; HSVtoRGB(h,s,v,nr,ng,nb);
-        pixels[idx]  =pixels[idx]  *(1.f-sel)+nr*sel;
-        pixels[idx+1]=pixels[idx+1]*(1.f-sel)+ng*sel;
-        pixels[idx+2]=pixels[idx+2]*(1.f-sel)+nb*sel;
-    }
+    BufferApplyHSV(pixels, m_Width, m_Height, dH, dS, dV, m_SelectionMask, m_HasSelection);
     SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
     CommitActiveLayerMutation("HSV");
     Logger::Get().Info("ApplyHSV");
 }
 
 void Canvas::ApplyCurves(const std::vector<float>& lutRGB, const std::vector<float>& lutAlpha) {
-    if ((int)lutRGB.size()<256||m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if ((int)lutRGB.size() < 256 || m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     if (layer.isGroup) return;
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
     BackupAllActiveLayerTiles();
     auto pixels = ExportLayerF(layer, m_Width, m_Height);
-    auto sample=[&](const std::vector<float>& lut, float v)->float{
-        float fi=v*255.f; int i=std::clamp((int)fi,0,254); float t=fi-i;
-        return lut[i]*(1.f-t)+lut[i+1]*t;
-    };
-    const bool hasA = (int)lutAlpha.size() >= 256;
-    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
-        if (sel<1e-4f) continue;
-        size_t idx=((size_t)y*m_Width+x)*4;
-        for(int c=0;c<3;++c) pixels[idx+c]=pixels[idx+c]*(1.f-sel)+sample(lutRGB, pixels[idx+c])*sel;
-        if (hasA) pixels[idx+3]=pixels[idx+3]*(1.f-sel)+sample(lutAlpha, pixels[idx+3])*sel;
-    }
+    BufferApplyCurves(pixels, m_Width, m_Height, lutRGB, lutAlpha, m_SelectionMask, m_HasSelection);
     SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
     CommitActiveLayerMutation("Curves");
     Logger::Get().Info("ApplyCurves");
 }
 
 void Canvas::ApplyNoise(float strength, bool colorNoise) {
-    if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     if (layer.isGroup) return;
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
     BackupAllActiveLayerTiles();
     auto pixels = ExportLayerF(layer, m_Width, m_Height);
-    std::mt19937 rng(std::random_device{}());
-    std::uniform_real_distribution<float> dist(-1.f,1.f);
-    for (int y=0;y<m_Height;++y) for (int x=0;x<m_Width;++x) {
-        float sel = GetSelWeight(m_SelectionMask, m_Width, x, y, m_HasSelection);
-        if (sel<1e-4f) continue;
-        size_t idx=((size_t)y*m_Width+x)*4;
-        if (colorNoise) { for(int c=0;c<3;++c) pixels[idx+c]=std::clamp(pixels[idx+c]+dist(rng)*strength*sel,0.f,1.f); }
-        else { float n=dist(rng)*strength*sel; for(int c=0;c<3;++c) pixels[idx+c]=std::clamp(pixels[idx+c]+n,0.f,1.f); }
-    }
+    uint32_t seed = (uint32_t)std::chrono::steady_clock::now().time_since_epoch().count() | 1u;
+    BufferApplyNoise(pixels, m_Width, m_Height, strength, colorNoise, seed, m_SelectionMask, m_HasSelection);
     SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
     CommitActiveLayerMutation("Noise");
     Logger::Get().Info("ApplyNoise");
@@ -7063,25 +7218,20 @@ ID3D11BlendState* Canvas::GetFillWriteBlend(ID3D11Device* device, uint8_t channe
 void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
     if (!device || !layer.IsFill()) return;
 
-    const bool needsFull = layer.HasEnabledStyles() ||
-        LayerFilterListHasEnabled(layer.filters) || layer.fill.HasTexture();
+    // Interactive: FX bake only when Effects Preview is ON. Texture fill still needs full buffer.
+    const bool fxActive = LayerFxPreviewActive(layer);
+    const bool needsFull = fxActive || layer.fill.HasTexture();
 
     if (needsFull) {
-        if (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters)) {
+        if (fxActive) {
             RebuildLayerPresentation(layer);
         } else {
-            // Texture fill without FX: bake full buffer into presentationCache for upload
+            // Texture fill without FX (or FX preview off): bake full buffer for upload
             auto content = ResolveLayerContentF(layer);
-            layer_fx::PresentationParams pp;
-            pp.fillOpacity = 1.f;
-            pp.bakeFillOpacity = false;
-            pp.hasMask = false;
-            auto body = content;
-            // Apply mask only in shader path; store raw content
             if (!layer.presentationCache)
                 layer.presentationCache = std::make_unique<TileCache>();
             layer.presentationCache->Init(m_Width, m_Height, m_CanvasFormat);
-            layer.presentationCache->ImportRGBA32F(body.data(), m_Width, m_Height);
+            layer.presentationCache->ImportRGBA32F(content.data(), m_Width, m_Height);
             layer.presentationCache->MarkAllDirty();
             layer.needsUpload = true;
         }
@@ -7095,7 +7245,7 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
                 RecreateLayerTexture(device, layer);
         }
         // presentationDirty cleared by RebuildLayerPresentation; solid+texture still needs upload path
-        if (!layer.HasEnabledStyles() && !LayerFilterListHasEnabled(layer.filters))
+        if (!fxActive)
             layer.presentationDirty = false;
         return;
     }
@@ -7280,6 +7430,36 @@ bool Canvas::IsFillLayer(int layerIdx) const {
 bool Canvas::CanPaintLayerContent(int layerIdx) const {
     if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
     return m_Layers[layerIdx].CanPaintContent();
+}
+
+void Canvas::SetEffectsPreviewEnabled(bool enabled) {
+    if (m_EffectsPreviewEnabled == enabled) return;
+    m_EffectsPreviewEnabled = enabled;
+    if (enabled) {
+        // Re-bake everything that has FX after temporary disable.
+        for (auto& L : m_Layers) {
+            if (L.HasEnabledStyles() || LayerFilterListHasEnabled(L.filters)) {
+                L.stylesDirty = true;
+                L.presentationDirty = true;
+                L.filtersDirty = true;
+                L.needsUpload = true;
+            }
+        }
+        Logger::Get().Info("Effects preview ON — rebuilding presentations");
+    } else {
+        Logger::Get().Info("Effects preview OFF — raw content (no CPU FX bake)");
+    }
+    m_CompositeDirty = true;
+    m_ChannelPreviewDirty = true;
+}
+
+bool Canvas::LayerStylesPreviewActive(const Layer& layer) const {
+    return m_EffectsPreviewEnabled && layer.HasEnabledStyles();
+}
+
+bool Canvas::LayerFxPreviewActive(const Layer& layer) const {
+    return m_EffectsPreviewEnabled &&
+        (layer.HasEnabledStyles() || LayerFilterListHasEnabled(layer.filters));
 }
 
 int Canvas::AddLayerStyle(int layerIdx, StyleType type) {

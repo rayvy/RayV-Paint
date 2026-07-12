@@ -165,6 +165,7 @@ Order matters: **wrong doc size was fixed in B15**; B16 opts:
 - Full multi-res **paint** into native map cache (storage exists; paint-at-native = later build).
 - Rewrite TileCache/undo from scratch.
 - Graphite-style mega PR of whole EditorPanels in one go.
+- **Full GPU-driven Layer Effects** — tracked as high-priority future work in `plans/ForFuture.md` (#0 Architecture debt). B16 only mitigates (stroke skip, Effects Preview OFF, proxy bake).
 
 ---
 
