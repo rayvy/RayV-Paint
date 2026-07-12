@@ -24,6 +24,7 @@
 #include "widgets/UiTooltip.h"
 #include "../core/BrushLibrary.h"
 #include "../core/ProjectManager.h"
+#include "../shell/DdsThumbRegister.h"
 #include "../preview3d/PreviewRenderer.h"
 #include "../preview3d/MaterialConfig.h"
 #include <stb_image.h>
@@ -881,6 +882,21 @@ namespace UI {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Help")) {
+                if (ImGui::MenuItem("Register Explorer thumbnails (DDS + fix PNG)")) {
+                    if (DdsThumbRegister::EnsureRegistered())
+                        Logger::Get().Info(
+                            "Thumbnails OK: DDS handler in HKLM + PNG restored to Photo provider. "
+                            "Restart Explorer / F5 if icons linger.");
+                    else
+                        Logger::Get().Error(
+                            "Thumbnail registration incomplete. Accept the UAC prompt "
+                            "(HKLM required). DLL must be next to RayVPaint_Core.exe.");
+                }
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip(
+                        "DDS: IThumbnailProvider COM DLL (needs Admin once → HKLM).\n"
+                        "PNG/JPG: restore Windows Photo handler if Google Drive stole it.\n"
+                        "Never puts ShellEx on Applications\\RayVPaint — that breaks all types.");
                 if (ImGui::MenuItem("About RayV-Paint…"))
                     state.openAboutModal = true;
                 ImGui::EndMenu();

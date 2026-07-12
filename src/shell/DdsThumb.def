@@ -1,0 +1,8 @@
+LIBRARY RayVPaint_DdsThumb
+EXPORTS
+    DllCanUnloadNow PRIVATE
+    DllGetClassObject PRIVATE
+    DllRegisterServer PRIVATE
+    DllUnregisterServer PRIVATE
+    RayV_RegisterDdsThumbnails
+    RayV_UnregisterDdsThumbnails

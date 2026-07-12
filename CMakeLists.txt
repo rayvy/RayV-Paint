@@ -130,6 +130,8 @@ set(SOURCES
     src/core/ProjectManager.h
     src/core/SingleInstance.cpp
     src/core/SingleInstance.h
+    src/shell/DdsThumbRegister.cpp
+    src/shell/DdsThumbRegister.h
     src/modio/ModTypes.cpp
     src/modio/ModTypes.h
     src/modio/ModIniParser.cpp
@@ -211,6 +213,28 @@ add_executable(RayVPaint_Core WIN32 ${SOURCES} ${SHADER_FILES} src/resources/res
 set_target_properties(RayVPaint_Core PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin"
 )
+
+# ---- Explorer DDS thumbnail handler (COM in-proc DLL) ----
+# Self-contained: bcdec software decode only — no OpenCV/D3D/ImGui.
+if(WIN32)
+    add_library(RayVPaint_DdsThumb SHARED
+        src/shell/DdsThumbDecode.cpp
+        src/shell/DdsThumbDecode.h
+        src/shell/DdsThumbnailHandler.cpp
+        src/shell/DdsThumb.def
+    )
+    set_target_properties(RayVPaint_DdsThumb PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin"
+        OUTPUT_NAME "RayVPaint_DdsThumb"
+    )
+    target_include_directories(RayVPaint_DdsThumb PRIVATE src src/core src/shell)
+    target_compile_definitions(RayVPaint_DdsThumb PRIVATE NOMINMAX UNICODE _UNICODE)
+    target_link_libraries(RayVPaint_DdsThumb PRIVATE ole32 uuid shlwapi shell32 gdi32 advapi32)
+    # Build thumb DLL with Core so it always ships next to the exe
+    add_dependencies(RayVPaint_Core RayVPaint_DdsThumb)
+endif()
 
 # Link dependencies to Core
 target_link_libraries(RayVPaint_Core PRIVATE

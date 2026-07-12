@@ -40,6 +40,7 @@
 #include "core/PathUtil.h"
 #include "core/ProjectManager.h"
 #include "core/SingleInstance.h"
+#include "shell/DdsThumbRegister.h"
 #include "modio/VertexLayout.h"
 #include "preview3d/MeshGpu.h"
 #include "ui/EditorPanels.h"
@@ -658,6 +659,16 @@ int main(int argc, char* argv[]) {
     // Subclass window procedure for high-precision pointer/tablet messages + single-instance IPC
     g_OriginalWndProc = (WNDPROC)SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)SubclassedWndProc);
     SingleInstance::RegisterMainWindow(hWnd);
+
+    // Explorer DDS previews: register COM thumbnail handler under HKCU (no admin).
+    // Replaces the default-app icon with real image thumbs (Paint.NET used to own this).
+    if (!headlessMode && !testMode) {
+        if (DdsThumbRegister::EnsureRegistered())
+            Logger::Get().Info("DDS Explorer thumbnails: registered/OK");
+        else
+            Logger::Get().Warn("DDS Explorer thumbnails: handler DLL missing or reg failed "
+                               "(build RayVPaint_DdsThumb and restart)");
+    }
 
     // Initialize KeymapManager (requires GLFW initialized and window created for scancode resolution)
     KeymapManager::Get().Initialize();
