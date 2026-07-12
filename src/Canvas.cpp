@@ -13,7 +13,7 @@
 // Prefer PathUtil for all disk paths (UTF-8 / wide on Windows).
 #include <opencv2/imgproc.hpp>
 #include "core/ConfigManager.h"
-#include "core/TexconvHelper.h"
+#include "core/DdsCodec.h"
 #include "modio/ModIniParser.h"
 #include <chrono>
 #include <sstream>
@@ -3268,24 +3268,46 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
 
         CreateCompositeResources(device);
         m_Layers.clear();
-        // Do NOT force Simple — Advanced project create imports Diffuse after SetProjectType.
-        // Only default to Simple when type was never set (still default Advanced actually —
-        // preserve whatever the caller configured).
+        // First real image into a blank tab: stay Simple unless caller already
+        // switched to Advanced (wizard / multi-map import sets type BEFORE load).
+        // Previously default was Advanced → Quick Export ran batch packing with no stroke.
+        if (m_ProjectType != ProjectType::Advanced &&
+            m_ProjectType != ProjectType::AdvancedModMode) {
+            m_ProjectType = ProjectType::Simple;
+        }
+        // If type is still the default Simple — good. If Advanced was set first, keep it.
         m_CurrentProjectFilePath = filepath;
         m_ExportPath         = filepath;
+        if (m_ProjectType == ProjectType::Simple) {
+            m_ExportContainer = (ext == "dds")
+                ? ExportContainer::DDS
+                : ExportContainer::PNG;
+        }
 
         if (ext == "dds") {
-            // Export format mirrors source when we can re-export natively.
-            // Depth dumps open as R8 grayscale — do NOT force "R32 Linear" project/export.
-            if (loadedDdsFormat == DdsFormat::RGBA32_FLOAT) m_ExportFormat = "RGBA32_FLOAT";
-            else if (loadedDdsFormat == DdsFormat::RGBA16_UNORM) m_ExportFormat = "RGBA16_UNORM";
-            else if (loadedDdsFormat == DdsFormat::RGBA16_FLOAT) m_ExportFormat = "RGBA16_FLOAT";
-            else if (loadedDdsFormat == DdsFormat::R8_UNORM)     m_ExportFormat = "R8 (Linear, Unsigned, L8)";
-            else if (loadedDdsFormat == DdsFormat::R8G8_UNORM)   m_ExportFormat = "R8G8 (Linear, Unsigned)";
-            else if (loadedDdsFormat == DdsFormat::R16_FLOAT)    m_ExportFormat = "R16_FLOAT";
-            else if (loadedDdsFormat == DdsFormat::R32_FLOAT)    m_ExportFormat = "R32 (Linear, Float)";
-            else m_ExportFormat = "BC7 (sRGB, DX 11+)";
-            Logger::Get().Info("Auto-configured DDS export format: " + m_ExportFormat);
+            // Round-trip: export format / container / mips follow source via DirectXTex Analyze
+            DdsCodec::SourceInfo srcInfo;
+            if (DdsCodec::AnalyzeFile(filepath, srcInfo)) {
+                m_ExportFormat = srcInfo.uiLabel.empty() ? srcInfo.formatLabel : srcInfo.uiLabel;
+                m_ExportContainer = ExportContainer::DDS;
+                // Do NOT auto-enable mip generation from source mip count.
+                // Rebuilding a full BC7 mip chain on CPU is minutes for 2K/4K (regression vs texconv).
+                // Keep existing UI preference; default stays false unless user enables Mipmaps.
+                Logger::Get().Info("Auto-configured DDS export: " + m_ExportFormat +
+                    " (source mips=" + std::to_string(srcInfo.mipCount) +
+                    ", export mips=" + (m_ExportGenerateMipMaps ? "on" : "off") + ")");
+            } else {
+                // Fallback from legacy enum
+                if (loadedDdsFormat == DdsFormat::RGBA32_FLOAT) m_ExportFormat = "RGBA32_FLOAT";
+                else if (loadedDdsFormat == DdsFormat::RGBA16_UNORM) m_ExportFormat = "RGBA16_UNORM";
+                else if (loadedDdsFormat == DdsFormat::RGBA16_FLOAT) m_ExportFormat = "RGBA16_FLOAT";
+                else if (loadedDdsFormat == DdsFormat::R8_UNORM)     m_ExportFormat = "R8 (Linear, Unsigned, L8)";
+                else if (loadedDdsFormat == DdsFormat::R8G8_UNORM)   m_ExportFormat = "R8G8 (Linear, Unsigned)";
+                else if (loadedDdsFormat == DdsFormat::R16_FLOAT)    m_ExportFormat = "R16_FLOAT";
+                else if (loadedDdsFormat == DdsFormat::R32_FLOAT)    m_ExportFormat = "R32 (Linear, Float)";
+                else m_ExportFormat = "BC7 (sRGB, DX 11+)";
+                Logger::Get().Info("Auto-configured DDS export format (legacy): " + m_ExportFormat);
+            }
         } else if (ext == "png") {
             ExtractAndSetICCProfile(filepath);
         }
@@ -3408,53 +3430,37 @@ bool Canvas::SaveCanvasStandard(const std::string& filepath, const std::string& 
 }
 
 bool Canvas::SaveCanvasCompressed(const std::string& filepath, const std::string& formatStr, bool generateMips, const std::string& mipFilter, const std::string& speed) {
-    DdsFormat ddsFmt;
-    bool isNative = false;
-    if (formatStr == "R8G8B8A8_UNORM" || formatStr == "RGBA8_UNORM") { ddsFmt = DdsFormat::RGBA8_UNORM; isNative = true; }
-    else if (formatStr == "R16G16B16A16_UNORM" || formatStr == "RGBA16_UNORM") { ddsFmt = DdsFormat::RGBA16_UNORM; isNative = true; }
-    else if (formatStr == "R16G16B16A16_FLOAT" || formatStr == "RGBA16_FLOAT") { ddsFmt = DdsFormat::RGBA16_FLOAT; isNative = true; }
-    else if (formatStr == "R32G32B32A32_FLOAT" || formatStr == "RGBA32_FLOAT") { ddsFmt = DdsFormat::RGBA32_FLOAT; isNative = true; }
-    else if (formatStr == "R8_UNORM") { ddsFmt = DdsFormat::R8_UNORM; isNative = true; }
-    else if (formatStr == "R16_FLOAT") { ddsFmt = DdsFormat::R16_FLOAT; isNative = true; }
-    else if (formatStr == "R32_FLOAT") { ddsFmt = DdsFormat::R32_FLOAT; isNative = true; }
+    DXGI_FORMAT dxgi = DXGI_FORMAT_BC7_UNORM_SRGB;
+    DdsCodec::UiLabelToDxgi(formatStr, dxgi);
 
-    if (isNative) {
-        return SaveCanvas(filepath, ddsFmt);
+    DdsCodec::SaveOptions opt;
+    opt.format = dxgi;
+    opt.generateMips = generateMips;
+    opt.mipFilter = mipFilter;
+    opt.compressionSpeed = speed;
+
+    // Prefer float path for HDR document / float targets
+    const bool wantFloat =
+        DdsCodec::IsFloatFormat(dxgi) ||
+        m_DocumentBitDepth == DocumentBitDepth::F16 ||
+        m_DocumentBitDepth == DocumentBitDepth::F32;
+
+    if (wantFloat && (DdsCodec::IsFloatFormat(dxgi) ||
+                      dxgi == DXGI_FORMAT_BC6H_UF16 || dxgi == DXGI_FORMAT_BC6H_SF16)) {
+        auto pixels = GetCompositePixels(); // float RGBA
+        if (pixels.empty()) {
+            Logger::Get().Error("SaveCanvasCompressed: empty composite");
+            return false;
+        }
+        return DdsCodec::SaveRgba32F(filepath, pixels.data(), m_Width, m_Height, opt);
     }
 
-    std::string tempDir = ConfigManager::GetUserSubdirectory("temp");
-    std::string tempFile = tempDir + "/temp_export_uncompressed.dds";
-
-    struct FileCleanupGuard {
-        std::wstring path;
-        ~FileCleanupGuard() {
-            if (!path.empty()) {
-                std::error_code ec;
-                std::filesystem::remove(path, ec);
-            }
-        }
-    } guard;
-#ifdef _WIN32
-    guard.path = UTF8ToWString(tempFile);
-#else
-    guard.path = std::wstring(tempFile.begin(), tempFile.end());
-#endif
-
-    if (!SaveCanvas(tempFile, DdsFormat::RGBA8_UNORM)) {
-        Logger::Get().Error("Failed to save temporary uncompressed DDS for texconv.");
+    std::vector<uint8_t> rgba8;
+    if (!ComposeVisibleLayersRGBA8(m_Layers, m_Width, m_Height, rgba8) || rgba8.empty()) {
+        Logger::Get().Error("SaveCanvasCompressed: RGBA8 composite failed");
         return false;
     }
-
-    ExportSettings settings;
-    settings.isDds = true;
-    settings.ddsFormatStr = formatStr;
-    settings.advancedMode = true;
-    settings.compressionSpeed = speed;
-    settings.generateMipMaps = generateMips;
-    settings.mipFilter = mipFilter;
-    settings.exportPath = filepath;
-
-    return TexconvHelper::CompressDDS(tempFile, filepath, settings);
+    return DdsCodec::SaveRgba8(filepath, rgba8.data(), m_Width, m_Height, opt);
 }
 
 void Canvas::SetExportContainer(ExportContainer c) {

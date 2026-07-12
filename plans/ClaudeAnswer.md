@@ -1,46 +1,50 @@
-Окей, это классическая задача — Windows Explorer генерирует превью не через ассоциацию "программа по умолчанию", а через отдельный **Thumbnail Handler** (COM-объект), который регистрируется для расширения файла. Просто назначив свой .exe как программу по умолчанию, ты получаешь только иконку — превью это отдельный контракт.
+## Что реализовать
 
-## Как это устроено
+Property Handler — COM-объект, отдельный от Thumbnail Handler, отвечает за метаданные в колонках Explorer, панели "Подробности" и tooltip (InfoTip). Показывает DXGI Format, Width, Height, MipCount, ArraySize, IsCubemap без открытия файла.
 
-**1. Интерфейс `IThumbnailProvider`**
+Компоненты:
+1. `.propdesc` XML-схема — объявляет кастомные PROPERTYKEY (formatID = свой GUID, propID 2+)
+2. COM DLL, реализующая `IPropertyStore` + `IInitializeWithStream`
+3. Парсер DDS header (128 байт + опционально 20 байт DX10 extension) — без загрузки пикселей
+4. Регистрация в реестре
 
-Начиная с Vista, Explorer использует COM-интерфейс `IThumbnailProvider::GetThumbnail(UINT cx, HBITMAP *phbmp, WTS_ALPHATYPE *pdwAlpha)`. Твой обработчик получает поток файла (через `IInitializeWithStream` или `IInitializeWithFile`), декодирует DDS-заголовок, достаёт первый мип нулевого уровня (или генерит превью так же, как это делает твой основной вьюпорт), и отдаёт готовый `HBITMAP` нужного размера `cx x cx`.
+## Чеклист проверки (от вероятного к менее вероятному)
 
-Минимальный набор интерфейсов, которые нужно реализовать в COM-объекте:
-- `IInitializeWithStream` (или `IInitializeWithFile`) — Explorer передаёт тебе файл
-- `IThumbnailProvider` — собственно генерация битмапа
-- `IUnknown` / `IClassFactory` — стандартная COM-обвязка
+**Схема свойств**
+- Проверь `.propdesc` зарегистрирован через `PSRegisterPropertySchema()` без ошибки
+- Проверь formatID GUID уникальный, не конфликтует с другими схемами
+- Проверь propID начинается с 2 (0 и 1 зарезервированы)
 
-**2. Регистрация в реестре**
+**Реестр — привязка хендлера**
+- Проверь `HKCR\.dds\PropertyHandler\(Default)` = точный CLSID
+- Проверь `HKCR\CLSID\{GUID}\InprocServer32\(Default)` = абсолютный путь к DLL
+- Проверь `ThreadingModel = Apartment`
 
-Это отдельная DLL (не твой основной .exe, COM in-proc сервер), которую регистрируешь так:
+**COM-реализация**
+- Проверь `IInitializeWithStream::Initialize` не падает на битых/неполных DDS
+- Проверь `GetValue()` возвращает `S_OK` + корректный `PROPVARIANT` тип (совпадает с `.propdesc`)
+- Проверь `GetValue()` для отсутствующих/неприменимых свойств возвращает пустой PROPVARIANT, не падает
+- Проверь `GetCount`/`GetAt` (если IPropertyStoreCapabilities) корректны
 
-```
-HKEY_CLASSES_ROOT\.dds\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}
-    (Default) = "{ТВОЙ-CLSID}"
+**DXGI Format парсинг**
+- Проверь legacy DDS (без DX10 header) — маппинг из `fourCC` (DXT1/3/5 и т.д.)
+- Проверь DX10 extended header — `dxgiFormat` читается напрямую
+- Проверь fallback на "Unknown" вместо краша при неизвестном формате
 
-HKEY_CLASSES_ROOT\CLSID\{ТВОЙ-CLSID}
-    (Default) = "RayVPaint DDS Thumbnail Handler"
-    InprocServer32\(Default) = "путь\к\dll"
-    InprocServer32\ThreadingModel = "Apartment"
-```
+**Видимость в Explorer**
+- Проверь колонка добавлена через ПКМ на заголовке списка → "Подробнее"
+- Проверь `InfoTip` строка в `HKCR\.dds` = `"prop:Prop1;Prop2;..."` для тултипа
+- Проверь имена свойств в InfoTip совпадают с `name=` в `.propdesc` один-в-один
 
-GUID `{e357fccd-a995-4576-b01f-234630154e96}` — это фиксированный, зарезервированный Microsoft GUID именно для thumbnail handler'ов, его не меняешь.
+**Права/архитектура**
+- Проверь regsvr32/установка от админа (HKCR requires elevation)
+- Проверь DLL x64 (не x86) под 64-бит Explorer
+- Проверь HKCU\Software\Classes не переопределяет HKCR веткой с другим/старым CLSID
 
-**3. Регистрация самой DLL**
+**Кэш**
+- Проверь Explorer перезапущен после регистрации (property system кэширует schema)
+- Проверь смена propID/formatID у существующего свойства = требует новый GUID, иначе бита кэш схемы
 
-DLL должна экспортировать `DllGetClassObject`, `DllCanUnloadNow`, `DllRegisterServer`, `DllUnregisterServer` — стандартный ATL/COM-сервер. Регистрируется через `regsvr32 yourhandler.dll`.
-
-Если не хочешь городить ATL руками — можно взять минимальный шаблон COM in-proc сервера, реализация `IThumbnailProvider` там буквально одна функция на 20 строк, весь остальной код — boilerplate регистрации.
-
-**4. Сброс кэша превьюшек**
-
-Explorer жёстко кэширует превью. После регистрации новые иконки не появятся, пока не:
-- очистишь кэш: `ie4uinit.exe -show` или удалить `%LocalAppData%\Microsoft\Windows\Explorer\thumbcache_*.db` (Explorer нужно перезапустить)
-- либо программно поднять версию через `HKCR\.dds` → добавить/сменить произвольный маркер, но по факту проще всего дёрнуть `SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL)` после установки/апдейта
-
-## Практический путь
-
-Раз у тебя уже есть DX11-пайплайн для чтения DDS и рендера превью в самом RayVPaint — вынеси кусок "декодировать DDS → получить RGBA буфер нужного маленького размера" в отдельную библиотеку/функцию, которую будет дёргать и основное приложение, и thumbnail-handler DLL. Не обязательно гонять полный DX11 контекст ради превью — для маленьких размеров (обычно Explorer просит 32/96/256 px) дешевле сделать software-decode DDS (BC1-7, DXT и т.п.) в CPU и просто собрать HBITMAP через GDI, без GPU-контекста — это быстрее и не тянет девайс-контекст в explorer.exe процесс, что важно, потому что thumbnail handler грузится **внутри explorer.exe** (или в изолированном surrogate-процессе `dllhost.exe`, если поставить флаг `DisableProcessIsolation = 0`, что желательно для стабильности).
-
-Хочешь, накидаю скелет C++ COM-объекта (IInitializeWithStream + IThumbnailProvider + регистрация) под твой конкретный DDS-ридер?
+**Диагностика**
+- Проверь через `ShellExView` (NirSoft) — виден ли Property Handler, не disabled
+- Проверь через `sdkddkver`/Property System viewer (`Microsoft PowerToys` PropertyEdit или `PropSys` test tools) — значения реально отдаются

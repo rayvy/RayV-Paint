@@ -882,21 +882,44 @@ namespace UI {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Help")) {
-                if (ImGui::MenuItem("Register Explorer thumbnails (DDS + fix PNG)")) {
-                    if (DdsThumbRegister::EnsureRegistered())
-                        Logger::Get().Info(
-                            "Thumbnails OK: DDS handler in HKLM + PNG restored to Photo provider. "
-                            "Restart Explorer / F5 if icons linger.");
-                    else
-                        Logger::Get().Error(
-                            "Thumbnail registration incomplete. Accept the UAC prompt "
-                            "(HKLM required). DLL must be next to RayVPaint_Core.exe.");
+                // ---- Explorer integration (Blender-style register) ----
+                {
+                    auto st = DdsThumbRegister::QueryStatus();
+                    ImGui::TextUnformatted("Windows Explorer integration");
+                    ImGui::PushStyleColor(ImGuiCol_Text, st.fullyOk
+                        ? ImVec4(0.45f, 0.9f, 0.5f, 1.f)
+                        : ImVec4(0.95f, 0.75f, 0.35f, 1.f));
+                    ImGui::TextWrapped("%s", st.summary.c_str());
+                    ImGui::PopStyleColor();
+                    ImGui::TextDisabled("%s", st.elevLine.c_str());
+                    ImGui::TextDisabled("%s", st.dllLine.c_str());
+                    ImGui::TextDisabled("%s", st.thumbLine.c_str());
+                    ImGui::TextDisabled("%s", st.propLine.c_str());
+                    ImGui::Spacing();
+                    if (ImGui::MenuItem("Register (DDS thumbs + type + fix PNG)")) {
+                        if (DdsThumbRegister::EnsureRegistered({}, true))
+                            Logger::Get().Info(
+                                "Explorer register OK. Restart Explorer / F5 if icons linger.");
+                        else
+                            Logger::Get().Error(
+                                "Register incomplete — accept UAC, ensure RayVPaint_DdsThumb.dll "
+                                "is next to Core.");
+                    }
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip(
+                            "Registers COM thumbnail + property handlers (HKLM needs Admin once).\n"
+                            "ProgID RayVPaint.dds, KindMap Picture, PNG Photo restore.\n"
+                            "Does NOT put ShellEx on Applications\\RayVPaint.");
+                    if (ImGui::MenuItem("Unregister Explorer integration")) {
+                        if (DdsThumbRegister::Unregister())
+                            Logger::Get().Info("Explorer integration unregistered.");
+                        else
+                            Logger::Get().Error("Unregister failed (DLL missing or UAC denied).");
+                    }
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip("Removes our CLSID / ShellEx / property handler (elevates for HKLM).");
+                    ImGui::Separator();
                 }
-                if (ImGui::IsItemHovered())
-                    Ui::Tooltip(
-                        "DDS: IThumbnailProvider COM DLL (needs Admin once → HKLM).\n"
-                        "PNG/JPG: restore Windows Photo handler if Google Drive stole it.\n"
-                        "Never puts ShellEx on Applications\\RayVPaint — that breaks all types.");
                 if (ImGui::MenuItem("About RayV-Paint…"))
                     state.openAboutModal = true;
                 ImGui::EndMenu();

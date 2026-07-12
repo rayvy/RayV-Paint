@@ -3,7 +3,7 @@
 #include "../core/ImageManager.h"
 #include "../core/Logger.h"
 #include "../core/PathUtil.h"
-#include "../core/TexconvHelper.h"
+#include "../core/DdsCodec.h"
 #include "../core/ConfigManager.h"
 
 #include <algorithm>
@@ -197,28 +197,13 @@ static bool SaveDdsWithFormat(const std::string& path, const uint8_t* rgba, int 
                               const std::string& formatStr, bool mips,
                               const std::string& mipFilter, const std::string& speed) {
     std::string outPath = ForcePathExtension(path, "dds");
-
-    std::string tempDir = ConfigManager::GetUserSubdirectory("temp");
-    // Unique temp name avoids collisions when exporting multiple maps in one batch
-    static std::atomic<uint32_t> s_tmpSeq{0};
-    std::string tempPng = tempDir + "/texset_export_tmp_" +
-        std::to_string(s_tmpSeq.fetch_add(1)) + ".png";
-
-    if (!ImageManager::SaveRGBA8ToFile(tempPng, rgba, w, h))
-        return false;
-
-    ExportSettings settings;
-    settings.isDds = true;
-    settings.ddsFormatStr = formatStr.empty() ? "BC7_UNORM" : formatStr;
-    settings.advancedMode = true;
-    settings.compressionSpeed = speed.empty() ? "Medium" : speed;
-    settings.generateMipMaps = mips;
-    settings.mipFilter = mipFilter.empty() ? "Bicubic" : mipFilter;
-    settings.exportPath = outPath;
-
-    bool ok = TexconvHelper::CompressDDS(tempPng, outPath, settings);
-    try { fs::remove(PathUtil::FromUtf8(tempPng)); } catch (...) {}
-    return ok;
+    DdsCodec::SaveOptions opt;
+    opt.format = DXGI_FORMAT_BC7_UNORM;
+    DdsCodec::UiLabelToDxgi(formatStr.empty() ? "BC7_UNORM" : formatStr, opt.format);
+    opt.generateMips = mips;
+    opt.mipFilter = mipFilter.empty() ? "Cubic" : mipFilter;
+    opt.compressionSpeed = speed.empty() ? "Medium" : speed;
+    return DdsCodec::SaveRgba8(outPath, rgba, w, h, opt);
 }
 
 static bool SaveWithResolved(const std::string& path, const uint8_t* rgba, int w, int h,

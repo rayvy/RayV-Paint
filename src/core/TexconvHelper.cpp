@@ -1,4 +1,4 @@
-#include "TexconvHelper.h"
+﻿#include "TexconvHelper.h"
 #include "Logger.h"
 #include "PathUtil.h"
 #include <windows.h>
@@ -18,7 +18,7 @@ static std::wstring GetExecutableDir() {
 
 static std::wstring FindTexconv() {
     std::wstring exeDir = GetExecutableDir();
-    // Candidates relative to RayVPaint_Core.exe (…/build/Release/bin)
+    // Candidates relative to RayVPaint_Core.exe (тАж/build/Release/bin)
     std::wstring candidates[] = {
         exeDir + L"\\texconv.exe",
         exeDir + L"\\..\\texconv.exe",
@@ -34,7 +34,7 @@ static std::wstring FindTexconv() {
     return L"texconv.exe"; // PATH
 }
 
-// Map Paint.NET-style / UI format strings → texconv -f DXGI name
+// Map Paint.NET-style / UI format strings тЖТ texconv -f DXGI name
 static std::wstring MapFormatToTexconv(const std::string& fmtIn) {
     std::string fmt = fmtIn;
     // normalize
@@ -142,7 +142,7 @@ bool TexconvHelper::CompressDDS(const std::string& srcImage, const std::string& 
 
     // Color: our composite is already display-referred sRGB bytes in R8G8B8A8_UNORM.
     // Targeting *_SRGB without -srgbi makes texconv treat input as linear and apply
-    // sRGB OETF → washed/bleached colors. Tag both ends as sRGB (identity transfer).
+    // sRGB OETF тЖТ washed/bleached colors. Tag both ends as sRGB (identity transfer).
     if (format.find(L"_SRGB") != std::wstring::npos)
         cmd += L" -srgbi -srgbo";
 
@@ -207,6 +207,6 @@ bool TexconvHelper::CompressDDS(const std::string& srcImage, const std::string& 
     Logger::Get().Info("DDS compressed OK format=" + PathUtil::WideToUtf8(format) +
                        " mips=" + std::string(settings.generateMipMaps ? "yes" : "no") +
                        " bytes=" + std::to_string((unsigned long long)finalSize) +
-                       " → " + destDds);
+                       " тЖТ " + destDds);
     return true;
 }

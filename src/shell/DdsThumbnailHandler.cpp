@@ -1,8 +1,7 @@
-// RayVPaint DDS Thumbnail Handler — COM in-proc server for Windows Explorer.
-// Implements IInitializeWithStream + IThumbnailProvider.
-//
-// CLSID: {B5E8A1C2-4F3D-4A9E-9C1B-7D6E5F4A3B2C}
-// ShellEx: {e357fccd-a995-4576-b01f-234630154e96}  (MS thumbnail provider)
+// RayVPaint DDS Shell COM server (Explorer):
+//   Thumbnail:  IThumbnailProvider     CLSID {B5E8A1C2-4F3D-4A9E-9C1B-7D6E5F4A3B2C}
+//   Properties: IPropertyStore         CLSID {D4A1B2C3-5E6F-4789-A012-3456789ABCDE}
+// Also registers ProgID, KindMap, InfoTip, propdesc schema — teaches Windows about .dds.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -12,6 +11,7 @@
 #include <shlwapi.h>
 #include <thumbcache.h>
 #include <propkey.h>
+#include <propsys.h>
 
 #include "DdsThumbDecode.h"
 
@@ -26,19 +26,33 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "uuid.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "propsys.lib")
 
 // {B5E8A1C2-4F3D-4A9E-9C1B-7D6E5F4A3B2C}
 static const CLSID CLSID_RayVDdsThumb =
     { 0xB5E8A1C2, 0x4F3D, 0x4A9E, { 0x9C, 0x1B, 0x7D, 0x6E, 0x5F, 0x4A, 0x3B, 0x2C } };
+// {D4A1B2C3-5E6F-4789-A012-3456789ABCDE}
+extern const CLSID CLSID_RayVDdsProps;
 
-static const wchar_t* kClsidStr = L"{B5E8A1C2-4F3D-4A9E-9C1B-7D6E5F4A3B2C}";
+static const wchar_t* kClsidThumbStr = L"{B5E8A1C2-4F3D-4A9E-9C1B-7D6E5F4A3B2C}";
+static const wchar_t* kClsidPropsStr = L"{D4A1B2C3-5E6F-4789-A012-3456789ABCDE}";
 // Microsoft thumbnail handler ShellEx GUID
 static const wchar_t* kThumbShellEx = L"{e357fccd-a995-4576-b01f-234630154e96}";
 static const wchar_t* kHandlerName = L"RayVPaint DDS Thumbnail Handler";
+static const wchar_t* kPropsName = L"RayVPaint DDS Property Handler";
+static const wchar_t* kProgId = L"RayVPaint.dds";
 
 static HINSTANCE g_hInst = nullptr;
-static std::atomic<long> g_serverLocks{0};
-static std::atomic<long> g_objCount{0};
+// Shared with DdsPropertyHandler.cpp
+std::atomic<long> g_shellServerLocks{0};
+std::atomic<long> g_shellObjCount{0};
+
+// legacy aliases used in this TU
+#define g_serverLocks g_shellServerLocks
+#define g_objCount g_shellObjCount
+
+// Forward: property handler factory (DdsPropertyHandler.cpp)
+HRESULT CreateDdsPropsClassFactory(REFIID riid, void** ppv);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -323,18 +337,17 @@ static void DeleteTree(HKEY root, const wchar_t* sub) {
     RegDeleteTreeW(root, sub);
 }
 
+static const wchar_t* ClassesPrefix(HKEY root) {
+    return (root == HKEY_LOCAL_MACHINE) ? L"SOFTWARE\\Classes\\" : L"Software\\Classes\\";
+}
+
 // Minimal Paint.NET-style CLSID registration under one hive.
-static HRESULT RegisterClsidHive(HKEY root, const std::wstring& dll) {
-    // root is HKEY_CURRENT_USER or HKEY_LOCAL_MACHINE
-    // subkeys are relative to Software\Classes when root is HKCU, or Classes when HKLM via Software\Classes
-    const wchar_t* prefix = (root == HKEY_LOCAL_MACHINE)
-        ? L"SOFTWARE\\Classes\\"
-        : L"Software\\Classes\\";
-
-    std::wstring clsidKey = std::wstring(prefix) + L"CLSID\\" + kClsidStr;
-    HRESULT hr = SetRegSz(root, clsidKey.c_str(), nullptr, kHandlerName);
+static HRESULT RegisterClsidHive(HKEY root, const std::wstring& dll,
+                                 const wchar_t* clsidStr, const wchar_t* name) {
+    const wchar_t* prefix = ClassesPrefix(root);
+    std::wstring clsidKey = std::wstring(prefix) + L"CLSID\\" + clsidStr;
+    HRESULT hr = SetRegSz(root, clsidKey.c_str(), nullptr, name);
     if (FAILED(hr)) return hr;
-
     std::wstring inproc = clsidKey + L"\\InprocServer32";
     hr = SetRegSz(root, inproc.c_str(), nullptr, dll.c_str());
     if (FAILED(hr)) return hr;
@@ -342,11 +355,148 @@ static HRESULT RegisterClsidHive(HKEY root, const std::wstring& dll) {
 }
 
 static HRESULT BindExtThumb(HKEY root, const wchar_t* extOrProg, const wchar_t* handlerClsid) {
-    const wchar_t* prefix = (root == HKEY_LOCAL_MACHINE)
-        ? L"SOFTWARE\\Classes\\"
-        : L"Software\\Classes\\";
-    std::wstring path = std::wstring(prefix) + extOrProg + L"\\ShellEx\\" + kThumbShellEx;
+    std::wstring path = std::wstring(ClassesPrefix(root)) + extOrProg +
+                        L"\\ShellEx\\" + kThumbShellEx;
     return SetRegSz(root, path.c_str(), nullptr, handlerClsid);
+}
+
+static std::wstring SiblingExePath() {
+    // Prefer RayVPaint.exe one level up from bin\, else Core in same folder
+    std::wstring dll = ModulePath();
+    size_t slash = dll.find_last_of(L"\\/");
+    std::wstring dir = (slash == std::wstring::npos) ? L"." : dll.substr(0, slash);
+    std::wstring core = dir + L"\\RayVPaint_Core.exe";
+    std::wstring launcher = dir + L"\\..\\RayVPaint.exe";
+    DWORD a = GetFileAttributesW(launcher.c_str());
+    if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY))
+        return launcher;
+    return core;
+}
+
+static void RegisterPropdescSchema(const std::wstring& dllDir) {
+    std::wstring propdesc = dllDir + L"\\RayVPaint.Dds.propdesc";
+    if (GetFileAttributesW(propdesc.c_str()) == INVALID_FILE_ATTRIBUTES)
+        return;
+    HRESULT hr = PSRegisterPropertySchema(propdesc.c_str());
+    // S_OK or already registered — both fine. Log only hard failures.
+    if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
+        // Can't use app Logger from shell DLL reliably — silent
+        (void)hr;
+    }
+}
+
+static void UnregisterPropdescSchema(const std::wstring& dllDir) {
+    std::wstring propdesc = dllDir + L"\\RayVPaint.Dds.propdesc";
+    PSUnregisterPropertySchema(propdesc.c_str());
+}
+
+// Teach Windows that .dds is a real image type with our ProgID + details columns.
+static void RegisterDdsFileType(HKEY root, const std::wstring& dll) {
+    const wchar_t* p = ClassesPrefix(root);
+    std::wstring exe = SiblingExePath();
+    std::wstring icon = L"\"" + exe + L"\",0";
+    std::wstring openCmd = L"\"" + exe + L"\" \"%1\"";
+
+    // .dds → RayVPaint.dds
+    SetRegSz(root, (std::wstring(p) + L".dds").c_str(), nullptr, kProgId);
+    SetRegSz(root, (std::wstring(p) + L".dds").c_str(), L"PerceivedType", L"image");
+    SetRegSz(root, (std::wstring(p) + L".dds").c_str(), L"Content Type", L"image/vnd-ms.dds");
+    // OpenWithProgids entry
+    SetRegSz(root, (std::wstring(p) + L".dds\\OpenWithProgids").c_str(), kProgId, L"");
+
+    // ProgID
+    std::wstring pid = std::wstring(p) + kProgId;
+    SetRegSz(root, pid.c_str(), nullptr, L"DDS Texture");
+    SetRegSz(root, pid.c_str(), L"FriendlyTypeName", L"DDS Texture");
+    SetRegSz(root, (pid + L"\\DefaultIcon").c_str(), nullptr, icon.c_str());
+    SetRegSz(root, (pid + L"\\shell\\open\\command").c_str(), nullptr, openCmd.c_str());
+
+    // Tooltip + Details pane (system image props + our custom ones)
+    SetRegSz(root, pid.c_str(), L"InfoTip",
+             L"prop:System.ItemType;System.Image.Dimensions;RayV.Dds.Format;RayV.Dds.Dxgi;"
+             L"RayV.Dds.MipCount;RayV.Dds.Flags;System.Size");
+    SetRegSz(root, pid.c_str(), L"FullDetails",
+             L"prop:System.PropGroup.Image;System.Image.Dimensions;System.Image.HorizontalSize;"
+             L"System.Image.VerticalSize;System.Image.BitDepth;RayV.Dds.Format;RayV.Dds.Dxgi;"
+             L"RayV.Dds.MipCount;RayV.Dds.Flags;System.PropGroup.FileSystem;System.ItemNameDisplay;"
+             L"System.ItemType;System.ItemFolderPathDisplay;System.DateCreated;System.DateModified;"
+             L"System.Size");
+    SetRegSz(root, pid.c_str(), L"PreviewDetails",
+             L"prop:System.Image.Dimensions;RayV.Dds.Format;RayV.Dds.Dxgi;RayV.Dds.MipCount;System.Size");
+    SetRegSz(root, pid.c_str(), L"ExtendedTileInfo",
+             L"prop:System.ItemType;System.Image.Dimensions;RayV.Dds.Format;*System.Size");
+
+    // Thumbnail on ProgID (extension binding also set)
+    BindExtThumb(root, kProgId, kClsidThumbStr);
+
+    // Property handler for .dds (system list under PropertySystem)
+    // HKLM path preferred; also try Classes\.dds shell extension style under HKCU
+    if (root == HKEY_LOCAL_MACHINE) {
+        SetRegSz(HKEY_LOCAL_MACHINE,
+                 L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PropertySystem\\PropertyHandlers\\.dds",
+                 nullptr, kClsidPropsStr);
+    } else {
+        // HKCU override (works for current user when HKLM blocked)
+        SetRegSz(HKEY_CURRENT_USER,
+                 L"Software\\Microsoft\\Windows\\CurrentVersion\\PropertySystem\\PropertyHandlers\\.dds",
+                 nullptr, kClsidPropsStr);
+    }
+
+    // KindMap → Picture (Explorer "Pictures" filters / photo chrome)
+    if (root == HKEY_LOCAL_MACHINE) {
+        SetRegSz(HKEY_LOCAL_MACHINE,
+                 L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\KindMap",
+                 L".dds", L"Picture");
+    } else {
+        SetRegSz(HKEY_CURRENT_USER,
+                 L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\KindMap",
+                 L".dds", L"Picture");
+    }
+
+    // Also keep legacy ddsfile ProgID informed (some systems still use it)
+    SetRegSz(root, (std::wstring(p) + L"ddsfile").c_str(), nullptr, L"DDS Texture");
+    SetRegSz(root, (std::wstring(p) + L"ddsfile\\DefaultIcon").c_str(), nullptr, icon.c_str());
+    BindExtThumb(root, L"ddsfile", kClsidThumbStr);
+
+    // SystemFileAssociations\.dds — Explorer often reads columns/InfoTip from here
+    // even when UserChoice ProgId is Applications\RayVPaint_Core.exe
+    const wchar_t* sfaPrefix = (root == HKEY_LOCAL_MACHINE)
+        ? L"SOFTWARE\\Classes\\SystemFileAssociations\\.dds"
+        : L"Software\\Classes\\SystemFileAssociations\\.dds";
+    SetRegSz(root, sfaPrefix, L"InfoTip",
+             L"prop:System.ItemType;System.Image.Dimensions;RayV.Dds.Format;RayV.Dds.Dxgi;"
+             L"RayV.Dds.MipCount;RayV.Dds.Flags;System.Size");
+    SetRegSz(root, sfaPrefix, L"FullDetails",
+             L"prop:System.PropGroup.Image;System.Image.Dimensions;System.Image.HorizontalSize;"
+             L"System.Image.VerticalSize;RayV.Dds.Format;RayV.Dds.Dxgi;RayV.Dds.MipCount;"
+             L"RayV.Dds.Flags;System.PropGroup.FileSystem;System.ItemNameDisplay;System.Size");
+    SetRegSz(root, sfaPrefix, L"PreviewDetails",
+             L"prop:System.Image.Dimensions;RayV.Dds.Format;RayV.Dds.Dxgi;RayV.Dds.MipCount;System.Size");
+    SetRegSz(root, sfaPrefix, L"ExtendedTileInfo",
+             L"prop:System.ItemType;System.Image.Dimensions;RayV.Dds.Format;*System.Size");
+    SetRegSz(root, sfaPrefix, L"TileInfo",
+             L"prop:System.ItemType;System.Image.Dimensions;RayV.Dds.Format");
+
+    // UserChoice default app ProgId (no ShellEx — would break multi-type) but Details columns yes
+    static const wchar_t* kAppProgIds[] = {
+        L"Applications\\RayVPaint_Core.exe",
+        L"Applications\\RayVPaint.exe",
+    };
+    for (const wchar_t* ap : kAppProgIds) {
+        std::wstring base = std::wstring(p) + ap;
+        SetRegSz(root, base.c_str(), L"FriendlyTypeName", L"DDS Texture");
+        SetRegSz(root, base.c_str(), L"InfoTip",
+                 L"prop:System.ItemType;System.Image.Dimensions;RayV.Dds.Format;RayV.Dds.Dxgi;"
+                 L"RayV.Dds.MipCount;System.Size");
+        SetRegSz(root, base.c_str(), L"FullDetails",
+                 L"prop:System.PropGroup.Image;System.Image.Dimensions;RayV.Dds.Format;"
+                 L"RayV.Dds.Dxgi;RayV.Dds.MipCount;RayV.Dds.Flags;"
+                 L"System.PropGroup.FileSystem;System.ItemNameDisplay;System.Size");
+        SetRegSz(root, base.c_str(), L"PreviewDetails",
+                 L"prop:System.Image.Dimensions;RayV.Dds.Format;RayV.Dds.Dxgi;System.Size");
+    }
+
+    (void)dll;
 }
 
 // Windows Photo Thumbnail Provider — restores PNG/JPG after Google Drive hijack
@@ -381,50 +531,57 @@ static void RemoveApplicationsShellExPollution() {
 static HRESULT RegisterHandler() {
     const std::wstring dll = ModulePath();
     if (dll.empty()) return E_FAIL;
+    size_t slash = dll.find_last_of(L"\\/");
+    std::wstring dllDir = (slash == std::wstring::npos) ? L"." : dll.substr(0, slash);
 
-    // 1) Always write HKCU (extension bindings + fallback)
-    HRESULT hrCu = RegisterClsidHive(HKEY_CURRENT_USER, dll);
-    BindExtThumb(HKEY_CURRENT_USER, L".dds", kClsidStr);
-    BindExtThumb(HKEY_CURRENT_USER, L"ddsfile", kClsidStr);
-    BindExtThumb(HKEY_CURRENT_USER, L"RayVPaint.dds", kClsidStr);
-    SetRegSz(HKEY_CURRENT_USER, L"Software\\Classes\\.dds", L"PerceivedType", L"image");
-    SetRegSz(HKEY_CURRENT_USER, L"Software\\Classes\\.dds", L"Content Type", L"image/vnd-ms.dds");
-    SetRegSz(HKEY_CURRENT_USER,
-             L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\KindMap",
-             L".dds", L"Picture");
+    // 1) COM CLSIDs — thumb + property (HKCU always)
+    HRESULT hrCu = RegisterClsidHive(HKEY_CURRENT_USER, dll, kClsidThumbStr, kHandlerName);
+    RegisterClsidHive(HKEY_CURRENT_USER, dll, kClsidPropsStr, kPropsName);
+    BindExtThumb(HKEY_CURRENT_USER, L".dds", kClsidThumbStr);
+    RegisterDdsFileType(HKEY_CURRENT_USER, dll);
+    RegisterPropdescSchema(dllDir);
 
-    // 2) HKLM is REQUIRED for Explorer thumbnail host (needs admin once)
-    HRESULT hrLm = RegisterClsidHive(HKEY_LOCAL_MACHINE, dll);
+    // 2) HKLM required for thumbnail host + machine-wide property handler
+    HRESULT hrLm = RegisterClsidHive(HKEY_LOCAL_MACHINE, dll, kClsidThumbStr, kHandlerName);
     if (SUCCEEDED(hrLm)) {
-        BindExtThumb(HKEY_LOCAL_MACHINE, L".dds", kClsidStr);
-        BindExtThumb(HKEY_LOCAL_MACHINE, L"ddsfile", kClsidStr);
+        RegisterClsidHive(HKEY_LOCAL_MACHINE, dll, kClsidPropsStr, kPropsName);
+        BindExtThumb(HKEY_LOCAL_MACHINE, L".dds", kClsidThumbStr);
+        RegisterDdsFileType(HKEY_LOCAL_MACHINE, dll);
+        RegisterPropdescSchema(dllDir);
     }
 
-    // 3) Do not pollute Applications\*.exe ShellEx
+    // 3) Never put ShellEx on Applications\RayVPaint*.exe
     RemoveApplicationsShellExPollution();
 
-    // 4) Fix PNG/JPG thumbs hijacked by Google Drive File Stream
+    // 4) Fix PNG/JPG if Google Drive stole them
     RestoreStandardImageThumbs();
 
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 
-    // Success if HKLM ok (real Explorer path). HKCU-only still returns S_FALSE-ish via custom.
-    if (FAILED(hrLm)) {
-        // Still partially useful; caller should elevate and retry
+    if (FAILED(hrLm))
         return SUCCEEDED(hrCu) ? HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) : hrCu;
-    }
     return S_OK;
 }
 
 static HRESULT UnregisterHandler() {
-    DeleteTree(HKEY_CURRENT_USER, (std::wstring(L"Software\\Classes\\CLSID\\") + kClsidStr).c_str());
-    DeleteTree(HKEY_CURRENT_USER, (std::wstring(L"Software\\Classes\\AppID\\") + kClsidStr).c_str());
-    DeleteTree(HKEY_CURRENT_USER, (std::wstring(L"Software\\Classes\\.dds\\ShellEx\\") + kThumbShellEx).c_str());
-    DeleteTree(HKEY_CURRENT_USER, (std::wstring(L"Software\\Classes\\RayVPaint.dds\\ShellEx\\") + kThumbShellEx).c_str());
-    DeleteTree(HKEY_CURRENT_USER, (std::wstring(L"Software\\Classes\\ddsfile\\ShellEx\\") + kThumbShellEx).c_str());
-    DeleteTree(HKEY_LOCAL_MACHINE, (std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + kClsidStr).c_str());
-    DeleteTree(HKEY_LOCAL_MACHINE, (std::wstring(L"SOFTWARE\\Classes\\.dds\\ShellEx\\") + kThumbShellEx).c_str());
-    DeleteTree(HKEY_LOCAL_MACHINE, (std::wstring(L"SOFTWARE\\Classes\\ddsfile\\ShellEx\\") + kThumbShellEx).c_str());
+    std::wstring dll = ModulePath();
+    size_t slash = dll.find_last_of(L"\\/");
+    std::wstring dllDir = (slash == std::wstring::npos) ? L"." : dll.substr(0, slash);
+    UnregisterPropdescSchema(dllDir);
+
+    auto wipe = [](HKEY root, const wchar_t* prefix) {
+        DeleteTree(root, (std::wstring(prefix) + L"CLSID\\" + kClsidThumbStr).c_str());
+        DeleteTree(root, (std::wstring(prefix) + L"CLSID\\" + kClsidPropsStr).c_str());
+        DeleteTree(root, (std::wstring(prefix) + L".dds\\ShellEx\\" + kThumbShellEx).c_str());
+        DeleteTree(root, (std::wstring(prefix) + L"ddsfile\\ShellEx\\" + kThumbShellEx).c_str());
+        DeleteTree(root, (std::wstring(prefix) + kProgId).c_str());
+    };
+    wipe(HKEY_CURRENT_USER, L"Software\\Classes\\");
+    wipe(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\");
+    DeleteTree(HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\PropertySystem\\PropertyHandlers\\.dds");
+    DeleteTree(HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PropertySystem\\PropertyHandlers\\.dds");
     RemoveApplicationsShellExPollution();
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return S_OK;
@@ -451,13 +608,16 @@ STDAPI DllCanUnloadNow() {
 STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void** ppv) {
     if (!ppv) return E_POINTER;
     *ppv = nullptr;
-    if (rclsid != CLSID_RayVDdsThumb)
-        return CLASS_E_CLASSNOTAVAILABLE;
-    auto* factory = new (std::nothrow) ClassFactory();
-    if (!factory) return E_OUTOFMEMORY;
-    HRESULT hr = factory->QueryInterface(riid, ppv);
-    factory->Release();
-    return hr;
+    if (rclsid == CLSID_RayVDdsThumb) {
+        auto* factory = new (std::nothrow) ClassFactory();
+        if (!factory) return E_OUTOFMEMORY;
+        HRESULT hr = factory->QueryInterface(riid, ppv);
+        factory->Release();
+        return hr;
+    }
+    if (rclsid == CLSID_RayVDdsProps)
+        return CreateDdsPropsClassFactory(riid, ppv);
+    return CLASS_E_CLASSNOTAVAILABLE;
 }
 
 STDAPI DllRegisterServer() {

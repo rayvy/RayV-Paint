@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RayVPaint custom DDS properties for Explorer columns / Details pane / InfoTip.
+     Registered via PSRegisterPropertySchema at install / DllRegisterServer. -->
+<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xmlns="http://schemas.microsoft.com/windows/2006/propertydescription"
+        schemaVersion="1.0">
+  <propertyDescriptionList publisher="RayVPaint" product="RayVPaint">
+    <propertyDescription name="RayV.Dds.Format"
+                         formatID="{8F4C2A10-9B7E-4D61-A5E2-3C1D0F9E8B7A}"
+                         propID="2">
+      <searchInfo inInvertedIndex="true" isColumn="true" columnIndexType="OnDemand"/>
+      <typeInfo type="String" multipleValues="false" isInnate="true" canBePurged="false"/>
+      <labelInfo label="DDS Format"
+                 invitationText="DXGI / compression format (BC7_UNORM_SRGB, R10G10B10A2, …)"/>
+    </propertyDescription>
+    <propertyDescription name="RayV.Dds.MipCount"
+                         formatID="{8F4C2A10-9B7E-4D61-A5E2-3C1D0F9E8B7A}"
+                         propID="3">
+      <searchInfo inInvertedIndex="false" isColumn="true" columnIndexType="OnDemand"/>
+      <typeInfo type="UInt32" multipleValues="false" isInnate="true" canBePurged="false"/>
+      <labelInfo label="Mip levels"
+                 invitationText="Number of mipmap levels stored in the file"/>
+    </propertyDescription>
+    <propertyDescription name="RayV.Dds.Flags"
+                         formatID="{8F4C2A10-9B7E-4D61-A5E2-3C1D0F9E8B7A}"
+                         propID="4">
+      <searchInfo inInvertedIndex="false" isColumn="true" columnIndexType="OnDemand"/>
+      <typeInfo type="String" multipleValues="false" isInnate="true" canBePurged="false"/>
+      <labelInfo label="DDS flags"
+                 invitationText="Cube / volume / array / sRGB / DX10"/>
+    </propertyDescription>
+    <propertyDescription name="RayV.Dds.Dxgi"
+                         formatID="{8F4C2A10-9B7E-4D61-A5E2-3C1D0F9E8B7A}"
+                         propID="5">
+      <searchInfo inInvertedIndex="false" isColumn="true" columnIndexType="OnDemand"/>
+      <typeInfo type="UInt32" multipleValues="false" isInnate="true" canBePurged="false"/>
+      <labelInfo label="DXGI enum"
+                 invitationText="Numeric DXGI_FORMAT value (e.g. 99 = BC7_UNORM_SRGB)"/>
+    </propertyDescription>
+  </propertyDescriptionList>
+</schema>

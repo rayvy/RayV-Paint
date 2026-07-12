@@ -1,4 +1,5 @@
 #include "DdsHelper.h"
+#include "DdsCodec.h"
 #include "TileCache.h"
 #include "HalfFloat.h"
 #include "Logger.h"
@@ -25,14 +26,7 @@
                 ((uint32_t)(uint8_t)(ch2) << 16) | ((uint32_t)(uint8_t)(ch3) << 24 ))
 #endif
 
-// DXGI Format definitions
-constexpr uint32_t DXGI_FORMAT_R32G32B32A32_FLOAT = 2;
-constexpr uint32_t DXGI_FORMAT_R16G16B16A16_FLOAT = 10;
-constexpr uint32_t DXGI_FORMAT_R16G16B16A16_UNORM = 11;
-constexpr uint32_t DXGI_FORMAT_R8G8B8A8_UNORM = 28;
-constexpr uint32_t DXGI_FORMAT_R32_FLOAT = 41;
-constexpr uint32_t DXGI_FORMAT_R16_FLOAT = 54;
-constexpr uint32_t DXGI_FORMAT_R8_UNORM = 61;
+#include <dxgiformat.h>
 
 struct DDS_PIXELFORMAT {
     uint32_t dwSize;
@@ -374,10 +368,34 @@ bool DdsHelper::LoadDDS(const std::string& filename, DdsImage& outImage) {
     return true;
 }
 
+// Map DirectXTex SourceInfo → legacy DdsFormat for Canvas channel heuristics.
+static DdsFormat LegacyFromSource(const DdsCodec::SourceInfo& s) {
+    if (s.singleChannel) {
+        if (s.dxgi == DXGI_FORMAT_R32_FLOAT) return DdsFormat::R32_FLOAT;
+        if (s.dxgi == DXGI_FORMAT_R16_FLOAT) return DdsFormat::R16_FLOAT;
+        return DdsFormat::R8_UNORM;
+    }
+    if (s.dualChannel) return DdsFormat::R8G8_UNORM;
+    if (s.suggestedDepth >= 2) return DdsFormat::RGBA32_FLOAT;
+    if (s.suggestedDepth == 1) {
+        if (s.dxgi == DXGI_FORMAT_R16G16B16A16_UNORM) return DdsFormat::RGBA16_UNORM;
+        return DdsFormat::RGBA16_FLOAT;
+    }
+    return DdsFormat::RGBA8_UNORM;
+}
+
 bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCache, int& outWidth, int& outHeight, DdsFormat& outFormat) {
-    auto loadStart = std::chrono::high_resolution_clock::now();
-    Logger::Get().InfoTag("io", "LoadDDSToTileCache begin: " + filename);
+    Logger::Get().InfoTag("io", "LoadDDSToTileCache (DirectXTex) begin: " + filename);
     MemoryStats::LogSnapshot("dds_open_start");
+
+    DdsCodec::SourceInfo info;
+    if (DdsCodec::LoadToTileCache(filename, outCache, outWidth, outHeight, info)) {
+        outFormat = LegacyFromSource(info);
+        return true;
+    }
+    // Fall through to legacy path if DirectXTex rejects the file
+    Logger::Get().WarnTag("io", "DirectXTex load failed — trying legacy DdsHelper path");
+    auto loadStart = std::chrono::high_resolution_clock::now();
 
     std::ifstream file(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filename)), std::ios::binary);
     if (!file.is_open())
@@ -1088,6 +1106,13 @@ bool DdsHelper::LoadDDSToTileCache(const std::string& filename, TileCache& outCa
 static uint16_t FloatToHalf(float f) { return HalfFloat::FromFloat(f); }
 
 std::string DdsHelper::SniffFormatLabel(const std::string& filename) {
+    DdsCodec::SourceInfo info;
+    if (DdsCodec::AnalyzeFile(filename, info) && info.width > 0) {
+        char dim[32];
+        std::snprintf(dim, sizeof(dim), "%dx%d", info.width, info.height);
+        return info.formatLabel + " · " + dim;
+    }
+    // Legacy sniff fallback
     std::ifstream file(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filename)), std::ios::binary);
     if (!file.is_open())
         file.open(PathUtil::FromUtf8(filename), std::ios::binary);

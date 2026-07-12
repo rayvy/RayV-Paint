@@ -16,7 +16,8 @@
 namespace DdsThumbRegister {
 namespace {
 
-static const wchar_t* kClsidStr = L"{B5E8A1C2-4F3D-4A9E-9C1B-7D6E5F4A3B2C}";
+static const wchar_t* kClsidThumb = L"{B5E8A1C2-4F3D-4A9E-9C1B-7D6E5F4A3B2C}";
+static const wchar_t* kClsidProps = L"{D4A1B2C3-5E6F-4789-A012-3456789ABCDE}";
 static const wchar_t* kThumbShellEx = L"{e357fccd-a995-4576-b01f-234630154e96}";
 
 using RegisterFn = HRESULT(__stdcall*)();
@@ -50,10 +51,9 @@ static bool FileExists(const std::wstring& path) {
     return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-// Thumbnail host only loads handlers whose CLSID is under HKLM (verified Win11).
-static bool IsHklmClsidOk(const std::wstring& wantDll) {
+static bool IsHklmClsidPathOk(const wchar_t* clsid, const std::wstring& wantDll) {
     const std::wstring inproc =
-        std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + kClsidStr + L"\\InprocServer32";
+        std::wstring(L"SOFTWARE\\Classes\\CLSID\\") + clsid + L"\\InprocServer32";
     std::wstring dll = ReadRegSz(HKEY_LOCAL_MACHINE, inproc.c_str(), nullptr);
     if (dll.empty() || !FileExists(dll))
         return false;
@@ -66,7 +66,7 @@ static bool IsExtBound(HKEY root, const wchar_t* prefix) {
     std::wstring shellex =
         std::wstring(prefix) + L".dds\\ShellEx\\" + kThumbShellEx;
     std::wstring clsid = ReadRegSz(root, shellex.c_str(), nullptr);
-    return !clsid.empty() && _wcsicmp(clsid.c_str(), kClsidStr) == 0;
+    return !clsid.empty() && _wcsicmp(clsid.c_str(), kClsidThumb) == 0;
 }
 
 static bool CallDllRegister(const std::wstring& dll, bool unregister) {
@@ -85,48 +85,45 @@ static bool CallDllRegister(const std::wstring& dll, bool unregister) {
         if (reg) hr = reg();
     }
     FreeLibrary(mod);
-    // ACCESS_DENIED means HKCU ok but HKLM needs elevation — still partial
     return SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
 }
 
-// Elevate once: regsvr32 the DLL (writes HKLM when elevated).
-static bool ElevateRegsvr32(const std::wstring& dll) {
-    // Avoid infinite UAC loops: only auto-elevate if never succeeded HKLM
-    wchar_t localApp[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", localApp, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-        std::wstring flag = std::wstring(localApp) + L"\\RayVPaint\\thumb_hklm_ok.flag";
-        if (FileExists(flag) && IsHklmClsidOk(dll))
-            return true;
-    }
-
+static bool ElevateRegsvr32(const std::wstring& dll, bool unregister) {
     SHELLEXECUTEINFOW sei = {};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = L"runas";
     sei.lpFile = L"regsvr32.exe";
-    std::wstring params = L"/s \"" + dll + L"\"";
+    std::wstring params = unregister
+        ? (L"/u /s \"" + dll + L"\"")
+        : (L"/s \"" + dll + L"\"");
     sei.lpParameters = params.c_str();
     sei.nShow = SW_HIDE;
     if (!ShellExecuteExW(&sei))
         return false;
     if (sei.hProcess) {
-        WaitForSingleObject(sei.hProcess, 15000);
+        WaitForSingleObject(sei.hProcess, 30000);
         CloseHandle(sei.hProcess);
     }
-    bool ok = IsHklmClsidOk(dll);
+    if (unregister)
+        return !IsHklmClsidPathOk(kClsidThumb, {});
+    return IsHklmClsidPathOk(kClsidThumb, dll);
+}
+
+static void WriteHklmOkFlag(bool ok) {
+    wchar_t appdata[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH) <= 0)
+        return;
+    std::wstring dir = std::wstring(appdata) + L"\\RayVPaint";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    std::wstring flag = dir + L"\\thumb_hklm_ok.flag";
     if (ok) {
-        wchar_t appdata[MAX_PATH] = {};
-        if (GetEnvironmentVariableW(L"LOCALAPPDATA", appdata, MAX_PATH) > 0) {
-            std::wstring dir = std::wstring(appdata) + L"\\RayVPaint";
-            CreateDirectoryW(dir.c_str(), nullptr);
-            std::wstring flag = dir + L"\\thumb_hklm_ok.flag";
-            HANDLE h = CreateFileW(flag.c_str(), GENERIC_WRITE, 0, nullptr,
-                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-        }
+        HANDLE h = CreateFileW(flag.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    } else {
+        DeleteFileW(flag.c_str());
     }
-    return ok;
 }
 
 } // namespace
@@ -135,40 +132,81 @@ std::wstring DefaultDllPath() {
     return ExeDir() + L"\\RayVPaint_DdsThumb.dll";
 }
 
-bool IsRegistered() {
-    std::wstring want = DefaultDllPath();
-    if (!FileExists(want))
+bool IsProcessElevated() {
+    HANDLE tok = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok))
         return false;
-    // Must have HKLM CLSID (thumbnail host requirement)
-    if (!IsHklmClsidOk(want))
-        return false;
-    // Extension binding either HKCU or HKLM
-    if (!IsExtBound(HKEY_CURRENT_USER, L"Software\\Classes\\") &&
-        !IsExtBound(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\"))
-        return false;
-    return true;
+    TOKEN_ELEVATION elev = {};
+    DWORD cb = 0;
+    BOOL ok = GetTokenInformation(tok, TokenElevation, &elev, sizeof(elev), &cb);
+    CloseHandle(tok);
+    return ok && elev.TokenIsElevated;
 }
 
-bool EnsureRegistered(const std::wstring& dllPathIn) {
+IntegrationStatus QueryStatus() {
+    IntegrationStatus s;
+    s.processElevated = IsProcessElevated();
+    s.elevLine = s.processElevated
+        ? "Process: elevated (Admin)"
+        : "Process: not elevated (UAC needed for full register)";
+
+    std::wstring dll = DefaultDllPath();
+    s.dllPresent = FileExists(dll);
+    s.dllLine = s.dllPresent
+        ? "DLL: found (RayVPaint_DdsThumb.dll)"
+        : "DLL: MISSING next to exe";
+
+    s.hklmThumbClsid = IsHklmClsidPathOk(kClsidThumb, dll);
+    s.thumbLine = s.hklmThumbClsid
+        ? "DDS thumbs: HKLM CLSID OK"
+        : "DDS thumbs: HKLM CLSID missing (register as Admin)";
+
+    s.hklmPropClsid = IsHklmClsidPathOk(kClsidProps, dll);
+    s.propLine = s.hklmPropClsid
+        ? "DDS properties: HKLM CLSID OK"
+        : "DDS properties: HKLM CLSID missing";
+
+    s.extShellExBound =
+        IsExtBound(HKEY_CURRENT_USER, L"Software\\Classes\\") ||
+        IsExtBound(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Classes\\");
+
+    s.fullyOk = s.dllPresent && s.hklmThumbClsid && s.extShellExBound;
+    if (s.fullyOk && s.hklmPropClsid)
+        s.summary = "Explorer integration: ready";
+    else if (s.fullyOk)
+        s.summary = "Thumbs OK; properties partial — re-register";
+    else if (!s.dllPresent)
+        s.summary = "Build/copy RayVPaint_DdsThumb.dll next to Core";
+    else
+        s.summary = "Click Register (accept UAC once)";
+    return s;
+}
+
+bool IsRegistered() {
+    return QueryStatus().fullyOk;
+}
+
+bool EnsureRegistered(const std::wstring& dllPathIn, bool forceElevate) {
     std::wstring dll = dllPathIn.empty() ? DefaultDllPath() : dllPathIn;
     if (!FileExists(dll))
         return false;
 
-    if (IsRegistered())
+    if (!forceElevate && IsRegistered())
         return true;
 
-    // Non-elevated: writes HKCU + tries HKLM (may get ACCESS_DENIED)
+    // Non-elevated pass: HKCU + try HKLM
     CallDllRegister(dll, false);
 
-    if (IsHklmClsidOk(dll)) {
+    if (IsHklmClsidPathOk(kClsidThumb, dll) && IsHklmClsidPathOk(kClsidProps, dll)) {
+        WriteHklmOkFlag(true);
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
         return true;
     }
 
-    // Elevate regsvr32 once so Explorer thumbnail host can CoCreate the CLSID
-    if (ElevateRegsvr32(dll)) {
-        // Re-run to bind HKCU extension + restore PNG/JPG (no admin needed for that)
-        CallDllRegister(dll, false);
+    // Elevate for HKLM (required by Explorer thumbnail host)
+    if (ElevateRegsvr32(dll, false)) {
+        CallDllRegister(dll, false); // HKCU + PNG restore
+        WriteHklmOkFlag(true);
         SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
         return IsRegistered();
     }
@@ -181,23 +219,11 @@ bool Unregister() {
     std::wstring dll = DefaultDllPath();
     if (!FileExists(dll))
         return false;
-    bool ok = CallDllRegister(dll, true);
-    // Best-effort elevated cleanup of HKLM
-    if (IsHklmClsidOk({})) {
-        SHELLEXECUTEINFOW sei = {};
-        sei.cbSize = sizeof(sei);
-        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-        sei.lpVerb = L"runas";
-        sei.lpFile = L"regsvr32.exe";
-        std::wstring params = L"/u /s \"" + dll + L"\"";
-        sei.lpParameters = params.c_str();
-        sei.nShow = SW_HIDE;
-        if (ShellExecuteExW(&sei) && sei.hProcess) {
-            WaitForSingleObject(sei.hProcess, 15000);
-            CloseHandle(sei.hProcess);
-        }
-    }
-    return ok;
+    CallDllRegister(dll, true);
+    ElevateRegsvr32(dll, true);
+    WriteHklmOkFlag(false);
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    return true;
 }
 
 } // namespace DdsThumbRegister

@@ -774,7 +774,9 @@ private:
     bool m_MirrorVertical = false;
     bool m_ViewportFlipH = false;
     bool m_ViewportFlipV = false;
-    ProjectType m_ProjectType = ProjectType::Advanced;
+    // Default Simple: open a lone DDS/PNG = paint+export that file.
+    // Advanced is set explicitly by New Project wizard / multi-map import.
+    ProjectType m_ProjectType = ProjectType::Simple;
     DocumentBitDepth m_DocumentBitDepth = DocumentBitDepth::U8;
 
     // Advanced Mod Mode — optional XXMI/3DMigoto binding (3D preview later)

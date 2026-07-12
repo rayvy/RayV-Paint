@@ -110,6 +110,9 @@ set(SOURCES
     src/core/ConfigManager.h
     src/core/DdsHelper.cpp
     src/core/DdsHelper.h
+    src/core/DdsCodec.cpp
+    src/core/DdsCodec.h
+    # BC compress: texconv.exe (fast). DirectXTex used for load/analyze + uncompressed save.
     src/core/TexconvHelper.cpp
     src/core/TexconvHelper.h
     src/core/ImageManager.cpp
@@ -208,6 +211,9 @@ set_source_files_properties(${SHADER_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 set(OPENCV_INSTALL_DIR "C:/Users/Rayvy/Documents/GitHub/opencv/install")
 set(OPENCV_LIBS_DIR "${OPENCV_INSTALL_DIR}/x64/vc17/staticlib")
 
+# DirectXTex (library-only, CPU + OpenMP) — replaces texconv for DDS compress/load
+add_subdirectory(third_party/DirectXTex EXCLUDE_FROM_ALL)
+
 # Create Core executable (WIN32 target ensures it runs without console window by default)
 add_executable(RayVPaint_Core WIN32 ${SOURCES} ${SHADER_FILES} src/resources/resources.rc)
 set_target_properties(RayVPaint_Core PROPERTIES
@@ -220,6 +226,9 @@ if(WIN32)
     add_library(RayVPaint_DdsThumb SHARED
         src/shell/DdsThumbDecode.cpp
         src/shell/DdsThumbDecode.h
+        src/shell/DdsHeaderInfo.cpp
+        src/shell/DdsHeaderInfo.h
+        src/shell/DdsPropertyHandler.cpp
         src/shell/DdsThumbnailHandler.cpp
         src/shell/DdsThumb.def
     )
@@ -231,7 +240,14 @@ if(WIN32)
     )
     target_include_directories(RayVPaint_DdsThumb PRIVATE src src/core src/shell)
     target_compile_definitions(RayVPaint_DdsThumb PRIVATE NOMINMAX UNICODE _UNICODE)
-    target_link_libraries(RayVPaint_DdsThumb PRIVATE ole32 uuid shlwapi shell32 gdi32 advapi32)
+    target_link_libraries(RayVPaint_DdsThumb PRIVATE ole32 uuid shlwapi shell32 gdi32 advapi32 propsys)
+    # Ship propdesc schema next to DLL for PSRegisterPropertySchema
+    add_custom_command(TARGET RayVPaint_DdsThumb POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/src/shell/RayVPaint.Dds.propdesc"
+            "$<TARGET_FILE_DIR:RayVPaint_DdsThumb>/RayVPaint.Dds.propdesc"
+        COMMENT "Copying RayVPaint.Dds.propdesc for Explorer property schema"
+    )
     # Build thumb DLL with Core so it always ships next to the exe
     add_dependencies(RayVPaint_Core RayVPaint_DdsThumb)
 endif()
@@ -243,6 +259,7 @@ target_link_libraries(RayVPaint_Core PRIVATE
     d3d11
     dxgi
     d3dcompiler
+    DirectXTex
     nlohmann_json::nlohmann_json
     pybind11::embed
     "${OPENCV_LIBS_DIR}/opencv_core4140.lib"
