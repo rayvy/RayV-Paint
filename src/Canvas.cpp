@@ -6569,7 +6569,8 @@ void Canvas::CancelMovePixels(ID3D11Device* device) {
     m_CompositeDirty = true;
 }
 
-void Canvas::DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen) {
+void Canvas::DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen,
+                           bool showHandles) {
     if (!m_IsMovingPixels) return;
     
     int minX = m_Width, maxX = 0, minY = m_Height, maxY = 0;
@@ -6627,20 +6628,20 @@ void Canvas::DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, flo
         dl->AddLine(p3, p4, gizmoCol, thickness);
         dl->AddLine(p4, p1, gizmoCol, thickness);
         
-        float hs = 5.0f;
-        auto drawHandle = [&](ImVec2 p) {
-            dl->AddRectFilled(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), IM_COL32(255, 255, 255, 230));
-            dl->AddRect(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), gizmoCol, 0.0f, 0, 1.5f);
-        };
-        auto drawEdgeHandle = [&](ImVec2 p) {
-            float hs2 = 4.0f;
-            dl->AddRectFilled(ImVec2(p.x - hs2, p.y - hs2), ImVec2(p.x + hs2, p.y + hs2), IM_COL32(200, 220, 255, 200));
-            dl->AddRect(ImVec2(p.x - hs2, p.y - hs2), ImVec2(p.x + hs2, p.y + hs2), gizmoCol, 0.0f, 0, 1.0f);
-        };
-        // Corner handles
-        drawHandle(p1); drawHandle(p2); drawHandle(p3); drawHandle(p4);
-        // Edge handles
-        drawEdgeHandle(mT); drawEdgeHandle(mR); drawEdgeHandle(mB); drawEdgeHandle(mL);
+        if (showHandles) {
+            float hs = 5.0f;
+            auto drawHandle = [&](ImVec2 p) {
+                dl->AddRectFilled(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), IM_COL32(255, 255, 255, 230));
+                dl->AddRect(ImVec2(p.x - hs, p.y - hs), ImVec2(p.x + hs, p.y + hs), gizmoCol, 0.0f, 0, 1.5f);
+            };
+            auto drawEdgeHandle = [&](ImVec2 p) {
+                float hs2 = 4.0f;
+                dl->AddRectFilled(ImVec2(p.x - hs2, p.y - hs2), ImVec2(p.x + hs2, p.y + hs2), IM_COL32(200, 220, 255, 200));
+                dl->AddRect(ImVec2(p.x - hs2, p.y - hs2), ImVec2(p.x + hs2, p.y + hs2), gizmoCol, 0.0f, 0, 1.0f);
+            };
+            drawHandle(p1); drawHandle(p2); drawHandle(p3); drawHandle(p4);
+            drawEdgeHandle(mT); drawEdgeHandle(mR); drawEdgeHandle(mB); drawEdgeHandle(mL);
+        }
     }
 }
 
@@ -6821,8 +6822,31 @@ void Canvas::InvertColors() {
 static void BufferApplyBlur(std::vector<float>& pixels, int w, int h, float radius,
                             const std::vector<uint8_t>& selMask, bool hasSel) {
     int r = std::max(1, (int)radius);
+    // Premul path (same as layer_fx filter blur) — no white fringe on transparency
     std::vector<float> blurred = pixels;
+    const int nPx = w * h;
+    for (int i = 0; i < nPx; ++i) {
+        size_t idx = (size_t)i * 4;
+        float a = std::clamp(blurred[idx + 3], 0.f, 1.f);
+        blurred[idx + 0] *= a;
+        blurred[idx + 1] *= a;
+        blurred[idx + 2] *= a;
+        blurred[idx + 3] = a;
+    }
     layer_fx::BoxBlur(blurred, w, h, r, 4, 3);
+    for (int i = 0; i < nPx; ++i) {
+        size_t idx = (size_t)i * 4;
+        float a = std::clamp(blurred[idx + 3], 0.f, 1.f);
+        if (a > 1e-6f) {
+            float inv = 1.f / a;
+            blurred[idx + 0] = std::clamp(blurred[idx + 0] * inv, 0.f, 1.f);
+            blurred[idx + 1] = std::clamp(blurred[idx + 1] * inv, 0.f, 1.f);
+            blurred[idx + 2] = std::clamp(blurred[idx + 2] * inv, 0.f, 1.f);
+        } else {
+            blurred[idx + 0] = blurred[idx + 1] = blurred[idx + 2] = 0.f;
+        }
+        blurred[idx + 3] = a;
+    }
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x) {
             float sel = GetSelWeight(selMask, w, x, y, hasSel);
@@ -8084,11 +8108,27 @@ static void RgbToLabApprox(float r, float g, float b, float& L, float& a, float&
 }
 
 void Canvas::BeginQuickSelectStroke() {
-    m_QuickSelectMask.assign((size_t)m_Width * m_Height, 0);
+    const size_t n = (size_t)std::max(0, m_Width) * (size_t)std::max(0, m_Height);
+    if (n == 0) return;
+
+    // Snapshot selection at stroke start (progressive base + undo "old")
+    m_QuickSelectBaseHas = m_HasSelection;
+    if (m_HasSelection && m_SelectionMask.size() == n)
+        m_QuickSelectBaseMask = m_SelectionMask;
+    else
+        m_QuickSelectBaseMask.assign(n, 0);
+
+    m_QuickSelectMask.assign(n, 0);
     m_QuickSelectSampleCount = 0;
     m_QuickSelectLabMean[0] = m_QuickSelectLabMean[1] = m_QuickSelectLabMean[2] = 0.f;
+    m_QuickSelectSubtract = false;
+    m_QuickSelectStrokeActive = true;
+
+    // Fresh wand source each stroke (layer may have changed)
+    InvalidateWandSourceCache();
+    EnsureWandSourceCache();
+
     if (!m_QuickSelectEdgeValid) {
-        // Build edge map from active layer / composite once per session revision
         std::vector<float> src;
         if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size() && !m_Layers[m_ActiveLayerIdx].isGroup)
             src = ExportLayerF(m_Layers[m_ActiveLayerIdx], m_Width, m_Height);
@@ -8105,7 +8145,7 @@ void Canvas::BeginQuickSelectStroke() {
         cv::magnitude(gradX, gradY, mag);
         double minV, maxV;
         cv::minMaxLoc(mag, &minV, &maxV);
-        m_QuickSelectEdge.assign((size_t)m_Width * m_Height, 0);
+        m_QuickSelectEdge.assign(n, 0);
         float inv = (maxV > 1e-6) ? (1.0f / (float)maxV) : 1.0f;
         for (int i = 0; i < m_Width * m_Height; ++i) {
             float e = mag.at<float>(i / m_Width, i % m_Width) * inv;
@@ -8115,53 +8155,54 @@ void Canvas::BeginQuickSelectStroke() {
     }
 }
 
-void Canvas::StrokeQuickSelect(const std::vector<std::pair<int, int>>& points, float radius, bool subtract) {
+void Canvas::StrokeQuickSelect(ID3D11Device* device, const std::vector<std::pair<int, int>>& points,
+                               float radius, bool subtract) {
     if (points.empty() || m_Width <= 0 || m_Height <= 0) return;
-    if (m_QuickSelectMask.size() != (size_t)m_Width * m_Height)
+    if (!m_QuickSelectStrokeActive || m_QuickSelectMask.size() != (size_t)m_Width * m_Height)
         BeginQuickSelectStroke();
 
+    m_QuickSelectSubtract = subtract;
     EnsureWandSourceCache();
     const int r = std::max(1, (int)std::lround(radius));
     const int r2 = r * r;
 
-    // Update color model from brush seeds
-    for (const auto& pt : points) {
-        int cx = pt.first, cy = pt.second;
-        for (int dy = -r; dy <= r; ++dy) {
-            for (int dx = -r; dx <= r; ++dx) {
-                if (dx * dx + dy * dy > r2) continue;
-                int x = cx + dx, y = cy + dy;
-                if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) continue;
-                size_t idx = (size_t)y * m_Width + x;
-                if (subtract) {
-                    m_QuickSelectMask[idx] = 0;
-                    continue;
-                }
-                // Seed pixel
+    // Process only the newest segment tip (last point) for progressive feel
+    const auto& pt = points.back();
+    int cx = pt.first, cy = pt.second;
+
+    // Stamp brush disc into stroke mask
+    for (int dy = -r; dy <= r; ++dy) {
+        for (int dx = -r; dx <= r; ++dx) {
+            if (dx * dx + dy * dy > r2) continue;
+            int x = cx + dx, y = cy + dy;
+            if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) continue;
+            size_t idx = (size_t)y * m_Width + x;
+            if (subtract) {
+                // Alt: mark pixels to carve out of base selection
                 m_QuickSelectMask[idx] = 255;
-                if (m_WandSourceRGBA.size() < (idx + 1) * 4) continue;
-                float rf = m_WandSourceRGBA[idx * 4 + 0] / 255.f;
-                float gf = m_WandSourceRGBA[idx * 4 + 1] / 255.f;
-                float bf = m_WandSourceRGBA[idx * 4 + 2] / 255.f;
-                float L, a, b;
-                RgbToLabApprox(rf, gf, bf, L, a, b);
-                int n = m_QuickSelectSampleCount;
-                m_QuickSelectLabMean[0] = (m_QuickSelectLabMean[0] * n + L) / (n + 1);
-                m_QuickSelectLabMean[1] = (m_QuickSelectLabMean[1] * n + a) / (n + 1);
-                m_QuickSelectLabMean[2] = (m_QuickSelectLabMean[2] * n + b) / (n + 1);
-                m_QuickSelectSampleCount = n + 1;
+                continue;
             }
+            m_QuickSelectMask[idx] = 255;
+            if (m_WandSourceRGBA.size() < (idx + 1) * 4) continue;
+            float rf = m_WandSourceRGBA[idx * 4 + 0] / 255.f;
+            float gf = m_WandSourceRGBA[idx * 4 + 1] / 255.f;
+            float bf = m_WandSourceRGBA[idx * 4 + 2] / 255.f;
+            float L, a, b;
+            RgbToLabApprox(rf, gf, bf, L, a, b);
+            int n = m_QuickSelectSampleCount;
+            m_QuickSelectLabMean[0] = (m_QuickSelectLabMean[0] * n + L) / (n + 1);
+            m_QuickSelectLabMean[1] = (m_QuickSelectLabMean[1] * n + a) / (n + 1);
+            m_QuickSelectLabMean[2] = (m_QuickSelectLabMean[2] * n + b) / (n + 1);
+            m_QuickSelectSampleCount = n + 1;
         }
     }
-    if (subtract || m_QuickSelectSampleCount == 0) return;
 
-    // Constrained region grow from seeds within dilated brush band
-    const float colorThresh = 0.18f;
-    const float edgeStop = 0.45f; // sticky edge
-    std::vector<std::pair<int, int>> q;
-    q.reserve(1024);
-    for (const auto& pt : points) {
-        int cx = pt.first, cy = pt.second;
+    // Add mode: region grow from brush seeds (PS quick-select feel)
+    if (!subtract && m_QuickSelectSampleCount > 0) {
+        const float colorThresh = 0.18f;
+        const float edgeStop = 0.45f;
+        std::vector<std::pair<int, int>> q;
+        q.reserve(256);
         for (int dy = -r; dy <= r; ++dy)
             for (int dx = -r; dx <= r; ++dx) {
                 if (dx * dx + dy * dy > r2) continue;
@@ -8169,88 +8210,118 @@ void Canvas::StrokeQuickSelect(const std::vector<std::pair<int, int>>& points, f
                 if (x < 0 || y < 0 || x >= m_Width || y >= m_Height) continue;
                 if (m_QuickSelectMask[(size_t)y * m_Width + x]) q.push_back({x, y});
             }
-    }
-    // Grow margin around stroke
-    const int margin = r * 3;
-    int minX = m_Width, minY = m_Height, maxX = 0, maxY = 0;
-    for (const auto& pt : points) {
-        minX = std::min(minX, pt.first - margin);
-        maxX = std::max(maxX, pt.first + margin);
-        minY = std::min(minY, pt.second - margin);
-        maxY = std::max(maxY, pt.second + margin);
-    }
-    minX = std::max(0, minX); maxX = std::min(m_Width - 1, maxX);
-    minY = std::max(0, minY); maxY = std::min(m_Height - 1, maxY);
-
-    size_t head = 0;
-    const int ndx[4] = {1, -1, 0, 0};
-    const int ndy[4] = {0, 0, 1, -1};
-    while (head < q.size()) {
-        auto [x, y] = q[head++];
-        for (int n = 0; n < 4; ++n) {
-            int nx = x + ndx[n], ny = y + ndy[n];
-            if (nx < minX || ny < minY || nx > maxX || ny > maxY) continue;
-            size_t nidx = (size_t)ny * m_Width + nx;
-            if (m_QuickSelectMask[nidx]) continue;
-            float edge = m_QuickSelectEdge.empty() ? 0.f : m_QuickSelectEdge[nidx] / 255.f;
-            if (edge >= edgeStop) continue; // sticky edge
-            if (m_WandSourceRGBA.size() < (nidx + 1) * 4) continue;
-            float rf = m_WandSourceRGBA[nidx * 4 + 0] / 255.f;
-            float gf = m_WandSourceRGBA[nidx * 4 + 1] / 255.f;
-            float bf = m_WandSourceRGBA[nidx * 4 + 2] / 255.f;
-            float L, a, b;
-            RgbToLabApprox(rf, gf, bf, L, a, b);
-            float dL = L - m_QuickSelectLabMean[0];
-            float da = a - m_QuickSelectLabMean[1];
-            float db = b - m_QuickSelectLabMean[2];
-            float dist = std::sqrt(dL * dL + da * da + db * db);
-            if (dist > colorThresh * (1.0f + edge)) continue;
-            m_QuickSelectMask[nidx] = 255;
-            q.push_back({nx, ny});
+        const int margin = r * 3;
+        int minX = std::max(0, cx - margin), maxX = std::min(m_Width - 1, cx + margin);
+        int minY = std::max(0, cy - margin), maxY = std::min(m_Height - 1, cy + margin);
+        size_t head = 0;
+        const int ndx[4] = {1, -1, 0, 0};
+        const int ndy[4] = {0, 0, 1, -1};
+        while (head < q.size()) {
+            auto [x, y] = q[head++];
+            for (int n = 0; n < 4; ++n) {
+                int nx = x + ndx[n], ny = y + ndy[n];
+                if (nx < minX || ny < minY || nx > maxX || ny > maxY) continue;
+                size_t nidx = (size_t)ny * m_Width + nx;
+                if (m_QuickSelectMask[nidx]) continue;
+                float edge = m_QuickSelectEdge.empty() ? 0.f : m_QuickSelectEdge[nidx] / 255.f;
+                if (edge >= edgeStop) continue;
+                if (m_WandSourceRGBA.size() < (nidx + 1) * 4) continue;
+                float rf = m_WandSourceRGBA[nidx * 4 + 0] / 255.f;
+                float gf = m_WandSourceRGBA[nidx * 4 + 1] / 255.f;
+                float bf = m_WandSourceRGBA[nidx * 4 + 2] / 255.f;
+                float L, a, b;
+                RgbToLabApprox(rf, gf, bf, L, a, b);
+                float dL = L - m_QuickSelectLabMean[0];
+                float da = a - m_QuickSelectLabMean[1];
+                float db = b - m_QuickSelectLabMean[2];
+                float dist = std::sqrt(dL * dL + da * da + db * db);
+                if (dist > colorThresh * (1.0f + edge)) continue;
+                m_QuickSelectMask[nidx] = 255;
+                q.push_back({nx, ny});
+            }
         }
     }
+
+    // Live publish → marching ants update every dab
+    {
+        const size_t n = m_QuickSelectMask.size();
+        if (n > 0 && m_QuickSelectBaseMask.size() == n) {
+            m_SelectionMask.resize(n);
+            m_HasSelection = false;
+            for (size_t i = 0; i < n; ++i) {
+                uint8_t v = subtract
+                    ? (uint8_t)(m_QuickSelectBaseMask[i] & (uint8_t)~m_QuickSelectMask[i])
+                    : (uint8_t)(m_QuickSelectBaseMask[i] | m_QuickSelectMask[i]);
+                m_SelectionMask[i] = v;
+                if (v) m_HasSelection = true;
+            }
+            m_SelectionMaskNeedsUpload = true;
+        }
+    }
+    if (device) UpdateSelectionMaskTexture(device);
 }
 
 void Canvas::CancelQuickSelectStroke() {
+    if (!m_QuickSelectStrokeActive) {
+        m_QuickSelectMask.clear();
+        return;
+    }
+    // Restore selection as it was at stroke begin
+    m_SelectionMask = m_QuickSelectBaseMask;
+    m_HasSelection = m_QuickSelectBaseHas;
+    m_SelectionMaskNeedsUpload = true;
     m_QuickSelectMask.clear();
+    m_QuickSelectBaseMask.clear();
     m_QuickSelectSampleCount = 0;
     m_QuickSelectLabMean[0] = m_QuickSelectLabMean[1] = m_QuickSelectLabMean[2] = 0.f;
-    // Keep edge cache (layer unchanged).
+    m_QuickSelectStrokeActive = false;
 }
 
-void Canvas::EndQuickSelectStroke(ID3D11Device* device, bool add, bool subtract) {
-    if (m_QuickSelectMask.size() != (size_t)m_Width * m_Height) return;
+void Canvas::EndQuickSelectStroke(ID3D11Device* device, bool subtract) {
+    if (!m_QuickSelectStrokeActive || m_QuickSelectMask.size() != (size_t)m_Width * m_Height) {
+        m_QuickSelectStrokeActive = false;
+        return;
+    }
+    // Prefer mode used during stroke (Alt may be released before mouse-up)
+    const bool sub = m_QuickSelectSubtract || subtract;
 
-    // Light morpho smooth
-    cv::Mat m(m_Height, m_Width, CV_8UC1, m_QuickSelectMask.data());
-    cv::Mat smoothed;
-    cv::morphologyEx(m, smoothed, cv::MORPH_CLOSE,
-                     cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3)));
-    cv::morphologyEx(smoothed, smoothed, cv::MORPH_OPEN,
-                     cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3)));
+    // Light morpho on stroke contribution, then re-merge with base
+    if (!sub) {
+        cv::Mat m(m_Height, m_Width, CV_8UC1);
+        std::memcpy(m.data, m_QuickSelectMask.data(), m_QuickSelectMask.size());
+        cv::Mat smoothed;
+        cv::morphologyEx(m, smoothed, cv::MORPH_CLOSE,
+                         cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3)));
+        cv::morphologyEx(smoothed, smoothed, cv::MORPH_OPEN,
+                         cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3)));
+        std::memcpy(m_QuickSelectMask.data(), smoothed.data, m_QuickSelectMask.size());
+    }
 
-    std::vector<uint8_t> oldMask = m_SelectionMask;
-    bool oldHas = m_HasSelection;
-    cv::Mat current(m_Height, m_Width, CV_8UC1);
-    if (!m_SelectionMask.empty() && (int)m_SelectionMask.size() == m_Width * m_Height)
-        std::memcpy(current.data, m_SelectionMask.data(), m_SelectionMask.size());
-    else
-        current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-
-    cv::Mat combined;
-    if (add) cv::bitwise_or(current, smoothed, combined);
-    else if (subtract) cv::bitwise_and(current, ~smoothed, combined);
-    else combined = smoothed;
-
-    m_SelectionMask.resize((size_t)m_Width * m_Height);
-    std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
-    m_HasSelection = false;
-    for (uint8_t v : m_SelectionMask) { if (v) { m_HasSelection = true; break; } }
-    m_SelectionMaskNeedsUpload = true;
+    std::vector<uint8_t> oldMask = m_QuickSelectBaseMask;
+    bool oldHas = m_QuickSelectBaseHas;
+    {
+        const size_t n = m_QuickSelectMask.size();
+        m_SelectionMask.resize(n);
+        m_HasSelection = false;
+        for (size_t i = 0; i < n; ++i) {
+            uint8_t v = sub
+                ? (uint8_t)(m_QuickSelectBaseMask[i] & (uint8_t)~m_QuickSelectMask[i])
+                : (uint8_t)(m_QuickSelectBaseMask[i] | m_QuickSelectMask[i]);
+            m_SelectionMask[i] = v;
+            if (v) m_HasSelection = true;
+        }
+        m_SelectionMaskNeedsUpload = true;
+    }
     if (device) UpdateSelectionMaskTexture(device);
+
     m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
-        "Quick Select", std::move(oldMask), oldHas, m_SelectionMask, m_HasSelection));
+        sub ? "Quick Select Subtract" : "Quick Select",
+        std::move(oldMask), oldHas, m_SelectionMask, m_HasSelection));
+
     m_QuickSelectMask.clear();
+    m_QuickSelectBaseMask.clear();
+    m_QuickSelectSampleCount = 0;
+    m_QuickSelectStrokeActive = false;
 }
 
 // ---------------------------------------------------------------------------

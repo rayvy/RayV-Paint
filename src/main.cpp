@@ -177,6 +177,10 @@ static float g_MoveDragStartX = 0.0f;
 static float g_MoveDragStartY = 0.0f;
 static int g_MoveAccumulatedOffsetX = 0;
 static int g_MoveAccumulatedOffsetY = 0;
+// Free Transform operator (Ctrl+T): full gizmo + Enter confirm; restores previous tool.
+// Move tool (V): translation only; commits on defocus / tool switch (no Enter required).
+static bool g_FreeTransformMode = false;
+static ActiveTool g_ToolBeforeFreeTransform = ActiveTool::Brush;
 static bool g_IsGradientDragging = false;
 
 enum class TransformGizmoHandle {
@@ -1089,8 +1093,26 @@ int main(int argc, char* argv[]) {
                 g_ActiveTool = ActiveTool::Pan;
             }
             if (KeymapManager::Get().ConsumeActionTrigger("TransformTool")) {
+                // V = Move tool (pixels only)
+                g_FreeTransformMode = false;
                 g_ActiveTool = ActiveTool::MovePixels;
             }
+            auto enterFreeTransform = [&]() {
+                if (!g_FreeTransformMode) {
+                    g_ToolBeforeFreeTransform = g_ActiveTool;
+                    if (g_ToolBeforeFreeTransform == ActiveTool::MovePixels)
+                        g_ToolBeforeFreeTransform = ActiveTool::Brush;
+                }
+                g_FreeTransformMode = true;
+                g_ActiveTool = ActiveTool::MovePixels;
+                if (!ActiveCanvas().IsMovingPixels())
+                    ActiveCanvas().StartMovePixels(g_pd3dDevice);
+            };
+            if (KeymapManager::Get().ConsumeActionTrigger("FreeTransform") || uiState.requestFreeTransform) {
+                uiState.requestFreeTransform = false;
+                enterFreeTransform();
+            }
+            uiState.freeTransformActive = g_FreeTransformMode;
             if (KeymapManager::Get().ConsumeActionTrigger("SmudgeTool")) {
                 g_ActiveTool = ActiveTool::Smudge;
             }
@@ -1803,32 +1825,52 @@ int main(int argc, char* argv[]) {
                 ActiveCanvas().SmudgeOnActiveLayer(0, 0, StrokePhase::End, uiState.smudge);
             }
 
-            // Commit / Cancel Move Pixels (keyboard or Tool Settings panel buttons)
+            // Commit / Cancel Move / Free Transform
             if (ActiveCanvas().IsMovingPixels()) {
+                const bool enterPressed = !ImGui::GetIO().WantTextInput &&
+                    (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
+                // Free Transform (Ctrl+T): Enter required. Move tool: Enter optional (also defocus).
                 bool doCommit = uiState.commitTransform ||
-                    (!ImGui::GetIO().WantTextInput && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)));
+                    (g_FreeTransformMode ? enterPressed : (enterPressed || false));
                 bool doCancel = uiState.cancelTransform ||
                     (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape));
                 uiState.commitTransform = false;
                 uiState.cancelTransform = false;
 
-                if (doCommit) {
-                    ActiveCanvas().CommitMovePixels(g_pd3dDevice);
+                // Move tool: defocus / click outside canvas confirms (PS-like, no Enter required)
+                if (!g_FreeTransformMode && !g_IsMoveDragging && !doCommit && !doCancel) {
+                    if (!isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+                        !ImGui::IsAnyItemHovered() && !ImGui::GetIO().WantCaptureMouse) {
+                        doCommit = true;
+                    }
+                }
+
+                auto finishTransformSession = [&](bool committed) {
+                    if (committed)
+                        ActiveCanvas().CommitMovePixels(g_pd3dDevice);
+                    else
+                        ActiveCanvas().CancelMovePixels(g_pd3dDevice);
                     g_MoveAccumulatedOffsetX = 0;
                     g_MoveAccumulatedOffsetY = 0;
-                }
-                else if (doCancel) {
-                    ActiveCanvas().CancelMovePixels(g_pd3dDevice);
-                    g_MoveAccumulatedOffsetX = 0;
-                    g_MoveAccumulatedOffsetY = 0;
-                }
+                    g_IsMoveDragging = false;
+                    g_ActiveGizmoHandle = TransformGizmoHandle::None;
+                    if (g_FreeTransformMode) {
+                        g_FreeTransformMode = false;
+                        g_ActiveTool = g_ToolBeforeFreeTransform;
+                    }
+                };
+
+                if (doCommit) finishTransformSession(true);
+                else if (doCancel) finishTransformSession(false);
             }
 
-            // Auto-commit Move Pixels if tool switched
+            // Auto-commit Move if tool switched (not Free Transform restore path)
             if (g_ActiveTool != ActiveTool::MovePixels && ActiveCanvas().IsMovingPixels()) {
                 ActiveCanvas().CommitMovePixels(g_pd3dDevice);
                 g_MoveAccumulatedOffsetX = 0;
                 g_MoveAccumulatedOffsetY = 0;
+                g_IsMoveDragging = false;
+                g_FreeTransformMode = false;
             }
 
             // Keyboard: Ctrl+D = Deselect (safe with empty selection — no null UpdateSubresource)
@@ -1862,12 +1904,11 @@ int main(int argc, char* argv[]) {
                 y1 = y0 + (dy >= 0.f ? s : -s);
             };
 
-            // Drag-based selection tools only (Magic Wand is click-once, not drag).
+            // Drag-based selection tools (Quick Select handled as live brush, not marquee).
             bool isDragSelectionTool = (g_ActiveTool == ActiveTool::RectSelect ||
                                         g_ActiveTool == ActiveTool::EllipseSelect ||
                                         g_ActiveTool == ActiveTool::LassoSelect ||
-                                        g_ActiveTool == ActiveTool::SmartSelect ||
-                                        g_ActiveTool == ActiveTool::QuickSelect);
+                                        g_ActiveTool == ActiveTool::SmartSelect);
 
             if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging) {
                 // Magic Wand (click sets sticky seed + selection; not a drag tool)
@@ -1910,7 +1951,16 @@ int main(int argc, char* argv[]) {
                             g_IsMoveDragging = true;
                             g_MoveDragStartX = canvasX;
                             g_MoveDragStartY = canvasY;
+                            g_MoveAccumulatedOffsetX = 0;
+                            g_MoveAccumulatedOffsetY = 0;
+                        } else if (!g_FreeTransformMode) {
+                            // Move tool: translation only
+                            g_ActiveGizmoHandle = TransformGizmoHandle::Move;
+                            g_IsMoveDragging = true;
+                            g_MoveDragStartX = canvasX;
+                            g_MoveDragStartY = canvasY;
                         } else {
+                            // Free Transform operator: full gizmo
                             GizmoScreenGeometry geo;
                             if (GetGizmoGeometry(ActiveCanvas(), canvasToScreen, geo)) {
                                 float threshSq = 64.0f; // 8px radius
@@ -1945,7 +1995,6 @@ int main(int argc, char* argv[]) {
                                     g_GizmoDragStartScaleY = ActiveCanvas().GetFloatingScaleY();
                                     g_GizmoDragStartDist = std::sqrt(distSq(mousePos, geo.center));
                                     if (g_GizmoDragStartDist < 5.0f) g_GizmoDragStartDist = 5.0f;
-                                    // Per-axis start distances for free (non-uniform) scale
                                     g_GizmoDragStartDistX = std::max(5.f, std::fabs(mousePos.x - geo.center.x));
                                     g_GizmoDragStartDistY = std::max(5.f, std::fabs(mousePos.y - geo.center.y));
                                 }
@@ -1958,6 +2007,17 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
+                // Quick Select: PS-like progressive brush (live ants, Alt=subtract)
+                else if (g_ActiveTool == ActiveTool::QuickSelect) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && isInsideCanvas) {
+                        g_IsSelectionDragging = true;
+                        g_LassoPoints.clear();
+                        g_LassoPoints.push_back({ (int)canvasX, (int)canvasY });
+                        ActiveCanvas().BeginQuickSelectStroke();
+                        ActiveCanvas().StrokeQuickSelect(g_pd3dDevice, g_LassoPoints, g_Brush.radius,
+                                                        ImGui::GetIO().KeyAlt);
+                    }
+                }
                 // Drag-based selections
                 else if (isDragSelectionTool) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
@@ -1966,9 +2026,6 @@ int main(int argc, char* argv[]) {
                         g_SelectionDragStartY = canvasY;
                         g_LassoPoints.clear();
                         g_LassoPoints.push_back({ (int)canvasX, (int)canvasY });
-                        if (g_ActiveTool == ActiveTool::QuickSelect) {
-                            ActiveCanvas().BeginQuickSelectStroke();
-                        }
                     }
                 }
                 // Polygonal Lasso
@@ -2007,32 +2064,45 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // Quick Select: Esc mid-stroke → CancelQuickSelectStroke (no selection/undo change)
+            // Quick Select: Esc mid-stroke → restore selection as of stroke start
             if (g_ActiveTool == ActiveTool::QuickSelect && !ImGui::GetIO().WantTextInput &&
                 ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                 if (ActiveCanvas().IsQuickSelectStrokeActive()) {
                     ActiveCanvas().CancelQuickSelectStroke();
+                    ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
                 }
                 g_IsSelectionDragging = false;
                 g_LassoPoints.clear();
             }
 
-            // Accumulate points if lasso or smart select or quick select is active
-            if (g_IsSelectionDragging && (g_ActiveTool == ActiveTool::LassoSelect || g_ActiveTool == ActiveTool::SmartSelect || g_ActiveTool == ActiveTool::QuickSelect)) {
+            // Live Quick Select while dragging (every mouse sample → progressive grow)
+            if (g_IsSelectionDragging && g_ActiveTool == ActiveTool::QuickSelect &&
+                ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 int cx = (int)canvasX;
                 int cy = (int)canvasY;
                 if (g_LassoPoints.empty() || g_LassoPoints.back() != std::make_pair(cx, cy)) {
                     g_LassoPoints.push_back({ cx, cy });
-                    if (g_ActiveTool == ActiveTool::QuickSelect) {
-                        ActiveCanvas().StrokeQuickSelect(g_LassoPoints, g_Brush.radius, ImGui::GetIO().KeyAlt);
-                    }
+                    // Keep path short for grow seeds — only need recent tip; stroke uses last point
+                    if (g_LassoPoints.size() > 8)
+                        g_LassoPoints.erase(g_LassoPoints.begin(), g_LassoPoints.end() - 4);
+                }
+                ActiveCanvas().StrokeQuickSelect(g_pd3dDevice, g_LassoPoints, g_Brush.radius,
+                                                ImGui::GetIO().KeyAlt);
+            }
+
+            // Lasso / Smart Select path accumulation
+            if (g_IsSelectionDragging && (g_ActiveTool == ActiveTool::LassoSelect || g_ActiveTool == ActiveTool::SmartSelect)) {
+                int cx = (int)canvasX;
+                int cy = (int)canvasY;
+                if (g_LassoPoints.empty() || g_LassoPoints.back() != std::make_pair(cx, cy)) {
+                    g_LassoPoints.push_back({ cx, cy });
                 }
             }
 
             // End drag handling
             if (g_IsSelectionDragging && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
                 g_IsSelectionDragging = false;
-                bool add = selAdd() || (g_ActiveTool == ActiveTool::QuickSelect && !selSub());
+                bool add = selAdd();
                 bool subtract = selSub();
 
                 float fx2 = canvasX, fy2 = canvasY;
@@ -2061,9 +2131,8 @@ int main(int argc, char* argv[]) {
                     ActiveCanvas().ApplySmartSelectSelection(g_pd3dDevice, g_LassoPoints, add, subtract);
                 }
                 else if (g_ActiveTool == ActiveTool::QuickSelect) {
-                    // Skip if already cancelled via Esc
                     if (ActiveCanvas().IsQuickSelectStrokeActive())
-                        ActiveCanvas().EndQuickSelectStroke(g_pd3dDevice, add, subtract);
+                        ActiveCanvas().EndQuickSelectStroke(g_pd3dDevice, ImGui::GetIO().KeyAlt);
                 }
                 g_LassoPoints.clear();
             }
@@ -2239,11 +2308,11 @@ int main(int argc, char* argv[]) {
                 dl->PopClipRect();
             }
 
-            // Draw Move Pixels Gizmo
+            // Draw Move / Free Transform gizmo
             if (ActiveCanvas().IsMovingPixels()) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
-                ActiveCanvas().DrawMoveGizmo(dl, canvasToScreen);
+                ActiveCanvas().DrawMoveGizmo(dl, canvasToScreen, /*showHandles=*/g_FreeTransformMode);
                 dl->PopClipRect();
             }
 

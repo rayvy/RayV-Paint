@@ -190,7 +190,10 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
                 canvas.PreviewWandFromSeed(device, state.magicWandTolerance, add, subtract, state.magicWandContiguous);
             }
         } else if (activeTool == ActiveTool::QuickSelect) {
-            MiniSlider("##qsr", &brush.radius, 1.f, 200.f, "Quick Select brush size", 140.f);
+            float maxR = ConfigManager::Get().GetMaxBrushRadius();
+            MiniSlider("##qsr", &brush.radius, 1.f, maxR, "Quick Select size (same as brush · [ ])", 140.f);
+            ImGui::SameLine();
+            ImGui::TextDisabled("paint = add · Alt = subtract · live ants");
         } else {
             ImGui::TextDisabled("Smart Select: draw contour");
         }
@@ -220,36 +223,49 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
         MiniSlider("##smp", &state.smudge.spacing, 0.01f, 1.f, "Spacing", 90.f);
     }
     else if (activeTool == ActiveTool::MovePixels) {
-        float sx = canvas.GetFloatingScaleX();
-        float sy = canvas.GetFloatingScaleY();
-        float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
-        ImGui::SetNextItemWidth(80.f);
-        if (ImGui::SliderFloat("##sx", &sx, 0.05f, 5.f, "X:%.2f")) canvas.SetFloatingScaleX(sx);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(80.f);
-        if (ImGui::SliderFloat("##sy", &sy, 0.05f, 5.f, "Y:%.2f")) canvas.SetFloatingScaleY(sy);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(90.f);
-        if (ImGui::SliderFloat("##rot", &rotDeg, -180.f, 180.f, "%.0f°"))
-            canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
-        ImGui::SameLine();
-        if (ImGui::Button("H")) canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());
-        if (ImGui::IsItemHovered()) Ui::Tooltip("Flip H");
-        ImGui::SameLine();
-        if (ImGui::Button("V")) canvas.SetFloatingScaleY(-canvas.GetFloatingScaleY());
-        if (ImGui::IsItemHovered()) Ui::Tooltip("Flip V");
-        ImGui::SameLine();
-        if (ImGui::Button("Reset")) {
-            canvas.SetFloatingScaleX(1.f); canvas.SetFloatingScaleY(1.f); canvas.SetFloatingRotation(0.f);
+        if (state.freeTransformActive) {
+            // Free Transform operator (Ctrl+T): full params + Enter/OK to apply
+            float sx = canvas.GetFloatingScaleX();
+            float sy = canvas.GetFloatingScaleY();
+            float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
+            ImGui::SetNextItemWidth(80.f);
+            if (ImGui::SliderFloat("##sx", &sx, 0.05f, 5.f, "X:%.2f")) canvas.SetFloatingScaleX(sx);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(80.f);
+            if (ImGui::SliderFloat("##sy", &sy, 0.05f, 5.f, "Y:%.2f")) canvas.SetFloatingScaleY(sy);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(90.f);
+            if (ImGui::SliderFloat("##rot", &rotDeg, -180.f, 180.f, "%.0f°"))
+                canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
+            ImGui::SameLine();
+            if (ImGui::Button("H")) canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Flip H");
+            ImGui::SameLine();
+            if (ImGui::Button("V##flip")) canvas.SetFloatingScaleY(-canvas.GetFloatingScaleY());
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Flip V");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset")) {
+                canvas.SetFloatingScaleX(1.f); canvas.SetFloatingScaleY(1.f); canvas.SetFloatingRotation(0.f);
+            }
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.18f, 1.0f));
+            if (ImGui::Button("OK")) state.commitTransform = true;
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Apply (Enter)");
+            ImGui::SameLine();
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.18f, 1.0f));
+            if (ImGui::Button("X")) state.cancelTransform = true;
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Cancel (Esc) — returns to previous tool");
+        } else {
+            ImGui::TextDisabled("Move: drag pixels · Esc cancel · switch tool / click away = apply");
+            if (canvas.IsMovingPixels()) {
+                ImGui::SameLine();
+                if (ImGui::Button("Apply##move")) state.commitTransform = true;
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel##move")) state.cancelTransform = true;
+            }
         }
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.55f, 0.18f, 1.0f));
-        if (ImGui::Button("OK")) state.commitTransform = true;
-        ImGui::PopStyleColor();
-        ImGui::SameLine();
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.18f, 0.18f, 1.0f));
-        if (ImGui::Button("X")) state.cancelTransform = true;
-        ImGui::PopStyleColor();
     }
     else {
         ImGui::TextDisabled("Hand: pan · RMB/Shift: rotate");

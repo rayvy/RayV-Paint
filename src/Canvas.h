@@ -340,12 +340,15 @@ public:
     bool PreviewWandFromSeed(ID3D11Device* device, float tolerance, bool add, bool subtract, bool contiguous);
     void ApplySmartSelectSelection(ID3D11Device* device, const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
     // Quick Selection (non-AI): brush seeds → region grow with edge stop.
+    // Quick Select (PS-like): progressive live selection under brush.
+    // Begin → Stroke (live outline) → End (undo) · Alt = subtract.
     void BeginQuickSelectStroke();
-    void StrokeQuickSelect(const std::vector<std::pair<int, int>>& points, float radius, bool subtract);
-    void EndQuickSelectStroke(ID3D11Device* device, bool add, bool subtract);
-    // Abort in-progress quick-select stroke without modifying document selection / undo.
+    void StrokeQuickSelect(ID3D11Device* device, const std::vector<std::pair<int, int>>& points,
+                           float radius, bool subtract);
+    void EndQuickSelectStroke(ID3D11Device* device, bool subtract);
+    // Abort in-progress quick-select stroke; restores selection from stroke start.
     void CancelQuickSelectStroke();
-    bool IsQuickSelectStrokeActive() const { return !m_QuickSelectMask.empty(); }
+    bool IsQuickSelectStrokeActive() const { return m_QuickSelectStrokeActive; }
     bool IsSmartSelectInProgress() const { return m_SmartSelectInProgress.load(); }
     void CancelSmartSelect() { m_SmartSelectCancelled.store(true); }
     void ApplyBucketFill(int startX, int startY, float tolerance, const float color[4], bool contiguous);
@@ -375,7 +378,9 @@ public:
     void UpdateMovePixels(ID3D11Device* device, int dx, int dy);
     void CommitMovePixels(ID3D11Device* device);
     void CancelMovePixels(ID3D11Device* device);
-    void DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen);
+    // showHandles=false: Move tool (bbox only). true: Free Transform (scale/rotate handles).
+    void DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen,
+                       bool showHandles = true);
     float GetFloatingScaleX() const { return m_FloatingScaleX; }
     float GetFloatingScaleY() const { return m_FloatingScaleY; }
     float GetFloatingRotation() const { return m_FloatingRotation; }
@@ -814,7 +819,11 @@ private:
     int m_WandSourceLayerIdx = -1;
 
     // Quick select session
-    std::vector<uint8_t> m_QuickSelectMask; // working mask during stroke
+    bool m_QuickSelectStrokeActive = false;
+    std::vector<uint8_t> m_QuickSelectMask;     // stroke contribution this drag
+    std::vector<uint8_t> m_QuickSelectBaseMask; // document selection at Begin (for undo + progressive)
+    bool m_QuickSelectBaseHas = false;
+    bool m_QuickSelectSubtract = false;
     std::vector<uint8_t> m_QuickSelectEdge; // cached edge strength 0-255
     bool m_QuickSelectEdgeValid = false;
 

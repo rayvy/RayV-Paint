@@ -293,15 +293,27 @@ float4 PSSelectionOutline(PS_INPUT input) : SV_TARGET
     
     float2 canvasSize = u_OffsetAndCanvasSize.zw;
     float zoom = u_ViewportSizeAndZoom.z;
-    float2 uvStep = 1.0f / (canvasSize * zoom);
+    // One canvas texel in UV (not screen-pixel): edge detect in document space
+    float2 uvStep = 1.0f / max(canvasSize, float2(1.0f, 1.0f));
     
     float mLeft  = g_SelectionMask.Sample(g_Sampler, input.uv - float2(uvStep.x, 0.0f)).r;
     float mRight = g_SelectionMask.Sample(g_Sampler, input.uv + float2(uvStep.x, 0.0f)).r;
     float mUp    = g_SelectionMask.Sample(g_Sampler, input.uv - float2(0.0f, uvStep.y)).r;
     float mDown  = g_SelectionMask.Sample(g_Sampler, input.uv + float2(0.0f, uvStep.y)).r;
     
-    // Check if there is an edge
-    if (abs(mask - mLeft) > 0.1f || abs(mask - mRight) > 0.1f || abs(mask - mUp) > 0.1f || abs(mask - mDown) > 0.1f)
+    // Interior mask edges (selected | unselected)
+    bool edge = abs(mask - mLeft) > 0.1f || abs(mask - mRight) > 0.1f
+             || abs(mask - mUp) > 0.1f || abs(mask - mDown) > 0.1f;
+
+    // Document border: if selection touches canvas edge, draw ants there too.
+    // Without this, a selection flush with the right/bottom edge has no visible
+    // outline on that side (no "outside" neighbor inside the texture).
+    bool onDocBorder = (input.uv.x <= uvStep.x * 1.5f) || (input.uv.x >= 1.0f - uvStep.x * 1.5f)
+                    || (input.uv.y <= uvStep.y * 1.5f) || (input.uv.y >= 1.0f - uvStep.y * 1.5f);
+    if (mask > 0.5f && onDocBorder)
+        edge = true;
+
+    if (edge && mask > 0.05f)
     {
         float time = u_ViewportFlags.z;
         float dash = (input.screenPos.x + input.screenPos.y - time * 30.0f) % 10.0f;

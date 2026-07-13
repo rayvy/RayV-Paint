@@ -109,7 +109,8 @@ void KeymapManager::Initialize() {
     m_Bindings["Paste"] = KeyCombination{ GLFW_KEY_V, -1, true, false, false };
     m_Bindings["PasteAsNewLayer"] = KeyCombination{ GLFW_KEY_V, -1, true, true, false }; // Ctrl+Shift+V
     m_Bindings["CopyLayers"] = KeyCombination{ GLFW_KEY_C, -1, true, true, false }; // Ctrl+Shift+C
-    m_Bindings["TransformTool"] = KeyCombination{ GLFW_KEY_V, -1, false, false, false };
+    m_Bindings["TransformTool"] = KeyCombination{ GLFW_KEY_V, -1, false, false, false }; // Move tool
+    m_Bindings["FreeTransform"] = KeyCombination{ GLFW_KEY_T, -1, true, false, false };  // Ctrl+T
     m_Bindings["FillSecondary"] = KeyCombination{ GLFW_KEY_BACKSPACE, -1, false, false, false };
     m_Bindings["DeleteContent"] = KeyCombination{ GLFW_KEY_DELETE, -1, false, false, false };
 

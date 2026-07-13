@@ -479,7 +479,32 @@ void ApplyPixelFilters(std::vector<float>& rgba, int w, int h, const std::vector
         switch (f.type) {
         case FilterType::Blur: {
             int rr = std::max(1, (int)f.p[0]);
+            // Premultiplied-alpha blur: prevents white fringe next to transparency.
+            // Straight RGB of transparent pixels is undefined/garbage; blurring it
+            // with opaque neighbors bleaches edges. Premul → blur → unpremul.
+            const int nPx = w * h;
+            for (int i = 0; i < nPx; ++i) {
+                size_t idx = (size_t)i * 4;
+                float a = std::clamp(rgba[idx + 3], 0.f, 1.f);
+                rgba[idx + 0] *= a;
+                rgba[idx + 1] *= a;
+                rgba[idx + 2] *= a;
+                rgba[idx + 3] = a;
+            }
             BoxBlur(rgba, w, h, rr, 4, 3);
+            for (int i = 0; i < nPx; ++i) {
+                size_t idx = (size_t)i * 4;
+                float a = std::clamp(rgba[idx + 3], 0.f, 1.f);
+                if (a > 1e-6f) {
+                    float inv = 1.f / a;
+                    rgba[idx + 0] = std::clamp(rgba[idx + 0] * inv, 0.f, 1.f);
+                    rgba[idx + 1] = std::clamp(rgba[idx + 1] * inv, 0.f, 1.f);
+                    rgba[idx + 2] = std::clamp(rgba[idx + 2] * inv, 0.f, 1.f);
+                } else {
+                    rgba[idx + 0] = rgba[idx + 1] = rgba[idx + 2] = 0.f;
+                }
+                rgba[idx + 3] = a;
+            }
             break;
         }
         case FilterType::HSV: {

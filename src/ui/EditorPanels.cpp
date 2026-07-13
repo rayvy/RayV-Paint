@@ -801,9 +801,14 @@ namespace UI {
                 }
                 ImGui::EndMenu();
             }
-            // ---- Image Menu ----
+            // ---- Image Menu (operators) ----
             if (ImGui::BeginMenu("Image")) {
                 bool hasLayer = canvas.GetActiveLayerIndex() != -1;
+                if (ImGui::MenuItem("Free Transform...", KeymapManager::Get().GetActionShortcutString("FreeTransform").c_str(), false, hasLayer)) {
+                    // Signal main loop via state (main owns tool switch)
+                    state.requestFreeTransform = true;
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("Invert Colors", KeymapManager::Get().GetActionShortcutString("InvertColors").c_str(), false, hasLayer))
                     canvas.InvertColors();
                 if (ImGui::MenuItem("Invert Alpha", KeymapManager::Get().GetActionShortcutString("InvertAlpha").c_str(), false, hasLayer))
@@ -1109,9 +1114,21 @@ namespace UI {
             endAdjSession(false, nullptr);
         s_WasAnyAdjModal = anyAdjModal;
 
+        // Operator modals: NO dim/scrim — user must see live image changes (not a "cat in a bag").
+        auto beginOperatorModal = [](const char* name, bool* open) -> bool {
+            ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg, ImVec4(0.f, 0.f, 0.f, 0.f));
+            bool openOk = ImGui::BeginPopupModal(name, open, ImGuiWindowFlags_AlwaysAutoResize);
+            if (!openOk) ImGui::PopStyleColor(); // balanced when not open
+            return openOk;
+        };
+        auto endOperatorModal = []() {
+            ImGui::EndPopup();
+            ImGui::PopStyleColor(); // ModalWindowDimBg
+        };
+
         // Blur Modal
         if (state.showBlurModal) ImGui::OpenPopup("Blur##modal");
-        if (ImGui::BeginPopupModal("Blur##modal", &state.showBlurModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (beginOperatorModal("Blur##modal", &state.showBlurModal)) {
             if (!s_AdjPreviewBegun && ensureAdjPreview())
                 canvas.UpdateAdjustPreviewBlur(state.blurRadius);
             ImGui::Text("Blur (3-pass box) — preview on active layer");
@@ -1132,12 +1149,12 @@ namespace UI {
                 state.showBlurModal = false;
                 ImGui::CloseCurrentPopup();
             }
-            ImGui::EndPopup();
+            endOperatorModal();
         }
 
         // HSV Modal
         if (state.showHSVModal) ImGui::OpenPopup("HSV Adjust##modal");
-        if (ImGui::BeginPopupModal("HSV Adjust##modal", &state.showHSVModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (beginOperatorModal("HSV Adjust##modal", &state.showHSVModal)) {
             if (!s_AdjPreviewBegun) ensureAdjPreview();
             ImGui::Text("Hue / Saturation / Value");
             ImGui::TextDisabled("Live preview on active layer · selection mask");
@@ -1163,12 +1180,12 @@ namespace UI {
                 state.showHSVModal = false;
                 ImGui::CloseCurrentPopup();
             }
-            ImGui::EndPopup();
+            endOperatorModal();
         }
 
         // Noise Modal
         if (state.showNoiseModal) ImGui::OpenPopup("Add Noise##modal");
-        if (ImGui::BeginPopupModal("Add Noise##modal", &state.showNoiseModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (beginOperatorModal("Add Noise##modal", &state.showNoiseModal)) {
             if (!s_AdjPreviewBegun) ensureAdjPreview();
             ImGui::TextDisabled("Live preview (stable seed until Apply)");
             bool ch = false;
@@ -1190,12 +1207,12 @@ namespace UI {
                 state.showNoiseModal = false;
                 ImGui::CloseCurrentPopup();
             }
-            ImGui::EndPopup();
+            endOperatorModal();
         }
 
         // Curves Modal — interactive spline editor + live canvas preview
         if (state.showCurvesModal) ImGui::OpenPopup("Curves##modal");
-        if (ImGui::BeginPopupModal("Curves##modal", &state.showCurvesModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (beginOperatorModal("Curves##modal", &state.showCurvesModal)) {
             if (!s_AdjPreviewBegun) ensureAdjPreview();
             if (state.curvesPointsRGB.empty()) {
                 state.curvesPointsRGB = {{0.f, 0.f}, {1.f, 1.f}};
@@ -1324,7 +1341,7 @@ namespace UI {
                 endAdjSession(false, nullptr);
                 state.showCurvesModal=false; ImGui::CloseCurrentPopup();
             }
-            ImGui::EndPopup();
+            endOperatorModal();
         }
 
         // 2. Persistent Footer (Status Bar)
@@ -1344,7 +1361,7 @@ namespace UI {
             case ActiveTool::QuickSelect: toolLabel = "Quick Select"; break;
             case ActiveTool::MagicWand: toolLabel = "Magic Wand"; break;
             case ActiveTool::SmartSelect: toolLabel = "Smart Select"; break;
-            case ActiveTool::MovePixels: toolLabel = "Transform"; break;
+            case ActiveTool::MovePixels: toolLabel = "Move"; break;
             case ActiveTool::Pipette: toolLabel = "Pipette"; break;
             case ActiveTool::BucketFill: toolLabel = "Bucket Fill"; break;
             case ActiveTool::Gradient: toolLabel = "Gradient"; break;
@@ -1877,7 +1894,7 @@ namespace UI {
                 "Wand / Selection Tools", wandBind, btnSize, s_RebindAction, activeTool);
             if (UI::IsWandTool(activeTool)) markAccent();
             ToolbarAdvance(isVertical, gap);
-            RenderToolButton("TransformTool", "Transform", ActiveTool::MovePixels, false, transformBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+            RenderToolButton("TransformTool", "Move", ActiveTool::MovePixels, false, transformBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             if (activeTool == ActiveTool::MovePixels) markAccent();
             ToolbarAdvance(isVertical, gap);
             RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);

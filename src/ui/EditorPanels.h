@@ -100,9 +100,13 @@ namespace UI {
         bool openSaveConfigModal = false;
         bool showRecoveryModal = false;
 
-        // Transform tool action signals
+        // Move / Free Transform action signals
         bool commitTransform = false;
         bool cancelTransform = false;
+        // Image → Free Transform… (Ctrl+T also); main loop enters Free Transform mode
+        bool requestFreeTransform = false;
+        // Written by main: true while Ctrl+T Free Transform session is active
+        bool freeTransformActive = false;
 
         // Rebinding helper state
         std::string rebindingAction = "";
