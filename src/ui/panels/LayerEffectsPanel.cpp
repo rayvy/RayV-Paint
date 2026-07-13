@@ -6,7 +6,9 @@
 #include "../widgets/UiPathField.h"
 #include "../widgets/UiTooltip.h"
 #include "../widgets/UiColorField.h"
+#include "../../Canvas.h"
 #include "../../layer/LayerTypes.h"
+#include "../../core/UndoRedoManager.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
@@ -37,7 +39,27 @@ if (ImGui::BeginPopupModal("Layer Effects##modal", &state.showLayerEffects, 0)) 
         FilterType::AlphaInvert, FilterType::Noise
     };
 
+    // Undo session: capture props on first edit, commit when interaction ends
+    static LayerPropsCommand::Props s_fxBefore;
+    static bool s_fxEditing = false;
+    static int s_fxLayer = -1;
+    auto ensureFxUndoBegin = [&](Layer& layer) {
+        int idx = canvas.GetActiveLayerIndex();
+        if (!s_fxEditing || s_fxLayer != idx) {
+            s_fxBefore = Canvas::CaptureLayerProps(layer);
+            s_fxEditing = true;
+            s_fxLayer = idx;
+        }
+    };
+    auto commitFxUndo = [&](const char* name) {
+        if (!s_fxEditing) return;
+        canvas.CommitLayerPropsEdit(s_fxLayer, s_fxBefore, name);
+        s_fxEditing = false;
+        s_fxLayer = -1;
+    };
+
     auto markStyleDirty = [&](Layer& layer) {
+        ensureFxUndoBegin(layer);
         int idx = canvas.GetActiveLayerIndex();
         canvas.RequestPresentationRebuild(idx);
         // Groups: also dirty self if editing group layer
@@ -46,6 +68,7 @@ if (ImGui::BeginPopupModal("Layer Effects##modal", &state.showLayerEffects, 0)) 
         }
     };
     auto markFilterDirty = [&](Layer& layer) {
+        ensureFxUndoBegin(layer);
         layer.filtersDirty = true;
         layer.presentationDirty = true;
         if (layer.isGroup || layer.HasEnabledStyles())
@@ -106,6 +129,7 @@ if (ImGui::BeginPopupModal("Layer Effects##modal", &state.showLayerEffects, 0)) 
             ImGui::TextDisabled("Filters");
             for (int ti = 0; ti < 5; ++ti) {
                 if (ImGui::MenuItem(filterTypeNames[ti])) {
+                    auto before = Canvas::CaptureLayerProps(layer);
                     LayerFilter nf;
                     nf.type = ftypes[ti];
                     nf.enabled = true;
@@ -118,6 +142,8 @@ if (ImGui::BeginPopupModal("Layer Effects##modal", &state.showLayerEffects, 0)) 
                     }
                     layer.filters.push_back(std::move(nf));
                     markFilterDirty(layer);
+                    canvas.CommitLayerPropsEdit(ai, before, "Add Filter");
+                    s_fxEditing = false;
                     selectFilter((int)layer.filters.size() - 1);
                     ImGui::CloseCurrentPopup();
                 }
@@ -138,8 +164,11 @@ if (ImGui::BeginPopupModal("Layer Effects##modal", &state.showLayerEffects, 0)) 
                 if (layer.styles.empty()) clearFxSel();
                 else selectStyle(std::min(state.layerEffectsSelIdx, (int)layer.styles.size() - 1));
             } else {
+                auto before = Canvas::CaptureLayerProps(layer);
                 layer.filters.erase(layer.filters.begin() + state.layerEffectsSelIdx);
                 markFilterDirty(layer);
+                canvas.CommitLayerPropsEdit(ai, before, "Remove Filter");
+                s_fxEditing = false;
                 if (layer.filters.empty()) clearFxSel();
                 else selectFilter(std::min(state.layerEffectsSelIdx, (int)layer.filters.size() - 1));
             }
@@ -396,15 +425,25 @@ if (ImGui::BeginPopupModal("Layer Effects##modal", &state.showLayerEffects, 0)) 
             ImGui::TextDisabled("or use Add to create one.");
         }
         ImGui::EndChild();
+
+        // Commit undo when user finishes dragging a control
+        if (s_fxEditing && ImGui::IsMouseReleased(0))
+            commitFxUndo("Edit Layer Effects");
     }
 
     ImGui::Separator();
     if (ImGui::Button("Close##fx_close", ImVec2(120, 0))) {
+        commitFxUndo("Edit Layer Effects");
         state.showLayerEffects = false;
         ImGui::CloseCurrentPopup();
     }
+    // If modal closed via X without Close button
+    if (!state.showLayerEffects)
+        commitFxUndo("Edit Layer Effects");
+
     ImGui::EndPopup();
-}
-}
+    } // BeginPopupModal
+
+} // DrawLayerEffectsPanel
 
 } // namespace UI

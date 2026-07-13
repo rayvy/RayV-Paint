@@ -1091,16 +1091,41 @@ void Canvas::ApplyLayerMask(int index) {
     }
 
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
-    for (int y = 0; y < m_Height; ++y) {
-        for (int x = 0; x < m_Width; ++x) {
-            float rgba[4];
-            layer.tileCache->GetPixelF(x, y, rgba);
-            rgba[3] *= SelU82F(layer.mask[(size_t)y * m_Width + x]);
-            layer.tileCache->SetPixelF(x, y, rgba);
+    // Tile walk — avoid GetPixelF/SetPixelF per document pixel
+    const int ntx = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+    const int nty = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+    for (int ty = 0; ty < nty; ++ty) {
+        for (int tx = 0; tx < ntx; ++tx) {
+            if (!layer.tileCache->HasTile(tx, ty)) continue;
+            uint8_t* raw = layer.tileCache->LockTile(tx, ty);
+            if (!raw) continue;
+            const int x0 = tx * TILE_SIZE, y0 = ty * TILE_SIZE;
+            const int x1 = std::min(x0 + TILE_SIZE, m_Width);
+            const int y1 = std::min(y0 + TILE_SIZE, m_Height);
+            const auto fmt = layer.tileCache->GetFormat();
+            for (int y = y0; y < y1; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    const int lx = x - x0, ly = y - y0;
+                    float aMul = SelU82F(layer.mask[(size_t)y * m_Width + x]);
+                    if (fmt == CanvasPixelFormat::RGBA8) {
+                        size_t off = ((size_t)ly * TILE_SIZE + lx) * 4;
+                        raw[off + 3] = (uint8_t)std::clamp((int)std::lround(raw[off + 3] * aMul), 0, 255);
+                    } else if (fmt == CanvasPixelFormat::RGBA16F) {
+                        float px[4];
+                        HalfFloat::LoadRGBA16F(raw + ((size_t)ly * TILE_SIZE + lx) * 8, px);
+                        px[3] *= aMul;
+                        HalfFloat::StoreRGBA16F(raw + ((size_t)ly * TILE_SIZE + lx) * 8, px);
+                    } else {
+                        float* fp = reinterpret_cast<float*>(raw);
+                        size_t off = ((size_t)ly * TILE_SIZE + lx) * 4;
+                        fp[off + 3] *= aMul;
+                    }
+                }
+            }
         }
     }
     layer.tileCache->MarkAllDirty();
-    
+
     layer.needsUpload = true;
     layer.filtersDirty = true;
     DeleteLayerMask(index);
@@ -1311,8 +1336,20 @@ LayerStackCommand::Snap Canvas::CaptureLayerSnap(const Layer& L, int index, int 
     s.parentGroupId = L.parentGroupId;
     s.groupExpanded = L.groupExpanded;
     s.fill = L.fill;
+    // Self-contained undo: embed fill texture pixels if only AssetStore-backed.
+    // DeleteLayer may Release the asset key; undo must still restore pixels.
+    if (s.fill.useTexture && s.fill.textureRgba.empty() && !s.fill.textureAssetKey.empty()) {
+        if (const assets::TextureAsset* a = assets::AssetStore::Get().Get(s.fill.textureAssetKey)) {
+            if (!a->rgba.empty() && a->w > 0 && a->h > 0) {
+                s.fill.textureRgba = a->rgba;
+                s.fill.textureW = a->w;
+                s.fill.textureH = a->h;
+            }
+        }
+    }
     s.filters = L.filters;
     s.styles = L.styles;
+    // Outline textures also live as embedded rgba on style — already copied via styles.
     s.smartPath = L.smartSourcePath;
     s.smartBytes = L.smartSourceBytes;
     s.smartScale = L.smartScale;
@@ -1360,6 +1397,88 @@ LayerStackCommand::Snap Canvas::CaptureLayerSnap(const Layer& L, int index, int 
     }
     (void)fmt;
     return s;
+}
+
+LayerPropsCommand::Props Canvas::CaptureLayerProps(const Layer& L) {
+    LayerPropsCommand::Props p;
+    p.name = L.name;
+    p.visible = L.visible;
+    p.opacity = L.opacity;
+    p.blendMode = L.blendMode;
+    p.alphaRewrite = L.alphaRewrite;
+    p.filters = L.filters;
+    p.styles = L.styles;
+    p.isFill = L.IsFill();
+    if (p.isFill) {
+        p.fill = L.fill;
+        if (p.fill.useTexture && p.fill.textureRgba.empty() && !p.fill.textureAssetKey.empty()) {
+            if (const assets::TextureAsset* a = assets::AssetStore::Get().Get(p.fill.textureAssetKey)) {
+                if (!a->rgba.empty() && a->w > 0 && a->h > 0) {
+                    p.fill.textureRgba = a->rgba;
+                    p.fill.textureW = a->w;
+                    p.fill.textureH = a->h;
+                }
+            }
+        }
+    }
+    return p;
+}
+
+void Canvas::CommitLayerPropsEdit(int layerIdx, const LayerPropsCommand::Props& before,
+                                  const char* actionName) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return;
+    LayerPropsCommand::Props after = CaptureLayerProps(m_Layers[layerIdx]);
+    // Cheap equality: name/opacity/blend/flags + filter/style counts & enabled + key params
+    auto same = [&]() -> bool {
+        if (before.name != after.name || before.visible != after.visible ||
+            before.opacity != after.opacity || before.blendMode != after.blendMode ||
+            before.alphaRewrite != after.alphaRewrite ||
+            before.filters.size() != after.filters.size() ||
+            before.styles.size() != after.styles.size())
+            return false;
+        if (before.isFill != after.isFill) return false;
+        if (before.isFill) {
+            if (before.fill.texturePath != after.fill.texturePath ||
+                before.fill.textureAssetKey != after.fill.textureAssetKey ||
+                before.fill.useTexture != after.fill.useTexture)
+                return false;
+            for (int i = 0; i < 4; ++i)
+                if (before.fill.color[i] != after.fill.color[i]) return false;
+        }
+        for (size_t i = 0; i < before.filters.size(); ++i) {
+            const auto& a = before.filters[i];
+            const auto& b = after.filters[i];
+            if (a.type != b.type || a.enabled != b.enabled || a.curvesChannels != b.curvesChannels)
+                return false;
+            for (int k = 0; k < 4; ++k)
+                if (a.p[k] != b.p[k]) return false;
+            if (a.lut != b.lut || a.lutR != b.lutR || a.lutG != b.lutG ||
+                a.lutB != b.lutB || a.lutA != b.lutA)
+                return false;
+        }
+        for (size_t i = 0; i < before.styles.size(); ++i) {
+            const auto& a = before.styles[i];
+            const auto& b = after.styles[i];
+            if (a.type != b.type || a.enabled != b.enabled || a.opacity != b.opacity ||
+                a.distance != b.distance || a.angleDeg != b.angleDeg ||
+                a.offsetX != b.offsetX || a.offsetY != b.offsetY ||
+                a.spread != b.spread || a.size != b.size ||
+                a.outlineSize != b.outlineSize || a.outlinePos != b.outlinePos ||
+                a.outlineFill != b.outlineFill || a.outlineGradientMap != b.outlineGradientMap)
+                return false;
+            for (int k = 0; k < 4; ++k) {
+                if (a.shadowColor[k] != b.shadowColor[k]) return false;
+                if (a.outlineColor[k] != b.outlineColor[k]) return false;
+            }
+            if (a.outlineTexturePath != b.outlineTexturePath) return false;
+            if (a.outlineGradient.size() != b.outlineGradient.size()) return false;
+        }
+        return true;
+    };
+    if (same()) return;
+    m_UndoRedoManager.PushCommand(std::make_shared<LayerPropsCommand>(
+        actionName ? actionName : "Layer Edit", layerIdx, before, std::move(after)));
+    m_IsDocumentModified = true;
 }
 
 void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
@@ -2243,8 +2362,7 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                                m_MirrorHorizontal, m_MirrorVertical,
                                m_HasSelection ? m_SelectionMask : std::vector<uint8_t>{});
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
-        m_Layers[m_ActiveLayerIdx].filtersDirty = true;
-        // Styles presentation rebaked on stroke End (not every dab)
+        // Do NOT set filtersDirty — ComposeLayers refilters only dirty tiles (keeps FX live).
         m_Layers[m_ActiveLayerIdx].thumbDirty = true;
         m_CompositeDirty = true;
         m_ChannelPreviewDirty = true;
@@ -2300,7 +2418,6 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         m_PrevStabilizedX = stabilizedX;
         m_PrevStabilizedY = stabilizedY;
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
-        m_Layers[m_ActiveLayerIdx].filtersDirty = true;
         m_Layers[m_ActiveLayerIdx].thumbDirty = true;
         m_CompositeDirty = true; // recompose every dab (A-off RGB view stays live)
         m_ChannelPreviewDirty = true;
@@ -2311,7 +2428,9 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         m_ChannelPreviewDirty = true;
         if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
             auto& al = m_Layers[m_ActiveLayerIdx];
-            al.filtersDirty = true;
+            // Final pass: catch any remaining dirty tiles (esp. blur halo).
+            if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(al.filters))
+                RefreshFilteredCache(al, /*onlyDirtyTiles=*/true);
             if (al.HasEnabledStyles()) {
                 al.presentationDirty = true;
                 al.stylesDirty = true;
@@ -2489,9 +2608,11 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 // Full-buffer path: styles, filters, or fill texture (visible only).
                 // When Effects Preview is OFF, skip FX bake (raw/solid/texture only).
                 if (layer.visible && (LayerFxPreviewActive(layer) || layer.fill.HasTexture())) {
-                    if (m_EffectsPreviewEnabled && layer.filtersDirty && !m_IsStrokeActive)
-                        RebuildFilteredPixels(layer);
-                    if (LayerStylesPreviewActive(layer) && (layer.presentationDirty || layer.stylesDirty))
+                    if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters) &&
+                        (layer.filtersDirty || !layer.filteredCache || layer.filteredCache->IsEmpty()))
+                        RefreshFilteredCache(layer, /*onlyDirtyTiles=*/false);
+                    if (LayerStylesPreviewActive(layer) && !m_IsStrokeActive &&
+                        (layer.presentationDirty || layer.stylesDirty))
                         RebuildLayerPresentation(layer);
                     TileCache* src = nullptr;
                     if (LayerStylesPreviewActive(layer) && layer.presentationCache &&
@@ -2536,28 +2657,32 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 if (!layer.texture) continue;
             }
 
-            // Rebuild filters / styles presentation.
-            // CRITICAL: never full-document RebuildFilteredPixels mid-stroke — even "cheap"
-            // Curves/HSV re-export+refilter entire W×H every dab (felt laggy at 1K).
-            // Same policy as styles: live paint on raw tiles; rebuild once on stroke End.
-            bool filtersWereDirty = m_EffectsPreviewEnabled && !layer.filters.empty() && layer.filtersDirty;
+            // Filters: sparse tile refresh (full when filtersDirty; dirty-only while painting).
+            // Styles: full presentation bake is expensive — skip mid-stroke, keep filters live.
+            bool filtersWereDirty = m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters) &&
+                (layer.filtersDirty || (layer.tileCache && layer.tileCache->HasPendingGpuWork()));
             bool stylesWereDirty = LayerStylesPreviewActive(layer) &&
                 (layer.stylesDirty || layer.presentationDirty);
-            if (m_EffectsPreviewEnabled && !layer.filters.empty() && layer.filtersDirty && !m_IsStrokeActive)
-                RebuildFilteredPixels(layer);
+
+            if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters)) {
+                if (layer.filtersDirty || !layer.filteredCache || layer.filteredCache->IsEmpty())
+                    RefreshFilteredCache(layer, /*onlyDirtyTiles=*/false);
+                else if (layer.tileCache && layer.tileCache->HasPendingGpuWork())
+                    // Dirty content after paint / undo — sparse refilter (FX stays live mid-stroke)
+                    RefreshFilteredCache(layer, /*onlyDirtyTiles=*/true);
+            }
             if (LayerStylesPreviewActive(layer) && !m_IsStrokeActive)
                 RebuildLayerPresentation(layer);
 
-            // Pick source cache: presentation > filtered > raw
-            // During stroke / FX preview OFF / dirty filters: raw tiles (responsive brush)
+            // Pick source: presentation (styles, idle) > filtered (filters live, incl. stroke) > raw
             TileCache* src = nullptr;
             bool layerNeedsUpload = layer.needsUpload;
             const bool usePres = LayerStylesPreviewActive(layer) && !m_IsStrokeActive &&
                 layer.presentationCache && !layer.presentationCache->IsEmpty();
             if (usePres)
                 src = layer.presentationCache.get();
-            else if (m_EffectsPreviewEnabled && !m_IsStrokeActive && !layer.filters.empty() &&
-                     layer.filteredCache && !layer.filtersDirty)
+            else if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters) &&
+                     layer.filteredCache && !layer.filteredCache->IsEmpty() && !layer.filtersDirty)
                 src = layer.filteredCache.get();
             if (!src) src = layer.tileCache.get();
             if (!src) continue;
@@ -6520,59 +6645,9 @@ void Canvas::DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, flo
 }
 
 // ============================================================
-//  Helpers
+//  Helpers (color/blur shared via layer_fx — no local duplicates)
 // ============================================================
 #include <random>
-
-static inline void RGBtoHSV(float r, float g, float b, float& h, float& s, float& v) {
-    float mx = std::max({r,g,b}), mn = std::min({r,g,b});
-    v = mx; float delta = mx - mn;
-    s = (mx > 1e-6f) ? delta / mx : 0.f;
-    if (delta < 1e-6f) { h = 0.f; return; }
-    if      (mx == r) h = (g - b) / delta + (g < b ? 6.f : 0.f);
-    else if (mx == g) h = (b - r) / delta + 2.f;
-    else              h = (r - g) / delta + 4.f;
-    h /= 6.f;
-}
-static inline void HSVtoRGB(float h, float s, float v, float& r, float& g, float& b) {
-    if (s < 1e-6f) { r = g = b = v; return; }
-    float hh = h * 6.f; int i = (int)hh % 6; float f = hh - (int)hh;
-    float p = v*(1.f-s), q = v*(1.f-s*f), t = v*(1.f-s*(1.f-f));
-    switch(i) {
-        case 0: r=v;g=t;b=p; break; case 1: r=q;g=v;b=p; break;
-        case 2: r=p;g=v;b=t; break; case 3: r=p;g=q;b=v; break;
-        case 4: r=t;g=p;b=v; break; default:r=v;g=p;b=q; break;
-    }
-}
-
-static void BoxBlurH(std::vector<float>& px, int w, int h, int r) {
-    std::vector<float> tmp(px.size());
-    for (int y = 0; y < h; ++y) {
-        float acc[4]={0,0,0,0}; int count=0;
-        for (int kx=0; kx<=r; ++kx) { int cx=std::min(kx,w-1); for(int c=0;c<4;++c) acc[c]+=px[((size_t)y*w+cx)*4+c]; ++count; }
-        for (int x = 0; x < w; ++x) {
-            for(int c=0;c<4;++c) tmp[((size_t)y*w+x)*4+c]=acc[c]/(float)count;
-            int add=x+r+1, rem=x-r;
-            if (add<w) { for(int c=0;c<4;++c) acc[c]+=px[((size_t)y*w+add)*4+c]; ++count; }
-            if (rem>=0) { for(int c=0;c<4;++c) acc[c]-=px[((size_t)y*w+rem)*4+c]; --count; }
-        }
-    }
-    px=tmp;
-}
-static void BoxBlurV(std::vector<float>& px, int w, int h, int r) {
-    std::vector<float> tmp(px.size());
-    for (int x = 0; x < w; ++x) {
-        float acc[4]={0,0,0,0}; int count=0;
-        for (int ky=0; ky<=r; ++ky) { int cy=std::min(ky,h-1); for(int c=0;c<4;++c) acc[c]+=px[((size_t)cy*w+x)*4+c]; ++count; }
-        for (int y = 0; y < h; ++y) {
-            for(int c=0;c<4;++c) tmp[((size_t)y*w+x)*4+c]=acc[c]/(float)count;
-            int add=y+r+1, rem=y-r;
-            if (add<h) { for(int c=0;c<4;++c) acc[c]+=px[((size_t)add*w+x)*4+c]; ++count; }
-            if (rem>=0) { for(int c=0;c<4;++c) acc[c]-=px[((size_t)rem*w+x)*4+c]; --count; }
-        }
-    }
-    px=tmp;
-}
 
 // Monotone cubic spline LUT — called from UI curves editor
 std::vector<float> Canvas_BuildSplineLUT(const std::vector<std::pair<float,float>>& pts) {
@@ -6747,10 +6822,7 @@ static void BufferApplyBlur(std::vector<float>& pixels, int w, int h, float radi
                             const std::vector<uint8_t>& selMask, bool hasSel) {
     int r = std::max(1, (int)radius);
     std::vector<float> blurred = pixels;
-    for (int pass = 0; pass < 3; ++pass) {
-        BoxBlurH(blurred, w, h, r);
-        BoxBlurV(blurred, w, h, r);
-    }
+    layer_fx::BoxBlur(blurred, w, h, r, 4, 3);
     for (int y = 0; y < h; ++y)
         for (int x = 0; x < w; ++x) {
             float sel = GetSelWeight(selMask, w, x, y, hasSel);
@@ -6770,12 +6842,12 @@ static void BufferApplyHSV(std::vector<float>& pixels, int w, int h, float dH, f
             size_t idx = ((size_t)y * w + x) * 4;
             float rr = pixels[idx], gg = pixels[idx + 1], bb = pixels[idx + 2];
             float hv, s, v;
-            RGBtoHSV(rr, gg, bb, hv, s, v);
+            layer_fx::RGBtoHSV(rr, gg, bb, hv, s, v);
             hv = fmodf(hv + dH + 1.f, 1.f);
             s = std::clamp(s + dS, 0.f, 1.f);
             v = std::clamp(v + dV, 0.f, 1.f);
             float nr, ng, nb;
-            HSVtoRGB(hv, s, v, nr, ng, nb);
+            layer_fx::HSVtoRGB(hv, s, v, nr, ng, nb);
             pixels[idx]     = pixels[idx]     * (1.f - sel) + nr * sel;
             pixels[idx + 1] = pixels[idx + 1] * (1.f - sel) + ng * sel;
             pixels[idx + 2] = pixels[idx + 2] * (1.f - sel) + nb * sel;
@@ -7040,19 +7112,219 @@ bool Canvas::IsTopLevelLayer(const Layer& layer) {
 
 void Canvas::RebuildFilteredPixels(Layer& layer) {
     if (!layer.filtersDirty) return;
+    RefreshFilteredCache(layer, /*onlyDirtyTiles=*/false);
+}
+
+void Canvas::RefreshFilteredCache(Layer& layer, bool onlyDirtyTiles) {
     if (layer.filters.empty() || (!LayerHasPixels(layer) && !layer.IsFill())) {
         layer.filteredCache.reset();
         layer.filtersDirty = false;
         layer.presentationDirty = true;
         return;
     }
-    std::vector<float> tmp = ResolveLayerContentF(layer);
-    layer_fx::ApplyPixelFilters(tmp, m_Width, m_Height, layer.filters);
-    if (!layer.filteredCache)
+    if (!m_EffectsPreviewEnabled) {
+        // Keep caches but don't thrash while preview is off
+        return;
+    }
+
+    const int halo = layer_fx::MaxFilterSupportRadius(layer.filters);
+    const bool needFull = layer.filtersDirty || !layer.filteredCache ||
+                          layer.filteredCache->IsEmpty() ||
+                          layer.filteredCache->GetWidth() != m_Width ||
+                          layer.filteredCache->GetHeight() != m_Height ||
+                          !onlyDirtyTiles;
+
+    if (!layer.filteredCache) {
         layer.filteredCache = std::make_unique<TileCache>();
-    layer.filteredCache->Init(m_Width, m_Height, m_CanvasFormat);
-    layer.filteredCache->ImportRGBA32F(tmp.data(), m_Width, m_Height);
-    layer.filteredCache->MarkAllDirty();
+        layer.filteredCache->Init(m_Width, m_Height, m_CanvasFormat);
+    } else if (layer.filteredCache->GetWidth() != m_Width ||
+               layer.filteredCache->GetHeight() != m_Height) {
+        layer.filteredCache->Init(m_Width, m_Height, m_CanvasFormat);
+    }
+
+    // Collect content tiles to process
+    std::vector<std::pair<int, int>> work;
+    work.reserve(64);
+
+    auto addTile = [&](int tx, int ty) {
+        if (tx < 0 || ty < 0) return;
+        if (layer.tileCache) {
+            if (tx >= layer.tileCache->GetTilesX() || ty >= layer.tileCache->GetTilesY()) return;
+        } else if (layer.IsFill()) {
+            int txx = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+            int tyy = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+            if (tx >= txx || ty >= tyy) return;
+        } else return;
+        work.emplace_back(tx, ty);
+    };
+
+    if (needFull) {
+        if (layer.IsFill() && (!layer.tileCache || layer.tileCache->IsEmpty())) {
+            // Solid/texture fill without raster tiles: one full-buffer pass (proxy-safe size check)
+            if (!CanAllocateFlatComposite(m_Width, m_Height, "RefreshFilteredCache(fill)")) {
+                layer.filtersDirty = false;
+                return;
+            }
+            std::vector<float> tmp = ResolveLayerContentF(layer);
+            layer_fx::ApplyPixelFilters(tmp, m_Width, m_Height, layer.filters, 0, 0);
+            layer.filteredCache->Clear();
+            layer.filteredCache->Init(m_Width, m_Height, m_CanvasFormat);
+            layer.filteredCache->ImportRGBA32F(tmp.data(), m_Width, m_Height);
+            layer.filteredCache->MarkAllDirty();
+            layer.filtersDirty = false;
+            layer.presentationDirty = true;
+            return;
+        }
+        if (!layer.tileCache) {
+            layer.filtersDirty = false;
+            return;
+        }
+        for (int ty = 0; ty < layer.tileCache->GetTilesY(); ++ty)
+            for (int tx = 0; tx < layer.tileCache->GetTilesX(); ++tx)
+                if (layer.tileCache->HasTile(tx, ty))
+                    addTile(tx, ty);
+        // Full rebuild: drop stale filtered tiles first
+        layer.filteredCache->Clear();
+        layer.filteredCache->Init(m_Width, m_Height, m_CanvasFormat);
+    } else {
+        // Incremental: content dirty tiles + blur halo neighborhood
+        if (!layer.tileCache) {
+            layer.filtersDirty = false;
+            return;
+        }
+        std::vector<std::pair<int, int>> seeds;
+        for (int ty = 0; ty < layer.tileCache->GetTilesY(); ++ty) {
+            for (int tx = 0; tx < layer.tileCache->GetTilesX(); ++tx) {
+                if (layer.tileCache->IsDirty(tx, ty) && layer.tileCache->HasTile(tx, ty))
+                    seeds.emplace_back(tx, ty);
+            }
+        }
+        if (seeds.empty()) {
+            layer.filtersDirty = false;
+            return;
+        }
+        const int expand = (halo + TILE_SIZE - 1) / TILE_SIZE;
+        std::unordered_set<uint32_t> seen;
+        for (auto [sx, sy] : seeds) {
+            for (int dy = -expand; dy <= expand; ++dy) {
+                for (int dx = -expand; dx <= expand; ++dx) {
+                    int tx = sx + dx, ty = sy + dy;
+                    if (tx < 0 || ty < 0 || tx >= layer.tileCache->GetTilesX() ||
+                        ty >= layer.tileCache->GetTilesY())
+                        continue;
+                    // Only process tiles that have content (or seed empty→paint created)
+                    if (!layer.tileCache->HasTile(tx, ty) && !(dx == 0 && dy == 0))
+                        continue;
+                    uint32_t key = (uint32_t)tx | ((uint32_t)ty << 16);
+                    if (!seen.insert(key).second) continue;
+                    addTile(tx, ty);
+                }
+            }
+        }
+    }
+
+    // Fast path: no halo (Curves/HSV/Noise/AlphaInvert) — convert whole 256² tile from raw bytes
+    auto exportTileF = [&](int tx, int ty, std::vector<float>& out, int& outW, int& outH) -> bool {
+        if (!layer.tileCache || !layer.tileCache->HasTile(tx, ty)) return false;
+        const int x0 = tx * TILE_SIZE, y0 = ty * TILE_SIZE;
+        outW = std::min(TILE_SIZE, m_Width - x0);
+        outH = std::min(TILE_SIZE, m_Height - y0);
+        if (outW <= 0 || outH <= 0) return false;
+        out.assign((size_t)TILE_SIZE * TILE_SIZE * 4, 0.f);
+        const uint8_t* raw = layer.tileCache->GetTileData(tx, ty);
+        if (!raw) return false;
+        const auto fmt = layer.tileCache->GetFormat();
+        for (int ly = 0; ly < outH; ++ly) {
+            for (int lx = 0; lx < outW; ++lx) {
+                size_t di = ((size_t)ly * TILE_SIZE + lx) * 4; // dense TILE_SIZE pitch in out
+                // Store with outW pitch for ApplyPixelFilters
+                size_t oi = ((size_t)ly * outW + lx) * 4;
+                if (fmt == CanvasPixelFormat::RGBA8) {
+                    size_t si = ((size_t)ly * TILE_SIZE + lx) * 4;
+                    out[oi + 0] = raw[si + 0] / 255.f;
+                    out[oi + 1] = raw[si + 1] / 255.f;
+                    out[oi + 2] = raw[si + 2] / 255.f;
+                    out[oi + 3] = raw[si + 3] / 255.f;
+                } else if (fmt == CanvasPixelFormat::RGBA16F) {
+                    float px[4];
+                    HalfFloat::LoadRGBA16F(raw + ((size_t)ly * TILE_SIZE + lx) * 8, px);
+                    out[oi + 0] = px[0]; out[oi + 1] = px[1];
+                    out[oi + 2] = px[2]; out[oi + 3] = px[3];
+                } else {
+                    const float* fp = reinterpret_cast<const float*>(raw);
+                    size_t si = ((size_t)ly * TILE_SIZE + lx) * 4;
+                    out[oi + 0] = fp[si + 0]; out[oi + 1] = fp[si + 1];
+                    out[oi + 2] = fp[si + 2]; out[oi + 3] = fp[si + 3];
+                }
+                (void)di;
+            }
+        }
+        out.resize((size_t)outW * outH * 4);
+        return true;
+    };
+
+    for (auto [tx, ty] : work) {
+        const int x0 = tx * TILE_SIZE;
+        const int y0 = ty * TILE_SIZE;
+        const int tileW = std::min(TILE_SIZE, m_Width - x0);
+        const int tileH = std::min(TILE_SIZE, m_Height - y0);
+        if (tileW <= 0 || tileH <= 0 || !layer.tileCache) continue;
+
+        if (halo == 0) {
+            std::vector<float> tileF;
+            int tw = 0, th = 0;
+            if (!exportTileF(tx, ty, tileF, tw, th)) continue;
+            layer_fx::ApplyPixelFilters(tileF, tw, th, layer.filters, x0, y0);
+            layer.filteredCache->ImportRGBA32F(tileF.data(), tw, th, x0, y0);
+            continue;
+        }
+
+        const int rx0 = std::max(0, x0 - halo);
+        const int ry0 = std::max(0, y0 - halo);
+        const int rx1 = std::min(m_Width, x0 + tileW + halo);
+        const int ry1 = std::min(m_Height, y0 + tileH + halo);
+        const int rw = rx1 - rx0;
+        const int rh = ry1 - ry0;
+        if (rw <= 0 || rh <= 0) continue;
+
+        std::vector<float> region((size_t)rw * rh * 4, 0.f);
+        for (int y = 0; y < rh; ++y) {
+            for (int x = 0; x < rw; ++x) {
+                float px[4];
+                layer.tileCache->GetPixelF(rx0 + x, ry0 + y, px);
+                size_t i = ((size_t)y * rw + x) * 4;
+                region[i + 0] = px[0]; region[i + 1] = px[1];
+                region[i + 2] = px[2]; region[i + 3] = px[3];
+            }
+        }
+
+        layer_fx::ApplyPixelFilters(region, rw, rh, layer.filters, rx0, ry0);
+
+        const int ox = x0 - rx0;
+        const int oy = y0 - ry0;
+        std::vector<float> tileF((size_t)tileW * tileH * 4);
+        for (int y = 0; y < tileH; ++y) {
+            for (int x = 0; x < tileW; ++x) {
+                size_t si = ((size_t)(oy + y) * rw + (ox + x)) * 4;
+                size_t di = ((size_t)y * tileW + x) * 4;
+                tileF[di + 0] = region[si + 0];
+                tileF[di + 1] = region[si + 1];
+                tileF[di + 2] = region[si + 2];
+                tileF[di + 3] = region[si + 3];
+            }
+        }
+        layer.filteredCache->ImportRGBA32F(tileF.data(), tileW, tileH, x0, y0);
+    }
+
+    // Content dirty was consumed for refilter; clear so we don't refilter every frame.
+    // GPU upload will use filteredCache dirty flags set by ImportRGBA32F.
+    if (layer.tileCache && onlyDirtyTiles) {
+        for (auto [tx, ty] : work)
+            layer.tileCache->ClearDirty(tx, ty);
+    } else if (layer.tileCache && needFull) {
+        layer.tileCache->ClearAllDirty();
+    }
+
     layer.filtersDirty = false;
     layer.presentationDirty = true;
 }
@@ -7531,6 +7803,7 @@ bool Canvas::LayerFxPreviewActive(const Layer& layer) const {
 int Canvas::AddLayerStyle(int layerIdx, StyleType type) {
     if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return -1;
     Layer& layer = m_Layers[layerIdx];
+    auto before = CaptureLayerProps(layer);
     LayerStyle s;
     s.type = type;
     s.enabled = true;
@@ -7546,6 +7819,7 @@ int Canvas::AddLayerStyle(int layerIdx, StyleType type) {
     }
     layer.styles.push_back(s);
     m_IsDocumentModified = true;
+    CommitLayerPropsEdit(layerIdx, before, "Add Layer Style");
     // Debounced bake — never full-res float composite on the same click (crash/lag on 4K+)
     RequestPresentationRebuild(layerIdx);
     return (int)layer.styles.size() - 1;
@@ -7555,11 +7829,13 @@ void Canvas::RemoveLayerStyle(int layerIdx, int styleIdx) {
     if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return;
     Layer& layer = m_Layers[layerIdx];
     if (styleIdx < 0 || styleIdx >= (int)layer.styles.size()) return;
+    auto before = CaptureLayerProps(layer);
     layer.styles.erase(layer.styles.begin() + styleIdx);
     layer.stylesDirty = true;
     layer.presentationDirty = true;
     m_CompositeDirty = true;
     m_IsDocumentModified = true;
+    CommitLayerPropsEdit(layerIdx, before, "Remove Layer Style");
 }
 
 void Canvas::MarkLayerStylesDirty(int layerIdx) {

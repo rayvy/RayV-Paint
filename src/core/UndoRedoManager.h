@@ -117,6 +117,36 @@ private:
     std::vector<MaskTileSnapshot> m_OldTiles, m_NewTiles;
 };
 
+// Non-destructive layer props: opacity, blend, filters, styles, visibility, name, fill params.
+// Used for FX panel edits and layer header changes that previously had no undo.
+class LayerPropsCommand : public UndoCommand {
+public:
+    struct Props {
+        std::string name;
+        bool visible = true;
+        float opacity = 1.f;
+        BlendMode blendMode = BlendMode::Normal;
+        bool alphaRewrite = true;
+        std::vector<LayerFilter> filters;
+        std::vector<LayerStyle> styles;
+        FillLayerParams fill{};
+        bool isFill = false;
+    };
+
+    LayerPropsCommand(const std::string& name, int layerIdx, Props oldProps, Props newProps);
+    std::string GetName() const override { return m_Name; }
+    void Undo(Canvas* canvas) override;
+    void Redo(Canvas* canvas) override;
+    size_t GetOverheadBytes() const override;
+
+private:
+    void Apply(Canvas* canvas, const Props& p);
+    std::string m_Name;
+    int m_LayerIdx = -1;
+    Props m_Old;
+    Props m_New;
+};
+
 // Layer insert / remove (create, delete, duplicate)
 class LayerStackCommand : public UndoCommand {
 public:

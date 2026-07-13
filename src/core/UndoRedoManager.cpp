@@ -36,9 +36,15 @@ void PaintStrokeCommand::Undo(Canvas* canvas) {
 
     for (const auto& delta : m_Deltas) {
         layer.tileCache->RestoreTile(delta.tileX, delta.tileY, delta.oldState);
+        // Mark dirty so sparse filter refresh picks these tiles up
+        layer.tileCache->MarkDirty(delta.tileX, delta.tileY);
     }
     layer.needsUpload  = true;
-    layer.filtersDirty = true;
+    // Prefer sparse refilter over full-document filtersDirty thrash
+    if (!layer.filters.empty())
+        layer.filtersDirty = false; // ComposeLayers will RefreshFilteredCache(onlyDirty)
+    layer.presentationDirty = layer.HasEnabledStyles();
+    layer.stylesDirty = layer.HasEnabledStyles();
     canvas->MarkCompositeDirty();
 }
 
@@ -50,9 +56,13 @@ void PaintStrokeCommand::Redo(Canvas* canvas) {
 
     for (const auto& delta : m_Deltas) {
         layer.tileCache->RestoreTile(delta.tileX, delta.tileY, delta.newState);
+        layer.tileCache->MarkDirty(delta.tileX, delta.tileY);
     }
     layer.needsUpload  = true;
-    layer.filtersDirty = true;
+    if (!layer.filters.empty())
+        layer.filtersDirty = false;
+    layer.presentationDirty = layer.HasEnabledStyles();
+    layer.stylesDirty = layer.HasEnabledStyles();
     canvas->MarkCompositeDirty();
 }
 
@@ -217,6 +227,62 @@ size_t LayerMaskPaintCommand::GetOverheadBytes() const {
     for (const auto& t : m_NewTiles) if (t.data) n += t.data->capacity();
     n += (m_OldTiles.capacity() + m_NewTiles.capacity()) * sizeof(MaskTileSnapshot);
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// LayerPropsCommand
+// ---------------------------------------------------------------------------
+
+LayerPropsCommand::LayerPropsCommand(const std::string& name, int layerIdx,
+                                     Props oldProps, Props newProps)
+    : m_Name(name), m_LayerIdx(layerIdx)
+    , m_Old(std::move(oldProps)), m_New(std::move(newProps)) {}
+
+void LayerPropsCommand::Apply(Canvas* canvas, const Props& p) {
+    if (!canvas || m_LayerIdx < 0 || m_LayerIdx >= (int)canvas->m_Layers.size()) return;
+    auto& L = canvas->m_Layers[m_LayerIdx];
+    L.name = p.name;
+    L.visible = p.visible;
+    L.opacity = p.opacity;
+    L.blendMode = p.blendMode;
+    L.alphaRewrite = p.alphaRewrite;
+    L.filters = p.filters;
+    L.styles = p.styles;
+    if (p.isFill || L.IsFill())
+        L.fill = p.fill;
+    L.filtersDirty = !L.filters.empty();
+    L.stylesDirty = !L.styles.empty();
+    L.presentationDirty = true;
+    if (L.filters.empty())
+        L.filteredCache.reset();
+    if (!L.HasEnabledStyles())
+        L.presentationCache.reset();
+    L.needsUpload = true;
+    L.thumbDirty = true;
+    canvas->MarkCompositeDirty();
+    canvas->m_IsDocumentModified = true;
+}
+
+void LayerPropsCommand::Undo(Canvas* canvas) { Apply(canvas, m_Old); }
+void LayerPropsCommand::Redo(Canvas* canvas) { Apply(canvas, m_New); }
+
+size_t LayerPropsCommand::GetOverheadBytes() const {
+    auto propsBytes = [](const Props& p) {
+        size_t n = p.name.capacity() + p.filters.capacity() * 128 + p.styles.capacity() * 256;
+        for (const auto& f : p.filters) {
+            n += f.lut.capacity() * sizeof(float) + f.lutR.capacity() * sizeof(float)
+               + f.lutG.capacity() * sizeof(float) + f.lutB.capacity() * sizeof(float)
+               + f.lutA.capacity() * sizeof(float);
+        }
+        for (const auto& s : p.styles) {
+            n += s.outlineTextureRgba.capacity() + s.outlineTexturePath.capacity()
+               + s.outlineGradient.capacity() * sizeof(GradientStop);
+        }
+        n += p.fill.textureRgba.capacity() + p.fill.texturePath.capacity()
+           + p.fill.textureAssetKey.capacity();
+        return n;
+    };
+    return sizeof(LayerPropsCommand) + m_Name.capacity() + propsBytes(m_Old) + propsBytes(m_New);
 }
 
 // ---------------------------------------------------------------------------
@@ -528,8 +594,10 @@ void UndoRedoManager::EnforceLimits() {
     RecalcMemory();
 
     if (budget > 0) {
-        // Drop oldest undo first (Krita-like purge of deep history).
-        while (m_CurrentMemoryBytes > budget && !m_UndoStack.empty()) {
+        // Drop oldest undo first — but never purge the most recent step.
+        // A single Delete Layer of a large raster used to exceed budget and
+        // immediately erase itself (layer "gone from memory" on Undo).
+        while (m_CurrentMemoryBytes > budget && m_UndoStack.size() > 1) {
             m_UndoStack.erase(m_UndoStack.begin());
             ++droppedSteps;
             RecalcMemory();

@@ -15,6 +15,8 @@
 #include "../../core/ProjectManager.h"
 #include "../../core/Logger.h"
 #include "../../core/KeymapManager.h"
+#include "../../core/UndoRedoManager.h"
+#include "../../Canvas.h"
 #include "../../texset/TextureSetTypes.h"
 #include "../../layer/LayerTypes.h"
 #include <algorithm>
@@ -99,12 +101,27 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 ImGui::PushID("##active_hdr");
                 const float hdrGap = 12.f;
                 ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.30f);
+                // Undo: keep last committed opacity/blend per layer for slider/combo sessions
+                static int s_propAi = -1;
+                static float s_committedOpacity = 1.f;
+                static BlendMode s_committedBlend = BlendMode::Normal;
+                if (s_propAi != ai) {
+                    s_propAi = ai;
+                    s_committedOpacity = al.opacity;
+                    s_committedBlend = al.blendMode;
+                }
                 if (Ui::SmartSliderFloat("##op_top", &al.opacity, 0.f, 1.f, 1.f, 0.05f, "Fill %.2f")) {
                     // Content/fill opacity — styles keep independent style.opacity
                     if (al.HasEnabledStyles() || al.isGroup)
                         canvas.RequestPresentationRebuild(ai);
                     else
                         canvas.MarkCompositeDirty();
+                }
+                if (ImGui::IsItemDeactivatedAfterEdit() && al.opacity != s_committedOpacity) {
+                    LayerPropsCommand::Props before = Canvas::CaptureLayerProps(al);
+                    before.opacity = s_committedOpacity;
+                    canvas.CommitLayerPropsEdit(ai, before, "Layer Opacity");
+                    s_committedOpacity = al.opacity;
                 }
                 ImGui::SameLine(0, hdrGap);
                 static const char* blendNamesTop[] = {
@@ -113,7 +130,16 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 int blendIdx = (int)al.blendMode;
                 ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 92.f - hdrGap * 2.f);
                 if (Ui::Combo("##bl_top", &blendIdx, blendNamesTop, IM_ARRAYSIZE(blendNamesTop))) {
-                    al.blendMode = (BlendMode)blendIdx;
+                    BlendMode newBm = (BlendMode)blendIdx;
+                    if (newBm != s_committedBlend) {
+                        LayerPropsCommand::Props before = Canvas::CaptureLayerProps(al);
+                        before.blendMode = s_committedBlend;
+                        al.blendMode = newBm;
+                        canvas.CommitLayerPropsEdit(ai, before, "Layer Blend Mode");
+                        s_committedBlend = newBm;
+                    } else {
+                        al.blendMode = newBm;
+                    }
                     canvas.MarkCompositeDirty();
                 }
                 ImGui::SameLine(0, hdrGap);

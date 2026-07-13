@@ -142,6 +142,7 @@ public:
     friend class LayerMaskCommand;
     friend class LayerMaskPaintCommand;
     friend class LayerStackCommand;
+    friend class LayerPropsCommand;
     friend class PaintStrokeCommand;
 
     bool Initialize(ID3D11Device* device);
@@ -206,6 +207,11 @@ public:
     // Capture layer for undo (tiles COW + mask tiles). Friend of LayerStackCommand.
     static LayerStackCommand::Snap CaptureLayerSnap(const Layer& L, int index, int docW, int docH,
                                                     CanvasPixelFormat fmt);
+    // Capture non-pixel props for undo (FX / opacity / blend / fill params).
+    static LayerPropsCommand::Props CaptureLayerProps(const Layer& L);
+    // Push undo if before/after differ. Call after user finishes an edit session.
+    void CommitLayerPropsEdit(int layerIdx, const LayerPropsCommand::Props& before,
+                              const char* actionName);
     // Import image/DDS as a real paint layer bound to one map (LightMap/Normal/…).
     // Visible in Layers panel; participates only when that map is active in viewport.
     // Pixels are placed in document UV space (scaled to canvas size if needed).
@@ -694,6 +700,9 @@ private:
 
     // Applies filters to layer.pixels → layer.filteredPixels (rebuilds if filtersDirty)
     void RebuildFilteredPixels(Layer& layer);
+    // Sparse/tile-local filter refresh. onlyDirtyTiles: refilter tiles marked dirty on content
+    // (paint hot path). Full rebuild when filtersDirty or filteredCache missing.
+    void RefreshFilteredCache(Layer& layer, bool onlyDirtyTiles);
     // Rebuild presentation cache when styles/filters/fill require baked buffer for GPU.
     // fullQuality=true: document-res bake (export/rasterize). false: proxy preview.
     void RebuildLayerPresentation(Layer& layer, bool fullQuality = false);
