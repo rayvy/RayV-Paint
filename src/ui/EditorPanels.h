@@ -10,7 +10,7 @@
 #include "../core/PaintEngine.h"
 #include "FileExplorer.h"
 
-enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSelect, PolygonalLasso, QuickSelect, MagicWand, SmartSelect, MovePixels, Pipette, BucketFill, Gradient, Smudge };
+enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSelect, PolygonalLasso, QuickSelect, MagicWand, SmartSelect, MovePixels, Pipette, BucketFill, Gradient, Smudge, BlurTool };
 
 
 #include <GLFW/glfw3.h>
@@ -105,6 +105,8 @@ namespace UI {
         bool cancelTransform = false;
         // Image → Free Transform… (Ctrl+T also); main loop enters Free Transform mode
         bool requestFreeTransform = false;
+        bool requestPerspectiveWarp = false;
+        bool requestMeshWarp = false;
         // Written by main: true while Ctrl+T Free Transform session is active
         bool freeTransformActive = false;
 
@@ -128,8 +130,9 @@ namespace UI {
         bool  magicWandContiguous = true;
         float bucketFillTolerance = 0.15f;
 
-        // Smudge tool settings
+        // Smudge / Blur tool settings (shared shape: radius, strength, spacing)
         SmudgeSettings smudge;
+        SmudgeSettings blurTool{ 20.f, 0.5f, 0.15f };
 
         // Brush tip preset: 0=Soft, 1=Hard, 2=Pencil, 3=Airbrush, 4=Custom (or procedural null)
         int brushTipPreset = 0;

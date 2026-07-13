@@ -2,6 +2,7 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include "../layer/LayerTypes.h"
 
 // Optional grayscale tip stamp (row-major, tipSize x tipSize, 0=transparent 255=solid).
 // When tipPixels is null/empty, procedural soft circle is used (legacy path).
@@ -43,6 +44,9 @@ struct BrushSettings {
 
     // Optional custom tip (null = procedural circle, no regression)
     const BrushTip* tip = nullptr;
+
+    // Brush pixel blend vs destination (Normal = classic stamp). Erase ignores this.
+    BlendMode blendMode = BlendMode::Normal;
 };
 
 // Built-in brush tip presets (generated procedurally once).

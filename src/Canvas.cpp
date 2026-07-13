@@ -6541,6 +6541,9 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
     if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
     m_FloatingPixels.clear();
     m_OriginalSelectionMask.clear();
+    m_WarpMode = WarpOperatorMode::None;
+    m_WarpControls.clear();
+    m_WarpSourcePixels.clear();
     
     m_IsMovingPixels = false;
 }
@@ -6566,12 +6569,317 @@ void Canvas::CancelMovePixels(ID3D11Device* device) {
     m_FloatingBufW = m_FloatingBufH = 0;
     
     m_IsMovingPixels = false;
+    m_WarpMode = WarpOperatorMode::None;
+    m_WarpControls.clear();
+    m_WarpSourcePixels.clear();
     m_CompositeDirty = true;
+}
+
+// ---------------------------------------------------------------------------
+// Perspective / Mesh Warp operators
+// ---------------------------------------------------------------------------
+
+// Inverse bilinear: map point p into unit square given corners TL,TR,BR,BL.
+static bool InvBilinear(float px, float py,
+                        float ax, float ay, float bx, float by,
+                        float cx, float cy, float dx, float dy,
+                        float& u, float& v) {
+    // e=B-A, f=D-A, g=A-B+C-D, h=P-A  (Eberly)
+    const float eps = 1e-6f;
+    float ex = bx - ax, ey = by - ay;
+    float fx = dx - ax, fy = dy - ay;
+    float gx = ax - bx + cx - dx, gy = ay - by + cy - dy;
+    float hx = px - ax, hy = py - ay;
+
+    float k2 = gx * fy - gy * fx;
+    float k1 = ex * fy - ey * fx + hx * gy - hy * gx;
+    float k0 = hx * ey - hy * ex;
+
+    auto solveU = [&](float vv) -> float {
+        float denx = ex + gx * vv;
+        float deny = ey + gy * vv;
+        if (std::fabs(denx) > std::fabs(deny))
+            return (std::fabs(denx) > eps) ? (hx - fx * vv) / denx : 0.f;
+        return (std::fabs(deny) > eps) ? (hy - fy * vv) / deny : 0.f;
+    };
+
+    if (std::fabs(k2) < 1e-8f) {
+        if (std::fabs(k1) < eps) return false;
+        v = -k0 / k1;
+        u = solveU(v);
+    } else {
+        float disc = k1 * k1 - 4.f * k2 * k0;
+        if (disc < 0.f) disc = 0.f;
+        float sd = std::sqrt(disc);
+        float v1 = (-k1 - sd) / (2.f * k2);
+        float v2 = (-k1 + sd) / (2.f * k2);
+        bool v1ok = (v1 >= -0.05f && v1 <= 1.05f);
+        bool v2ok = (v2 >= -0.05f && v2 <= 1.05f);
+        if (v1ok && !v2ok) v = v1;
+        else if (v2ok && !v1ok) v = v2;
+        else if (v1ok && v2ok) v = (std::fabs(v1 - 0.5f) < std::fabs(v2 - 0.5f)) ? v1 : v2;
+        else v = v1;
+        u = solveU(v);
+    }
+    return true;
+}
+
+static float SampleBilinearFloat(const std::vector<float>& buf, int w, int h, float x, float y, int c) {
+    if (buf.empty() || w < 1 || h < 1) return 0.f;
+    x = std::clamp(x, 0.f, (float)(w - 1));
+    y = std::clamp(y, 0.f, (float)(h - 1));
+    int x0 = (int)std::floor(x), y0 = (int)std::floor(y);
+    int x1 = std::min(x0 + 1, w - 1), y1 = std::min(y0 + 1, h - 1);
+    float tx = x - x0, ty = y - y0;
+    auto at = [&](int ix, int iy) { return buf[((size_t)iy * w + ix) * 4 + c]; };
+    float a = at(x0, y0), b = at(x1, y0), d = at(x0, y1), e = at(x1, y1);
+    return a * (1 - tx) * (1 - ty) + b * tx * (1 - ty) + d * (1 - tx) * ty + e * tx * ty;
+}
+
+void Canvas::StartWarpOperator(ID3D11Device* device, WarpOperatorMode mode) {
+    if (mode == WarpOperatorMode::None) return;
+    if (m_IsMovingPixels)
+        CancelMovePixels(device);
+    StartMovePixels(device);
+    if (!m_IsMovingPixels) return;
+
+    m_WarpMode = mode;
+    m_WarpSourcePixels = m_FloatingPixels;
+    m_WarpBBoxX = m_FloatingBBoxX;
+    m_WarpBBoxY = m_FloatingBBoxY;
+    m_WarpBBoxW = m_FloatingBBoxW;
+    m_WarpBBoxH = m_FloatingBBoxH;
+    if (m_WarpBBoxW < 2) m_WarpBBoxW = 2;
+    if (m_WarpBBoxH < 2) m_WarpBBoxH = 2;
+
+    float x0 = (float)m_WarpBBoxX, y0 = (float)m_WarpBBoxY;
+    float x1 = (float)(m_WarpBBoxX + m_WarpBBoxW - 1);
+    float y1 = (float)(m_WarpBBoxY + m_WarpBBoxH - 1);
+    m_WarpSourceCorners = { {x0, y0}, {x1, y0}, {x1, y1}, {x0, y1} }; // TL TR BR BL
+
+    m_WarpControls.clear();
+    if (mode == WarpOperatorMode::Perspective) {
+        m_WarpControls = m_WarpSourceCorners;
+    } else {
+        m_WarpMeshN = 4;
+        const int n = m_WarpMeshN;
+        m_WarpControls.resize((size_t)n * n);
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                float u = (n == 1) ? 0.f : (float)i / (float)(n - 1);
+                float v = (n == 1) ? 0.f : (float)j / (float)(n - 1);
+                m_WarpControls[(size_t)j * n + i] = {
+                    x0 + u * (x1 - x0),
+                    y0 + v * (y1 - y0)
+                };
+            }
+        }
+    }
+    // Identity offset while warping — geometry is in control points
+    m_FloatingOffsetX = 0;
+    m_FloatingOffsetY = 0;
+    m_FloatingScaleX = 1.f;
+    m_FloatingScaleY = 1.f;
+    m_FloatingRotation = 0.f;
+    PreviewWarpOperator(device);
+}
+
+void Canvas::SetWarpControlPoint(int index, float canvasX, float canvasY) {
+    if (index < 0 || index >= (int)m_WarpControls.size()) return;
+    m_WarpControls[index] = { canvasX, canvasY };
+}
+
+int Canvas::HitTestWarpControl(float canvasX, float canvasY, float threshPx) const {
+    float best = threshPx * threshPx;
+    int hit = -1;
+    for (int i = 0; i < (int)m_WarpControls.size(); ++i) {
+        float dx = m_WarpControls[i].first - canvasX;
+        float dy = m_WarpControls[i].second - canvasY;
+        float d2 = dx * dx + dy * dy;
+        if (d2 <= best) { best = d2; hit = i; }
+    }
+    return hit;
+}
+
+bool Canvas::GetWarpControl(int index, float& outX, float& outY) const {
+    if (index < 0 || index >= (int)m_WarpControls.size()) return false;
+    outX = m_WarpControls[index].first;
+    outY = m_WarpControls[index].second;
+    return true;
+}
+
+void Canvas::RebuildWarpPreviewTexture(ID3D11Device* device) {
+    if (!device || m_WarpMode == WarpOperatorMode::None || m_WarpSourcePixels.empty()) return;
+    const int w = m_Width, h = m_Height;
+    if ((int)m_WarpSourcePixels.size() < w * h * 4) return;
+
+    m_FloatingPixels.assign((size_t)w * h * 4, 0.f);
+
+    // Expand scan region to control convex hull
+    float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+    for (auto& p : m_WarpControls) {
+        minX = std::min(minX, p.first); maxX = std::max(maxX, p.first);
+        minY = std::min(minY, p.second); maxY = std::max(maxY, p.second);
+    }
+    int x0 = std::max(0, (int)std::floor(minX) - 1);
+    int y0 = std::max(0, (int)std::floor(minY) - 1);
+    int x1 = std::min(w - 1, (int)std::ceil(maxX) + 1);
+    int y1 = std::min(h - 1, (int)std::ceil(maxY) + 1);
+
+    if (m_WarpMode == WarpOperatorMode::Perspective && m_WarpControls.size() >= 4) {
+        auto A = m_WarpControls[0], B = m_WarpControls[1], C = m_WarpControls[2], D = m_WarpControls[3];
+        float sx0 = m_WarpSourceCorners[0].first, sy0 = m_WarpSourceCorners[0].second;
+        float sx1 = m_WarpSourceCorners[1].first, sy1 = m_WarpSourceCorners[2].second; // x1,y1
+        float srcW = std::max(1.f, sx1 - sx0), srcH = std::max(1.f, sy1 - sy0);
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+                float u, v;
+                if (!InvBilinear((float)x, (float)y,
+                                 A.first, A.second, B.first, B.second,
+                                 C.first, C.second, D.first, D.second, u, v))
+                    continue;
+                if (u < -0.01f || u > 1.01f || v < -0.01f || v > 1.01f) continue;
+                u = std::clamp(u, 0.f, 1.f);
+                v = std::clamp(v, 0.f, 1.f);
+                float sx = sx0 + u * srcW;
+                float sy = sy0 + v * srcH;
+                size_t di = ((size_t)y * w + x) * 4;
+                for (int c = 0; c < 4; ++c)
+                    m_FloatingPixels[di + c] = SampleBilinearFloat(m_WarpSourcePixels, w, h, sx, sy, c);
+            }
+        }
+    } else if (m_WarpMode == WarpOperatorMode::Mesh && m_WarpMeshN >= 2) {
+        const int n = m_WarpMeshN;
+        float sx0 = m_WarpSourceCorners[0].first, sy0 = m_WarpSourceCorners[0].second;
+        float sx1 = m_WarpSourceCorners[1].first, sy1 = m_WarpSourceCorners[2].second;
+        float srcW = std::max(1.f, sx1 - sx0), srcH = std::max(1.f, sy1 - sy0);
+        // For each dest cell, inv-bilinear within warped cell → source cell
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+                bool found = false;
+                float su = 0, sv = 0;
+                for (int j = 0; j < n - 1 && !found; ++j) {
+                    for (int i = 0; i < n - 1 && !found; ++i) {
+                        auto TL = m_WarpControls[(size_t)j * n + i];
+                        auto TR = m_WarpControls[(size_t)j * n + i + 1];
+                        auto BR = m_WarpControls[(size_t)(j + 1) * n + i + 1];
+                        auto BL = m_WarpControls[(size_t)(j + 1) * n + i];
+                        float u, v;
+                        if (!InvBilinear((float)x, (float)y,
+                                         TL.first, TL.second, TR.first, TR.second,
+                                         BR.first, BR.second, BL.first, BL.second, u, v))
+                            continue;
+                        if (u < -0.02f || u > 1.02f || v < -0.02f || v > 1.02f) continue;
+                        u = std::clamp(u, 0.f, 1.f);
+                        v = std::clamp(v, 0.f, 1.f);
+                        // Source cell UV
+                        float gu0 = (float)i / (float)(n - 1);
+                        float gv0 = (float)j / (float)(n - 1);
+                        float gu1 = (float)(i + 1) / (float)(n - 1);
+                        float gv1 = (float)(j + 1) / (float)(n - 1);
+                        su = gu0 + u * (gu1 - gu0);
+                        sv = gv0 + v * (gv1 - gv0);
+                        found = true;
+                    }
+                }
+                if (!found) continue;
+                float sx = sx0 + su * srcW;
+                float sy = sy0 + sv * srcH;
+                size_t di = ((size_t)y * w + x) * 4;
+                for (int c = 0; c < 4; ++c)
+                    m_FloatingPixels[di + c] = SampleBilinearFloat(m_WarpSourcePixels, w, h, sx, sy, c);
+            }
+        }
+    }
+
+    // Upload floating texture
+    if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
+    if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
+    D3D11_TEXTURE2D_DESC desc = {};
+    desc.Width = w; desc.Height = h; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA init = {};
+    init.pSysMem = m_FloatingPixels.data();
+    init.SysMemPitch = (UINT)(w * 4 * sizeof(float));
+    if (SUCCEEDED(device->CreateTexture2D(&desc, &init, &m_FloatingTexture)) && m_FloatingTexture)
+        device->CreateShaderResourceView(m_FloatingTexture, nullptr, &m_FloatingSRV);
+    m_CompositeDirty = true;
+}
+
+void Canvas::PreviewWarpOperator(ID3D11Device* device) {
+    RebuildWarpPreviewTexture(device);
+}
+
+void Canvas::CommitWarpOperator(ID3D11Device* device) {
+    if (m_WarpMode == WarpOperatorMode::None) return;
+    PreviewWarpOperator(device);
+    // Floating buffer holds warped result — commit via existing move path
+    m_WarpMode = WarpOperatorMode::None;
+    m_WarpControls.clear();
+    m_WarpSourcePixels.clear();
+    CommitMovePixels(device);
+}
+
+void Canvas::CancelWarpOperator(ID3D11Device* device) {
+    if (m_WarpMode == WarpOperatorMode::None) {
+        if (m_IsMovingPixels) CancelMovePixels(device);
+        return;
+    }
+    m_WarpMode = WarpOperatorMode::None;
+    m_WarpControls.clear();
+    m_WarpSourcePixels.clear();
+    CancelMovePixels(device);
+}
+
+void Canvas::DrawWarpGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen) {
+    if (m_WarpMode == WarpOperatorMode::None || m_WarpControls.empty()) return;
+    ImU32 lineCol = IM_COL32(0, 200, 255, 220);
+    ImU32 handleCol = IM_COL32(255, 255, 255, 240);
+    ImU32 handleOut = IM_COL32(0, 120, 200, 255);
+
+    if (m_WarpMode == WarpOperatorMode::Perspective && m_WarpControls.size() >= 4) {
+        ImVec2 p[4];
+        for (int i = 0; i < 4; ++i)
+            p[i] = canvasToScreen(m_WarpControls[i].first, m_WarpControls[i].second);
+        for (int i = 0; i < 4; ++i)
+            dl->AddLine(p[i], p[(i + 1) % 4], lineCol, 2.f);
+        for (int i = 0; i < 4; ++i) {
+            dl->AddCircleFilled(p[i], 5.f, handleCol);
+            dl->AddCircle(p[i], 5.f, handleOut, 0, 1.5f);
+        }
+    } else if (m_WarpMode == WarpOperatorMode::Mesh) {
+        const int n = m_WarpMeshN;
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                ImVec2 p = canvasToScreen(m_WarpControls[(size_t)j * n + i].first,
+                                          m_WarpControls[(size_t)j * n + i].second);
+                if (i + 1 < n) {
+                    ImVec2 p2 = canvasToScreen(m_WarpControls[(size_t)j * n + i + 1].first,
+                                               m_WarpControls[(size_t)j * n + i + 1].second);
+                    dl->AddLine(p, p2, lineCol, 1.5f);
+                }
+                if (j + 1 < n) {
+                    ImVec2 p2 = canvasToScreen(m_WarpControls[(size_t)(j + 1) * n + i].first,
+                                               m_WarpControls[(size_t)(j + 1) * n + i].second);
+                    dl->AddLine(p, p2, lineCol, 1.5f);
+                }
+                dl->AddCircleFilled(p, 4.f, handleCol);
+                dl->AddCircle(p, 4.f, handleOut, 0, 1.2f);
+            }
+        }
+    }
 }
 
 void Canvas::DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen,
                            bool showHandles) {
     if (!m_IsMovingPixels) return;
+    if (m_WarpMode != WarpOperatorMode::None) {
+        DrawWarpGizmo(dl, canvasToScreen);
+        return;
+    }
     
     int minX = m_Width, maxX = 0, minY = m_Height, maxY = 0;
     bool hasPixels = false;
@@ -7061,60 +7369,282 @@ void Canvas::ApplyNoise(float strength, bool colorNoise) {
 }
 
 // ============================================================
-//  Smudge Tool
+//  Smudge Tool — finger smear (push pixels along stroke)
 // ============================================================
 
 void Canvas::SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s) {
-    if (m_ActiveLayerIdx<0||m_ActiveLayerIdx>=(int)m_Layers.size()) return;
-    Layer& layer=m_Layers[m_ActiveLayerIdx];
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
     if (!layer.CanPaintContent()) return;
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
-    int r=std::max(1,(int)s.radius);
 
-    auto pickupAt=[&](float cx, float cy){
-        float acc[4]={0,0,0,0}; int cnt=0;
-        for (int dy=-r;dy<=r;++dy) for (int dx=-r;dx<=r;++dx) {
-            if (dx*dx+dy*dy>r*r) continue;
-            int px=std::clamp((int)cx+dx,0,m_Width-1);
-            int py=std::clamp((int)cy+dy,0,m_Height-1);
-            float rgba[4];
-            layer.tileCache->GetPixelF(px, py, rgba);
-            for(int c=0;c<4;++c) acc[c]+=rgba[c]; ++cnt;
-        }
-        if (cnt>0) for(int c=0;c<4;++c) m_SmudgePickup[c]=acc[c]/(float)cnt;
+    const int r = std::max(1, (int)std::lround(s.radius));
+    const int diam = r * 2 + 1;
+    const float strength = std::clamp(s.strength, 0.f, 1.f);
+
+    auto backupBrushTiles = [&](float cx, float cy) {
+        int numTilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+        int numTilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+        int minTX = std::max(0, (int)(cx - r) / TILE_SIZE);
+        int maxTX = std::min(numTilesX - 1, (int)(cx + r) / TILE_SIZE);
+        int minTY = std::max(0, (int)(cy - r) / TILE_SIZE);
+        int maxTY = std::min(numTilesY - 1, (int)(cy + r) / TILE_SIZE);
+        for (int ty = minTY; ty <= maxTY; ++ty)
+            for (int tx = minTX; tx <= maxTX; ++tx)
+                BackupTile(tx, ty);
     };
 
-    if (phase==StrokePhase::Begin) {
-        m_SmudgePickupValid=false; m_SmudgeLastX=x; m_SmudgeLastY=y; m_SmudgeDistAcc=0.f;
-        pickupAt(x,y); m_SmudgePickupValid=true; return;
+    if (phase == StrokePhase::Begin) {
+        m_IsStrokeActive = true;
+        m_ActiveStrokeDeltas.clear();
+        m_SmudgeLastX = x; m_SmudgeLastY = y; m_SmudgeDistAcc = 0.f;
+        m_SmudgePickupValid = true;
+        // Seed finger buffer from local neighborhood at press
+        m_SmudgeFinger.assign((size_t)diam * diam * 4, 0.f);
+        for (int ky = -r; ky <= r; ++ky) {
+            for (int kx = -r; kx <= r; ++kx) {
+                if (kx * kx + ky * ky > r * r) continue;
+                int px = std::clamp((int)std::lround(x) + kx, 0, m_Width - 1);
+                int py = std::clamp((int)std::lround(y) + ky, 0, m_Height - 1);
+                float rgba[4];
+                layer.tileCache->GetPixelF(px, py, rgba);
+                size_t fi = ((size_t)(ky + r) * diam + (kx + r)) * 4;
+                for (int c = 0; c < 4; ++c) m_SmudgeFinger[fi + c] = rgba[c];
+            }
+        }
+        backupBrushTiles(x, y);
+        return;
     }
-    if (phase==StrokePhase::End) { m_SmudgePickupValid=false; return; }
-    if (!m_SmudgePickupValid) return;
 
-    float ddx=x-m_SmudgeLastX, ddy=y-m_SmudgeLastY;
-    float dist=sqrtf(ddx*ddx+ddy*ddy);
-    m_SmudgeDistAcc+=dist;
-    float minDist=s.radius*s.spacing;
-    if (m_SmudgeDistAcc<minDist) return;
-    m_SmudgeDistAcc=0.f; m_SmudgeLastX=x; m_SmudgeLastY=y;
-
-    for (int ky=-r;ky<=r;++ky) for (int kx=-r;kx<=r;++kx) {
-        float d2=sqrtf((float)(kx*kx+ky*ky));
-        if (d2>(float)r) continue;
-        float falloff=1.f-d2/(float)r;
-        float blend=s.strength*falloff;
-        int px=std::clamp((int)x+kx,0,m_Width-1);
-        int py=std::clamp((int)y+ky,0,m_Height-1);
-        float sel = GetSelWeight(m_SelectionMask, m_Width, px, py, m_HasSelection);
-        if (sel<1e-4f) continue;
-        float rgba[4];
-        layer.tileCache->GetPixelF(px, py, rgba);
-        for(int c=0;c<4;++c) rgba[c]=rgba[c]*(1.f-blend*sel)+m_SmudgePickup[c]*blend*sel;
-        layer.tileCache->SetPixelF(px, py, rgba);
+    if (phase == StrokePhase::End) {
+        m_SmudgePickupValid = false;
+        m_IsStrokeActive = false;
+        if (!m_ActiveStrokeDeltas.empty()) {
+            std::vector<TileDelta> deltas;
+            deltas.reserve(m_ActiveStrokeDeltas.size());
+            for (auto& pair : m_ActiveStrokeDeltas) {
+                auto& delta = pair.second;
+                delta.newState = layer.tileCache
+                    ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
+                    : TileSnapshot{};
+                deltas.push_back(std::move(delta));
+            }
+            m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>(
+                "Smudge", m_ActiveLayerIdx, std::move(deltas)));
+            m_ActiveStrokeDeltas.clear();
+            m_IsDocumentModified = true;
+        }
+        m_SmudgeFinger.clear();
+        m_CompositeDirty = true;
+        return;
     }
-    pickupAt(x,y);
-    layer.needsUpload=true;
-    layer.filtersDirty=true;
+
+    if (!m_SmudgePickupValid || phase != StrokePhase::Update) return;
+
+    float ddx = x - m_SmudgeLastX, ddy = y - m_SmudgeLastY;
+    float dist = std::sqrt(ddx * ddx + ddy * ddy);
+    if (dist < 1e-4f) return;
+    m_SmudgeDistAcc += dist;
+    float minDist = std::max(0.5f, s.radius * std::max(0.02f, s.spacing));
+    if (m_SmudgeDistAcc < minDist) return;
+    m_SmudgeDistAcc = 0.f;
+
+    // Unit direction of stroke — sample "upstream" (pixels pulled from behind the finger)
+    float invD = 1.f / dist;
+    float dirX = ddx * invD, dirY = ddy * invD;
+    // How far to pull source samples (fraction of radius)
+    float pull = std::max(1.f, s.radius * 0.35f);
+
+    backupBrushTiles(x, y);
+    backupBrushTiles(m_SmudgeLastX, m_SmudgeLastY);
+
+    // For each pixel under brush: mix current with source from upstream + finger paint
+    for (int ky = -r; ky <= r; ++ky) {
+        for (int kx = -r; kx <= r; ++kx) {
+            float d2 = std::sqrt((float)(kx * kx + ky * ky));
+            if (d2 > (float)r) continue;
+            float falloff = 1.f - d2 / (float)r;
+            falloff = falloff * falloff; // softer center weight like oil smear
+            float w = strength * falloff;
+            if (w < 1e-4f) continue;
+
+            int px = (int)std::lround(x) + kx;
+            int py = (int)std::lround(y) + ky;
+            if (px < 0 || py < 0 || px >= m_Width || py >= m_Height) continue;
+            float sel = GetSelWeight(m_SelectionMask, m_Width, px, py, m_HasSelection);
+            if (sel < 1e-4f) continue;
+            w *= sel;
+
+            // Upstream sample (pixel that is being dragged into this spot)
+            float sx = (float)px - dirX * pull;
+            float sy = (float)py - dirY * pull;
+            int isx = std::clamp((int)std::lround(sx), 0, m_Width - 1);
+            int isy = std::clamp((int)std::lround(sy), 0, m_Height - 1);
+
+            float cur[4], src[4];
+            layer.tileCache->GetPixelF(px, py, cur);
+            layer.tileCache->GetPixelF(isx, isy, src);
+
+            // Finger buffer contribution (color carried from stroke start / previous dabs)
+            size_t fi = ((size_t)(ky + r) * diam + (kx + r)) * 4;
+            float finger[4] = {0, 0, 0, 0};
+            if (fi + 3 < m_SmudgeFinger.size()) {
+                for (int c = 0; c < 4; ++c) finger[c] = m_SmudgeFinger[fi + c];
+            }
+
+            // Mix: mostly push upstream canvas + finger paint
+            float out[4];
+            for (int c = 0; c < 4; ++c) {
+                float pushed = src[c] * 0.55f + finger[c] * 0.45f;
+                out[c] = cur[c] * (1.f - w) + pushed * w;
+            }
+            layer.tileCache->SetPixelF(px, py, out);
+
+            // Update finger: absorb a bit of what we just painted (oil picks up paint)
+            if (fi + 3 < m_SmudgeFinger.size()) {
+                for (int c = 0; c < 4; ++c)
+                    m_SmudgeFinger[fi + c] = finger[c] * (1.f - 0.35f * w) + out[c] * (0.35f * w);
+            }
+        }
+    }
+
+    m_SmudgeLastX = x;
+    m_SmudgeLastY = y;
+    layer.needsUpload = true;
+    layer.thumbDirty = true;
+    m_CompositeDirty = true;
+    m_ChannelPreviewDirty = true;
+}
+
+// ============================================================
+//  Blur Tool — local brush blur (Tool | Operator | Filter triad)
+// ============================================================
+
+void Canvas::BlurToolOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    if (!layer.CanPaintContent()) return;
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+
+    const int r = std::max(1, (int)std::lround(s.radius));
+    const float strength = std::clamp(s.strength, 0.f, 1.f);
+    // Blur kernel radius independent of brush size (small local blur under dab)
+    const int kr = std::clamp((int)std::lround(std::max(1.f, s.radius * 0.25f)), 1, 24);
+
+    auto backupBrushTiles = [&](float cx, float cy) {
+        int numTilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
+        int numTilesY = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+        int minTX = std::max(0, (int)(cx - r) / TILE_SIZE);
+        int maxTX = std::min(numTilesX - 1, (int)(cx + r) / TILE_SIZE);
+        int minTY = std::max(0, (int)(cy - r) / TILE_SIZE);
+        int maxTY = std::min(numTilesY - 1, (int)(cy + r) / TILE_SIZE);
+        for (int ty = minTY; ty <= maxTY; ++ty)
+            for (int tx = minTX; tx <= maxTX; ++tx)
+                BackupTile(tx, ty);
+    };
+
+    if (phase == StrokePhase::Begin) {
+        m_IsStrokeActive = true;
+        m_ActiveStrokeDeltas.clear();
+        m_SmudgeLastX = x; m_SmudgeLastY = y; m_SmudgeDistAcc = 0.f;
+        m_SmudgePickupValid = true;
+        backupBrushTiles(x, y);
+        // Fall through: first dab immediately
+    }
+    if (phase == StrokePhase::End) {
+        m_SmudgePickupValid = false;
+        m_IsStrokeActive = false;
+        if (!m_ActiveStrokeDeltas.empty()) {
+            std::vector<TileDelta> deltas;
+            for (auto& pair : m_ActiveStrokeDeltas) {
+                auto& delta = pair.second;
+                delta.newState = layer.tileCache
+                    ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY) : TileSnapshot{};
+                deltas.push_back(std::move(delta));
+            }
+            m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>(
+                "Blur Tool", m_ActiveLayerIdx, std::move(deltas)));
+            m_ActiveStrokeDeltas.clear();
+            m_IsDocumentModified = true;
+        }
+        m_CompositeDirty = true;
+        return;
+    }
+    if (!m_SmudgePickupValid && phase != StrokePhase::Begin) return;
+
+    if (phase == StrokePhase::Update) {
+        float ddx = x - m_SmudgeLastX, ddy = y - m_SmudgeLastY;
+        float dist = std::sqrt(ddx * ddx + ddy * ddy);
+        m_SmudgeDistAcc += dist;
+        float minDist = std::max(0.5f, s.radius * std::max(0.05f, s.spacing));
+        if (m_SmudgeDistAcc < minDist && phase != StrokePhase::Begin) return;
+        m_SmudgeDistAcc = 0.f;
+    }
+
+    backupBrushTiles(x, y);
+    m_SmudgeLastX = x;
+    m_SmudgeLastY = y;
+
+    // Sample neighborhood into temp, then write blurred premul mix
+    const int sampleR = r + kr;
+    for (int ky = -r; ky <= r; ++ky) {
+        for (int kx = -r; kx <= r; ++kx) {
+            float d2 = std::sqrt((float)(kx * kx + ky * ky));
+            if (d2 > (float)r) continue;
+            float falloff = 1.f - d2 / (float)r;
+            float w = strength * falloff;
+            if (w < 1e-4f) continue;
+
+            int px = (int)std::lround(x) + kx;
+            int py = (int)std::lround(y) + ky;
+            if (px < 0 || py < 0 || px >= m_Width || py >= m_Height) continue;
+            float sel = GetSelWeight(m_SelectionMask, m_Width, px, py, m_HasSelection);
+            if (sel < 1e-4f) continue;
+            w *= sel;
+
+            // Premul box blur kernel around pixel
+            float acc[4] = {0, 0, 0, 0};
+            int cnt = 0;
+            for (int jy = -kr; jy <= kr; ++jy) {
+                for (int jx = -kr; jx <= kr; ++jx) {
+                    int qx = std::clamp(px + jx, 0, m_Width - 1);
+                    int qy = std::clamp(py + jy, 0, m_Height - 1);
+                    float srgba[4];
+                    layer.tileCache->GetPixelF(qx, qy, srgba);
+                    float a = std::clamp(srgba[3], 0.f, 1.f);
+                    acc[0] += srgba[0] * a;
+                    acc[1] += srgba[1] * a;
+                    acc[2] += srgba[2] * a;
+                    acc[3] += a;
+                    ++cnt;
+                }
+            }
+            if (cnt < 1) continue;
+            float inv = 1.f / (float)cnt;
+            float ba = acc[3] * inv;
+            float br = 0, bg = 0, bb = 0;
+            if (ba > 1e-6f) {
+                br = std::clamp((acc[0] * inv) / ba, 0.f, 1.f);
+                bg = std::clamp((acc[1] * inv) / ba, 0.f, 1.f);
+                bb = std::clamp((acc[2] * inv) / ba, 0.f, 1.f);
+            }
+            float cur[4];
+            layer.tileCache->GetPixelF(px, py, cur);
+            float out[4] = {
+                cur[0] * (1.f - w) + br * w,
+                cur[1] * (1.f - w) + bg * w,
+                cur[2] * (1.f - w) + bb * w,
+                cur[3] * (1.f - w) + ba * w
+            };
+            layer.tileCache->SetPixelF(px, py, out);
+        }
+    }
+
+    layer.needsUpload = true;
+    layer.thumbDirty = true;
+    m_CompositeDirty = true;
+    m_ChannelPreviewDirty = true;
+    (void)sampleR;
 }
 
 // ============================================================
@@ -7794,6 +8324,39 @@ bool Canvas::CanPaintLayerContent(int layerIdx) const {
     return m_Layers[layerIdx].CanPaintContent();
 }
 
+void Canvas::RefreshCanvas(ID3D11Device* device) {
+    // Kill GPU/tile ghosting: force full re-upload path + recompose.
+    for (auto& L : m_Layers) {
+        if (L.isGroup) continue;
+        if (L.tileCache && !L.tileCache->IsEmpty())
+            L.tileCache->MarkAllDirty();
+        if (L.filteredCache && !L.filteredCache->IsEmpty())
+            L.filteredCache->MarkAllDirty();
+        if (L.presentationCache && !L.presentationCache->IsEmpty())
+            L.presentationCache->MarkAllDirty();
+        L.needsUpload = true;
+        L.thumbDirty = true;
+        L.maskNeedsUpload = L.hasMask;
+        if (m_EffectsPreviewEnabled) {
+            if (LayerFilterListHasEnabled(L.filters))
+                L.filtersDirty = true;
+            if (L.HasEnabledStyles()) {
+                L.stylesDirty = true;
+                L.presentationDirty = true;
+            }
+        }
+        // Drop GPU layer textures so ComposeLayers recreates clean views
+        if (device) {
+            if (L.texture) { L.texture->Release(); L.texture = nullptr; }
+            if (L.srv) { L.srv->Release(); L.srv = nullptr; }
+        }
+    }
+    m_CompositeDirty = true;
+    m_ChannelPreviewDirty = true;
+    m_SelectionMaskNeedsUpload = m_HasSelection;
+    Logger::Get().InfoTag("gpu", "RefreshCanvas: forced tile re-upload + recompose");
+}
+
 void Canvas::SetEffectsPreviewEnabled(bool enabled) {
     if (m_EffectsPreviewEnabled == enabled) return;
     m_EffectsPreviewEnabled = enabled;
@@ -7811,8 +8374,8 @@ void Canvas::SetEffectsPreviewEnabled(bool enabled) {
     } else {
         Logger::Get().Info("Effects preview OFF — raw content (no CPU FX bake)");
     }
-    m_CompositeDirty = true;
-    m_ChannelPreviewDirty = true;
+    // Full refresh so FX on/off never leaves ghost tiles
+    RefreshCanvas(nullptr);
 }
 
 bool Canvas::LayerStylesPreviewActive(const Layer& layer) const {

@@ -111,6 +111,10 @@ void KeymapManager::Initialize() {
     m_Bindings["CopyLayers"] = KeyCombination{ GLFW_KEY_C, -1, true, true, false }; // Ctrl+Shift+C
     m_Bindings["TransformTool"] = KeyCombination{ GLFW_KEY_V, -1, false, false, false }; // Move tool
     m_Bindings["FreeTransform"] = KeyCombination{ GLFW_KEY_T, -1, true, false, false };  // Ctrl+T
+    m_Bindings["RefreshCanvas"] = KeyCombination{ GLFW_KEY_F5, -1, false, false, false };
+    m_Bindings["PerspectiveWarp"] = KeyCombination{ GLFW_KEY_P, -1, true, true, false }; // Ctrl+Shift+P
+    m_Bindings["MeshWarp"] = KeyCombination{ GLFW_KEY_W, -1, true, true, false }; // Ctrl+Shift+W
+    m_Bindings["BlurTool"] = KeyCombination{ 0, -1, false, false, false };
     m_Bindings["FillSecondary"] = KeyCombination{ GLFW_KEY_BACKSPACE, -1, false, false, false };
     m_Bindings["DeleteContent"] = KeyCombination{ GLFW_KEY_DELETE, -1, false, false, false };
 

@@ -181,6 +181,9 @@ static int g_MoveAccumulatedOffsetY = 0;
 // Move tool (V): translation only; commits on defocus / tool switch (no Enter required).
 static bool g_FreeTransformMode = false;
 static ActiveTool g_ToolBeforeFreeTransform = ActiveTool::Brush;
+// Warp operators (perspective / mesh) — control drag state
+static int g_WarpDragIndex = -1;
+static ActiveTool g_ToolBeforeWarp = ActiveTool::Brush;
 static bool g_IsGradientDragging = false;
 
 enum class TransformGizmoHandle {
@@ -1116,6 +1119,24 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("SmudgeTool")) {
                 g_ActiveTool = ActiveTool::Smudge;
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("BlurTool")) {
+                g_ActiveTool = ActiveTool::BlurTool;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("RefreshCanvas")) {
+                ActiveCanvas().RefreshCanvas(g_pd3dDevice);
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("PerspectiveWarp") || uiState.requestPerspectiveWarp) {
+                uiState.requestPerspectiveWarp = false;
+                g_ToolBeforeWarp = g_ActiveTool;
+                ActiveCanvas().StartWarpOperator(g_pd3dDevice, Canvas::WarpOperatorMode::Perspective);
+                g_WarpDragIndex = -1;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("MeshWarp") || uiState.requestMeshWarp) {
+                uiState.requestMeshWarp = false;
+                g_ToolBeforeWarp = g_ActiveTool;
+                ActiveCanvas().StartWarpOperator(g_pd3dDevice, Canvas::WarpOperatorMode::Mesh);
+                g_WarpDragIndex = -1;
+            }
             if (KeymapManager::Get().ConsumeActionTrigger("SelectAll")) {
                 ActiveCanvas().SelectAll();
             }
@@ -1331,7 +1352,7 @@ int main(int argc, char* argv[]) {
 
             // Smudge is NOT brush-like: must not paint with brush.color / accent color.
             bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser);
-            bool isSmudgeTool = (g_ActiveTool == ActiveTool::Smudge);
+            bool isSmudgeTool = (g_ActiveTool == ActiveTool::Smudge || g_ActiveTool == ActiveTool::BlurTool);
             bool isPipetteTool = (g_ActiveTool == ActiveTool::Pipette);
             // Alt-sample blocked when Ctrl held (future: Ctrl+Alt+LMB = brush rotation)
             bool isEyedropperMode = ((isBrushLikeTool || isSmudgeTool) && ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyCtrl)
@@ -1584,7 +1605,9 @@ int main(int argc, char* argv[]) {
 
                 // Draw custom outline circle + rotation direction at mouse position
                 ImDrawList* drawList = ImGui::GetForegroundDrawList();
-                float cursorRadius = isSmudgeTool ? uiState.smudge.radius : g_Brush.radius;
+                float cursorRadius = (g_ActiveTool == ActiveTool::Smudge) ? uiState.smudge.radius
+                    : (g_ActiveTool == ActiveTool::BlurTool) ? uiState.blurTool.radius
+                    : g_Brush.radius;
                 float screenRadius = cursorRadius * ActiveCanvas().GetZoom();
                 float hScreen = screenRadius * g_Brush.hardness;
                 drawList->AddCircle(mousePos, screenRadius, IM_COL32(0, 0, 0, 255), 32, 1.5f);
@@ -1820,13 +1843,49 @@ int main(int argc, char* argv[]) {
                 g_IsPainting = false;
             }
 
-            // Smudge End
-            if (g_ActiveTool == ActiveTool::Smudge && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
-                ActiveCanvas().SmudgeOnActiveLayer(0, 0, StrokePhase::End, uiState.smudge);
+            // Smudge / Blur Tool End
+            if ((g_ActiveTool == ActiveTool::Smudge || g_ActiveTool == ActiveTool::BlurTool) &&
+                (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+                if (g_ActiveTool == ActiveTool::Smudge)
+                    ActiveCanvas().SmudgeOnActiveLayer(0, 0, StrokePhase::End, uiState.smudge);
+                else
+                    ActiveCanvas().BlurToolOnActiveLayer(0, 0, StrokePhase::End, uiState.blurTool);
+            }
+
+            // Warp operator commit / cancel
+            if (ActiveCanvas().IsWarpOperatorActive()) {
+                bool doCommit = uiState.commitTransform ||
+                    (!ImGui::GetIO().WantTextInput && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)));
+                bool doCancel = uiState.cancelTransform ||
+                    (!ImGui::GetIO().WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape));
+                uiState.commitTransform = false;
+                uiState.cancelTransform = false;
+                if (doCommit) {
+                    ActiveCanvas().CommitWarpOperator(g_pd3dDevice);
+                    g_ActiveTool = g_ToolBeforeWarp;
+                    g_WarpDragIndex = -1;
+                } else if (doCancel) {
+                    ActiveCanvas().CancelWarpOperator(g_pd3dDevice);
+                    g_ActiveTool = g_ToolBeforeWarp;
+                    g_WarpDragIndex = -1;
+                }
+            }
+
+            // Warp operator: drag control points (any tool / even outside strict hover after grab)
+            if (ActiveCanvas().IsWarpOperatorActive()) {
+                float hitR = 12.f / std::max(0.01f, ActiveCanvas().GetZoom());
+                if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                    g_WarpDragIndex = ActiveCanvas().HitTestWarpControl(canvasX, canvasY, hitR);
+                if (g_WarpDragIndex >= 0 && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    ActiveCanvas().SetWarpControlPoint(g_WarpDragIndex, canvasX, canvasY);
+                    ActiveCanvas().PreviewWarpOperator(g_pd3dDevice);
+                }
+                if (ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+                    g_WarpDragIndex = -1;
             }
 
             // Commit / Cancel Move / Free Transform
-            if (ActiveCanvas().IsMovingPixels()) {
+            if (ActiveCanvas().IsMovingPixels() && !ActiveCanvas().IsWarpOperatorActive()) {
                 const bool enterPressed = !ImGui::GetIO().WantTextInput &&
                     (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
                 // Free Transform (Ctrl+T): Enter required. Move tool: Enter optional (also defocus).
@@ -1943,7 +2002,15 @@ int main(int argc, char* argv[]) {
                         ActiveCanvas().SmudgeOnActiveLayer(canvasX, canvasY, StrokePhase::Update, uiState.smudge);
                     }
                 }
-                else if (g_ActiveTool == ActiveTool::MovePixels) {
+                // Blur Tool
+                else if (g_ActiveTool == ActiveTool::BlurTool) {
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        ActiveCanvas().BlurToolOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, uiState.blurTool);
+                    } else if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                        ActiveCanvas().BlurToolOnActiveLayer(canvasX, canvasY, StrokePhase::Update, uiState.blurTool);
+                    }
+                }
+                else if (g_ActiveTool == ActiveTool::MovePixels && !ActiveCanvas().IsWarpOperatorActive()) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                         if (!ActiveCanvas().IsMovingPixels()) {
                             ActiveCanvas().StartMovePixels(g_pd3dDevice);
@@ -2032,18 +2099,32 @@ int main(int argc, char* argv[]) {
                 else if (g_ActiveTool == ActiveTool::PolygonalLasso) {
                     bool add = selAdd();
                     bool subtract = selSub();
-                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-                        if (!g_PolygonalLassoPoints.empty()) {
-                            g_PolygonalLassoPoints.pop_back(); // double-click also emits a single click vertex
-                        }
+                    auto closePoly = [&]() {
                         if (g_PolygonalLassoPoints.size() >= 3) {
                             ActiveCanvas().ApplyPolygonalLassoSelection(g_PolygonalLassoPoints, add, subtract);
                             ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
                         }
                         g_PolygonalLassoPoints.clear();
+                    };
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        if (!g_PolygonalLassoPoints.empty()) {
+                            g_PolygonalLassoPoints.pop_back(); // double-click also emits a single click vertex
+                        }
+                        closePoly();
                     }
                     else if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                        g_PolygonalLassoPoints.push_back({ (int)canvasX, (int)canvasY });
+                        // Auto-close when click is within Ø3px (radius 1.5) of start
+                        if (g_PolygonalLassoPoints.size() >= 3) {
+                            float dx = canvasX - (float)g_PolygonalLassoPoints[0].first;
+                            float dy = canvasY - (float)g_PolygonalLassoPoints[0].second;
+                            if (dx * dx + dy * dy <= 1.5f * 1.5f) {
+                                closePoly();
+                            } else {
+                                g_PolygonalLassoPoints.push_back({ (int)canvasX, (int)canvasY });
+                            }
+                        } else {
+                            g_PolygonalLassoPoints.push_back({ (int)canvasX, (int)canvasY });
+                        }
                     }
                 }
             }
@@ -2308,11 +2389,14 @@ int main(int argc, char* argv[]) {
                 dl->PopClipRect();
             }
 
-            // Draw Move / Free Transform gizmo
-            if (ActiveCanvas().IsMovingPixels()) {
+            // Draw Move / Free Transform / Warp gizmo
+            if (ActiveCanvas().IsMovingPixels() || ActiveCanvas().IsWarpOperatorActive()) {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
                 dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
-                ActiveCanvas().DrawMoveGizmo(dl, canvasToScreen, /*showHandles=*/g_FreeTransformMode);
+                if (ActiveCanvas().IsWarpOperatorActive())
+                    ActiveCanvas().DrawWarpGizmo(dl, canvasToScreen);
+                else
+                    ActiveCanvas().DrawMoveGizmo(dl, canvasToScreen, /*showHandles=*/g_FreeTransformMode);
                 dl->PopClipRect();
             }
 

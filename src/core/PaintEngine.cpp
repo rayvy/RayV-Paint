@@ -191,6 +191,49 @@ static void StampAt(TileCache& cache, float px, float py,
                     // !writeA alone also uses morph so RGB-only channel locks stay simple.
                     const bool morphRgb = brush.rgbMorphOnly || !brush.writeA;
 
+                    // Brush blend mode (Overlay, Multiply, …) vs destination RGB.
+                    auto blendBrushRgb = [&](float sr, float sg, float sb,
+                                             float dr, float dg, float db,
+                                             float& or_, float& og, float& ob) {
+                        or_ = sr; og = sg; ob = sb;
+                        switch (brush.blendMode) {
+                        case BlendMode::Multiply:
+                            or_ = sr * dr; og = sg * dg; ob = sb * db; break;
+                        case BlendMode::Screen:
+                            or_ = 1.f - (1.f - sr) * (1.f - dr);
+                            og = 1.f - (1.f - sg) * (1.f - dg);
+                            ob = 1.f - (1.f - sb) * (1.f - db); break;
+                        case BlendMode::Overlay:
+                            or_ = (dr < 0.5f) ? 2.f * sr * dr : 1.f - 2.f * (1.f - sr) * (1.f - dr);
+                            og = (dg < 0.5f) ? 2.f * sg * dg : 1.f - 2.f * (1.f - sg) * (1.f - dg);
+                            ob = (db < 0.5f) ? 2.f * sb * db : 1.f - 2.f * (1.f - sb) * (1.f - db); break;
+                        case BlendMode::Add:
+                            or_ = std::min(sr + dr, 1.f); og = std::min(sg + dg, 1.f); ob = std::min(sb + db, 1.f); break;
+                        case BlendMode::Subtract:
+                            or_ = std::max(dr - sr, 0.f); og = std::max(dg - sg, 0.f); ob = std::max(db - sb, 0.f); break;
+                        case BlendMode::Darken:
+                            or_ = std::min(sr, dr); og = std::min(sg, dg); ob = std::min(sb, db); break;
+                        case BlendMode::Lighten:
+                            or_ = std::max(sr, dr); og = std::max(sg, dg); ob = std::max(sb, db); break;
+                        case BlendMode::HardLight:
+                            or_ = (sr < 0.5f) ? 2.f * sr * dr : 1.f - 2.f * (1.f - sr) * (1.f - dr);
+                            og = (sg < 0.5f) ? 2.f * sg * dg : 1.f - 2.f * (1.f - sg) * (1.f - dg);
+                            ob = (sb < 0.5f) ? 2.f * sb * db : 1.f - 2.f * (1.f - sb) * (1.f - db); break;
+                        case BlendMode::SoftLight:
+                            or_ = (sr < 0.5f) ? dr - (1.f - 2.f * sr) * dr * (1.f - dr)
+                                              : dr + (2.f * sr - 1.f) * (std::sqrt(std::max(dr, 0.f)) - dr);
+                            og = (sg < 0.5f) ? dg - (1.f - 2.f * sg) * dg * (1.f - dg)
+                                              : dg + (2.f * sg - 1.f) * (std::sqrt(std::max(dg, 0.f)) - dg);
+                            ob = (sb < 0.5f) ? db - (1.f - 2.f * sb) * db * (1.f - db)
+                                              : db + (2.f * sb - 1.f) * (std::sqrt(std::max(db, 0.f)) - db); break;
+                        case BlendMode::Normal:
+                        default: break;
+                        }
+                        or_ = std::clamp(or_, 0.f, 1.f);
+                        og = std::clamp(og, 0.f, 1.f);
+                        ob = std::clamp(ob, 0.f, 1.f);
+                    };
+
                     if (brush.erase) {
                         // Erase: pull written channels toward 0.
                         // writeA: fade coverage (rewrite ON) or morph strength (rewrite OFF).
@@ -199,24 +242,30 @@ static void StampAt(TileCache& cache, float px, float py,
                         if (brush.writeG) out[1] *= factor;
                         if (brush.writeB) out[2] *= factor;
                         if (brush.writeA) out[3] *= factor;
-                    } else if (morphRgb) {
-                        // Brush: stamp = opacity×hardness×tip (color.a usually forced 1).
-                        // writeA builds coverage even when Channel A is hidden.
-                        const float t = stampAlpha;
-                        const float inv = 1.0f - t;
-                        if (brush.writeR) out[0] = brush.color[0] * t + dest[0] * inv;
-                        if (brush.writeG) out[1] = brush.color[1] * t + dest[1] * inv;
-                        if (brush.writeB) out[2] = brush.color[2] * t + dest[2] * inv;
-                        if (brush.writeA)
-                            out[3] = stampAlpha + dest[3] * (1.0f - stampAlpha);
                     } else {
-                        // Classic src-over (Alpha Rewrite ON + Channel A ON).
-                        float outA = stampAlpha + dest[3] * (1.0f - stampAlpha);
-                        if (outA > 0.0f) {
-                            if (brush.writeR) out[0] = (brush.color[0] * stampAlpha + dest[0] * dest[3] * (1.0f - stampAlpha)) / outA;
-                            if (brush.writeG) out[1] = (brush.color[1] * stampAlpha + dest[1] * dest[3] * (1.0f - stampAlpha)) / outA;
-                            if (brush.writeB) out[2] = (brush.color[2] * stampAlpha + dest[2] * dest[3] * (1.0f - stampAlpha)) / outA;
-                            if (brush.writeA) out[3] = outA;
+                        float br = brush.color[0], bg = brush.color[1], bb = brush.color[2];
+                        if (brush.blendMode != BlendMode::Normal)
+                            blendBrushRgb(brush.color[0], brush.color[1], brush.color[2],
+                                          dest[0], dest[1], dest[2], br, bg, bb);
+
+                        if (morphRgb) {
+                            // Brush: stamp = opacity×hardness×tip (color.a usually forced 1).
+                            const float t = stampAlpha;
+                            const float inv = 1.0f - t;
+                            if (brush.writeR) out[0] = br * t + dest[0] * inv;
+                            if (brush.writeG) out[1] = bg * t + dest[1] * inv;
+                            if (brush.writeB) out[2] = bb * t + dest[2] * inv;
+                            if (brush.writeA)
+                                out[3] = stampAlpha + dest[3] * (1.0f - stampAlpha);
+                        } else {
+                            // Classic src-over (Alpha Rewrite ON + Channel A ON).
+                            float outA = stampAlpha + dest[3] * (1.0f - stampAlpha);
+                            if (outA > 0.0f) {
+                                if (brush.writeR) out[0] = (br * stampAlpha + dest[0] * dest[3] * (1.0f - stampAlpha)) / outA;
+                                if (brush.writeG) out[1] = (bg * stampAlpha + dest[1] * dest[3] * (1.0f - stampAlpha)) / outA;
+                                if (brush.writeB) out[2] = (bb * stampAlpha + dest[2] * dest[3] * (1.0f - stampAlpha)) / outA;
+                                if (brush.writeA) out[3] = outA;
+                            }
                         }
                     }
 

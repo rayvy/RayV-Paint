@@ -169,8 +169,10 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 {
                     bool fxOn = canvas.GetEffectsPreviewEnabled();
                     if (!fxOn) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.25f, 0.15f, 0.75f));
-                    if (ImGui::Button(fxOn ? "FX##fxprev" : "off##fxprev", ImVec2(36, 0)))
+                    if (ImGui::Button(fxOn ? "FX##fxprev" : "off##fxprev", ImVec2(36, 0))) {
                         canvas.SetEffectsPreviewEnabled(!fxOn);
+                        // RefreshCanvas is called inside SetEffectsPreviewEnabled
+                    }
                     if (!fxOn) ImGui::PopStyleColor();
                     if (ImGui::IsItemHovered())
                         Ui::Tooltip(fxOn

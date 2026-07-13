@@ -9,6 +9,7 @@
 #include "../../core/ConfigManager.h"
 #include "../../core/ImageManager.h"
 #include "../../core/PaintEngine.h"
+#include "../../layer/LayerTypes.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
@@ -48,6 +49,17 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
     bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser);
 
     if (isBrushLike) {
+        // Brush blend mode (erase ignores)
+        if (activeTool == ActiveTool::Brush && !brush.erase) {
+            static const char* blendNames[] = {
+                "Normal","Multiply","Screen","Overlay","Add","Subtract","Darken","Lighten","HardLight","SoftLight"
+            };
+            int bi = (int)brush.blendMode;
+            ImGui::SetNextItemWidth(110.f);
+            if (Ui::Combo("##brush_blend", &bi, blendNames, IM_ARRAYSIZE(blendNames), "Brush Blend Mode"))
+                brush.blendMode = (BlendMode)bi;
+            ImGui::SameLine();
+        }
         // Brush tips: ids persisted on Canvas (.rayp brush_tip_id / custom pixels)
         static BrushTip s_CustomTip;
         static bool s_CustomLoaded = false;
@@ -203,7 +215,7 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
     }
     else if (IsSelectTool(activeTool) || IsLassoTool(activeTool)) {
         if (activeTool == ActiveTool::PolygonalLasso)
-            ImGui::TextDisabled("Click vertices · Enter/Dbl close · Esc cancel  ·  Ctrl: add  ·  Alt: sub");
+            ImGui::TextDisabled("Click vertices · near start (Ø3px) closes · Enter/Dbl · Esc  ·  Ctrl/Alt");
         else if (activeTool == ActiveTool::RectSelect || activeTool == ActiveTool::EllipseSelect)
             ImGui::TextDisabled("Ctrl: add  ·  Alt: subtract  ·  Shift: 1:1 proportions");
         else
@@ -218,9 +230,16 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
     else if (activeTool == ActiveTool::Smudge) {
         MiniSlider("##smr", &state.smudge.radius, 1.f, 150.f, "Smudge Radius", 110.f);
         ImGui::SameLine();
-        MiniSlider("##sms", &state.smudge.strength, 0.f, 1.f, "Strength", 100.f);
+        MiniSlider("##sms", &state.smudge.strength, 0.f, 1.f, "Strength (finger push)", 100.f);
         ImGui::SameLine();
         MiniSlider("##smp", &state.smudge.spacing, 0.01f, 1.f, "Spacing", 90.f);
+    }
+    else if (activeTool == ActiveTool::BlurTool) {
+        MiniSlider("##blr", &state.blurTool.radius, 1.f, 150.f, "Blur brush size", 110.f);
+        ImGui::SameLine();
+        MiniSlider("##bls", &state.blurTool.strength, 0.f, 1.f, "Strength", 100.f);
+        ImGui::SameLine();
+        MiniSlider("##blp", &state.blurTool.spacing, 0.01f, 1.f, "Spacing", 90.f);
     }
     else if (activeTool == ActiveTool::MovePixels) {
         if (state.freeTransformActive) {

@@ -545,6 +545,7 @@ namespace UI {
         if (strcmp(actionName, "BucketFillTool") == 0) return "tool_fill";
         if (strcmp(actionName, "GradientTool") == 0) return "tool_gradient";
         if (strcmp(actionName, "SmudgeTool") == 0) return "tool_smudge";
+        if (strcmp(actionName, "BlurTool") == 0) return "tool_smudge"; // reuse until dedicated icon
         if (strcmp(actionName, "PipetteTool") == 0) return "tool_pipette";
         if (strcmp(actionName, "PanTool") == 0) return "tool_pan";
         if (strcmp(actionName, "TransformTool") == 0) return "tool_transform";
@@ -805,8 +806,17 @@ namespace UI {
             if (ImGui::BeginMenu("Image")) {
                 bool hasLayer = canvas.GetActiveLayerIndex() != -1;
                 if (ImGui::MenuItem("Free Transform...", KeymapManager::Get().GetActionShortcutString("FreeTransform").c_str(), false, hasLayer)) {
-                    // Signal main loop via state (main owns tool switch)
                     state.requestFreeTransform = true;
+                }
+                if (ImGui::MenuItem("Perspective Warp...", KeymapManager::Get().GetActionShortcutString("PerspectiveWarp").c_str(), false, hasLayer)) {
+                    state.requestPerspectiveWarp = true;
+                }
+                if (ImGui::MenuItem("Mesh Warp...", KeymapManager::Get().GetActionShortcutString("MeshWarp").c_str(), false, hasLayer)) {
+                    state.requestMeshWarp = true;
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Refresh Canvas", KeymapManager::Get().GetActionShortcutString("RefreshCanvas").c_str())) {
+                    canvas.RefreshCanvas(device);
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Invert Colors", KeymapManager::Get().GetActionShortcutString("InvertColors").c_str(), false, hasLayer))
@@ -1366,6 +1376,7 @@ namespace UI {
             case ActiveTool::BucketFill: toolLabel = "Bucket Fill"; break;
             case ActiveTool::Gradient: toolLabel = "Gradient"; break;
             case ActiveTool::Smudge: toolLabel = "Smudge"; break;
+            case ActiveTool::BlurTool: toolLabel = "Blur"; break;
         }
         {
             const char* bdLabel =
@@ -1878,6 +1889,13 @@ namespace UI {
             ToolbarAdvance(isVertical, gap);
             RenderToolButton("SmudgeTool", "Smudge", ActiveTool::Smudge, false, smudgeBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             if (activeTool == ActiveTool::Smudge) markAccent();
+            ToolbarAdvance(isVertical, gap);
+            {
+                std::string blurBind = KeymapManager::Get().GetActionShortcutString("BlurTool");
+                // Reuse smudge icon if no dedicated blur tool icon
+                RenderToolButton("BlurTool", "Blur", ActiveTool::BlurTool, false, blurBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+                if (activeTool == ActiveTool::BlurTool) markAccent();
+            }
             ToolbarAdvance(isVertical, gap);
             RenderToolButton("PipetteTool", "Pipette", ActiveTool::Pipette, false, pipetteBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             if (activeTool == ActiveTool::Pipette) markAccent();

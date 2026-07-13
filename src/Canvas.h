@@ -256,6 +256,9 @@ public:
     void SetActiveLayerIndex(int idx);
     void ToggleLayerIsolation(int layerIdx);
     void MarkCompositeDirty() { m_CompositeDirty = true; m_ChannelPreviewDirty = true; }
+    // Force GPU re-upload of all layer/presentation tiles + recompose.
+    // Call after FX toggle, undo glitches, or F5 — kills tile ghosting.
+    void RefreshCanvas(ID3D11Device* device = nullptr);
     bool IsLayerIsolated(int layerIdx) const { return m_IsIsolatedMode && m_IsolatedLayerIdx == layerIdx; }
     bool IsInIsolationMode() const { return m_IsIsolatedMode; }
     int GetActiveLayerIndex() const { return m_ActiveLayerIdx; }
@@ -284,6 +287,8 @@ public:
     void PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phase, const BrushSettings& brush);
     bool IsStrokeActive() const { return m_IsStrokeActive; }
     void SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s);
+    // Local brush blur (Tool). Operator/Filter blur remain separate.
+    void BlurToolOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s);
 
     // Destructive image adjustments (operate on active layer, respect selection mask)
     void SelectAll();                       // full canvas selection (with undo)
@@ -381,6 +386,20 @@ public:
     // showHandles=false: Move tool (bbox only). true: Free Transform (scale/rotate handles).
     void DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen,
                        bool showHandles = true);
+
+    // Perspective / mesh Warp operators (Ctrl+Shift+P / Ctrl+Shift+W via UI)
+    enum class WarpOperatorMode : uint8_t { None = 0, Perspective = 1, Mesh = 2 };
+    bool IsWarpOperatorActive() const { return m_WarpMode != WarpOperatorMode::None; }
+    WarpOperatorMode GetWarpOperatorMode() const { return m_WarpMode; }
+    void StartWarpOperator(ID3D11Device* device, WarpOperatorMode mode);
+    void SetWarpControlPoint(int index, float canvasX, float canvasY);
+    int  HitTestWarpControl(float canvasX, float canvasY, float threshPx = 10.f) const;
+    int  GetWarpControlCount() const { return (int)m_WarpControls.size(); }
+    bool GetWarpControl(int index, float& outX, float& outY) const;
+    void PreviewWarpOperator(ID3D11Device* device); // rebuild floating tex from controls
+    void CommitWarpOperator(ID3D11Device* device);
+    void CancelWarpOperator(ID3D11Device* device);
+    void DrawWarpGizmo(ImDrawList* dl, const std::function<ImVec2(float, float)>& canvasToScreen);
     float GetFloatingScaleX() const { return m_FloatingScaleX; }
     float GetFloatingScaleY() const { return m_FloatingScaleY; }
     float GetFloatingRotation() const { return m_FloatingRotation; }
@@ -745,12 +764,14 @@ private:
     std::chrono::steady_clock::time_point m_PresentationRebuildNotBefore{};
     bool m_PresentationRebuildDeferred = false;
 
-    // Smudge state
+    // Smudge / blur-tool state
     float m_SmudgePickup[4] = { 0.f, 0.f, 0.f, 0.f };
     bool  m_SmudgePickupValid = false;
     float m_SmudgeLastX = 0.f;
     float m_SmudgeLastY = 0.f;
     float m_SmudgeDistAcc = 0.f;
+    // Finger buffer: per-pixel RGB(A) being dragged along stroke (true smudge)
+    std::vector<float> m_SmudgeFinger; // radius*2+1 square, reused
 
     // Undo/Redo Engine
     UndoRedoManager m_UndoRedoManager;
@@ -869,4 +890,13 @@ private:
     ID3D11ShaderResourceView* m_FloatingSRV = nullptr;
     ID3D11Texture2D* m_FloatingMaskTexture = nullptr;
     ID3D11ShaderResourceView* m_FloatingMaskSRV = nullptr;
+
+    // Perspective / mesh warp operator (uses floating content as source)
+    WarpOperatorMode m_WarpMode = WarpOperatorMode::None;
+    int m_WarpMeshN = 4; // control points per side for Mesh (NxN)
+    std::vector<std::pair<float, float>> m_WarpControls; // dest control points (canvas space)
+    std::vector<std::pair<float, float>> m_WarpSourceCorners; // original bbox TL,TR,BR,BL
+    int m_WarpBBoxX = 0, m_WarpBBoxY = 0, m_WarpBBoxW = 0, m_WarpBBoxH = 0;
+    std::vector<float> m_WarpSourcePixels; // frozen source at operator start
+    void RebuildWarpPreviewTexture(ID3D11Device* device);
 };
