@@ -10,6 +10,7 @@
 #include "core/PathUtil.h"
 #include "core/ClipboardHelper.h"
 #include "assets/AssetStore.h"
+#include "utilities/ContentAwareFill.h"
 // Prefer PathUtil for all disk paths (UTF-8 / wide on Windows).
 #include <opencv2/imgproc.hpp>
 #include "core/ConfigManager.h"
@@ -7366,6 +7367,81 @@ void Canvas::ApplyNoise(float strength, bool colorNoise) {
     SetLayerPixelsF(layer, pixels, m_Width, m_Height, m_CanvasFormat);
     CommitActiveLayerMutation("Noise");
     Logger::Get().Info("ApplyNoise");
+}
+
+// ============================================================
+//  Clone Stamp
+// ============================================================
+
+void Canvas::StampSetSource(float canvasX, float canvasY) {
+    m_StampSrcX = canvasX;
+    m_StampSrcY = canvasY;
+    m_StampHasSource = true;
+    m_StampHasOffset = false; // new source resets offset until first dab
+    Logger::Get().InfoTag("stamp",
+        "Source set at " + std::to_string((int)canvasX) + "," + std::to_string((int)canvasY));
+}
+
+void Canvas::StampClearSource() {
+    m_StampHasSource = false;
+    m_StampHasOffset = false;
+}
+
+void Canvas::StampLockOffsetFromDab(float dabX, float dabY) {
+    if (!m_StampHasSource || m_StampHasOffset) return;
+    // Sample at (dest - offset) == source when dest == first dab
+    m_StampOffsetX = dabX - m_StampSrcX;
+    m_StampOffsetY = dabY - m_StampSrcY;
+    m_StampHasOffset = true;
+    Logger::Get().InfoTag("stamp",
+        "Offset locked dx=" + std::to_string(m_StampOffsetX) +
+        " dy=" + std::to_string(m_StampOffsetY));
+}
+
+bool Canvas::ApplyContentAwareFill(ID3D11Device* /*device*/) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return false;
+    if (!m_HasSelection || m_SelectionMask.empty()) {
+        Logger::Get().Warn("Content-Aware Fill requires an active selection (hole region).");
+        return false;
+    }
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    if (!layer.CanPaintContent()) {
+        Logger::Get().Warn("Content-Aware Fill: active layer is not paintable.");
+        return false;
+    }
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+
+    caf::CafImage img;
+    img.w = m_Width;
+    img.h = m_Height;
+    img.rgba = ExportLayerF(layer, m_Width, m_Height);
+
+    caf::CafMask hole;
+    hole.w = m_Width;
+    hole.h = m_Height;
+    hole.hole = m_SelectionMask; // non-zero = synthesize
+
+    caf::CafParams params;
+    params.patchSize = 7;
+    params.multiScaleLevels = 4;
+    params.searchIters = 5;
+
+    caf::CafResult res = caf::ContentAwareFill(img, hole, params);
+    if (!res.ok) {
+        Logger::Get().Error("Content-Aware Fill: " + res.error);
+        return false;
+    }
+    if ((int)res.filled.rgba.size() != m_Width * m_Height * 4) {
+        Logger::Get().Error("Content-Aware Fill: bad output size");
+        return false;
+    }
+
+    BackupAllActiveLayerTiles();
+    SetLayerPixelsF(layer, res.filled.rgba, m_Width, m_Height, m_CanvasFormat, true);
+    CommitActiveLayerMutation("Content-Aware Fill");
+    m_CompositeDirty = true;
+    m_ChannelPreviewDirty = true;
+    return true;
 }
 
 // ============================================================

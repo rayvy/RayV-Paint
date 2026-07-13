@@ -115,6 +115,9 @@ void KeymapManager::Initialize() {
     m_Bindings["PerspectiveWarp"] = KeyCombination{ GLFW_KEY_P, -1, true, true, false }; // Ctrl+Shift+P
     m_Bindings["MeshWarp"] = KeyCombination{ GLFW_KEY_W, -1, true, true, false }; // Ctrl+Shift+W
     m_Bindings["BlurTool"] = KeyCombination{ 0, -1, false, false, false };
+    // Stamp: unbound by default (toolbar); avoid clashing with Select-group S
+    m_Bindings["StampTool"] = KeyCombination{ 0, -1, false, false, false };
+    m_Bindings["ContentAwareFill"] = KeyCombination{ 0, -1, false, false, false };
     m_Bindings["FillSecondary"] = KeyCombination{ GLFW_KEY_BACKSPACE, -1, false, false, false };
     m_Bindings["DeleteContent"] = KeyCombination{ GLFW_KEY_DELETE, -1, false, false, false };
 

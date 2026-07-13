@@ -546,6 +546,7 @@ namespace UI {
         if (strcmp(actionName, "GradientTool") == 0) return "tool_gradient";
         if (strcmp(actionName, "SmudgeTool") == 0) return "tool_smudge";
         if (strcmp(actionName, "BlurTool") == 0) return "tool_smudge"; // reuse until dedicated icon
+        if (strcmp(actionName, "StampTool") == 0) return "tool_brush"; // clone stamp uses brush base
         if (strcmp(actionName, "PipetteTool") == 0) return "tool_pipette";
         if (strcmp(actionName, "PanTool") == 0) return "tool_pan";
         if (strcmp(actionName, "TransformTool") == 0) return "tool_transform";
@@ -832,6 +833,16 @@ namespace UI {
                     state.showCurvesModal = true;
                 if (ImGui::MenuItem("Add Noise...", KeymapManager::Get().GetActionShortcutString("AdjustNoise").c_str(), false, hasLayer))
                     state.showNoiseModal = true;
+                ImGui::Separator();
+                {
+                    bool canCaf = hasLayer && canvas.HasSelection();
+                    if (ImGui::MenuItem("Content-Aware Fill...",
+                            KeymapManager::Get().GetActionShortcutString("ContentAwareFill").c_str(),
+                            false, canCaf))
+                        state.requestContentAwareFill = true;
+                    if (ImGui::IsItemHovered() && !canCaf)
+                        Ui::Tooltip("Requires an active selection (region to fill) on a paint layer.");
+                }
                 ImGui::Separator();
                 if (ImGui::BeginMenu("Document Bit Depth")) {
                     using BD = Canvas::DocumentBitDepth;
@@ -1377,6 +1388,7 @@ namespace UI {
             case ActiveTool::Gradient: toolLabel = "Gradient"; break;
             case ActiveTool::Smudge: toolLabel = "Smudge"; break;
             case ActiveTool::BlurTool: toolLabel = "Blur"; break;
+            case ActiveTool::Stamp: toolLabel = "Stamp"; break;
         }
         {
             const char* bdLabel =
@@ -1877,6 +1889,12 @@ namespace UI {
 
             RenderToolButton("BrushTool", "Brush", ActiveTool::Brush, false, brushBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             if (activeTool == ActiveTool::Brush && !brush.erase) markAccent();
+            ToolbarAdvance(isVertical, gap);
+            {
+                std::string stampBind = KeymapManager::Get().GetActionShortcutString("StampTool");
+                RenderToolButton("StampTool", "Stamp", ActiveTool::Stamp, false, stampBind, btnSize, s_RebindAction, activeTool, brush, canvas);
+                if (activeTool == ActiveTool::Stamp) markAccent();
+            }
             ToolbarAdvance(isVertical, gap);
             RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction, activeTool, brush, canvas);
             if (activeTool == ActiveTool::Eraser || (activeTool == ActiveTool::Brush && brush.erase)) markAccent();

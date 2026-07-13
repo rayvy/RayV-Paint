@@ -1122,6 +1122,13 @@ int main(int argc, char* argv[]) {
             if (KeymapManager::Get().ConsumeActionTrigger("BlurTool")) {
                 g_ActiveTool = ActiveTool::BlurTool;
             }
+            if (KeymapManager::Get().ConsumeActionTrigger("StampTool")) {
+                g_ActiveTool = ActiveTool::Stamp;
+            }
+            if (KeymapManager::Get().ConsumeActionTrigger("ContentAwareFill") || uiState.requestContentAwareFill) {
+                uiState.requestContentAwareFill = false;
+                ActiveCanvas().ApplyContentAwareFill(g_pd3dDevice);
+            }
             if (KeymapManager::Get().ConsumeActionTrigger("RefreshCanvas")) {
                 ActiveCanvas().RefreshCanvas(g_pd3dDevice);
             }
@@ -1351,11 +1358,14 @@ int main(int argc, char* argv[]) {
                                    canvasY >= 0.0f && canvasY < (float)ActiveCanvas().GetHeight());
 
             // Smudge is NOT brush-like: must not paint with brush.color / accent color.
-            bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser);
+            // Stamp is brush-like for size/hardness, but Alt = set clone source (not pipette).
+            bool isStampTool = (g_ActiveTool == ActiveTool::Stamp);
+            bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser || isStampTool);
             bool isSmudgeTool = (g_ActiveTool == ActiveTool::Smudge || g_ActiveTool == ActiveTool::BlurTool);
             bool isPipetteTool = (g_ActiveTool == ActiveTool::Pipette);
             // Alt-sample blocked when Ctrl held (future: Ctrl+Alt+LMB = brush rotation)
-            bool isEyedropperMode = ((isBrushLikeTool || isSmudgeTool) && ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyCtrl)
+            // Stamp: Alt does NOT open pipette — sets clone source instead.
+            bool isEyedropperMode = (((isBrushLikeTool && !isStampTool) || isSmudgeTool) && ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyCtrl)
                                     || isPipetteTool;
 
             if (g_ActiveTool != g_PrevActiveTool) {
@@ -1773,15 +1783,44 @@ int main(int argc, char* argv[]) {
                 s_PipetteHasPreview = false;
             }
 
+            // Stamp: Alt+LMB sets clone source (no paint)
+            if (isStampTool && isHovered && isInsideCanvas && ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyCtrl
+                && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !isPanning) {
+                ActiveCanvas().StampSetSource(canvasX, canvasY);
+            }
+
+            // Build brush for paint (Stamp injects clone offsets)
+            auto makePaintBrush = [&]() -> BrushSettings {
+                BrushSettings b = g_Brush;
+                b.cloneStamp = false;
+                if (isStampTool) {
+                    b.erase = false;
+                    b.cloneStamp = true;
+                    float ox = 0, oy = 0;
+                    ActiveCanvas().StampGetOffset(ox, oy);
+                    b.cloneOffsetX = ox;
+                    b.cloneOffsetY = oy;
+                }
+                return b;
+            };
+
             if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging
                 && isBrushLikeTool && !isEyedropperMode && !UI::IsFillPipetteArmed()
-                && !(ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt)) {
-                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                && !(ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt)
+                && !(isStampTool && ImGui::GetIO().KeyAlt)) {
+                // Stamp without source: no paint
+                const bool stampBlocked = isStampTool && !ActiveCanvas().StampHasSource();
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !stampBlocked) {
                     g_IsPainting = true;
+                    if (isStampTool)
+                        ActiveCanvas().StampLockOffsetFromDab(canvasX, canvasY);
+                    BrushSettings pb = makePaintBrush();
                     if (isShiftHeld && g_HasLastStrokeEnd) {
-                        // Draw line from last stroke end to current mouse at an arbitrary angle (NO axis lock)
-                        ActiveCanvas().PaintOnActiveLayer(g_LastStrokeEndX, g_LastStrokeEndY, StrokePhase::Begin, g_Brush);
-                        ActiveCanvas().PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Update, g_Brush);
+                        if (isStampTool)
+                            ActiveCanvas().StampLockOffsetFromDab(g_LastStrokeEndX, g_LastStrokeEndY);
+                        pb = makePaintBrush();
+                        ActiveCanvas().PaintOnActiveLayer(g_LastStrokeEndX, g_LastStrokeEndY, StrokePhase::Begin, pb);
+                        ActiveCanvas().PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Update, pb);
                         
                         g_StrokeStartX = canvasX;
                         g_StrokeStartY = canvasY;
@@ -1790,8 +1829,7 @@ int main(int argc, char* argv[]) {
                         g_LockAxisSelected = false;
                         g_LockAxis = LockAxis::None;
                     } else {
-                        // Normal start
-                        ActiveCanvas().PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, g_Brush);
+                        ActiveCanvas().PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, pb);
                         g_StrokeStartX = canvasX;
                         g_StrokeStartY = canvasY;
                         g_LockAxisSelected = false;
@@ -1800,7 +1838,7 @@ int main(int argc, char* argv[]) {
                         g_LastStrokeEndY = canvasY;
                     }
                 } 
-                else if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && g_IsPainting) {
+                else if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && g_IsPainting && !stampBlocked) {
                     float targetX = canvasX;
                     float targetY = canvasY;
                     
@@ -1831,7 +1869,7 @@ int main(int argc, char* argv[]) {
                         g_LockAxis = LockAxis::None;
                     }
                     
-                    ActiveCanvas().PaintOnActiveLayer(targetX, targetY, StrokePhase::Update, g_Brush);
+                    ActiveCanvas().PaintOnActiveLayer(targetX, targetY, StrokePhase::Update, makePaintBrush());
                     g_LastStrokeEndX = targetX;
                     g_LastStrokeEndY = targetY;
                     g_HasLastStrokeEnd = true;
@@ -1839,7 +1877,15 @@ int main(int argc, char* argv[]) {
             }
 
             if (g_IsPainting && (!ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
-                ActiveCanvas().PaintOnActiveLayer(0, 0, StrokePhase::End, g_Brush);
+                BrushSettings endB = g_Brush;
+                if (isStampTool) {
+                    endB.cloneStamp = true;
+                    float ox = 0, oy = 0;
+                    ActiveCanvas().StampGetOffset(ox, oy);
+                    endB.cloneOffsetX = ox;
+                    endB.cloneOffsetY = oy;
+                }
+                ActiveCanvas().PaintOnActiveLayer(0, 0, StrokePhase::End, endB);
                 g_IsPainting = false;
             }
 
@@ -2397,6 +2443,28 @@ int main(int argc, char* argv[]) {
                     ActiveCanvas().DrawWarpGizmo(dl, canvasToScreen);
                 else
                     ActiveCanvas().DrawMoveGizmo(dl, canvasToScreen, /*showHandles=*/g_FreeTransformMode);
+                dl->PopClipRect();
+            }
+
+            // Stamp clone-source crosshair
+            if (g_ActiveTool == ActiveTool::Stamp && ActiveCanvas().StampHasSource()) {
+                float sx = 0, sy = 0;
+                ActiveCanvas().StampGetSource(sx, sy);
+                ImVec2 sp = canvasToScreen(sx + 0.5f, sy + 0.5f);
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                dl->PushClipRect(imageMin, ImVec2(imageMin.x + viewportWidth, imageMin.y + viewportHeight), true);
+                const float arm = 10.0f;
+                ImU32 col = IM_COL32(80, 220, 255, 255);
+                dl->AddLine(ImVec2(sp.x - arm, sp.y), ImVec2(sp.x + arm, sp.y), col, 2.0f);
+                dl->AddLine(ImVec2(sp.x, sp.y - arm), ImVec2(sp.x, sp.y + arm), col, 2.0f);
+                dl->AddCircle(sp, 6.f, col, 0, 1.5f);
+                // Live source under cursor when painting with offset
+                if (ActiveCanvas().StampHasOffset() && g_IsPainting) {
+                    float ox = 0, oy = 0;
+                    ActiveCanvas().StampGetOffset(ox, oy);
+                    ImVec2 live = canvasToScreen(canvasX - ox + 0.5f, canvasY - oy + 0.5f);
+                    dl->AddCircle(live, 5.f, IM_COL32(255, 180, 40, 220), 0, 1.5f);
+                }
                 dl->PopClipRect();
             }
 

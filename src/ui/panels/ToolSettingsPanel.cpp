@@ -46,9 +46,20 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
         if (ImGui::IsItemHovered()) Ui::Tooltip(tip);
     };
 
-    bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser);
+    bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser ||
+                        activeTool == ActiveTool::Stamp);
 
     if (isBrushLike) {
+        if (activeTool == ActiveTool::Stamp) {
+            ImGui::TextDisabled(canvas.StampHasSource()
+                ? (canvas.StampHasOffset()
+                    ? "Stamp: source+offset locked · Alt+click = new source"
+                    : "Stamp: source set · first dab locks offset")
+                : "Stamp: Alt+click sets source · then paint elsewhere");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear##stamp_src"))
+                canvas.StampClearSource();
+        }
         // Brush blend mode (erase ignores)
         if (activeTool == ActiveTool::Brush && !brush.erase) {
             static const char* blendNames[] = {

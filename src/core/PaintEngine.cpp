@@ -243,10 +243,28 @@ static void StampAt(TileCache& cache, float px, float py,
                         if (brush.writeB) out[2] *= factor;
                         if (brush.writeA) out[3] *= factor;
                     } else {
+                        // Source color: solid brush, or clone-stamp resample from offset
                         float br = brush.color[0], bg = brush.color[1], bb = brush.color[2];
+                        float ba = brush.color[3];
+                        if (brush.cloneStamp) {
+                            int isx = (int)std::floor((float)x - brush.cloneOffsetX + 0.5f);
+                            int isy = (int)std::floor((float)y - brush.cloneOffsetY + 0.5f);
+                            if (isx < 0 || isy < 0 || isx >= width || isy >= height)
+                                continue;
+                            int stx = isx / TILE_SIZE, sty = isy / TILE_SIZE;
+                            const uint8_t* sraw = cache.GetTileData(stx, sty);
+                            if (!sraw) continue;
+                            // Same-tile COW: dest tile is writable copy; source read is safe.
+                            int slx = isx - stx * TILE_SIZE, sly = isy - sty * TILE_SIZE;
+                            const uint8_t* sp = sraw + ((size_t)sly * TILE_SIZE + slx) * bytesPerPixel;
+                            float srcPx[4];
+                            ReadPixelRaw(sp, fmt, srcPx);
+                            br = srcPx[0]; bg = srcPx[1]; bb = srcPx[2]; ba = srcPx[3];
+                            stampAlpha *= std::clamp(ba, 0.f, 1.f);
+                            if (stampAlpha <= 0.0f) continue;
+                        }
                         if (brush.blendMode != BlendMode::Normal)
-                            blendBrushRgb(brush.color[0], brush.color[1], brush.color[2],
-                                          dest[0], dest[1], dest[2], br, bg, bb);
+                            blendBrushRgb(br, bg, bb, dest[0], dest[1], dest[2], br, bg, bb);
 
                         if (morphRgb) {
                             // Brush: stamp = opacity×hardness×tip (color.a usually forced 1).

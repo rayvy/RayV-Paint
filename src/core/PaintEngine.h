@@ -47,6 +47,12 @@ struct BrushSettings {
 
     // Brush pixel blend vs destination (Normal = classic stamp). Erase ignores this.
     BlendMode blendMode = BlendMode::Normal;
+
+    // Clone Stamp mode: sample color from (destX - cloneOffsetX, destY - cloneOffsetY).
+    // When cloneStamp=true, brush.color is ignored (source pixels drive RGB/A).
+    bool  cloneStamp = false;
+    float cloneOffsetX = 0.f;
+    float cloneOffsetY = 0.f;
 };
 
 // Built-in brush tip presets (generated procedurally once).

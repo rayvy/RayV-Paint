@@ -10,7 +10,7 @@
 #include "../core/PaintEngine.h"
 #include "FileExplorer.h"
 
-enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSelect, PolygonalLasso, QuickSelect, MagicWand, SmartSelect, MovePixels, Pipette, BucketFill, Gradient, Smudge, BlurTool };
+enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSelect, PolygonalLasso, QuickSelect, MagicWand, SmartSelect, MovePixels, Pipette, BucketFill, Gradient, Smudge, BlurTool, Stamp };
 
 
 #include <GLFW/glfw3.h>
@@ -107,6 +107,7 @@ namespace UI {
         bool requestFreeTransform = false;
         bool requestPerspectiveWarp = false;
         bool requestMeshWarp = false;
+        bool requestContentAwareFill = false;
         // Written by main: true while Ctrl+T Free Transform session is active
         bool freeTransformActive = false;
 

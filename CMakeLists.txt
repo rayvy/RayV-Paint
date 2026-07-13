@@ -123,6 +123,8 @@ set(SOURCES
     src/core/PaintEngine.h
     src/core/BrushLibrary.cpp
     src/core/BrushLibrary.h
+    src/utilities/ContentAwareFill.cpp
+    src/utilities/ContentAwareFill.h
     src/core/UndoRedoManager.cpp
     src/core/UndoRedoManager.h
     src/core/KeymapManager.cpp

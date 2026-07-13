@@ -290,6 +290,18 @@ public:
     // Local brush blur (Tool). Operator/Filter blur remain separate.
     void BlurToolOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s);
 
+    // Clone Stamp (source point + offset resampling). Alt+click sets source.
+    void StampSetSource(float canvasX, float canvasY);
+    void StampClearSource();
+    bool StampHasSource() const { return m_StampHasSource; }
+    bool StampHasOffset() const { return m_StampHasOffset; }
+    void StampGetSource(float& outX, float& outY) const { outX = m_StampSrcX; outY = m_StampSrcY; }
+    // Call on first dab after source is set: locks clone offset (dest - source).
+    void StampLockOffsetFromDab(float dabX, float dabY);
+    void StampGetOffset(float& outOx, float& outOy) const { outOx = m_StampOffsetX; outOy = m_StampOffsetY; }
+    // Content-Aware Fill (requires selection). Uses utilities/ContentAwareFill module.
+    bool ApplyContentAwareFill(ID3D11Device* device = nullptr);
+
     // Destructive image adjustments (operate on active layer, respect selection mask)
     void SelectAll();                       // full canvas selection (with undo)
     void SelectOpaquePixels(int layerIdx = -1); // alpha-as-mask; -1 = active layer
@@ -772,6 +784,12 @@ private:
     float m_SmudgeDistAcc = 0.f;
     // Finger buffer: per-pixel RGB(A) being dragged along stroke (true smudge)
     std::vector<float> m_SmudgeFinger; // radius*2+1 square, reused
+
+    // Clone Stamp state (tool)
+    bool  m_StampHasSource = false;
+    bool  m_StampHasOffset = false;
+    float m_StampSrcX = 0.f, m_StampSrcY = 0.f;
+    float m_StampOffsetX = 0.f, m_StampOffsetY = 0.f;
 
     // Undo/Redo Engine
     UndoRedoManager m_UndoRedoManager;
