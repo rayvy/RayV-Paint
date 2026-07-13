@@ -80,7 +80,8 @@ struct CafParams {
     int patchSize = 7;            // odd, typically 5/7/9
     int multiScaleLevels = 4;     // pyramid depth (>=1)
     int searchIters = 5;          // PatchMatch iterations per level
-    int randomSearchRadius = 0;   // 0 = auto (image diagonal / 2 at that scale)
+    // 0 = Auto: local radius ~ hole size (Photoshop-like), NOT whole canvas
+    int randomSearchRadius = 0;
     uint32_t seed = 1;
 
     // Voting / reconstruction
