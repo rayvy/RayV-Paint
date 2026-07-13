@@ -49,10 +49,98 @@
 // App version (CLI --version, about, logs)
 static constexpr const char* kRayVPaintVersion = "0.3.0";
 
-// Tablet Pointer API support
+// Tablet / pen support (Pointer API + disable OS press-and-hold dead zone)
 float g_PenPressure = 1.0f;
 static bool g_IsPenActive = false;
+// Barrel / "right click" button on pen (driver-mapped RMB often fails under Windows Ink)
+static bool g_PenBarrelDown = false;
+static bool g_PenEraserDown = false;
 static WNDPROC g_OriginalWndProc = nullptr;
+
+// Tablet PC gesture flags (tpcshrd.h) — disable press-and-hold "ring" that freezes
+// pen movement in a small *screen-space* radius until you leave the circle.
+#ifndef WM_TABLET_DEFBASE
+#define WM_TABLET_DEFBASE                    0x02C0
+#endif
+#ifndef WM_TABLET_QUERYSYSTEMGESTURESTATUS
+#define WM_TABLET_QUERYSYSTEMGESTURESTATUS   (WM_TABLET_DEFBASE + 12)
+#endif
+#ifndef TABLET_DISABLE_PRESSANDHOLD
+#define TABLET_DISABLE_PRESSANDHOLD          0x00000001
+#define TABLET_DISABLE_PENTAPFEEDBACK        0x00000008
+#define TABLET_DISABLE_PENBARRELFEEDBACK     0x00000010
+#define TABLET_DISABLE_FLICKS                0x00010000
+#define TABLET_DISABLE_SMOOTHSCROLLING       0x00080000
+#define TABLET_DISABLE_FLICKFALLBACKKEYS     0x00100000
+#endif
+
+// Window property used by the Tablet PC input service (same flags as gesture query).
+#ifndef MICROSOFT_TABLETPENSERVICE_PROPERTY
+#define MICROSOFT_TABLETPENSERVICE_PROPERTY  L"MicrosoftTabletPenServiceProperty"
+#endif
+
+static DWORD TabletGestureDisableFlags() {
+    return TABLET_DISABLE_PRESSANDHOLD
+         | TABLET_DISABLE_PENTAPFEEDBACK
+         | TABLET_DISABLE_PENBARRELFEEDBACK
+         | TABLET_DISABLE_FLICKS
+         | TABLET_DISABLE_SMOOTHSCROLLING
+         | TABLET_DISABLE_FLICKFALLBACKKEYS;
+}
+
+// Call once after HWND exists. Marks this window as a drawing surface so Windows
+// does not treat pen as a "press-and-hold → right-click" gesture app.
+static void ConfigureWindowForPenDrawing(HWND hWnd) {
+    if (!hWnd) return;
+    // Prefer SetProp (works even when WM_TABLET_QUERYSYSTEMGESTURESTATUS is not sent).
+    SetPropW(hWnd, MICROSOFT_TABLETPENSERVICE_PROPERTY,
+             reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(TabletGestureDisableFlags())));
+
+    // Enable all pointer messages (pen/touch) so we get pressure + barrel reliably.
+    // EnableMouseInPointer: when TRUE, pen also generates mouse; we still need gestures off.
+    // Keep mouse-in-pointer so existing ImGui/GLFW mouse path works.
+    EnableMouseInPointer(TRUE);
+
+    // Register as touch window with want-palm so OS palm rejection is less aggressive;
+    // does not enable press-and-hold if tablet props above are set.
+    RegisterTouchWindow(hWnd, TWF_WANTPALM);
+
+    Logger::Get().InfoTag("input",
+        "Pen drawing mode: press-and-hold/flicks disabled for main window");
+}
+
+static void UpdatePenStateFromPointer(UINT32 pointerId, bool isUp) {
+    if (isUp) {
+        g_PenPressure = 1.0f;
+        g_IsPenActive = false;
+        g_PenBarrelDown = false;
+        g_PenEraserDown = false;
+        return;
+    }
+    POINTER_INPUT_TYPE pointerType = PT_POINTER;
+    if (!GetPointerType(pointerId, &pointerType) || pointerType != PT_PEN) {
+        g_PenPressure = 1.0f;
+        g_IsPenActive = false;
+        g_PenBarrelDown = false;
+        g_PenEraserDown = false;
+        return;
+    }
+    POINTER_PEN_INFO penInfo = {};
+    if (!GetPointerPenInfo(pointerId, &penInfo)) return;
+
+    g_IsPenActive = true;
+    // pressure is 0..1024 for pen
+    g_PenPressure = std::clamp((float)penInfo.pressure / 1024.0f, 0.f, 1.f);
+
+    const UINT32 flags = penInfo.pointerInfo.pointerFlags;
+    const UINT32 penFlags = penInfo.penFlags;
+    // Barrel button and/or "second button" (right) — driver-mapped RMB often never
+    // reaches GLFW; we inject ImGui right-button after NewFrame.
+    g_PenBarrelDown =
+        ((penFlags & PEN_FLAG_BARREL) != 0) ||
+        ((flags & POINTER_FLAG_SECONDBUTTON) != 0);
+    g_PenEraserDown = ((penFlags & PEN_FLAG_ERASER) != 0);
+}
 
 LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
@@ -67,36 +155,37 @@ LRESULT CALLBACK SubclassedWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM l
             }
             return FALSE;
         }
+
+        // Critical: tell Tablet PC service this is a drawing app — no press-and-hold
+        // dead zone (the small screen-space circle that blocks paint until you leave it).
+        case WM_TABLET_QUERYSYSTEMGESTURESTATUS:
+            return static_cast<LRESULT>(TabletGestureDisableFlags());
+
+        // Swallow OS gesture messages that can eat pen input
+        case WM_GESTURE:
+        case WM_GESTURENOTIFY:
+            return 0;
+
         case WM_LBUTTONDOWN:
         case WM_MOUSEMOVE: {
             // Only reset if this is a genuine mouse event, not a synthesized one from a pen/tablet
+            // (pen-synthesized mouse uses signature 0xFF515700 in GetMessageExtraInfo)
             if ((GetMessageExtraInfo() & 0xFFFFFF00) != 0xFF515700) {
                 g_PenPressure = 1.0f;
                 g_IsPenActive = false;
+                g_PenBarrelDown = false;
+                g_PenEraserDown = false;
             }
             break;
         }
         case WM_POINTERDOWN:
         case WM_POINTERUPDATE: {
-            UINT32 pointerId = GET_POINTERID_WPARAM(wParam);
-            POINTER_INPUT_TYPE pointerType = PT_POINTER;
-            if (GetPointerType(pointerId, &pointerType)) {
-                if (pointerType == PT_PEN) {
-                    POINTER_PEN_INFO penInfo;
-                    if (GetPointerPenInfo(pointerId, &penInfo)) {
-                        g_PenPressure = (float)penInfo.pressure / 1024.0f;
-                        g_IsPenActive = true;
-                    }
-                } else {
-                    g_PenPressure = 1.0f;
-                    g_IsPenActive = false;
-                }
-            }
+            UpdatePenStateFromPointer(GET_POINTERID_WPARAM(wParam), /*isUp=*/false);
             break;
         }
-        case WM_POINTERUP: {
-            g_PenPressure = 1.0f;
-            g_IsPenActive = false;
+        case WM_POINTERUP:
+        case WM_POINTERCAPTURECHANGED: {
+            UpdatePenStateFromPointer(GET_POINTERID_WPARAM(wParam), /*isUp=*/true);
             break;
         }
     }
@@ -665,6 +754,9 @@ int main(int argc, char* argv[]) {
 
     // Subclass window procedure for high-precision pointer/tablet messages + single-instance IPC
     g_OriginalWndProc = (WNDPROC)SetWindowLongPtr(hWnd, GWLP_WNDPROC, (LONG_PTR)SubclassedWndProc);
+    // Disable Windows press-and-hold / flicks for this HWND (Photoshop-like pen drawing).
+    // Without this, pen tip freezes inside a small *screen-space* circle until moved out.
+    ConfigureWindowForPenDrawing(hWnd);
     SingleInstance::RegisterMainWindow(hWnd);
 
     // Explorer DDS previews: register COM thumbnail handler under HKCU (no admin).
@@ -1017,6 +1109,17 @@ int main(int argc, char* argv[]) {
         // Start Dear ImGui Frame
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplGlfw_NewFrame();
+        // Pen barrel / second button → ImGui RMB. Driver-mapped "right click" often never
+        // reaches GLFW under Windows Ink; inject edge-triggered button events after GLFW backend.
+        {
+            static bool s_PrevPenBarrel = false;
+            ImGuiIO& ioPen = ImGui::GetIO();
+            const bool wantRmb = g_IsPenActive && g_PenBarrelDown;
+            if (wantRmb != s_PrevPenBarrel) {
+                ioPen.AddMouseButtonEvent(ImGuiMouseButton_Right, wantRmb);
+                s_PrevPenBarrel = wantRmb;
+            }
+        }
         ImGui::NewFrame();
         g_IsViewportHovered = false;
         g_IsLayersHovered = false;
