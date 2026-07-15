@@ -2373,15 +2373,17 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         }
 
         // Place the very first stamp immediately
+        // CRITICAL: never pass a temporary copy of the full selection mask (8K = 64 MiB/dab).
+        static const std::vector<uint8_t> kEmptySel;
+        const std::vector<uint8_t>& selMask =
+            (m_HasSelection && !m_SelectionMask.empty()) ? m_SelectionMask : kEmptySel;
         PaintEngine::DrawStamp(*m_Layers[m_ActiveLayerIdx].tileCache,
                                currRawX, currRawY, activeBrush,
                                m_MirrorHorizontal, m_MirrorVertical,
-                               m_HasSelection ? m_SelectionMask : std::vector<uint8_t>{});
+                               selMask);
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
-        // Do NOT set filtersDirty — ComposeLayers refilters only dirty tiles (keeps FX live).
-        m_Layers[m_ActiveLayerIdx].thumbDirty = true;
+        // Mid-stroke: raw content only. FX refilter deferred to StrokePhase::End (see ComposeLayers).
         m_CompositeDirty = true;
-        m_ChannelPreviewDirty = true;
     }
     else if (phase == StrokePhase::Update && m_IsStrokeActive) {
         // Apply stabilization
@@ -2422,21 +2424,22 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                           static_cast<float>(m_Width) - stabilizedX, static_cast<float>(m_Height) - stabilizedY);
         }
 
-        // Draw stroke segment
+        // Draw stroke segment (no selection-mask copy)
+        static const std::vector<uint8_t> kEmptySelUpd;
+        const std::vector<uint8_t>& selMask =
+            (m_HasSelection && !m_SelectionMask.empty()) ? m_SelectionMask : kEmptySelUpd;
         PaintEngine::DrawStrokeSegment(*m_Layers[m_ActiveLayerIdx].tileCache,
                                        m_PrevStabilizedX, m_PrevStabilizedY,
                                        stabilizedX, stabilizedY,
                                        activeBrush, m_StrokeDistanceAccumulator,
                                        m_LastDabX, m_LastDabY,
                                        m_MirrorHorizontal, m_MirrorVertical,
-                                       m_HasSelection ? m_SelectionMask : std::vector<uint8_t>{});
+                                       selMask);
 
         m_PrevStabilizedX = stabilizedX;
         m_PrevStabilizedY = stabilizedY;
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
-        m_Layers[m_ActiveLayerIdx].thumbDirty = true;
-        m_CompositeDirty = true; // recompose every dab (A-off RGB view stays live)
-        m_ChannelPreviewDirty = true;
+        m_CompositeDirty = true; // recompose every dab from raw tiles (FX deferred)
     }
     else if (phase == StrokePhase::End) {
         m_IsStrokeActive = false;
@@ -2444,9 +2447,15 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         m_ChannelPreviewDirty = true;
         if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
             auto& al = m_Layers[m_ActiveLayerIdx];
-            // Final pass: catch any remaining dirty tiles (esp. blur halo).
-            if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(al.filters))
+            al.thumbDirty = true;
+            // Re-mark stroke tiles dirty so incremental FX refilter sees them (compose may
+            // have cleared dirty flags while uploading raw mid-stroke).
+            if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(al.filters) && al.tileCache) {
+                for (const auto& pair : m_ActiveStrokeDeltas) {
+                    al.tileCache->MarkDirty(pair.second.tileX, pair.second.tileY);
+                }
                 RefreshFilteredCache(al, /*onlyDirtyTiles=*/true);
+            }
             if (al.HasEnabledStyles()) {
                 al.presentationDirty = true;
                 al.stylesDirty = true;
@@ -2673,31 +2682,38 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 if (!layer.texture) continue;
             }
 
-            // Filters: sparse tile refresh (full when filtersDirty; dirty-only while painting).
-            // Styles: full presentation bake is expensive — skip mid-stroke, keep filters live.
-            bool filtersWereDirty = m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters) &&
-                (layer.filtersDirty || (layer.tileCache && layer.tileCache->HasPendingGpuWork()));
+            // Filters: NEVER refilter mid-stroke on the active paint layer — blur halo CPU
+            // was the main "modifiers kill FPS" path. Paint raw; bake FX on Stroke End.
+            const bool isActivePaintLayer =
+                m_IsStrokeActive && (int)i == m_ActiveLayerIdx;
+            bool filtersWereDirty = false;
             bool stylesWereDirty = LayerStylesPreviewActive(layer) &&
                 (layer.stylesDirty || layer.presentationDirty);
 
-            if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters)) {
-                if (layer.filtersDirty || !layer.filteredCache || layer.filteredCache->IsEmpty())
+            if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters) &&
+                !isActivePaintLayer) {
+                if (layer.filtersDirty || !layer.filteredCache || layer.filteredCache->IsEmpty()) {
                     RefreshFilteredCache(layer, /*onlyDirtyTiles=*/false);
-                else if (layer.tileCache && layer.tileCache->HasPendingGpuWork())
-                    // Dirty content after paint / undo — sparse refilter (FX stays live mid-stroke)
+                    filtersWereDirty = true;
+                } else if (layer.tileCache && layer.tileCache->HasPendingGpuWork()) {
                     RefreshFilteredCache(layer, /*onlyDirtyTiles=*/true);
+                    filtersWereDirty = true;
+                }
             }
             if (LayerStylesPreviewActive(layer) && !m_IsStrokeActive)
                 RebuildLayerPresentation(layer);
 
-            // Pick source: presentation (styles, idle) > filtered (filters live, incl. stroke) > raw
+            // Pick source: presentation (styles, idle) > filtered (idle FX) > raw
+            // Active stroke always uses raw tileCache for lightning-fast dabs.
             TileCache* src = nullptr;
             bool layerNeedsUpload = layer.needsUpload;
-            const bool usePres = LayerStylesPreviewActive(layer) && !m_IsStrokeActive &&
+            const bool usePres = !isActivePaintLayer && LayerStylesPreviewActive(layer) &&
+                !m_IsStrokeActive &&
                 layer.presentationCache && !layer.presentationCache->IsEmpty();
             if (usePres)
                 src = layer.presentationCache.get();
-            else if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters) &&
+            else if (!isActivePaintLayer && m_EffectsPreviewEnabled &&
+                     LayerFilterListHasEnabled(layer.filters) &&
                      layer.filteredCache && !layer.filteredCache->IsEmpty() && !layer.filtersDirty)
                 src = layer.filteredCache.get();
             if (!src) src = layer.tileCache.get();
@@ -2706,7 +2722,6 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             bool layerHadUploads = false;
             size_t dirtyUploaded = 0;
             const bool hadPending = src->HasPendingGpuWork() || layerNeedsUpload;
-            auto uploadStart = std::chrono::high_resolution_clock::now();
             src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
                 layerHadUploads = true;
                 ++dirtyUploaded;
@@ -2719,24 +2734,18 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 box.back   = 1;
                 UINT pitch = TILE_SIZE * (UINT)src->GetBytesPerPixel();
                 context->UpdateSubresource(layer.texture, 0, &box, data, pitch, 0);
-                if (dirtyUploaded == 1 || (dirtyUploaded % 512) == 0) {
-                    Logger::Get().InfoTag("gpu",
-                        "Upload dirty tiles progress " + std::to_string(dirtyUploaded));
-                }
             });
+            // Always clear dirty after GPU upload. Stroke End re-marks tiles from
+            // m_ActiveStrokeDeltas before RefreshFilteredCache (FX bake).
             src->ClearAllDirty();
             layer.needsUpload = false;
-            if (layerHadUploads && dirtyUploaded > 0) {
-                double ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::high_resolution_clock::now() - uploadStart).count();
-                Logger::Get().InfoTag("gpu",
-                    "Uploaded " + std::to_string(dirtyUploaded) + " dirty tiles in " +
-                    std::to_string(ms) + " ms");
-            }
+            // Hot path: no per-dab Info logs (was a major real-project FPS killer vs bench).
             if (layerHadUploads || filtersWereDirty || stylesWereDirty || layerNeedsUpload || hadPending) {
                 needsCompositeRebuild = true;
-                layer.thumbDirty = true;
-                m_ChannelPreviewDirty = true;
+                if (!m_IsStrokeActive) {
+                    layer.thumbDirty = true;
+                    m_ChannelPreviewDirty = true;
+                }
             }
 
             if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
@@ -6263,31 +6272,71 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
     // Undo backup only for tiles we will cut (source AABB)
     BackupTilesInRect(minX, minY, maxX, maxY);
 
-    // Lift pixels tile-wise (no full-canvas ExportLayerF)
-    for (int y = minY; y <= maxY; ++y) {
-        for (int x = minX; x <= maxX; ++x) {
-            size_t li = (size_t)(y - minY) * (size_t)m_FloatingBufW + (size_t)(x - minX);
-            float weight = SelU82F(m_OriginalSelectionMask[li]);
-            if (weight <= 0.0f) continue;
-
-            float rgba[4] = {0, 0, 0, 0};
-            layer.tileCache->GetPixelF(x, y, rgba);
-            size_t pi = li * 4;
-            m_FloatingPixels[pi + 0] = rgba[0];
-            m_FloatingPixels[pi + 1] = rgba[1];
-            m_FloatingPixels[pi + 2] = rgba[2];
-            m_FloatingPixels[pi + 3] = rgba[3] * weight;
-
-            rgba[0] *= (1.0f - weight);
-            rgba[1] *= (1.0f - weight);
-            rgba[2] *= (1.0f - weight);
-            rgba[3] *= (1.0f - weight);
-            layer.tileCache->SetPixelF(x, y, rgba);
+    // Lift pixels tile-locked (no GetPixelF/SetPixelF thrash)
+    {
+        const auto fmt = layer.tileCache->GetFormat();
+        const int bpp = layer.tileCache->GetBytesPerPixel();
+        const int ntx = layer.tileCache->GetTilesX();
+        const int nty = layer.tileCache->GetTilesY();
+        const int t0x = minX / TILE_SIZE, t0y = minY / TILE_SIZE;
+        const int t1x = maxX / TILE_SIZE, t1y = maxY / TILE_SIZE;
+        for (int ty = t0y; ty <= t1y && ty < nty; ++ty) {
+            for (int tx = t0x; tx <= t1x && tx < ntx; ++tx) {
+                const int tileX0 = tx * TILE_SIZE, tileY0 = ty * TILE_SIZE;
+                const int px0 = std::max(minX, tileX0);
+                const int py0 = std::max(minY, tileY0);
+                const int px1 = std::min(maxX, tileX0 + TILE_SIZE - 1);
+                const int py1 = std::min(maxY, tileY0 + TILE_SIZE - 1);
+                if (px1 < px0 || py1 < py0) continue;
+                // Need a writable tile only if something is cut; still lock if any weight>0
+                uint8_t* raw = layer.tileCache->LockTile(tx, ty);
+                if (!raw) continue;
+                for (int y = py0; y <= py1; ++y) {
+                    const int lyT = y - tileY0;
+                    uint8_t* row = raw + ((size_t)lyT * TILE_SIZE) * bpp;
+                    for (int x = px0; x <= px1; ++x) {
+                        size_t li = (size_t)(y - minY) * (size_t)m_FloatingBufW + (size_t)(x - minX);
+                        float weight = SelU82F(m_OriginalSelectionMask[li]);
+                        if (weight <= 0.0f) continue;
+                        const int lxT = x - tileX0;
+                        uint8_t* p = row + (size_t)lxT * bpp;
+                        float rgba[4];
+                        if (fmt == CanvasPixelFormat::RGBA8) {
+                            rgba[0] = p[0] / 255.f; rgba[1] = p[1] / 255.f;
+                            rgba[2] = p[2] / 255.f; rgba[3] = p[3] / 255.f;
+                        } else if (fmt == CanvasPixelFormat::RGBA16F) {
+                            HalfFloat::LoadRGBA16F(p, rgba);
+                        } else {
+                            const float* fp = reinterpret_cast<const float*>(p);
+                            rgba[0] = fp[0]; rgba[1] = fp[1]; rgba[2] = fp[2]; rgba[3] = fp[3];
+                        }
+                        size_t pi = li * 4;
+                        m_FloatingPixels[pi + 0] = rgba[0];
+                        m_FloatingPixels[pi + 1] = rgba[1];
+                        m_FloatingPixels[pi + 2] = rgba[2];
+                        m_FloatingPixels[pi + 3] = rgba[3] * weight;
+                        rgba[0] *= (1.0f - weight);
+                        rgba[1] *= (1.0f - weight);
+                        rgba[2] *= (1.0f - weight);
+                        rgba[3] *= (1.0f - weight);
+                        if (fmt == CanvasPixelFormat::RGBA8) {
+                            p[0] = HalfFloat::FloatToU8(rgba[0]);
+                            p[1] = HalfFloat::FloatToU8(rgba[1]);
+                            p[2] = HalfFloat::FloatToU8(rgba[2]);
+                            p[3] = HalfFloat::FloatToU8(rgba[3]);
+                        } else if (fmt == CanvasPixelFormat::RGBA16F) {
+                            HalfFloat::StoreRGBA16F(p, rgba);
+                        } else {
+                            float* fp = reinterpret_cast<float*>(p);
+                            fp[0] = rgba[0]; fp[1] = rgba[1]; fp[2] = rgba[2]; fp[3] = rgba[3];
+                        }
+                    }
+                }
+            }
         }
     }
     layer.needsUpload = true;
     layer.thumbDirty = true;
-    layer.filtersDirty = true;
     m_CompositeDirty = true;
 
     // Edge RGB pad for bilinear (local buffer only — 4 cheap dilate passes)
@@ -6381,10 +6430,9 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
         }
     }
 
-    Logger::Get().InfoTag("perf",
-        "StartMovePixels floating " + std::to_string(fw) + "x" + std::to_string(fh) +
-        " (" + MemoryStats::FormatBytes(estBytes) + ") center=(" +
-        std::to_string((int)m_FloatingCenterX) + "," + std::to_string((int)m_FloatingCenterY) + ")");
+    Logger::Get().Debug(
+        std::string("[perf] StartMovePixels floating ") + std::to_string(fw) + "x" +
+        std::to_string(fh) + " (" + MemoryStats::FormatBytes(estBytes) + ")");
 }
 
 void Canvas::UpdateMovePixels(ID3D11Device* device, int dx, int dy) {
@@ -6415,6 +6463,32 @@ static float sampleBilinearChannel(const std::vector<float>& pixels, int width, 
     float r1 = c00 * (1.0f - tx) + c10 * tx;
     float r2 = c01 * (1.0f - tx) + c11 * tx;
     return r1 * (1.0f - ty) + r2 * ty;
+}
+
+// Sample all 4 channels once (4× cheaper than 4× sampleBilinearChannel).
+static void sampleBilinearRGBA(const std::vector<float>& pixels, int width, int height,
+                               float fx, float fy, float out[4]) {
+    int x1 = (int)std::floor(fx);
+    int y1 = (int)std::floor(fy);
+    int x2 = x1 + 1;
+    int y2 = y1 + 1;
+    float tx = fx - x1;
+    float ty = fy - y1;
+    x1 = std::clamp(x1, 0, width - 1);
+    x2 = std::clamp(x2, 0, width - 1);
+    y1 = std::clamp(y1, 0, height - 1);
+    y2 = std::clamp(y2, 0, height - 1);
+    const size_t i00 = ((size_t)y1 * width + x1) * 4;
+    const size_t i10 = ((size_t)y1 * width + x2) * 4;
+    const size_t i01 = ((size_t)y2 * width + x1) * 4;
+    const size_t i11 = ((size_t)y2 * width + x2) * 4;
+    const float w00 = (1.f - tx) * (1.f - ty);
+    const float w10 = tx * (1.f - ty);
+    const float w01 = (1.f - tx) * ty;
+    const float w11 = tx * ty;
+    for (int c = 0; c < 4; ++c)
+        out[c] = pixels[i00 + c] * w00 + pixels[i10 + c] * w10
+               + pixels[i01 + c] * w01 + pixels[i11 + c] * w11;
 }
 
 static float sampleBilinearMask(const std::vector<uint8_t>& mask, int width, int height, float fx, float fy) {
@@ -6487,46 +6561,97 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
 
         const float invCos = std::cos(-m_FloatingRotation);
         const float invSin = std::sin(-m_FloatingRotation);
-        const float invSx = (m_FloatingScaleX > 1e-4f) ? (1.f / m_FloatingScaleX) : 0.f;
-        const float invSy = (m_FloatingScaleY > 1e-4f) ? (1.f / m_FloatingScaleY) : 0.f;
+        const float invSx = (m_FloatingScaleX > 1e-4f) ? (1.f / m_FloatingScaleX) : 1.f;
+        const float invSy = (m_FloatingScaleY > 1e-4f) ? (1.f / m_FloatingScaleY) : 1.f;
 
-        for (int y = destY0; y <= destY1; ++y) {
-            for (int x = destX0; x <= destX1; ++x) {
-                float px = (float)x - cx - (float)m_FloatingOffsetX;
-                float py = (float)y - cy - (float)m_FloatingOffsetY;
-                float rx = px * invCos - py * invSin;
-                float ry = px * invSin + py * invCos;
-                float srcX = rx * invSx + cx;
-                float srcY = ry * invSy + cy;
+        // Tile-locked commit (no GetPixelF/SetPixelF per pixel)
+        const auto fmt = layer.tileCache->GetFormat();
+        const int bpp = layer.tileCache->GetBytesPerPixel();
+        const int ntx = layer.tileCache->GetTilesX();
+        const int nty = layer.tileCache->GetTilesY();
+        const int tx0 = destX0 / TILE_SIZE, ty0 = destY0 / TILE_SIZE;
+        const int tx1 = destX1 / TILE_SIZE, ty1 = destY1 / TILE_SIZE;
 
-                // Local floating coords
-                float lx = srcX - (float)ox;
-                float ly = srcY - (float)oy;
-                if (lx < -0.5f || ly < -0.5f || lx > (float)fw - 0.5f || ly > (float)fh - 0.5f)
-                    continue;
+        for (int ty = ty0; ty <= ty1 && ty < nty; ++ty) {
+            for (int tx = tx0; tx <= tx1 && tx < ntx; ++tx) {
+                const int tileX0 = tx * TILE_SIZE, tileY0 = ty * TILE_SIZE;
+                const int px0 = std::max(destX0, tileX0);
+                const int py0 = std::max(destY0, tileY0);
+                const int px1 = std::min(destX1, tileX0 + TILE_SIZE - 1);
+                const int py1 = std::min(destY1, tileY0 + TILE_SIZE - 1);
+                if (px1 < px0 || py1 < py0) continue;
 
-                float srcAlpha = sampleBilinearChannel(m_FloatingPixels, fw, fh, lx, ly, 3);
-                if (srcAlpha <= 0.0f) continue;
+                uint8_t* raw = layer.tileCache->LockTile(tx, ty);
+                if (!raw) continue;
 
-                float dest[4] = {0, 0, 0, 0};
-                layer.tileCache->GetPixelF(x, y, dest);
-                float destAlpha = dest[3];
-                float outAlpha = srcAlpha + destAlpha * (1.0f - srcAlpha);
-                if (outAlpha > 0.0f) {
-                    float srcR = sampleBilinearChannel(m_FloatingPixels, fw, fh, lx, ly, 0);
-                    float srcG = sampleBilinearChannel(m_FloatingPixels, fw, fh, lx, ly, 1);
-                    float srcB = sampleBilinearChannel(m_FloatingPixels, fw, fh, lx, ly, 2);
-                    dest[0] = (srcR * srcAlpha + dest[0] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
-                    dest[1] = (srcG * srcAlpha + dest[1] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
-                    dest[2] = (srcB * srcAlpha + dest[2] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                for (int y = py0; y <= py1; ++y) {
+                    const int lyT = y - tileY0;
+                    uint8_t* row = raw + ((size_t)lyT * TILE_SIZE) * bpp;
+                    for (int x = px0; x <= px1; ++x) {
+                        float px = (float)x - cx - (float)m_FloatingOffsetX;
+                        float py = (float)y - cy - (float)m_FloatingOffsetY;
+                        float rx = px * invCos - py * invSin;
+                        float ry = px * invSin + py * invCos;
+                        float srcX = rx * invSx + cx;
+                        float srcY = ry * invSy + cy;
+                        float lx = srcX - (float)ox;
+                        float ly = srcY - (float)oy;
+                        if (lx < -0.5f || ly < -0.5f || lx > (float)fw - 0.5f || ly > (float)fh - 0.5f)
+                            continue;
+
+                        float src[4];
+                        sampleBilinearRGBA(m_FloatingPixels, fw, fh, lx, ly, src);
+                        if (src[3] <= 0.0f) continue;
+                        const float srcAlpha = src[3];
+
+                        const int lxT = x - tileX0;
+                        uint8_t* p = row + (size_t)lxT * bpp;
+                        float dest[4];
+                        if (fmt == CanvasPixelFormat::RGBA8) {
+                            dest[0] = p[0] / 255.f; dest[1] = p[1] / 255.f;
+                            dest[2] = p[2] / 255.f; dest[3] = p[3] / 255.f;
+                        } else if (fmt == CanvasPixelFormat::RGBA16F) {
+                            HalfFloat::LoadRGBA16F(p, dest);
+                        } else {
+                            const float* fp = reinterpret_cast<const float*>(p);
+                            dest[0] = fp[0]; dest[1] = fp[1]; dest[2] = fp[2]; dest[3] = fp[3];
+                        }
+
+                        float destAlpha = dest[3];
+                        float outAlpha = srcAlpha + destAlpha * (1.0f - srcAlpha);
+                        if (outAlpha > 0.0f) {
+                            dest[0] = (src[0] * srcAlpha + dest[0] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                            dest[1] = (src[1] * srcAlpha + dest[1] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                            dest[2] = (src[2] * srcAlpha + dest[2] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                        }
+                        dest[3] = outAlpha;
+
+                        if (fmt == CanvasPixelFormat::RGBA8) {
+                            p[0] = HalfFloat::FloatToU8(dest[0]);
+                            p[1] = HalfFloat::FloatToU8(dest[1]);
+                            p[2] = HalfFloat::FloatToU8(dest[2]);
+                            p[3] = HalfFloat::FloatToU8(dest[3]);
+                        } else if (fmt == CanvasPixelFormat::RGBA16F) {
+                            HalfFloat::StoreRGBA16F(p, dest);
+                        } else {
+                            float* fp = reinterpret_cast<float*>(p);
+                            fp[0] = dest[0]; fp[1] = dest[1]; fp[2] = dest[2]; fp[3] = dest[3];
+                        }
+                    }
                 }
-                dest[3] = outAlpha;
-                layer.tileCache->SetPixelF(x, y, dest);
             }
         }
         layer.needsUpload = true;
         layer.thumbDirty = true;
-        layer.filtersDirty = true;
+        // Deferred FX: mark dirty only if filters present (don't force full filtersDirty rebuild)
+        if (LayerFilterListHasEnabled(layer.filters)) {
+            for (int ty = ty0; ty <= ty1 && ty < nty; ++ty)
+                for (int tx = tx0; tx <= tx1 && tx < ntx; ++tx)
+                    layer.tileCache->MarkDirty(tx, ty);
+            layer.filtersDirty = false; // incremental path in compose
+        } else {
+            layer.filtersDirty = false;
+        }
         m_CompositeDirty = true;
 
         CommitTransformation("Transform");
@@ -7963,14 +8088,40 @@ void Canvas::RefreshFilteredCache(Layer& layer, bool onlyDirtyTiles) {
         const int rh = ry1 - ry0;
         if (rw <= 0 || rh <= 0) continue;
 
+        // Bulk tile-row export (no per-pixel GetPixelF — was catastrophic for blur halo)
         std::vector<float> region((size_t)rw * rh * 4, 0.f);
+        const auto fmt = layer.tileCache->GetFormat();
+        const int bpp = layer.tileCache->GetBytesPerPixel();
         for (int y = 0; y < rh; ++y) {
-            for (int x = 0; x < rw; ++x) {
-                float px[4];
-                layer.tileCache->GetPixelF(rx0 + x, ry0 + y, px);
-                size_t i = ((size_t)y * rw + x) * 4;
-                region[i + 0] = px[0]; region[i + 1] = px[1];
-                region[i + 2] = px[2]; region[i + 3] = px[3];
+            const int docY = ry0 + y;
+            const int sty = docY / TILE_SIZE;
+            const int sly = docY - sty * TILE_SIZE;
+            int x = 0;
+            while (x < rw) {
+                const int docX = rx0 + x;
+                const int stx = docX / TILE_SIZE;
+                const int slx0 = docX - stx * TILE_SIZE;
+                const int run = std::min(rw - x, TILE_SIZE - slx0);
+                const uint8_t* raw = layer.tileCache->GetTileData(stx, sty);
+                if (raw) {
+                    for (int k = 0; k < run; ++k) {
+                        const uint8_t* p = raw + ((size_t)sly * TILE_SIZE + (slx0 + k)) * bpp;
+                        size_t i = ((size_t)y * rw + x + k) * 4;
+                        if (fmt == CanvasPixelFormat::RGBA8) {
+                            region[i + 0] = p[0] / 255.f; region[i + 1] = p[1] / 255.f;
+                            region[i + 2] = p[2] / 255.f; region[i + 3] = p[3] / 255.f;
+                        } else if (fmt == CanvasPixelFormat::RGBA16F) {
+                            float px[4]; HalfFloat::LoadRGBA16F(p, px);
+                            region[i + 0] = px[0]; region[i + 1] = px[1];
+                            region[i + 2] = px[2]; region[i + 3] = px[3];
+                        } else {
+                            const float* fp = reinterpret_cast<const float*>(p);
+                            region[i + 0] = fp[0]; region[i + 1] = fp[1];
+                            region[i + 2] = fp[2]; region[i + 3] = fp[3];
+                        }
+                    }
+                }
+                x += run;
             }
         }
 
@@ -7980,14 +8131,9 @@ void Canvas::RefreshFilteredCache(Layer& layer, bool onlyDirtyTiles) {
         const int oy = y0 - ry0;
         std::vector<float> tileF((size_t)tileW * tileH * 4);
         for (int y = 0; y < tileH; ++y) {
-            for (int x = 0; x < tileW; ++x) {
-                size_t si = ((size_t)(oy + y) * rw + (ox + x)) * 4;
-                size_t di = ((size_t)y * tileW + x) * 4;
-                tileF[di + 0] = region[si + 0];
-                tileF[di + 1] = region[si + 1];
-                tileF[di + 2] = region[si + 2];
-                tileF[di + 3] = region[si + 3];
-            }
+            const size_t siBase = ((size_t)(oy + y) * rw + ox) * 4;
+            const size_t diBase = ((size_t)y * tileW) * 4;
+            std::memcpy(tileF.data() + diBase, region.data() + siBase, (size_t)tileW * 4 * sizeof(float));
         }
         layer.filteredCache->ImportRGBA32F(tileF.data(), tileW, tileH, x0, y0);
     }
