@@ -25,6 +25,7 @@
 #include "../core/BrushLibrary.h"
 #include "../core/ProjectManager.h"
 #include "../shell/DdsThumbRegister.h"
+#include "shell/HelperShellRegister.h"
 #include "../preview3d/PreviewRenderer.h"
 #include "../preview3d/MaterialConfig.h"
 #include <stb_image.h>
@@ -944,6 +945,40 @@ namespace UI {
                     }
                     if (ImGui::IsItemHovered())
                         Ui::Tooltip("Removes our CLSID / ShellEx / property handler (elevates for HKLM).");
+                    ImGui::Separator();
+                    // ---- Helper microservices (PNG→DDS + atlas) — registry only ----
+                    {
+                        auto hs = HelperShellRegister::QueryStatus();
+                        ImGui::TextUnformatted("PNG helper tools");
+                        ImGui::PushStyleColor(ImGuiCol_Text, hs.fullyOk
+                            ? ImVec4(0.45f, 0.9f, 0.5f, 1.f)
+                            : ImVec4(0.95f, 0.75f, 0.35f, 1.f));
+                        ImGui::TextWrapped("%s", hs.summary.c_str());
+                        ImGui::PopStyleColor();
+                        ImGui::TextDisabled("%s", hs.exeLine.c_str());
+                        ImGui::TextDisabled("%s", hs.convertLine.c_str());
+                        ImGui::TextDisabled("%s", hs.atlasLine.c_str());
+                        if (ImGui::MenuItem("Register helpers (PNG → DDS + Atlas)")) {
+                            if (HelperShellRegister::EnsureRegistered())
+                                Logger::Get().Info(
+                                    "PNG helpers registered. Right-click PNG(s) in Explorer.");
+                            else
+                                Logger::Get().Error(
+                                    "Helpers register failed — build RayVHelpers.exe next to Core.");
+                        }
+                        if (ImGui::IsItemHovered())
+                            Ui::Tooltip(
+                                "Registers Explorer context menu for multi-select PNG:\n"
+                                "• Convert to DDS (RayVPaint)\n"
+                                "• Create Texture Atlas (RayVPaint)\n"
+                                "Uses RayVHelpers.exe + same app icon. HKCU only (no Admin).");
+                        if (ImGui::MenuItem("Unregister helpers")) {
+                            if (HelperShellRegister::Unregister())
+                                Logger::Get().Info("PNG helpers unregistered.");
+                            else
+                                Logger::Get().Error("Helpers unregister failed.");
+                        }
+                    }
                     ImGui::Separator();
                 }
                 if (ImGui::MenuItem("About RayV-Paint…"))

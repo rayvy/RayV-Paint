@@ -137,6 +137,9 @@ set(SOURCES
     src/core/SingleInstance.h
     src/shell/DdsThumbRegister.cpp
     src/shell/DdsThumbRegister.h
+    # Helper microservices: shell context-menu register only (no paint coupling)
+    helper_microservices/shell/HelperShellRegister.cpp
+    helper_microservices/shell/HelperShellRegister.h
     src/modio/ModTypes.cpp
     src/modio/ModTypes.h
     src/modio/ModIniParser.cpp
@@ -274,9 +277,15 @@ target_include_directories(RayVPaint_Core PRIVATE
     src
     src/core
     src/scripting
+    helper_microservices
     ${stb_SOURCE_DIR}
     "${OPENCV_INSTALL_DIR}/include"
 )
+
+# Isolated PNG→DDS + atlas micro-apps (RayVHelpers.exe). Requires imgui FetchContent above.
+if(WIN32)
+    add_subdirectory(helper_microservices)
+endif()
 
 # Copy OpenCV LICENSE file to the output directory
 add_custom_command(

@@ -1,0 +1,2 @@
+// Same application icon as RayVPaint (lowest ID = shell icon).
+1 ICON "../src/resources/app.ico"
