@@ -63,6 +63,7 @@ namespace UI {
         bool showViewportNav = true;   // Stage 2c — zoom/pan/flip/rot
         bool showLayerEffects = false; // Stage 2c — FX panel for active layer
         bool showLayers = true;
+        bool showAssetBrowser = false;
         bool showChannels = true;
         bool showToolbar = true;
         bool showColors = true;

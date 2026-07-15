@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <random>
 
 namespace layer_fx {
@@ -651,16 +652,17 @@ void FillSolidBuffer(std::vector<float>& out, int w, int h, const FillLayerParam
     fill.ResolveRgba(c);
     out.resize((size_t)w * h * 4);
 
+    // Pin shared payload for the duration of the sample (safe if store releases others).
+    std::shared_ptr<const assets::TexturePayload> pinned;
     const uint8_t* texPx = nullptr;
     int tw = 0, th = 0;
     if (fill.useTexture) {
         if (!fill.textureAssetKey.empty()) {
-            if (const assets::TextureAsset* a = assets::AssetStore::Get().Get(fill.textureAssetKey)) {
-                if (!a->rgba.empty() && a->w > 0 && a->h > 0) {
-                    texPx = a->rgba.data();
-                    tw = a->w;
-                    th = a->h;
-                }
+            pinned = assets::AssetStore::Get().GetPayload(fill.textureAssetKey);
+            if (pinned && !pinned->rgba.empty() && pinned->w > 0 && pinned->h > 0) {
+                texPx = pinned->rgba.data();
+                tw = pinned->w;
+                th = pinned->h;
             }
         }
         if (!texPx && !fill.textureRgba.empty() && fill.textureW > 0 && fill.textureH > 0) {
@@ -671,6 +673,7 @@ void FillSolidBuffer(std::vector<float>& out, int w, int h, const FillLayerParam
     }
 
     if (!texPx) {
+        // Missing / pending / failed asset → solid color fallback (never block).
         for (int i = 0; i < w * h; ++i) {
             out[(size_t)i * 4 + 0] = c[0];
             out[(size_t)i * 4 + 1] = c[1];

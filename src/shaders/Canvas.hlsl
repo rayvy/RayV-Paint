@@ -24,11 +24,15 @@ cbuffer LayerBuffer : register(b1)
     // x: opacity, y: hasMask, z: firstLayer (1=init buffer, keep RGB if A=0), w: uOff when floating else 0
     // When isFloating, zw = translation; firstLayer is only used when not floating.
     float4 u_LayerParams;
-    float4 u_TransformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
+    // x: scaleX, y: scaleY, z: rotation, w: isFloating (1) or fillTexture (2)
+    float4 u_TransformParams;
     // x,y: center; z: blendMode; w: alphaRewrite (1=overwrite A, 0=A is RGB strength)
     float4 u_CenterParams;
     // Floating tex rect in document UV: xy=origin, zw=size (0 size = full-doc legacy)
+    // When fillTexture mode (transform.w > 1.5): xy=texScale, zw=texOffset
     float4 u_FloatRect;
+    // Fill texture tint (RGBA). Used when transform.w > 1.5 (fill pattern sample).
+    float4 u_FillColor;
 };
 
 Texture2D g_Texture : register(t0);
@@ -174,9 +178,11 @@ Texture2D g_Composite  : register(t2); // current composite for blend modes
 float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
 {
     float2 uv = input.uv;
+    // Fill texture mode: sample pattern at source res with wrap — no full-doc bake.
+    const bool fillTexMode = (u_TransformParams.w > 1.5f);
     
-    // Check if we are drawing floating pixels
-    if (u_TransformParams.w > 0.5f)
+    // Check if we are drawing floating pixels (w ≈ 1, not fillTex 2)
+    if (!fillTexMode && u_TransformParams.w > 0.5f)
     {
         // Center of transformation in UV space
         float2 center = u_CenterParams.xy;
@@ -219,7 +225,7 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
             return float4(0.0f, 0.0f, 0.0f, 0.0f);
         }
     }
-    else
+    else if (!fillTexMode)
     {
         // Normal layer offset translation
         uv -= u_LayerParams.zw;
@@ -231,7 +237,19 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
         }
     }
 
-    float4 col = g_Texture.Sample(g_Sampler, uv);
+    float4 col;
+    if (fillTexMode)
+    {
+        // Document UV → tiled pattern UV (wrap via frac)
+        float2 tuv = input.uv * u_FloatRect.xy + u_FloatRect.zw;
+        tuv = tuv - floor(tuv);
+        float4 tex = g_Texture.Sample(g_Sampler, tuv);
+        col = tex * u_FillColor;
+    }
+    else
+    {
+        col = g_Texture.Sample(g_Sampler, uv);
+    }
 
     // Pixel A * layer opacity [* mask] = coverage / morph strength for RGB.
     // Alpha Rewrite OFF: blend state keeps dest A; col.a is strength only.
@@ -242,8 +260,9 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
 
     if (u_LayerParams.y > 0.5f)
     {
-        // Mask uses same UV as content (local floating UV when isFloating+floatRect)
-        float maskVal = g_LayerMask.Sample(g_Sampler, uv).r;
+        // Mask always in document UV for fill-texture; content UV otherwise
+        float2 maskUv = fillTexMode ? input.uv : uv;
+        float maskVal = g_LayerMask.Sample(g_Sampler, maskUv).r;
         col.a *= maskVal;
     }
 

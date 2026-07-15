@@ -94,8 +94,15 @@ set(SOURCES
     src/layer/LayerStyles.cpp
     src/layer/LayerStyles.h
     src/assets/AssetTypes.h
+    src/assets/AssetTypes.cpp
     src/assets/AssetStore.cpp
     src/assets/AssetStore.h
+    src/assets/AssetLibraryIndex.cpp
+    src/assets/AssetLibraryIndex.h
+    src/assets/AssetThumbCache.cpp
+    src/assets/AssetThumbCache.h
+    src/assets/AssetManager.cpp
+    src/assets/AssetManager.h
     src/core/TileCache.cpp
     src/core/TileCache.h
     src/core/MaskTiles.cpp
@@ -182,6 +189,8 @@ set(SOURCES
     src/ui/dialogs/Win32FileDialogs.h
     src/ui/panels/LayersPanel.cpp
     src/ui/panels/LayersPanel.h
+    src/ui/panels/AssetBrowserPanel.cpp
+    src/ui/panels/AssetBrowserPanel.h
     src/ui/panels/ChannelsPanel.cpp
     src/ui/panels/ChannelsPanel.h
     src/ui/panels/ToolSettingsPanel.cpp
@@ -214,6 +223,10 @@ set(SOURCES
     src/ui/widgets/UiTooltip.h
     src/ui/widgets/UiColorField.cpp
     src/ui/widgets/UiColorField.h
+    src/ui/widgets/UiAssetGrid.cpp
+    src/ui/widgets/UiAssetGrid.h
+    src/ui/widgets/UiAssetPicker.cpp
+    src/ui/widgets/UiAssetPicker.h
 )
 
 # Shaders

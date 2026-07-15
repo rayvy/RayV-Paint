@@ -1,122 +1,89 @@
-# Asset Browser (Build 16 — forced optimization)
+# Asset Browser
 
-**Not a feature drop for its own sake.** Fill Layer + large textures currently store full CPU RGBA on the layer and force expensive bake paths → unusable lag. Asset Browser = **shared identity + cache** for textures (and later fonts / materials).
+**Status:** Core + UI + Fill + project packing + SmartObject foundation implemented (2026-07).
 
----
-
-## 1. Categories (folders of ownership, not file types)
+## Categories (ownership, not file types)
 
 | Category | Root | Mutability | Ship in `.rayp` |
 |----------|------|------------|-----------------|
-| **built-in** | `{exe_dir}/assets/` | Read-only | No (user already has app) |
-| **user** | `{Documents/AppData}/RayVPaint/assets/` | User r/w | No (local library) |
-| **project** | In-memory / project temp | Session + save | **Yes** — packed into `.rayp` |
+| **Core** (`BuiltIn`) | `{exe}/assets/` | Read-only | No |
+| **User** | `Documents/RayVPaint/assets/` | User r/w | No |
+| **Project** | Session memory | Session | **Yes** — referenced blobs |
+| **External** | Absolute path | Migration | Prefer promote to Project |
 
-“Types” later (texture, font, material graph) live *under* categories. **B16 type scope: textures only.**
+## Asset kinds (consumer filter)
 
----
+`Texture`, `SmartSource`, `BrushTip`, `ExportTemplate` (.rayexpt hook), `Preview3dTemplate` (.ray3dt hook), `Unknown`.
 
-## 2. Goals B16
+Fill accepts **Texture only** (UI + `BindFillTextureAsset`).
 
-1. Browse + preview + pick texture for **Fill → Use Texture**.
-2. One decode / one GPU (or tile) cache per asset key; refcount consumers.
-3. Project assets serialized in `.rayp` so projects move between machines.
-4. Fill samples via asset key — no private multi-megabyte `textureRgba` thrash every frame.
+## Architecture
 
-### Non-goals B16
+| Component | Path | Role |
+|-----------|------|------|
+| `AssetManager` | `src/assets/AssetManager.*` | Public façade for tools/UI |
+| `AssetStore` | `src/assets/AssetStore.*` | Payload cache, async load, refcount |
+| `AssetLibraryIndex` | `src/assets/AssetLibraryIndex.*` | Core/User/Project catalog |
+| `AssetThumbCache` | `src/assets/AssetThumbCache.*` | 32 / 128 thumbs + GPU LRU |
+| Browser panel | `src/ui/panels/AssetBrowserPanel.*` | Dock UI |
+| Picker / grid | `src/ui/widgets/UiAssetPicker.*`, `UiAssetGrid.*` | Modal pick + grid |
 
-- Fonts, node materials (hooks only in schema comments).
-- Cloud / store / licensing.
-- Replacing File Explorer for general file open (FE stays for maps/projects).
+## Keys
 
----
+- `core:<rel>` · `user:<rel>` · `proj:<uuid>` · `ext:<abs>`
+- Legacy `builtin:` accepted as Core
 
-## 3. Paths (concrete)
+## Thumb sidecars (disk)
 
 ```
-{exe}/assets/textures/...          # built-in
-{user}/assets/textures/...         # user library  
-project: asset table in .rayp      # project
+asset.ext
+asset.thumbnail.png      # 32×32
+asset.thumbnail_h.png    # 128×128 (hover)
 ```
 
-User root: prefer existing `ConfigManager::GetUserDirectory()` / AppData pattern used by brushes/keymap.
+Written on User import / first browse generate. Core is not written (read-only).
 
----
+## Async contract
 
-## 4. Data model (sketch)
+- `RequestLoad` / `Poll` — never block UI on full decode
+- Fill samples `GetPayload` (shared_ptr); missing → solid color fallback
+- Thumbs load async via ThreadPool
 
-```cpp
-enum class AssetCategory : uint8_t { BuiltIn, User, Project };
+## Fill
 
-struct AssetId {
-  AssetCategory cat;
-  std::string key; // relative path or uuid for project
-};
+- Bind via `Canvas::BindFillTextureAsset` / Asset Browser / picker
+- File import → **Project** asset (`ImportFileToProject`) then bind
+- No private multi-MB `textureRgba` when store Ready
+- Solid fill still 1×1 GPU path
 
-struct TextureAsset {
-  AssetId id;
-  int w, h;
-  // CPU optional after GPU upload policy
-  // GPU: ID3D11ShaderResourceView* or TileCache*
-  int refCount;
-};
-```
+## `.rayp` packing
 
-**Layer.fill (target):**
+Metadata `project_assets[]` + zlib blobs **before** layer pixels.  
+Only **referenced** `proj:` keys (fill + smartAssetKey).
 
-```cpp
-// Prefer:
-std::string fillTextureAssetKey; // or AssetId
-// Deprecate long-term as sole storage:
-// textureRgba / textureW / textureH — migrate on load
-```
+## SmartObject foundation
 
----
+- `Layer::smartAssetKey`
+- `CanPaintContent()` false for SmartObject / VectorSvg
+- `ConvertLayerToSmartObject` / `ReplaceSmartObjectSource`
+- Rasterize clears smart key/bytes
 
-## 5. UI
+## Conceptual rules
 
-- Panel or File-Explorer-like browser filtered to images.
-- Tabs or sidebar: Built-in | User | Project.
-- Thumb grid reuses FE thumb cache patterns (cap LRU).
-- Pick → returns `AssetId` to caller (Fill properties).
+1. Raster layer ≠ asset until convert/import  
+2. Using an asset does not force layer rasterization  
+3. Brushes may pick assets later; `.rvbrush` still embeds tip bytes  
+4. Templates `.rayexpt` / `.ray3dt` — kind hooks only (not full format yet)
 
----
+## Checklist
 
-## 6. .rayp packing (project category)
-
-- Section or blob list: `project_assets[] { key, mime, bytes, w, h }`
-- On open: rehydrate into memory store, keys stable.
-- On save: only **referenced** project assets (or all registered — prefer referenced).
-
----
-
-## 7. Fill performance contract
-
-| Bad (today) | Good (B16) |
-|-------------|------------|
-| Every layer holds full RGBA | Shared asset, N layers → 1 blob |
-| Dirty fill → full buffer bake often | Sample asset in cheap path; GPU 1×1 fill still for solid color |
-| Import path string only | Asset key + category |
-
-Solid color Fill stays 1×1 GPU path. Textured Fill must not call full-document `FillSolidBuffer` every frame.
-
----
-
-## 8. Implementation slices
-
-1. `AssetStore` + path resolution (built-in/user)  ✅ (`src/assets/AssetStore.*`)
-2. Register + load texture + thumb  ✅ (AcquireFile + refcount; thumbs later)
-3. UI browser shell  — next (tabs Built-in | User | Project)
-4. Fill wiring + stop private multi-MB copy  ✅  
-   - `fill.textureAssetKey` + shared sample in `FillSolidBuffer`  
-   - `LoadFillTexture` / load .rayp / Duplicate / Delete refcount
-5. Project category + `.rayp` packing blobs  
-6. Migrate old `texture_path` on document load  ✅ (AcquireFile on deserialize)
-
----
-
-## 9. Future (document only)
-
-- Fonts under `assets/fonts/`  
-- Node materials / graphs as assets  
-- Brush tip textures already partially in BrushLibrary — consider unify later  
+1. `AssetStore` + path resolution — ✅  
+2. Async load + payload pin — ✅  
+3. Library index Core/User — ✅  
+4. Thumbs 32/128 + disk sidecar — ✅  
+5. UI browser + picker — ✅  
+6. Fill wiring (no path-only identity) — ✅  
+7. Project packing in `.rayp` — ✅  
+8. SmartObject foundation — ✅  
+9. Export/3D template formats — deferred (hooks only)  
+10. GPU textured-fill sample (no full-doc bake) — future  

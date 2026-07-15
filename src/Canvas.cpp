@@ -11,6 +11,7 @@
 #include "core/PathUtil.h"
 #include "core/ClipboardHelper.h"
 #include "assets/AssetStore.h"
+#include "assets/AssetManager.h"
 #include "utilities/ContentAwareFill.h"
 // Prefer PathUtil for all disk paths (UTF-8 / wide on Windows).
 #include <opencv2/imgproc.hpp>
@@ -353,8 +354,13 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
 
                 float fillSolid[4] = {0,0,0,0};
                 const bool solidFill = layer->IsFill() && !cache;
-                if (solidFill)
+                // Textured fill without presentation cache: sample asset per pixel
+                std::shared_ptr<const assets::TexturePayload> fillPay;
+                if (solidFill) {
                     layer->fill.ResolveRgba(fillSolid);
+                    if (layer->fill.useTexture && !layer->fill.textureAssetKey.empty())
+                        fillPay = assets::AssetStore::Get().GetPayload(layer->fill.textureAssetKey);
+                }
 
                 if (!cache && !solidFill) continue;
 
@@ -368,6 +374,22 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
                         float sr, sg, sb, saPix;
                         if (solidFill) {
                             sr = fillSolid[0]; sg = fillSolid[1]; sb = fillSolid[2]; saPix = fillSolid[3];
+                            if (fillPay && fillPay->w > 0 && fillPay->h > 0) {
+                                float u = (float)x / (float)std::max(1, w) * layer->fill.texScale[0]
+                                        + layer->fill.texOffset[0];
+                                float v = (float)y / (float)std::max(1, h) * layer->fill.texScale[1]
+                                        + layer->fill.texOffset[1];
+                                u = u - std::floor(u);
+                                v = v - std::floor(v);
+                                int sx = std::min(fillPay->w - 1, (int)(u * fillPay->w));
+                                int sy = std::min(fillPay->h - 1, (int)(v * fillPay->h));
+                                if (sx < 0) sx = 0;
+                                if (sy < 0) sy = 0;
+                                const uint8_t* p = fillPay->rgba.data()
+                                    + ((size_t)sy * fillPay->w + sx) * 4;
+                                sr *= p[0] / 255.f; sg *= p[1] / 255.f;
+                                sb *= p[2] / 255.f; saPix *= p[3] / 255.f;
+                            }
                         } else if (tile) {
                             const uint8_t* sp = tile + ((size_t)ly * TILE_SIZE + lx) * 4;
                             sr = sp[0] / 255.f; sg = sp[1] / 255.f; sb = sp[2] / 255.f;
@@ -811,6 +833,7 @@ void Canvas::Shutdown() {
     if (m_SelectionMaskSRV) { m_SelectionMaskSRV->Release(); m_SelectionMaskSRV = nullptr; }
 
     for (auto& layer : m_Layers) {
+        ReleaseFillPatternGpu(layer);
         if (layer.texture) layer.texture->Release();
         if (layer.srv) layer.srv->Release();
         if (layer.maskTexture) layer.maskTexture->Release();
@@ -961,6 +984,7 @@ void Canvas::DrawTiledLayer(ID3D11DeviceContext* context, Layer& layer,
             float flags = (layer.alphaRewrite ? 1.f : 0.f) + (isFirst ? 2.f : 0.f);
             lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
             lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
+            lb->fillColor = DirectX::XMFLOAT4(1.f, 1.f, 1.f, 1.f);
             context->Unmap(m_LayerConstantBuffer, 0);
         }
         context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -1750,11 +1774,11 @@ LayerStackCommand::Snap Canvas::CaptureLayerSnap(const Layer& L, int index, int 
     // Self-contained undo: embed fill texture pixels if only AssetStore-backed.
     // DeleteLayer may Release the asset key; undo must still restore pixels.
     if (s.fill.useTexture && s.fill.textureRgba.empty() && !s.fill.textureAssetKey.empty()) {
-        if (const assets::TextureAsset* a = assets::AssetStore::Get().Get(s.fill.textureAssetKey)) {
-            if (!a->rgba.empty() && a->w > 0 && a->h > 0) {
-                s.fill.textureRgba = a->rgba;
-                s.fill.textureW = a->w;
-                s.fill.textureH = a->h;
+        if (auto pay = assets::AssetStore::Get().GetPayload(s.fill.textureAssetKey)) {
+            if (!pay->rgba.empty() && pay->w > 0 && pay->h > 0) {
+                s.fill.textureRgba = pay->rgba;
+                s.fill.textureW = pay->w;
+                s.fill.textureH = pay->h;
             }
         }
     }
@@ -1823,11 +1847,11 @@ LayerPropsCommand::Props Canvas::CaptureLayerProps(const Layer& L) {
     if (p.isFill) {
         p.fill = L.fill;
         if (p.fill.useTexture && p.fill.textureRgba.empty() && !p.fill.textureAssetKey.empty()) {
-            if (const assets::TextureAsset* a = assets::AssetStore::Get().Get(p.fill.textureAssetKey)) {
-                if (!a->rgba.empty() && a->w > 0 && a->h > 0) {
-                    p.fill.textureRgba = a->rgba;
-                    p.fill.textureW = a->w;
-                    p.fill.textureH = a->h;
+            if (auto pay = assets::AssetStore::Get().GetPayload(p.fill.textureAssetKey)) {
+                if (!pay->rgba.empty() && pay->w > 0 && pay->h > 0) {
+                    p.fill.textureRgba = pay->rgba;
+                    p.fill.textureW = pay->w;
+                    p.fill.textureH = pay->h;
                 }
             }
         }
@@ -2046,6 +2070,11 @@ void Canvas::DeleteLayer(int index) {
         assets::AssetStore::Get().Release(m_Layers[index].fill.textureAssetKey);
         m_Layers[index].fill.textureAssetKey.clear();
     }
+    if (!m_Layers[index].smartAssetKey.empty()) {
+        assets::AssetStore::Get().Release(m_Layers[index].smartAssetKey);
+        m_Layers[index].smartAssetKey.clear();
+    }
+    ReleaseFillPatternGpu(m_Layers[index]);
     if (m_Layers[index].texture) m_Layers[index].texture->Release();
     if (m_Layers[index].srv) m_Layers[index].srv->Release();
     if (m_Layers[index].gpuSurfaceId) {
@@ -2291,11 +2320,14 @@ int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
     dup.groupExpanded = src.groupExpanded;
     dup.smartSourceBytes = src.smartSourceBytes;
     dup.smartSourcePath = src.smartSourcePath;
+    dup.smartAssetKey = src.smartAssetKey;
     dup.smartScale = src.smartScale;
     dup.fill = src.fill;
     // Shared fill texture: bump AssetStore ref (copy does not Acquire).
     if (!dup.fill.textureAssetKey.empty())
         assets::AssetStore::Get().AddRef(dup.fill.textureAssetKey);
+    if (!dup.smartAssetKey.empty())
+        assets::AssetStore::Get().AddRef(dup.smartAssetKey);
     dup.workSpace = src.workSpace; // map participation
     dup.filters = src.filters;
     dup.filtersDirty = true;
@@ -3060,12 +3092,15 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             auto& layer = m_Layers[i];
             if (layer.isGroup) continue;
 
-            // Fill layer: solid 1×1 or full presentation
+            // Fill layer: solid 1×1, GPU pattern texture, or FX presentation bake
             if (layer.IsFill()) {
                 bool fillDirty = layer.needsUpload || layer.stylesDirty || layer.presentationDirty ||
                                  layer.filtersDirty || !layer.texture || !layer.srv;
+                // Texture without FX: also dirty if pattern missing after async load
+                if (!fillDirty && layer.fill.HasTexture() && !LayerFxPreviewActive(layer) &&
+                    !layer.fillPatternSRV)
+                    fillDirty = true;
                 // Invisible fill must not force a full recomposite every frame.
-                // Sticky presentationDirty used to re-upload forever (lag only dies on delete).
                 if (fillDirty) {
                     if (layer.visible) {
                         EnsureFillLayerGpu(device, layer);
@@ -3073,19 +3108,16 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                         layer.thumbDirty = true;
                         m_ChannelPreviewDirty = true;
                     } else {
-                        // Defer GPU; clear sticky flags that would thrash compose while hidden.
-                        const bool needsFull = layer.HasEnabledStyles() ||
-                            LayerFilterListHasEnabled(layer.filters) || layer.fill.HasTexture();
-                        if (!needsFull) {
+                        // Defer GPU; clear sticky flags (texture no longer forces full bake).
+                        if (!LayerFxPreviewActive(layer)) {
                             layer.needsUpload = false;
                             layer.presentationDirty = false;
                             layer.stylesDirty = false;
                         }
                     }
                 }
-                // Full-buffer path: styles, filters, or fill texture (visible only).
-                // When Effects Preview is OFF, skip FX bake (raw/solid/texture only).
-                if (layer.visible && (LayerFxPreviewActive(layer) || layer.fill.HasTexture())) {
+                // FX-only full-buffer upload (styles/filters). Texture alone uses GPU pattern.
+                if (layer.visible && LayerFxPreviewActive(layer)) {
                     if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters) &&
                         (layer.filtersDirty || !layer.filteredCache || layer.filteredCache->IsEmpty()))
                         RefreshFilteredCache(layer, /*onlyDirtyTiles=*/false);
@@ -3113,7 +3145,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                         src->ClearAllDirty();
                         layer.needsUpload = false;
                         needsCompositeRebuild = true;
-                        MarkCompositeDirty(); // fill FX: full proxy
+                        MarkCompositeDirty();
                     }
                 }
                 if (layer.visible && layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
@@ -3377,18 +3409,17 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     // First layer: REPLACE full RGBA. Later: SRC_ALPHA.
     // layer.opacity = content/fill opacity; styles bake their own opacity into presentation.
     bool firstVisible = true;
-    auto drawLayerSrv = [&](Layer& layer, ID3D11ShaderResourceView* srv, bool useMask, float opacityMul) {
+    auto drawLayerSrv = [&](Layer& layer, ID3D11ShaderResourceView* srv, bool useMask, float opacityMul,
+                            bool fillTexMode = false) {
         if (!srv) return false;
         const bool isFirst = firstVisible && m_LayerBlendStateReplace;
         ID3D11BlendState* blend = nullptr;
         // Fill: per-map channel write mask (unchecked = leave underlay; never black-fill)
         uint8_t fillWrite = 0xF;
+        float fillTint[4] = {1.f, 1.f, 1.f, 1.f};
         if (layer.IsFill()) {
-            float tmp[4];
-            if (!layer.fill.ResolveForMap(m_ActiveSetMaps, m_ViewMapKind, tmp, &fillWrite))
+            if (!layer.fill.ResolveForMap(m_ActiveSetMaps, m_ViewMapKind, fillTint, &fillWrite))
                 return false;
-            // First layer + partial mask: still use replace only on enabled channels
-            // so disabled channels keep clear-color underlay (typically transparent).
             ID3D11Device* dev = nullptr;
             context->GetDevice(&dev);
             blend = GetFillWriteBlend(dev, fillWrite, isFirst);
@@ -3407,10 +3438,20 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             LayerBuffer* lb = (LayerBuffer*)mapped.pData;
             float hasMaskVal = (useMask && layer.hasMask && layer.maskSRV) ? 1.0f : 0.0f;
             lb->layerParams = DirectX::XMFLOAT4(opacityMul, hasMaskVal, 0.0f, 0.0f);
-            lb->transformParams = DirectX::XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
+            if (fillTexMode) {
+                // w=2 → PSLayerBlend fill-texture path (wrap sample + tint)
+                lb->transformParams = DirectX::XMFLOAT4(1.0f, 1.0f, 0.0f, 2.0f);
+                lb->floatRect = DirectX::XMFLOAT4(
+                    layer.fill.texScale[0], layer.fill.texScale[1],
+                    layer.fill.texOffset[0], layer.fill.texOffset[1]);
+                lb->fillColor = DirectX::XMFLOAT4(fillTint[0], fillTint[1], fillTint[2], fillTint[3]);
+            } else {
+                lb->transformParams = DirectX::XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
+                lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
+                lb->fillColor = DirectX::XMFLOAT4(1.f, 1.f, 1.f, 1.f);
+            }
             float flags = (layer.alphaRewrite ? 1.f : 0.f) + (isFirst ? 2.f : 0.f);
             lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
-            lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
             context->Unmap(m_LayerConstantBuffer, 0);
         }
         context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -3494,6 +3535,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                         float flags = 1.f + (gFirst ? 2.f : 0.f);
                         lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
                         lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
+                        lb->fillColor = DirectX::XMFLOAT4(1.f, 1.f, 1.f, 1.f);
                         context->Unmap(m_LayerConstantBuffer, 0);
                     }
                     context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -3547,6 +3589,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     float flags = (child.alphaRewrite ? 1.f : 0.f) + (firstInGroup ? 2.f : 0.f);
                     lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)child.blendMode, flags);
                     lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
+                    lb->fillColor = DirectX::XMFLOAT4(1.f, 1.f, 1.f, 1.f);
                     context->Unmap(m_LayerConstantBuffer, 0);
                 }
                 context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -3579,6 +3622,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 float flags = 1.f + (gFirst ? 2.f : 0.f);
                 lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
                 lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
+                lb->fillColor = DirectX::XMFLOAT4(1.f, 1.f, 1.f, 1.f);
                 context->Unmap(m_LayerConstantBuffer, 0);
             }
             context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -3597,7 +3641,8 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             continue;
         }
 
-        if (layer.srv || layer.gpuSurfaceId) {
+        if (layer.srv || layer.gpuSurfaceId ||
+            (layer.IsFill() && layer.fillPatternSRV && !LayerFxPreviewActive(layer))) {
             if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
                 ID3D11Device* device = nullptr;
                 context->GetDevice(&device);
@@ -3607,6 +3652,12 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 }
             }
 
+            // GPU fill pattern: no full-doc texture — sample source-res pattern in shader
+            if (layer.IsFill() && layer.fillPatternSRV && !LayerFxPreviewActive(layer) &&
+                layer.fill.HasTexture()) {
+                const bool useMask = layer.hasMask && layer.maskSRV;
+                drawLayerSrv(layer, layer.fillPatternSRV, useMask, layer.opacity, /*fillTexMode=*/true);
+            } else {
             // Styles baked → opacity=1, mask already in presentation
             // During stroke / FX preview OFF: live content path with fill opacity
             const bool baked = LayerStylesPreviewActive(layer) && !m_IsStrokeActive &&
@@ -3620,6 +3671,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 firstVisible = false;
             } else if (layer.srv) {
                 drawLayerSrv(layer, layer.srv, useMask, op);
+            }
             }
 
             if (m_IsMovingPixels && i == m_StartActiveLayerIdx && m_FloatingSRV) {
@@ -3645,6 +3697,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     lb->transformParams = DirectX::XMFLOAT4(m_FloatingScaleX, m_FloatingScaleY, m_FloatingRotation, 1.0f); // isFloating = 1.0f
                     lb->centerParams = DirectX::XMFLOAT4(centerX, centerY, 0.0f, layer.alphaRewrite ? 1.0f : 0.0f);
                     lb->floatRect = DirectX::XMFLOAT4(rectU, rectV, rectSU, rectSV);
+                    lb->fillColor = DirectX::XMFLOAT4(1.f, 1.f, 1.f, 1.f);
                     context->Unmap(m_LayerConstantBuffer, 0);
                 }
                 context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -4676,6 +4729,8 @@ static json LayerToJson(const Layer& layer) {
     j["smart_source_path"] = layer.smartSourcePath;
     j["smart_scale"] = layer.smartScale;
     j["has_smart_source"] = !layer.smartSourceBytes.empty();
+    if (!layer.smartAssetKey.empty())
+        j["smart_asset_key"] = layer.smartAssetKey;
     j["has_mask"] = layer.hasMask && !layer.mask.empty();
 
     if (layer.type == Layer::Type::Fill || layer.IsFill()) {
@@ -4787,6 +4842,16 @@ static void LayerFromJson(Layer& layer, const json& j) {
     else if (layer.isGroup) layer.type = Layer::Type::Group;
     if (j.contains("smart_source_path")) layer.smartSourcePath = j["smart_source_path"].get<std::string>();
     if (j.contains("smart_scale")) layer.smartScale = j["smart_scale"].get<float>();
+    if (j.contains("smart_asset_key") && j["smart_asset_key"].is_string()) {
+        layer.smartAssetKey = j["smart_asset_key"].get<std::string>();
+        if (!layer.smartAssetKey.empty()) {
+            if (!assets::AssetStore::Get().AddRef(layer.smartAssetKey)) {
+                std::string k = assets::AssetStore::Get().AcquireKey(layer.smartAssetKey);
+                if (!k.empty()) layer.smartAssetKey = k;
+                else assets::AssetStore::Get().RequestLoad(layer.smartAssetKey);
+            }
+        }
+    }
     if (j.contains("has_mask")) layer.hasMask = j["has_mask"].get<bool>();
 
     if (j.contains("fill") && j["fill"].is_object()) {
@@ -4812,19 +4877,47 @@ static void LayerFromJson(Layer& layer, const json& j) {
             layer.fill.texOffset[0] = fj["tex_offset"][0].get<float>();
             layer.fill.texOffset[1] = fj["tex_offset"][1].get<float>();
         }
-        // Rehydrate texture via shared AssetStore (no private multi-MB copy).
-        if (layer.fill.useTexture && !layer.fill.texturePath.empty()) {
-            std::string key = assets::AssetStore::Get().AcquireFile(layer.fill.texturePath);
-            if (!key.empty()) {
-                layer.fill.textureAssetKey = key;
-                if (const assets::TextureAsset* t = assets::AssetStore::Get().Get(key)) {
-                    layer.fill.textureW = t->w;
-                    layer.fill.textureH = t->h;
+        // Resolve texture: prefer asset key (proj/user/core/ext), migrate path as fallback.
+        if (layer.fill.useTexture) {
+            bool resolved = false;
+            if (!layer.fill.textureAssetKey.empty()) {
+                std::string key = assets::AssetStore::Get().AcquireKey(layer.fill.textureAssetKey);
+                if (key.empty()) {
+                    // Async request; keep key and dims if known
+                    assets::AssetStore::Get().RequestLoad(layer.fill.textureAssetKey);
+                    assets::AssetStore::Get().AddRef(layer.fill.textureAssetKey);
+                    key = layer.fill.textureAssetKey;
                 }
-                layer.fill.textureRgba.clear();
-            } else {
+                if (!key.empty()) {
+                    layer.fill.textureAssetKey = key;
+                    int tw = 0, th = 0;
+                    if (assets::AssetStore::Get().GetDims(key, tw, th)) {
+                        layer.fill.textureW = tw;
+                        layer.fill.textureH = th;
+                    }
+                    layer.fill.textureRgba.clear();
+                    resolved = (assets::AssetStore::Get().GetLoadState(key) == assets::AssetLoadState::Ready)
+                               || tw > 0;
+                }
+            }
+            if (!resolved && !layer.fill.texturePath.empty()) {
+                // Prefer project import for portability on next save
+                std::string key = assets::AssetManager::Get().ImportFileToProject(layer.fill.texturePath);
+                if (key.empty())
+                    key = assets::AssetStore::Get().AcquireFile(layer.fill.texturePath);
+                if (!key.empty()) {
+                    layer.fill.textureAssetKey = key;
+                    int tw = 0, th = 0;
+                    if (assets::AssetStore::Get().GetDims(key, tw, th)) {
+                        layer.fill.textureW = tw;
+                        layer.fill.textureH = th;
+                    }
+                    layer.fill.textureRgba.clear();
+                    resolved = true;
+                }
+            }
+            if (!resolved && layer.fill.textureAssetKey.empty()) {
                 layer.fill.useTexture = false;
-                layer.fill.textureAssetKey.clear();
             }
         }
         layer.fill.roles.clear();
@@ -5059,6 +5152,37 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
             }
         }
 
+        // Project assets referenced by fill / smart object keys
+        std::vector<std::string> refKeys;
+        {
+            std::unordered_set<std::string> uniq;
+            for (const auto& layer : m_Layers) {
+                if (!layer.fill.textureAssetKey.empty() &&
+                    layer.fill.textureAssetKey.compare(0, 5, "proj:") == 0)
+                    uniq.insert(layer.fill.textureAssetKey);
+                if (!layer.smartAssetKey.empty() &&
+                    layer.smartAssetKey.compare(0, 5, "proj:") == 0)
+                    uniq.insert(layer.smartAssetKey);
+            }
+            refKeys.assign(uniq.begin(), uniq.end());
+        }
+        auto projBlobs = assets::AssetManager::Get().CollectProjectBlobs(refKeys);
+        json projArr = json::array();
+        for (size_t i = 0; i < projBlobs.size(); ++i) {
+            json pj;
+            pj["key"] = projBlobs[i].key;
+            pj["name"] = projBlobs[i].name;
+            pj["kind"] = projBlobs[i].kind;
+            pj["mime"] = projBlobs[i].mime;
+            pj["w"] = projBlobs[i].w;
+            pj["h"] = projBlobs[i].h;
+            pj["is_rgba"] = projBlobs[i].isRgba;
+            pj["blob_index"] = (int)i;
+            projArr.push_back(std::move(pj));
+        }
+        if (!projArr.empty())
+            metadata["project_assets"] = projArr;
+
         json layersArray = json::array();
         for (const auto& layer : m_Layers) {
             layersArray.push_back(LayerToJson(layer));
@@ -5084,6 +5208,14 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         uint64_t metadataSize = metadataStr.size();
         out.write(reinterpret_cast<const char*>(&metadataSize), sizeof(metadataSize));
         out.write(metadataStr.data(), metadataStr.size());
+
+        // Project asset blobs BEFORE layer pixels so load can rehydrate keys first.
+        for (const auto& blob : projBlobs) {
+            if (!WriteZlibBlob(out, blob.bytes.data(), blob.bytes.size())) {
+                Logger::Get().Error("Failed to compress project asset " + blob.key);
+                return false;
+            }
+        }
 
         // Pixels (float RGBA) + optional mask blob per layer (v2)
         for (auto& layer : m_Layers) {
@@ -5113,7 +5245,8 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
         m_CurrentProjectFilePath = filepath;
         Logger::Get().Info("Successfully saved project to " + filepath +
             " (RAYP v" + std::to_string(kRaypVersionCurrent) +
-            ", layers=" + std::to_string(m_Layers.size()) + ")");
+            ", layers=" + std::to_string(m_Layers.size()) +
+            ", project_assets=" + std::to_string(projBlobs.size()) + ")");
         return true;
     }
     catch (const std::exception& e) {
@@ -5162,6 +5295,15 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
         json metadata = json::parse(metadataStr);
 
         for (auto& layer : m_Layers) {
+            if (!layer.fill.textureAssetKey.empty()) {
+                assets::AssetStore::Get().Release(layer.fill.textureAssetKey);
+                layer.fill.textureAssetKey.clear();
+            }
+            if (!layer.smartAssetKey.empty()) {
+                assets::AssetStore::Get().Release(layer.smartAssetKey);
+                layer.smartAssetKey.clear();
+            }
+            ReleaseFillPatternGpu(layer);
             if (layer.texture) layer.texture->Release();
             if (layer.srv) layer.srv->Release();
             if (layer.maskTexture) layer.maskTexture->Release();
@@ -5170,6 +5312,7 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
             if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
         }
         m_Layers.clear();
+        assets::AssetManager::Get().ClearProjectSession();
 
         m_Width = metadata["width"].get<int>();
         m_Height = metadata["height"].get<int>();
@@ -5257,7 +5400,32 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
         }
 
         CreateCompositeResources(device);
-        if (progress) progress(0.15f, "metadata");
+        if (progress) progress(0.12f, "metadata");
+
+        // Rehydrate project assets (blobs sit before layer pixels when present)
+        if (metadata.contains("project_assets") && metadata["project_assets"].is_array()) {
+            std::vector<assets::AssetManager::ProjectAssetBlob> blobs;
+            for (const auto& pj : metadata["project_assets"]) {
+                assets::AssetManager::ProjectAssetBlob b;
+                b.key = pj.value("key", "");
+                b.name = pj.value("name", "");
+                b.kind = pj.value("kind", "texture");
+                b.mime = pj.value("mime", "image/png");
+                b.w = pj.value("w", 0);
+                b.h = pj.value("h", 0);
+                b.isRgba = pj.value("is_rgba", false);
+                std::vector<uint8_t> raw;
+                if (!ReadZlibBlob(in, raw)) {
+                    Logger::Get().Error("Failed to decompress project asset " + b.key);
+                    return false;
+                }
+                b.bytes = std::move(raw);
+                blobs.push_back(std::move(b));
+            }
+            assets::AssetManager::Get().LoadProjectBlobs(blobs);
+            Logger::Get().Info("RAYP: rehydrated " + std::to_string(blobs.size()) + " project asset(s)");
+        }
+        if (progress) progress(0.15f, "assets");
 
         auto layersArray = metadata["layers"];
         const size_t layerCount = layersArray.size();
@@ -8954,47 +9122,94 @@ ID3D11BlendState* Canvas::GetFillWriteBlend(ID3D11Device* device, uint8_t channe
     return *slot;
 }
 
+void Canvas::ReleaseFillPatternGpu(Layer& layer) {
+    if (layer.fillPatternSRV) { layer.fillPatternSRV->Release(); layer.fillPatternSRV = nullptr; }
+    if (layer.fillPatternTex) { layer.fillPatternTex->Release(); layer.fillPatternTex = nullptr; }
+    layer.fillPatternUploadedKey.clear();
+}
+
+bool Canvas::EnsureFillPatternGpu(ID3D11Device* device, Layer& layer) {
+    if (!device || !layer.IsFill() || !layer.fill.HasTexture()) return false;
+    const std::string& key = layer.fill.textureAssetKey;
+    if (key.empty()) return false;
+
+    // Already uploaded this asset
+    if (layer.fillPatternSRV && layer.fillPatternUploadedKey == key)
+        return true;
+
+    auto pay = assets::AssetStore::Get().GetPayload(key);
+    if (!pay || pay->rgba.empty() || pay->w <= 0 || pay->h <= 0) {
+        // Kick async load; compose will solid-fallback until ready
+        assets::AssetStore::Get().RequestLoad(key);
+        return false;
+    }
+
+    ReleaseFillPatternGpu(layer);
+
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = (UINT)pay->w;
+    td.Height = (UINT)pay->h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_SUBRESOURCE_DATA init = {};
+    init.pSysMem = pay->rgba.data();
+    init.SysMemPitch = (UINT)pay->w * 4;
+
+    if (FAILED(device->CreateTexture2D(&td, &init, &layer.fillPatternTex)) || !layer.fillPatternTex)
+        return false;
+    if (FAILED(device->CreateShaderResourceView(layer.fillPatternTex, nullptr, &layer.fillPatternSRV)) ||
+        !layer.fillPatternSRV) {
+        ReleaseFillPatternGpu(layer);
+        return false;
+    }
+    layer.fillPatternUploadedKey = key;
+    layer.fill.textureW = pay->w;
+    layer.fill.textureH = pay->h;
+    return true;
+}
+
 void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
     if (!device || !layer.IsFill()) return;
 
-    // Interactive: FX bake only when Effects Preview is ON. Texture fill still needs full buffer.
+    // Interactive: FX bake only when Effects Preview is ON.
+    // Texture without FX → GPU pattern sample (source-res), NEVER full-doc CPU bake.
     const bool fxActive = LayerFxPreviewActive(layer);
-    const bool needsFull = fxActive || layer.fill.HasTexture();
 
-    if (needsFull) {
-        if (fxActive) {
-            RebuildLayerPresentation(layer);
-        } else {
-            // Texture fill without FX (or FX preview off): bake full buffer for upload
-            auto content = ResolveLayerContentF(layer);
-            if (!layer.presentationCache)
-                layer.presentationCache = std::make_unique<TileCache>();
-            layer.presentationCache->Init(m_Width, m_Height, m_CanvasFormat);
-            layer.presentationCache->ImportRGBA32F(content.data(), m_Width, m_Height);
-            layer.presentationCache->MarkAllDirty();
-            layer.needsUpload = true;
-        }
+    if (fxActive) {
+        // Styles/filters need baked presentation (proxy or full via RebuildLayerPresentation)
+        RebuildLayerPresentation(layer);
         if (!layer.texture)
             RecreateLayerTexture(device, layer);
-        // Ensure full-size texture (not leftover 1×1)
         if (layer.texture) {
             D3D11_TEXTURE2D_DESC desc{};
             layer.texture->GetDesc(&desc);
             if (desc.Width != (UINT)m_Width || desc.Height != (UINT)m_Height)
                 RecreateLayerTexture(device, layer);
         }
-        // presentationDirty cleared by RebuildLayerPresentation; solid+texture still needs upload path
-        if (!fxActive)
-            layer.presentationDirty = false;
         return;
     }
 
-    // Cheap path: 1×1 solid color texture (sampled at any UV).
+    // Texture fill: ensure pattern GPU; keep 1×1 tint as layer.srv fallback
+    if (layer.fill.HasTexture() || layer.fill.useTexture) {
+        EnsureFillPatternGpu(device, layer);
+        // Drop any leftover full-doc presentation from older builds / FX-off toggle
+        if (layer.presentationCache) {
+            layer.presentationCache.reset();
+        }
+    } else {
+        ReleaseFillPatternGpu(layer);
+    }
+
+    // Cheap path: 1×1 solid color texture (tint / solid fill).
     // Multi-target Fill: pack enabled roles into current view map.
     float c[4] = {0,0,0,1};
     if (!m_ActiveSetMaps.empty()) {
         if (!layer.fill.ResolveForMap(m_ActiveSetMaps, m_ViewMapKind, c)) {
-            // No contribution to this map — transparent (layer still filtered by workSpace)
             c[0] = c[1] = c[2] = 0.f; c[3] = 0.f;
         }
     } else {
@@ -9034,8 +9249,7 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
         }
         ctx->Release();
     }
-    // MUST clear all dirty flags — sticky presentationDirty forced full recomposite every frame
-    // after enabling multi-map fill channels (lag only ended when the layer was deleted).
+    // MUST clear dirty flags — sticky presentationDirty forced full recomposite every frame.
     layer.needsUpload = false;
     layer.presentationDirty = false;
     layer.stylesDirty = false;
@@ -9043,6 +9257,49 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
 }
 
 bool Canvas::LoadFillTexture(int layerIdx, const std::string& filepath) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    if (!m_Layers[layerIdx].IsFill()) return false;
+
+    if (filepath.empty())
+        return BindFillTextureAsset(layerIdx, {});
+
+    // Import into Project session so .rayp packs without absolute paths (ref=1).
+    std::string key = assets::AssetManager::Get().ImportFileToProject(filepath);
+    if (key.empty()) {
+        key = assets::AssetStore::Get().AcquireFile(filepath);
+        if (key.empty()) {
+            Logger::Get().Error("LoadFillTexture failed: " + filepath);
+            return false;
+        }
+    }
+    // Key already held with refcount 1 — assign without second Acquire.
+    Layer& layer = m_Layers[layerIdx];
+    if (!layer.fill.textureAssetKey.empty()) {
+        assets::AssetStore::Get().Release(layer.fill.textureAssetKey);
+        layer.fill.textureAssetKey.clear();
+    }
+    ReleaseFillPatternGpu(layer);
+    layer.fill.textureRgba.clear();
+    layer.fill.useTexture = true;
+    layer.fill.textureAssetKey = key;
+    layer.fill.texturePath.clear();
+    int tw = 0, th = 0;
+    if (assets::AssetStore::Get().GetDims(key, tw, th)) {
+        layer.fill.textureW = tw;
+        layer.fill.textureH = th;
+    } else {
+        layer.fill.textureW = layer.fill.textureH = 1;
+    }
+    layer.needsUpload = true;
+    layer.presentationDirty = true;
+    layer.presentationCache.reset();
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    Logger::Get().Info("Fill texture (import) key=" + key);
+    return true;
+}
+
+bool Canvas::BindFillTextureAsset(int layerIdx, const std::string& assetKey) {
     if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
     Layer& layer = m_Layers[layerIdx];
     if (!layer.IsFill()) return false;
@@ -9054,12 +9311,13 @@ bool Canvas::LoadFillTexture(int layerIdx, const std::string& filepath) {
         }
         layer.fill.textureRgba.clear();
         layer.fill.textureW = layer.fill.textureH = 0;
+        layer.fill.texturePath.clear();
     };
 
-    if (filepath.empty()) {
+    if (assetKey.empty()) {
         releasePrev();
+        ReleaseFillPatternGpu(layer);
         layer.fill.useTexture = false;
-        layer.fill.texturePath.clear();
         layer.needsUpload = true;
         layer.presentationDirty = true;
         m_CompositeDirty = true;
@@ -9067,33 +9325,55 @@ bool Canvas::LoadFillTexture(int layerIdx, const std::string& filepath) {
         return true;
     }
 
-    // Shared decode via AssetStore — N fill layers with same path → 1 CPU blob.
-    std::string key = assets::AssetStore::Get().AcquireFile(filepath);
-    if (key.empty()) {
-        Logger::Get().Error("LoadFillTexture failed: " + filepath);
-        return false;
+    if (!assets::AssetManager::Get().IsKindAllowed(assetKey, assets::AssetKind::Texture)) {
+        // Unknown kind on unindexed keys: still allow if it looks like a texture key
+        assets::AssetCategory cat;
+        std::string rest;
+        bool okKind = false;
+        if (assets::ParseKey(assetKey, cat, rest)) {
+            auto k = assets::GuessKindFromPath(rest);
+            okKind = (k == assets::AssetKind::Texture || k == assets::AssetKind::Unknown);
+        }
+        if (!okKind) {
+            Logger::Get().Error("BindFillTextureAsset: kind not Texture for " + assetKey);
+            return false;
+        }
     }
-    const assets::TextureAsset* tex = assets::AssetStore::Get().Get(key);
-    if (!tex || tex->w <= 0 || tex->h <= 0) {
-        assets::AssetStore::Get().Release(key);
-        Logger::Get().Error("LoadFillTexture: empty asset " + filepath);
-        return false;
+
+    // Ensure payload requested; pin ref for layer.
+    std::string key = assets::AssetStore::Get().AcquireKey(assetKey);
+    if (key.empty()) {
+        assets::AssetStore::Get().RequestLoad(assetKey);
+        if (!assets::AssetStore::Get().AddRef(assetKey)) {
+            // Ensure meta entry exists
+            assets::AssetStore::Get().EnsureMeta(assetKey, assets::AssetKind::Texture, {}, {});
+            assets::AssetStore::Get().AddRef(assetKey);
+        }
+        key = assetKey;
     }
 
     releasePrev();
+    ReleaseFillPatternGpu(layer); // force re-upload of new pattern
     layer.fill.useTexture = true;
-    layer.fill.texturePath = filepath;
     layer.fill.textureAssetKey = key;
-    layer.fill.textureW = tex->w;
-    layer.fill.textureH = tex->h;
-    // No private textureRgba copy — sample through AssetStore in FillSolidBuffer.
+    layer.fill.texturePath.clear(); // library/project identity — not path-bound
+    int tw = 0, th = 0;
+    if (assets::AssetStore::Get().GetDims(key, tw, th)) {
+        layer.fill.textureW = tw;
+        layer.fill.textureH = th;
+    } else {
+        // Placeholder dims until async ready
+        layer.fill.textureW = layer.fill.textureH = 1;
+    }
+    layer.fill.textureRgba.clear();
     layer.needsUpload = true;
     layer.presentationDirty = true;
     layer.presentationCache.reset();
     m_CompositeDirty = true;
     m_IsDocumentModified = true;
-    Logger::Get().Info("Fill texture (AssetStore) " + std::to_string(tex->w) + "x" +
-                       std::to_string(tex->h) + " key=" + key);
+    Logger::Get().Info("Fill texture bound key=" + key + " " +
+                       std::to_string(layer.fill.textureW) + "x" +
+                       std::to_string(layer.fill.textureH));
     return true;
 }
 
@@ -10462,108 +10742,118 @@ ID3D11ShaderResourceView* Canvas::GetLayerThumbSRV(ID3D11Device* device, int lay
 // SVG Smart Object (minimal rasterizer: OpenCV-free; parse via simple image fallback)
 // ---------------------------------------------------------------------------
 bool Canvas::ImportSvgAsSmartObject(ID3D11Device* device, const std::string& filepath) {
-#ifdef _WIN32
-    std::ifstream in(PathUtil::FromUtf8(PathUtil::NormalizeToUtf8Path(filepath)), std::ios::binary);
-#else
-    std::ifstream in(filepath, std::ios::binary);
-#endif
-    if (!in) {
-        Logger::Get().Error("ImportSvgAsSmartObject: cannot open " + filepath);
-        return false;
-    }
-    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    if (bytes.empty()) return false;
+    // SVG import was a placeholder (checkerboard only, no real rasterizer).
+    // Disabled until a proper vector pipeline (e.g. nanosvg) lands — do not
+    // create fake SmartObject layers that look broken and confuse users.
+    (void)device;
+    Logger::Get().Error(
+        "SVG import is not supported yet: \"" + filepath +
+        "\". Convert SVG to PNG/DDS and open as a raster layer. "
+        "(VectorSvg type remains for future implementation.)");
+    return false;
+}
 
-    // Minimal SVG size parse: width/height attributes or viewBox
-    int svgW = m_Width > 0 ? m_Width : 512;
-    int svgH = m_Height > 0 ? m_Height : 512;
-    std::string s(bytes.begin(), bytes.end());
-    auto findAttr = [&](const char* name) -> float {
-        auto p = s.find(name);
-        if (p == std::string::npos) return -1.f;
-        p = s.find('"', p);
-        if (p == std::string::npos) return -1.f;
-        return (float)std::atof(s.c_str() + p + 1);
-    };
-    float aw = findAttr("width="), ah = findAttr("height=");
-    if (aw > 1.f && ah > 1.f) { svgW = (int)aw; svgH = (int)ah; }
-    else {
-        auto vb = s.find("viewBox");
-        if (vb != std::string::npos) {
-            auto q = s.find('"', vb);
-            if (q != std::string::npos) {
-                float minx, miny, vw, vh;
-                if (sscanf(s.c_str() + q + 1, "%f %f %f %f", &minx, &miny, &vw, &vh) == 4 && vw > 1 && vh > 1) {
-                    svgW = (int)vw; svgH = (int)vh;
-                }
-            }
-        }
-    }
-    svgW = std::clamp(svgW, 1, 8192);
-    svgH = std::clamp(svgH, 1, 8192);
+bool Canvas::ConvertLayerToSmartObject(ID3D11Device* device, int layerIdx) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    Layer& layer = m_Layers[layerIdx];
+    if (layer.isGroup || layer.IsFill()) return false;
+    if (layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg)
+        return true; // already smart
 
-    // Placeholder raster: checker + label (full SVG path raster needs nanosvg in later pass)
-    std::vector<float> pixels((size_t)svgW * svgH * 4, 0.f);
-    for (int y = 0; y < svgH; ++y) {
-        for (int x = 0; x < svgW; ++x) {
-            size_t i = ((size_t)y * svgW + x) * 4;
-            bool c = ((x / 16) ^ (y / 16)) & 1;
-            pixels[i + 0] = c ? 0.85f : 0.55f;
-            pixels[i + 1] = c ? 0.85f : 0.55f;
-            pixels[i + 2] = c ? 0.90f : 0.60f;
-            pixels[i + 3] = 1.0f;
-        }
+    // Export current display pixels as project texture asset
+    std::vector<float> pxF = ExportLayerF(layer, m_Width, m_Height);
+    if (pxF.empty() || m_Width <= 0 || m_Height <= 0) return false;
+    std::vector<uint8_t> rgba((size_t)m_Width * m_Height * 4);
+    for (size_t i = 0, n = (size_t)m_Width * m_Height; i < n; ++i) {
+        auto q = [](float v) -> uint8_t {
+            v = v < 0.f ? 0.f : (v > 1.f ? 1.f : v);
+            return (uint8_t)(v * 255.f + 0.5f);
+        };
+        rgba[i * 4 + 0] = q(pxF[i * 4 + 0]);
+        rgba[i * 4 + 1] = q(pxF[i * 4 + 1]);
+        rgba[i * 4 + 2] = q(pxF[i * 4 + 2]);
+        rgba[i * 4 + 3] = q(pxF[i * 4 + 3]);
     }
+    std::string key = assets::AssetManager::Get().RegisterProjectRgba(
+        layer.name + ".png", m_Width, m_Height, std::move(rgba));
+    if (key.empty()) return false;
 
-    // Try system conversion: if file can be loaded by STB after external convert — skip.
-    // Prefer ImageMagick-less path: use OpenCV only for raster formats.
-
-    bool isFirst = m_Layers.empty() ||
-        (m_Layers.size() == 1 && m_Layers[0].name == "Background" &&
-         (!m_Layers[0].tileCache || m_Layers[0].tileCache->IsEmpty()));
-    if (isFirst) {
-        m_Width = svgW;
-        m_Height = svgH;
-        m_CanvasFormat = CanvasPixelFormat::RGBA8;
-        if (device) CreateCompositeResources(device);
-        m_Layers.clear();
-    }
-
-    Layer layer;
-    layer.name = std::filesystem::path(filepath).filename().string();
-    layer.type = Layer::Type::VectorSvg;
-    layer.smartSourceBytes = std::move(bytes);
-    layer.smartSourcePath = filepath;
-    layer.tileCache = std::make_unique<TileCache>();
-    layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
-    // Center placeholder into document
-    int dx = (m_Width - svgW) / 2;
-    int dy = (m_Height - svgH) / 2;
-    if (svgW == m_Width && svgH == m_Height) {
-        layer.tileCache->ImportRGBA32F(pixels.data(), svgW, svgH);
-    } else {
-        std::vector<float> full((size_t)m_Width * m_Height * 4, 0.f);
-        for (int y = 0; y < svgH; ++y) {
-            int yy = y + dy;
-            if (yy < 0 || yy >= m_Height) continue;
-            for (int x = 0; x < svgW; ++x) {
-                int xx = x + dx;
-                if (xx < 0 || xx >= m_Width) continue;
-                size_t si = ((size_t)y * svgW + x) * 4;
-                size_t di = ((size_t)yy * m_Width + xx) * 4;
-                for (int c = 0; c < 4; ++c) full[di + c] = pixels[si + c];
-            }
-        }
-        layer.tileCache->ImportRGBA32F(full.data(), m_Width, m_Height);
-    }
+    if (!layer.smartAssetKey.empty())
+        assets::AssetStore::Get().Release(layer.smartAssetKey);
+    layer.smartAssetKey = key; // Register left ref=1
+    layer.type = Layer::Type::SmartObject;
+    layer.smartSourcePath.clear();
+    // Keep tileCache as display proxy (current pixels already there)
     layer.needsUpload = true;
-    if (device) RecreateLayerTexture(device, layer);
-    m_Layers.push_back(std::move(layer));
-    m_ActiveLayerIdx = (int)m_Layers.size() - 1;
     m_CompositeDirty = true;
     m_IsDocumentModified = true;
-    Logger::Get().Info("Imported SVG as VectorSvg smart object: " + filepath);
-    Logger::Get().Warn("SVG raster is placeholder until nanosvg path; source bytes preserved for Rasterize/re-render.");
+    Logger::Get().Info("ConvertLayerToSmartObject: " + layer.name + " key=" + key);
+    (void)device;
+    return true;
+}
+
+bool Canvas::ReplaceSmartObjectSource(ID3D11Device* device, int layerIdx, const std::string& assetKey) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    Layer& layer = m_Layers[layerIdx];
+    if (layer.type != Layer::Type::SmartObject && layer.type != Layer::Type::VectorSvg)
+        return false;
+    if (assetKey.empty()) return false;
+    if (!assets::AssetManager::Get().IsKindAllowed(assetKey, assets::AssetKind::Texture) &&
+        assets::AssetManager::Get().GetKind(assetKey) != assets::AssetKind::Unknown) {
+        Logger::Get().Error("ReplaceSmartObjectSource: expected Texture kind");
+        return false;
+    }
+
+    std::string key = assets::AssetStore::Get().AcquireKey(assetKey);
+    if (key.empty()) {
+        assets::AssetStore::Get().RequestLoad(assetKey);
+        assets::AssetStore::Get().AddRef(assetKey);
+        key = assetKey;
+    }
+    auto pay = assets::AssetStore::Get().GetPayload(key);
+    if (!pay || pay->rgba.empty()) {
+        // Keep binding; display unchanged until load completes
+        if (!layer.smartAssetKey.empty() && layer.smartAssetKey != key)
+            assets::AssetStore::Get().Release(layer.smartAssetKey);
+        layer.smartAssetKey = key;
+        layer.type = Layer::Type::SmartObject;
+        m_IsDocumentModified = true;
+        return true;
+    }
+
+    // Rebuild tile cache from asset (centered / scaled to document)
+    if (!layer.tileCache) {
+        layer.tileCache = std::make_unique<TileCache>();
+        layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+    }
+    std::vector<float> full((size_t)m_Width * m_Height * 4, 0.f);
+    const int tw = pay->w, th = pay->h;
+    int dx = (m_Width - tw) / 2;
+    int dy = (m_Height - th) / 2;
+    for (int y = 0; y < th; ++y) {
+        int yy = y + dy;
+        if (yy < 0 || yy >= m_Height) continue;
+        for (int x = 0; x < tw; ++x) {
+            int xx = x + dx;
+            if (xx < 0 || xx >= m_Width) continue;
+            size_t si = ((size_t)y * tw + x) * 4;
+            size_t di = ((size_t)yy * m_Width + xx) * 4;
+            full[di + 0] = pay->rgba[si + 0] / 255.f;
+            full[di + 1] = pay->rgba[si + 1] / 255.f;
+            full[di + 2] = pay->rgba[si + 2] / 255.f;
+            full[di + 3] = pay->rgba[si + 3] / 255.f;
+        }
+    }
+    layer.tileCache->ImportRGBA32F(full.data(), m_Width, m_Height);
+    layer.tileCache->MarkAllDirty();
+    layer.needsUpload = true;
+    if (!layer.smartAssetKey.empty() && layer.smartAssetKey != key)
+        assets::AssetStore::Get().Release(layer.smartAssetKey);
+    layer.smartAssetKey = key;
+    layer.type = Layer::Type::SmartObject;
+    if (device) RecreateLayerTexture(device, layer);
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
     return true;
 }
 
@@ -10654,6 +10944,10 @@ bool Canvas::RasterizeLayer(ID3D11Device* device, int layerIdx) {
         baked = ExportLayerF(layer, m_Width, m_Height);
     }
 
+    if (!layer.smartAssetKey.empty()) {
+        assets::AssetStore::Get().Release(layer.smartAssetKey);
+        layer.smartAssetKey.clear();
+    }
     layer.type = Layer::Type::Raster;
     layer.isGroup = false;
     layer.smartSourceBytes.clear();

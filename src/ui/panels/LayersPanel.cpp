@@ -11,7 +11,9 @@
 #include "../widgets/UiPathField.h"
 #include "../widgets/UiVisualSlider.h"
 #include "../widgets/UiColorField.h"
+#include "../widgets/UiAssetPicker.h"
 #include "../style/UiTokens.h"
+#include "../../assets/AssetManager.h"
 #include "../../core/ProjectManager.h"
 #include "../../core/Logger.h"
 #include "../../core/KeymapManager.h"
@@ -309,33 +311,74 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     bool useTex = al.fill.useTexture;
                     if (ImGui::Checkbox("Use Texture##filltex", &useTex)) {
                         if (!useTex)
-                            canvas.LoadFillTexture(ai, "");
+                            canvas.BindFillTextureAsset(ai, "");
                         else
                             al.fill.useTexture = true;
                         al.needsUpload = true;
                         canvas.MarkCompositeDirty();
                     }
-                    if (al.fill.useTexture || !al.fill.texturePath.empty()) {
-                        static char fillTexPath[512] = {};
-                        if (al.fill.texturePath.size() < sizeof(fillTexPath))
-                            std::snprintf(fillTexPath, sizeof(fillTexPath), "%s", al.fill.texturePath.c_str());
-                        if (Ui::PathField("##filltexpath", "Fill Texture", fillTexPath, sizeof(fillTexPath),
-                                Ui::ShowOpenFile,
-                                "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All\0*.*\0",
-                                "Image tiled across canvas")) {
-                            canvas.LoadFillTexture(ai, fillTexPath);
+                    // Consume asset picker result for this fill layer
+                    {
+                        static int s_FillPickLayer = -1;
+                        std::string picked;
+                        if (Ui::AssetPickerResult(picked) && !picked.empty()) {
+                            int target = s_FillPickLayer >= 0 ? s_FillPickLayer : ai;
+                            canvas.BindFillTextureAsset(target, picked);
+                            s_FillPickLayer = -1;
                         }
-                        if (Ui::SmartSliderFloat("Scale X##fts", &al.fill.texScale[0], 0.05f, 8.f, 1.f, 0.05f) ||
-                            Ui::SmartSliderFloat("Scale Y##fts", &al.fill.texScale[1], 0.05f, 8.f, 1.f, 0.05f) ||
-                            Ui::SmartSliderFloat("Off X##fto", &al.fill.texOffset[0], -2.f, 2.f, 0.f, 0.05f) ||
-                            Ui::SmartSliderFloat("Off Y##fto", &al.fill.texOffset[1], -2.f, 2.f, 0.f, 0.05f)) {
-                            al.needsUpload = true;
-                            al.presentationDirty = true;
-                            al.presentationCache.reset();
-                            canvas.MarkCompositeDirty();
+                        if (al.fill.useTexture || !al.fill.textureAssetKey.empty()) {
+                            std::string name = assets::AssetManager::Get().DisplayName(al.fill.textureAssetKey);
+                            if (name.empty()) name = al.fill.textureAssetKey.empty() ? "(none)" : al.fill.textureAssetKey;
+                            ID3D11ShaderResourceView* thumb =
+                                assets::AssetManager::Get().GetThumbSrv(device, al.fill.textureAssetKey, false);
+                            if (thumb) {
+                                ImGui::Image((ImTextureID)thumb, ImVec2(32, 32));
+                                ImGui::SameLine();
+                            }
+                            ImGui::TextWrapped("%s", name.c_str());
+                            auto st = assets::AssetManager::Get().GetLoadState(al.fill.textureAssetKey);
+                            if (st == assets::AssetLoadState::Pending)
+                                ImGui::TextDisabled("Loading…");
+                            else if (st == assets::AssetLoadState::Failed)
+                                ImGui::TextColored(ImVec4(1.f, 0.4f, 0.35f, 1.f), "Missing / failed");
+                            else if (al.fill.textureW > 0)
+                                ImGui::TextDisabled("Texture %dx%d", al.fill.textureW, al.fill.textureH);
+
+                            if (ImGui::Button("Choose Asset…##filltex")) {
+                                s_FillPickLayer = ai;
+                                assets::AssetFilter f;
+                                f.kind = assets::AssetKind::Texture;
+                                Ui::OpenAssetPicker(f, "Fill Texture");
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Import File…##filltex")) {
+                                char path[512] = {};
+                                if (Ui::ShowOpenFile(path, sizeof(path),
+                                    "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds\0All\0*.*\0")) {
+                                    canvas.LoadFillTexture(ai, path);
+                                }
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Clear##filltex"))
+                                canvas.BindFillTextureAsset(ai, "");
+
+                            if (Ui::SmartSliderFloat("Scale X##fts", &al.fill.texScale[0], 0.05f, 8.f, 1.f, 0.05f) ||
+                                Ui::SmartSliderFloat("Scale Y##fts", &al.fill.texScale[1], 0.05f, 8.f, 1.f, 0.05f) ||
+                                Ui::SmartSliderFloat("Off X##fto", &al.fill.texOffset[0], -2.f, 2.f, 0.f, 0.05f) ||
+                                Ui::SmartSliderFloat("Off Y##fto", &al.fill.texOffset[1], -2.f, 2.f, 0.f, 0.05f)) {
+                                al.needsUpload = true;
+                                al.presentationDirty = true;
+                                al.presentationCache.reset();
+                                canvas.MarkCompositeDirty();
+                            }
+                        } else if (useTex) {
+                            if (ImGui::Button("Choose Asset…##filltex0")) {
+                                s_FillPickLayer = ai;
+                                assets::AssetFilter f;
+                                f.kind = assets::AssetKind::Texture;
+                                Ui::OpenAssetPicker(f, "Fill Texture");
+                            }
                         }
-                        if (al.fill.textureW > 0)
-                            ImGui::TextDisabled("Texture %dx%d", al.fill.textureW, al.fill.textureH);
                     }
                     ImGui::TextDisabled("Paint content blocked — paint the mask to shape fill");
                     ImGui::PopID();
@@ -683,6 +726,10 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     }
                     {
                         ImGui::Separator();
+                        const bool canConvertSO = !layer.isGroup && !layer.IsFill() &&
+                            layer.type == Layer::Type::Raster;
+                        if (ImGui::MenuItem("Convert to Smart Object", nullptr, false, canConvertSO))
+                            canvas.ConvertLayerToSmartObject(device, i);
                         const bool canRast = layer.isGroup || layer.IsFill() ||
                             !layer.filters.empty() || !layer.styles.empty() ||
                             layer.type == Layer::Type::SmartObject || layer.type == Layer::Type::VectorSvg;

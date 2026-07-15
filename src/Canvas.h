@@ -113,9 +113,16 @@ struct Layer {
     Type type = Type::Raster;
     // Fill params (type == Fill)
     FillLayerParams fill;
+    // GPU fill pattern (source-res texture). Interactive path samples this instead of
+    // baking full document RGBA — kills Fill-texture lag.
+    ID3D11Texture2D* fillPatternTex = nullptr;
+    ID3D11ShaderResourceView* fillPatternSRV = nullptr;
+    std::string fillPatternUploadedKey; // which asset key is currently on GPU
     // Source bytes for smart objects / SVG (empty for pure raster).
     std::vector<uint8_t> smartSourceBytes;
     std::string smartSourcePath;
+    // Optional AssetStore key (proj:/user:/core:) for SmartObject source identity.
+    std::string smartAssetKey;
     float smartScale = 1.0f;
 
     // Texture-set participation (Plan 0): which maps/roles this layer writes.
@@ -123,8 +130,10 @@ struct Layer {
     texset::LayerWorkSpace workSpace;
 
     bool IsFill() const { return type == Type::Fill; }
+    // SmartObject / VectorSvg: content paint locked until Rasterize (mask still OK).
     bool CanPaintContent() const {
-        return !isGroup && type != Type::Fill && type != Type::Group;
+        return !isGroup && type != Type::Fill && type != Type::Group
+            && type != Type::SmartObject && type != Type::VectorSvg;
     }
     bool HasEnabledStyles() const { return LayerStyleListHasEnabled(styles); }
 
@@ -210,6 +219,10 @@ public:
 
     // Layer types / smart objects (Layer::Type)
     bool ImportSvgAsSmartObject(ID3D11Device* device, const std::string& filepath);
+    // Convert raster (or baked display) layer into SmartObject; registers project asset.
+    bool ConvertLayerToSmartObject(ID3D11Device* device, int layerIdx);
+    // Replace SO source from an asset key (Texture kind). Re-uploads display from asset.
+    bool ReplaceSmartObjectSource(ID3D11Device* device, int layerIdx, const std::string& assetKey);
     // Bake filters/styles/fill into raster tiles. Groups: flatten children into one raster.
     bool RasterizeLayer(ID3D11Device* device, int layerIdx);
     bool RasterizeGroup(ID3D11Device* device, int groupIdx);
@@ -234,8 +247,11 @@ public:
                          const FillLayerParams& params = {});
     bool IsFillLayer(int layerIdx) const;
     bool CanPaintLayerContent(int layerIdx) const;
-    // Load RGBA texture into Fill layer (or clear if path empty). Returns false on failure.
+    // Load RGBA texture into Fill layer (or clear if path empty).
+    // Imports file into Project session asset (proj:) — no long-term absolute path dependency.
     bool LoadFillTexture(int layerIdx, const std::string& filepath);
+    // Bind Fill to an existing AssetManager key (Texture kind only). AddRefs key.
+    bool BindFillTextureAsset(int layerIdx, const std::string& assetKey);
     // Load texture for outline style on layer.
     bool LoadOutlineTexture(int layerIdx, int styleIdx, const std::string& filepath);
 
@@ -657,13 +673,16 @@ private:
 
     struct LayerBuffer {
         DirectX::XMFLOAT4 layerParams;     // x: opacity, y: hasMask, zw: translation (uOff, vOff)
-        DirectX::XMFLOAT4 transformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
+        // w: 0=normal, 1=floating, 2=fillTexture (GPU pattern, no full-doc bake)
+        DirectX::XMFLOAT4 transformParams; // x: scaleX, y: scaleY, z: rotation, w: mode
         // x,y: center; z: blendMode; w: alphaRewrite (1=overwrite A, 0=A is RGB strength only)
         DirectX::XMFLOAT4 centerParams;
         // Floating texture rect in document UV (only when isFloating):
         // xy = origin (bbox min / canvasSize), zw = size (bbox / canvasSize).
         // Zero size → legacy full-document floating UV.
+        // Fill-texture mode: xy=texScale, zw=texOffset.
         DirectX::XMFLOAT4 floatRect;
+        DirectX::XMFLOAT4 fillColor; // tint for fill-texture mode
     };
 
 
@@ -810,8 +829,11 @@ private:
     void RebuildGroupPresentation(int groupIdx, bool fullQuality = false);
     // Resolve raw content (tiles or fill solid) to float RGBA W×H.
     std::vector<float> ResolveLayerContentF(const Layer& layer) const;
-    // Ensure Fill layer has a GPU texture (1×1 solid or full presentation).
+    // Ensure Fill layer has a GPU texture (1×1 solid, GPU pattern, or full FX presentation).
     void EnsureFillLayerGpu(ID3D11Device* device, Layer& layer);
+    // Upload fill pattern asset to layer.fillPattern* (source resolution, once per key).
+    bool EnsureFillPatternGpu(ID3D11Device* device, Layer& layer);
+    static void ReleaseFillPatternGpu(Layer& layer);
     // True if layer should be drawn as top-level (parentGroupId < 0 or parent missing).
     static bool IsTopLevelLayer(const Layer& layer);
     // True if layerIdx is under groupIdx (any depth).

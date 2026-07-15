@@ -1,11 +1,13 @@
 #include "EditorPanels.h"
 #include "FileExplorer.h"
 #include "panels/LayersPanel.h"
+#include "panels/AssetBrowserPanel.h"
 #include "panels/ChannelsPanel.h"
 #include "panels/ToolSettingsPanel.h"
 #include "panels/LayerEffectsPanel.h"
 #include "panels/ProjectSetupPanel.h"
 #include "panels/ColorsPanel.h"
+#include "widgets/UiAssetPicker.h"
 #include "../core/ConfigManager.h"
 #include "../core/Logger.h"
 #include "../core/KeymapManager.h"
@@ -876,6 +878,7 @@ namespace UI {
                 ImGui::MenuItem("Properties", nullptr, &state.showProperties);
                 ImGui::MenuItem("Viewport Navigation", nullptr, &state.showViewportNav);
                 ImGui::MenuItem("Layers", nullptr, &state.showLayers);
+                ImGui::MenuItem("Asset Browser", nullptr, &state.showAssetBrowser);
                 // Layer Effects: only via Layers panel (Fx), not View menu
                 ImGui::MenuItem("Channels", nullptr, &state.showChannels);
                 ImGui::MenuItem("Colors Window", nullptr, &state.showColors);
@@ -2285,6 +2288,8 @@ namespace UI {
         }
 
         UI::DrawLayersPanel(state, canvas, device);
+        UI::DrawAssetBrowserPanel(state, canvas, device);
+        Ui::DrawAssetPicker(device);
 
         // Layer Effects modal (extracted)
         UI::DrawLayerEffectsPanel(state, canvas);

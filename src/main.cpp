@@ -30,6 +30,7 @@
 // Project Core
 #include "Logger.h"
 #include "ThreadPool.h"
+#include "assets/AssetManager.h"
 #include "ConfigManager.h"
 #include "ScriptingEngine.h"
 #include "Canvas.h"
@@ -723,6 +724,9 @@ int main(int argc, char* argv[]) {
     ThreadPool::Get().Init(numThreads);
     log_step("Concurrency (ThreadPool)");
 
+    assets::AssetManager::Get().Startup();
+    log_step("AssetManager");
+
     // 4. Initialize Scripting Engine
     if (!scriptPath.empty() || headlessMode || testMode) {
         ScriptingEngine::Get().Initialize();
@@ -1091,6 +1095,7 @@ int main(int argc, char* argv[]) {
 
         // Merge async brush disk scan (non-blocking)
         BrushLibrary::Get().PollAsyncDiskLoad();
+        assets::AssetManager::Get().Poll(g_pd3dDevice, 4.0);
 
         // Paths from second instance (WM_COPYDATA) → new project tabs
         ProjectManager::Get().DrainPendingOpens(
@@ -2834,6 +2839,7 @@ int main(int argc, char* argv[]) {
     glfwTerminate();
 
     ScriptingEngine::Get().Shutdown();
+    assets::AssetManager::Get().Shutdown();
     ThreadPool::Get().Shutdown();
     if (processExitCode != 0) {
         Logger::Get().Error("RayVPaint exiting with code " + std::to_string(processExitCode));
