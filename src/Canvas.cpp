@@ -1,4 +1,5 @@
 #include "Canvas.h"
+#include <d3d11_1.h>
 #include "core/UndoRedoManager.h"
 #include "layer/LayerStyles.h"
 #include "core/TileCache.h"
@@ -743,10 +744,20 @@ bool Canvas::Initialize(ID3D11Device* device) {
     rd.CullMode = D3D11_CULL_NONE;
     rd.FrontCounterClockwise = FALSE;
     rd.DepthClipEnable = TRUE;
+    rd.ScissorEnable = FALSE;
     hr = device->CreateRasterizerState(&rd, &m_RasterizerState);
     if (FAILED(hr)) {
         return false;
     }
+    // Scissor-enabled for dirty-rect proxy compose
+    rd.ScissorEnable = TRUE;
+    hr = device->CreateRasterizerState(&rd, &m_RasterizerStateScissor);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // Staging ring for tile uploads (created for default RGBA8; re-ensured on format change)
+    m_TileStaging.Ensure(device, DXGI_FORMAT_R8G8B8A8_UNORM, TILE_SIZE, TILE_SIZE, 16);
 
     // Composite targets and default layer are created lazily on first use.
 
@@ -776,6 +787,8 @@ void Canvas::Shutdown() {
         if (m_FillWriteMaskReplace[i]) { m_FillWriteMaskReplace[i]->Release(); m_FillWriteMaskReplace[i] = nullptr; }
     }
     if (m_RasterizerState) { m_RasterizerState->Release(); m_RasterizerState = nullptr; }
+    if (m_RasterizerStateScissor) { m_RasterizerStateScissor->Release(); m_RasterizerStateScissor = nullptr; }
+    m_TileStaging.Shutdown();
 
     if (m_SelectionMaskTexture) { m_SelectionMaskTexture->Release(); m_SelectionMaskTexture = nullptr; }
     if (m_SelectionMaskSRV) { m_SelectionMaskSRV->Release(); m_SelectionMaskSRV = nullptr; }
@@ -789,6 +802,68 @@ void Canvas::Shutdown() {
         if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
     }
     m_Layers.clear();
+}
+
+void Canvas::InvalidateCompositeRect(int x0, int y0, int x1, int y1) {
+    m_CompositeDirty = true;
+    if (m_CompositeDirtyFull) return;
+    if (m_Width <= 0 || m_Height <= 0) {
+        m_CompositeDirtyFull = true;
+        return;
+    }
+    // Clamp + order
+    if (x1 < x0) std::swap(x0, x1);
+    if (y1 < y0) std::swap(y0, y1);
+    x0 = std::max(0, x0); y0 = std::max(0, y0);
+    x1 = std::min(m_Width - 1, x1); y1 = std::min(m_Height - 1, y1);
+    if (x1 < x0 || y1 < y0) return;
+
+    if (!m_CompositeDirtyValid) {
+        m_CompositeDirtyX0 = x0; m_CompositeDirtyY0 = y0;
+        m_CompositeDirtyX1 = x1; m_CompositeDirtyY1 = y1;
+        m_CompositeDirtyValid = true;
+    } else {
+        m_CompositeDirtyX0 = std::min(m_CompositeDirtyX0, x0);
+        m_CompositeDirtyY0 = std::min(m_CompositeDirtyY0, y0);
+        m_CompositeDirtyX1 = std::max(m_CompositeDirtyX1, x1);
+        m_CompositeDirtyY1 = std::max(m_CompositeDirtyY1, y1);
+    }
+    // Huge rect → full recompose is cheaper than scissor thrash
+    const int64_t area = (int64_t)(m_CompositeDirtyX1 - m_CompositeDirtyX0 + 1) *
+                         (int64_t)(m_CompositeDirtyY1 - m_CompositeDirtyY0 + 1);
+    const int64_t full = (int64_t)m_Width * (int64_t)m_Height;
+    if (full > 0 && area * 100 > full * 70) {
+        m_CompositeDirtyFull = true;
+        m_CompositeDirtyValid = false;
+    }
+}
+
+void Canvas::UploadLayerTile(ID3D11DeviceContext* context, ID3D11Texture2D* dest,
+                             int tx, int ty, const uint8_t* data, int bytesPerPixel,
+                             int docW, int docH) {
+    if (!context || !dest || !data || bytesPerPixel < 1) return;
+    const int x0 = tx * TILE_SIZE;
+    const int y0 = ty * TILE_SIZE;
+    const int w = std::min(TILE_SIZE, docW - x0);
+    const int h = std::min(TILE_SIZE, docH - y0);
+    if (w < 1 || h < 1) return;
+
+    const int pitch = TILE_SIZE * bytesPerPixel;
+    ID3D11Device* device = nullptr;
+    context->GetDevice(&device);
+    if (device) {
+        m_TileStaging.Ensure(device, GetLayerDxgiFormat(), TILE_SIZE, TILE_SIZE, 16);
+        device->Release();
+    }
+    if (m_TileStaging.IsReady() &&
+        m_TileStaging.UploadRegion(context, dest, x0, y0, w, h, data, pitch))
+        return;
+
+    // Fallback: UpdateSubresource (driver path)
+    D3D11_BOX box = {};
+    box.left = (UINT)x0; box.top = (UINT)y0; box.front = 0;
+    box.right = (UINT)(x0 + w); box.bottom = (UINT)(y0 + h); box.back = 1;
+    context->UpdateSubresource(dest, 0, &box, data, (UINT)pitch, 0);
 }
 
 void Canvas::CreateCompositeResources(ID3D11Device* device) {
@@ -841,6 +916,10 @@ void Canvas::CreateCompositeResources(ID3D11Device* device) {
     m_HasSelection = false;
     m_SelectionMaskNeedsUpload = false;
     m_CompositeDirty = true;
+    m_CompositeDirtyFull = true;
+    m_CompositeDirtyValid = false;
+    if (device)
+        m_TileStaging.Ensure(device, GetLayerDxgiFormat(), TILE_SIZE, TILE_SIZE, 16);
     CreateGroupCompositeResources(device);
     MemoryStats::LogSnapshot("after_CreateCompositeResources");
 }
@@ -2383,7 +2462,11 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                                selMask);
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
         // Mid-stroke: raw content only. FX refilter deferred to StrokePhase::End (see ComposeLayers).
-        m_CompositeDirty = true;
+        {
+            const int r = (int)std::ceil(paintRadius) + 2;
+            const int ix = (int)currRawX, iy = (int)currRawY;
+            InvalidateCompositeRect(ix - r, iy - r, ix + r, iy + r);
+        }
     }
     else if (phase == StrokePhase::Update && m_IsStrokeActive) {
         // Apply stabilization
@@ -2436,14 +2519,22 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                                        m_MirrorHorizontal, m_MirrorVertical,
                                        selMask);
 
+        {
+            const int r = (int)std::ceil(paintRadius) + 2;
+            const int x0 = (int)std::floor(std::min(m_PrevStabilizedX, stabilizedX)) - r;
+            const int y0 = (int)std::floor(std::min(m_PrevStabilizedY, stabilizedY)) - r;
+            const int x1 = (int)std::ceil(std::max(m_PrevStabilizedX, stabilizedX)) + r;
+            const int y1 = (int)std::ceil(std::max(m_PrevStabilizedY, stabilizedY)) + r;
+            InvalidateCompositeRect(x0, y0, x1, y1);
+        }
         m_PrevStabilizedX = stabilizedX;
         m_PrevStabilizedY = stabilizedY;
         m_Layers[m_ActiveLayerIdx].needsUpload = true;
-        m_CompositeDirty = true; // recompose every dab from raw tiles (FX deferred)
     }
     else if (phase == StrokePhase::End) {
         m_IsStrokeActive = false;
-        m_CompositeDirty = true;
+        // FX bake may touch a halo around stroke tiles — full proxy is safest/cheapest here.
+        MarkCompositeDirty();
         m_ChannelPreviewDirty = true;
         if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
             auto& al = m_Layers[m_ActiveLayerIdx];
@@ -2595,6 +2686,20 @@ void Canvas::Update(float viewportWidth, float viewportHeight, bool isMouseOverC
 void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     ID3D11Device* device = nullptr;
     context->GetDevice(&device);
+    // Moving floating content: dirty its AABB (not full proxy every frame).
+    if (m_IsMovingPixels && m_FloatingBBoxW > 0 && m_FloatingBBoxH > 0) {
+        const float sx = std::max(std::fabs(m_FloatingScaleX), 1.f);
+        const float sy = std::max(std::fabs(m_FloatingScaleY), 1.f);
+        const int pad = (int)std::ceil(std::max(m_FloatingBBoxW * sx, m_FloatingBBoxH * sy) * 0.15f) + 8;
+        int x0 = m_FloatingBBoxX + m_FloatingOffsetX - pad;
+        int y0 = m_FloatingBBoxY + m_FloatingOffsetY - pad;
+        int x1 = m_FloatingBBoxX + m_FloatingBBoxW + m_FloatingOffsetX + pad;
+        int y1 = m_FloatingBBoxY + m_FloatingBBoxH + m_FloatingOffsetY + pad;
+        // also cover original cut region
+        InvalidateCompositeRect(m_FloatingBBoxX - 2, m_FloatingBBoxY - 2,
+            m_FloatingBBoxX + m_FloatingBBoxW + 2, m_FloatingBBoxY + m_FloatingBBoxH + 2);
+        InvalidateCompositeRect(x0, y0, x1, y1);
+    }
     bool needsCompositeRebuild = m_CompositeDirty || m_IsMovingPixels;
 
     if (device) {
@@ -2653,18 +2758,14 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                             }()) {
                             RecreateLayerTexture(device, layer);
                         }
+                        const int fbpp = src->GetBytesPerPixel();
                         src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int) {
-                            D3D11_BOX box;
-                            box.left = tx * TILE_SIZE; box.top = ty * TILE_SIZE; box.front = 0;
-                            box.right = std::min(box.left + TILE_SIZE, (UINT)m_Width);
-                            box.bottom = std::min(box.top + TILE_SIZE, (UINT)m_Height);
-                            box.back = 1;
-                            context->UpdateSubresource(layer.texture, 0, &box, data,
-                                TILE_SIZE * (UINT)src->GetBytesPerPixel(), 0);
+                            UploadLayerTile(context, layer.texture, tx, ty, data, fbpp, m_Width, m_Height);
                         });
                         src->ClearAllDirty();
                         layer.needsUpload = false;
                         needsCompositeRebuild = true;
+                        MarkCompositeDirty(); // fill FX: full proxy
                     }
                 }
                 if (layer.visible && layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
@@ -2722,24 +2823,20 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             bool layerHadUploads = false;
             size_t dirtyUploaded = 0;
             const bool hadPending = src->HasPendingGpuWork() || layerNeedsUpload;
+            const int bpp = src->GetBytesPerPixel();
             src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
                 layerHadUploads = true;
                 ++dirtyUploaded;
-                D3D11_BOX box;
-                box.left   = tx * TILE_SIZE;
-                box.top    = ty * TILE_SIZE;
-                box.front  = 0;
-                box.right  = std::min(box.left + TILE_SIZE, (UINT)m_Width);
-                box.bottom = std::min(box.top  + TILE_SIZE, (UINT)m_Height);
-                box.back   = 1;
-                UINT pitch = TILE_SIZE * (UINT)src->GetBytesPerPixel();
-                context->UpdateSubresource(layer.texture, 0, &box, data, pitch, 0);
+                UploadLayerTile(context, layer.texture, tx, ty, data, bpp, m_Width, m_Height);
+                // Expand composite dirty by this tile (paint may already have dab AABB)
+                InvalidateCompositeRect(tx * TILE_SIZE, ty * TILE_SIZE,
+                    std::min(m_Width - 1, tx * TILE_SIZE + TILE_SIZE - 1),
+                    std::min(m_Height - 1, ty * TILE_SIZE + TILE_SIZE - 1));
             });
             // Always clear dirty after GPU upload. Stroke End re-marks tiles from
             // m_ActiveStrokeDeltas before RefreshFilteredCache (FX bake).
             src->ClearAllDirty();
             layer.needsUpload = false;
-            // Hot path: no per-dab Info logs (was a major real-project FPS killer vs bench).
             if (layerHadUploads || filtersWereDirty || stylesWereDirty || layerNeedsUpload || hadPending) {
                 needsCompositeRebuild = true;
                 if (!m_IsStrokeActive) {
@@ -2767,10 +2864,6 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     if (!m_CompositeRTV || !m_CompositeSRV) return;
     if (!needsCompositeRebuild) return;
 
-    // Rebuild the proxy composite only when visible content changed.
-    float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // Clear to transparent!
-    context->ClearRenderTargetView(m_CompositeRTV, clearColor);
-
     // Save previous targets & viewport
     ID3D11RenderTargetView* prevRTV = nullptr;
     ID3D11DepthStencilView* prevDSV = nullptr;
@@ -2790,6 +2883,48 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     context->RSSetViewports(1, &compViewport);
 
     context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr);
+
+    // --- Dirty-rect compose: clear + scissor only the changed proxy region ---
+    float clearColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    bool useScissor = false;
+    D3D11_RECT scissorRect = {};
+    if (!m_CompositeDirtyFull && m_CompositeDirtyValid && m_Width > 0 && m_Height > 0 &&
+        m_CompositeWidth > 0 && m_CompositeHeight > 0) {
+        const float sx = (float)m_CompositeWidth / (float)m_Width;
+        const float sy = (float)m_CompositeHeight / (float)m_Height;
+        int px0 = (int)std::floor(m_CompositeDirtyX0 * sx) - 2;
+        int py0 = (int)std::floor(m_CompositeDirtyY0 * sy) - 2;
+        int px1 = (int)std::ceil((m_CompositeDirtyX1 + 1) * sx) + 2;
+        int py1 = (int)std::ceil((m_CompositeDirtyY1 + 1) * sy) + 2;
+        px0 = std::max(0, px0); py0 = std::max(0, py0);
+        px1 = std::min(m_CompositeWidth, px1); py1 = std::min(m_CompositeHeight, py1);
+        const int area = std::max(0, px1 - px0) * std::max(0, py1 - py0);
+        const int fullA = m_CompositeWidth * m_CompositeHeight;
+        if (px1 > px0 && py1 > py0 && fullA > 0 && area * 100 <= fullA * 85) {
+            useScissor = true;
+            scissorRect.left = px0; scissorRect.top = py0;
+            scissorRect.right = px1; scissorRect.bottom = py1;
+        }
+    }
+
+    if (useScissor) {
+        // ClearView respects rect (D3D11.1); ClearRenderTargetView does not.
+        ID3D11DeviceContext1* ctx1 = nullptr;
+        if (SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&ctx1)) && ctx1) {
+            ctx1->ClearView(m_CompositeRTV, clearColor, &scissorRect, 1);
+            ctx1->Release();
+        } else {
+            // No 11.1: full clear + still scissor draws (safe overdraw of layers)
+            context->ClearRenderTargetView(m_CompositeRTV, clearColor);
+        }
+        context->RSSetScissorRects(1, &scissorRect);
+        if (m_RasterizerStateScissor)
+            context->RSSetState(m_RasterizerStateScissor);
+    } else {
+        context->ClearRenderTargetView(m_CompositeRTV, clearColor);
+        if (m_RasterizerState)
+            context->RSSetState(m_RasterizerState);
+    }
 
     // Bind resources
     UINT stride = sizeof(Vertex);
@@ -2904,14 +3039,9 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                         RecreateLayerTexture(groupDev, layer);
                     if (layer.texture) {
                         TileCache* src = layer.presentationCache.get();
+                        const int gbpp = src->GetBytesPerPixel();
                         src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int) {
-                            D3D11_BOX box;
-                            box.left = tx * TILE_SIZE; box.top = ty * TILE_SIZE; box.front = 0;
-                            box.right = std::min(box.left + TILE_SIZE, (UINT)m_Width);
-                            box.bottom = std::min(box.top + TILE_SIZE, (UINT)m_Height);
-                            box.back = 1;
-                            context->UpdateSubresource(layer.texture, 0, &box, data,
-                                TILE_SIZE * (UINT)src->GetBytesPerPixel(), 0);
+                            UploadLayerTile(context, layer.texture, tx, ty, data, gbpp, m_Width, m_Height);
                         });
                         src->ClearAllDirty();
                         layer.needsUpload = false;
@@ -3098,8 +3228,11 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     if (prevDSV) prevDSV->Release();
 
     context->RSSetViewports(1, &prevViewport);
+    context->RSSetState(nullptr);
     context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
     m_CompositeDirty = false;
+    m_CompositeDirtyFull = false;
+    m_CompositeDirtyValid = false;
 }
 
 void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float viewportHeight) {
@@ -9799,12 +9932,15 @@ void Canvas::RebuildChannelPreviews(ID3D11Device* device) {
 
 ID3D11ShaderResourceView* Canvas::GetChannelPreviewSRV(ID3D11Device* device, ChannelPreview ch) {
     if (!device) return nullptr;
-    if (m_ChannelPreviewDirty || !m_ChannelPreviewSRV[(int)ch] ||
+    int idx = (int)ch;
+    if (idx < 0 || idx > 3) return nullptr;
+    // Defer rebuild during stroke/move — return last good preview.
+    if (m_ChannelPreviewDirty && (m_IsStrokeActive || m_IsMovingPixels) && m_ChannelPreviewSRV[idx])
+        return m_ChannelPreviewSRV[idx];
+    if (m_ChannelPreviewDirty || !m_ChannelPreviewSRV[idx] ||
         m_ChannelPreviewW <= 0 || m_ChannelPreviewH <= 0) {
         RebuildChannelPreviews(device);
     }
-    int idx = (int)ch;
-    if (idx < 0 || idx > 3) return nullptr;
     return m_ChannelPreviewSRV[idx];
 }
 
@@ -9816,6 +9952,11 @@ ID3D11ShaderResourceView* Canvas::GetLayerThumbSRV(ID3D11Device* device, int lay
         return nullptr;
 
     if (!layer.thumbDirty && layer.thumbSRV && layer.thumbSize == size)
+        return layer.thumbSRV;
+
+    // Idle-only rebuild: during stroke/move keep stale thumb (avoids O(size²) GetPixelF thrash).
+    if (layer.thumbDirty && layer.thumbSRV && layer.thumbSize == size &&
+        (m_IsStrokeActive || m_IsMovingPixels))
         return layer.thumbSRV;
 
     if (layer.thumbSRV) { layer.thumbSRV->Release(); layer.thumbSRV = nullptr; }

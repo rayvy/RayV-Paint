@@ -14,6 +14,7 @@
 #include "core/PaintEngine.h"
 #include "core/DdsHelper.h"
 #include "core/UndoRedoManager.h"
+#include "core/GpuStagingUpload.h"
 #include "modio/ModTypes.h"
 #include "layer/LayerTypes.h"
 #include "texset/TextureSetTypes.h"
@@ -255,7 +256,15 @@ public:
     int MergeLayers(ID3D11Device* device, const std::vector<int>& indices);
     void SetActiveLayerIndex(int idx);
     void ToggleLayerIsolation(int layerIdx);
-    void MarkCompositeDirty() { m_CompositeDirty = true; m_ChannelPreviewDirty = true; }
+    // Full-proxy recompose (layer stack / FX / format change).
+    void MarkCompositeDirty() {
+        m_CompositeDirty = true;
+        m_CompositeDirtyFull = true;
+        m_CompositeDirtyValid = false;
+        m_ChannelPreviewDirty = true;
+    }
+    // Partial recompose: union document-space AABB (inclusive). Paint hot path.
+    void InvalidateCompositeRect(int x0, int y0, int x1, int y1);
     // Force GPU re-upload of all layer/presentation tiles + recompose.
     // Call after FX toggle, undo glitches, or F5 — kills tile ghosting.
     void RefreshCanvas(ID3D11Device* device = nullptr);
@@ -716,6 +725,13 @@ private:
     int m_CompositeWidth = 0;
     int m_CompositeHeight = 0;
     bool m_CompositeDirty = true;
+    // Dirty-rect compose (document pixels, inclusive). Full when m_CompositeDirtyFull.
+    bool m_CompositeDirtyFull = true;
+    bool m_CompositeDirtyValid = false;
+    int  m_CompositeDirtyX0 = 0, m_CompositeDirtyY0 = 0;
+    int  m_CompositeDirtyX1 = -1, m_CompositeDirtyY1 = -1;
+    // Staging ring for DEFAULT layer texture uploads (tile-sized).
+    GpuStagingUpload m_TileStaging;
     ID3D11BlendState* m_LayerBlendState = nullptr;
     // RGB: SRC_ALPHA/INV_SRC_ALPHA; Alpha: ZERO/ONE — keeps dest A (Alpha Rewrite OFF)
     ID3D11BlendState* m_LayerBlendStateAlphaPreserve = nullptr;
@@ -726,6 +742,12 @@ private:
     ID3D11BlendState* m_FillWriteMaskReplace[16] = {};
     ID3D11BlendState* GetFillWriteBlend(ID3D11Device* device, uint8_t channelMask, bool replace);
     ID3D11RasterizerState* m_RasterizerState = nullptr;
+    ID3D11RasterizerState* m_RasterizerStateScissor = nullptr;
+
+    // Upload one dirty tile via staging ring (falls back to UpdateSubresource).
+    void UploadLayerTile(ID3D11DeviceContext* context, ID3D11Texture2D* dest,
+                         int tx, int ty, const uint8_t* data, int bytesPerPixel,
+                         int docW, int docH);
 
     PaintTarget m_PaintTarget = PaintTarget::LayerContent;
     void EnsureActiveLayerMaskAllocated();

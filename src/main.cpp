@@ -594,6 +594,7 @@ int main(int argc, char* argv[]) {
     bool forceConsole = false;
     bool test16kMode = false;
     bool benchmarkMode = false;
+    bool perfMode = false; // uncapped Present(0) — prefer for FPS testing / heavy docs
     bool allowMultiInstance = false;
     std::string scriptPath = "";
     std::string configPath = "";
@@ -623,6 +624,9 @@ int main(int argc, char* argv[]) {
             forceConsole = true;
             allowMultiInstance = true;
             BenchmarkRunner::Get().Enable(true);
+        } else if (arg == "--perf") {
+            // Uncapped swap chain present (no VSync). Also used when window unfocused.
+            perfMode = true;
         } else if (arg == "--headless") {
             headlessMode = true;
             testMode = true; // Headless implies auto-testing behavior
@@ -2766,7 +2770,12 @@ int main(int argc, char* argv[]) {
             ImGui::RenderPlatformWindowsDefault();
         }
 
-        g_pSwapChain->Present(1, 0); // VSync enabled
+        // Present: VSync when focused; uncapped when unfocused or --perf (Phase A).
+        {
+            const bool focused = glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_TRUE;
+            const UINT syncInterval = (perfMode || benchmarkMode || !focused) ? 0u : 1u;
+            g_pSwapChain->Present(syncInterval, 0);
+        }
 
         // End frame timing
         auto loopEnd = std::chrono::high_resolution_clock::now();

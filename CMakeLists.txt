@@ -129,6 +129,8 @@ set(SOURCES
     src/core/UndoRedoManager.h
     src/core/BenchmarkRunner.cpp
     src/core/BenchmarkRunner.h
+    src/core/GpuStagingUpload.cpp
+    src/core/GpuStagingUpload.h
     src/core/KeymapManager.cpp
     src/core/KeymapManager.h
     src/core/ClipboardHelper.cpp
