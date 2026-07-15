@@ -2292,7 +2292,7 @@ namespace UI {
         Ui::DrawAssetPicker(device);
 
         // Layer Effects modal (extracted)
-        UI::DrawLayerEffectsPanel(state, canvas);
+        UI::DrawLayerEffectsPanel(state, canvas, device);
 
 
         UI::DrawChannelsPanel(state, canvas, device);

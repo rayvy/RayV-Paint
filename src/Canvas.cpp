@@ -1906,6 +1906,7 @@ void Canvas::CommitLayerPropsEdit(int layerIdx, const LayerPropsCommand::Props& 
                 if (a.outlineColor[k] != b.outlineColor[k]) return false;
             }
             if (a.outlineTexturePath != b.outlineTexturePath) return false;
+            if (a.outlineTextureAssetKey != b.outlineTextureAssetKey) return false;
             if (a.outlineGradient.size() != b.outlineGradient.size()) return false;
         }
         return true;
@@ -2073,6 +2074,12 @@ void Canvas::DeleteLayer(int index) {
     if (!m_Layers[index].smartAssetKey.empty()) {
         assets::AssetStore::Get().Release(m_Layers[index].smartAssetKey);
         m_Layers[index].smartAssetKey.clear();
+    }
+    for (auto& st : m_Layers[index].styles) {
+        if (!st.outlineTextureAssetKey.empty()) {
+            assets::AssetStore::Get().Release(st.outlineTextureAssetKey);
+            st.outlineTextureAssetKey.clear();
+        }
     }
     ReleaseFillPatternGpu(m_Layers[index]);
     if (m_Layers[index].texture) m_Layers[index].texture->Release();
@@ -2332,6 +2339,10 @@ int Canvas::DuplicateLayer(ID3D11Device* device, int index) {
     dup.filters = src.filters;
     dup.filtersDirty = true;
     dup.styles = src.styles;
+    for (auto& st : dup.styles) {
+        if (!st.outlineTextureAssetKey.empty())
+            assets::AssetStore::Get().AddRef(st.outlineTextureAssetKey);
+    }
     dup.stylesDirty = true;
     dup.presentationDirty = true;
 
@@ -4805,6 +4816,8 @@ static json LayerToJson(const Layer& layer) {
         sj["outline_position"] = (int)s.outlinePos;
         sj["outline_fill_mode"] = (int)s.outlineFill;
         sj["outline_texture_path"] = s.outlineTexturePath;
+        if (!s.outlineTextureAssetKey.empty())
+            sj["outline_texture_asset_key"] = s.outlineTextureAssetKey;
         sj["outline_gradient_map"] = (int)s.outlineGradientMap;
         sj["outline_tex_scale"] = { s.outlineTexScale[0], s.outlineTexScale[1] };
         sj["outline_tex_offset"] = { s.outlineTexOffset[0], s.outlineTexOffset[1] };
@@ -5027,6 +5040,8 @@ static void LayerFromJson(Layer& layer, const json& j) {
             if (sj.contains("outline_position")) s.outlinePos = static_cast<OutlinePosition>(sj["outline_position"].get<int>());
             if (sj.contains("outline_fill_mode")) s.outlineFill = static_cast<OutlineFillMode>(sj["outline_fill_mode"].get<int>());
             if (sj.contains("outline_texture_path")) s.outlineTexturePath = sj["outline_texture_path"].get<std::string>();
+            if (sj.contains("outline_texture_asset_key") && sj["outline_texture_asset_key"].is_string())
+                s.outlineTextureAssetKey = sj["outline_texture_asset_key"].get<std::string>();
             if (sj.contains("outline_gradient_map")) s.outlineGradientMap = (uint8_t)sj["outline_gradient_map"].get<int>();
             if (sj.contains("outline_tex_scale") && sj["outline_tex_scale"].is_array() && sj["outline_tex_scale"].size() >= 2) {
                 s.outlineTexScale[0] = sj["outline_tex_scale"][0].get<float>();
@@ -5047,7 +5062,46 @@ static void LayerFromJson(Layer& layer, const json& j) {
                     s.outlineGradient.push_back(st);
                 }
             }
-            // Texture pixels reloaded on demand when path set (not embedded in .rayp for size)
+            // Resolve outline texture: asset key first, path migration second
+            if (s.outlineFill == OutlineFillMode::Texture) {
+                bool resolved = false;
+                if (!s.outlineTextureAssetKey.empty()) {
+                    std::string key = assets::AssetStore::Get().AcquireKey(s.outlineTextureAssetKey);
+                    if (key.empty()) {
+                        assets::AssetStore::Get().RequestLoad(s.outlineTextureAssetKey);
+                        assets::AssetStore::Get().AddRef(s.outlineTextureAssetKey);
+                        key = s.outlineTextureAssetKey;
+                    }
+                    if (!key.empty()) {
+                        s.outlineTextureAssetKey = key;
+                        int tw = 0, th = 0;
+                        if (assets::AssetStore::Get().GetDims(key, tw, th)) {
+                            s.outlineTextureW = tw;
+                            s.outlineTextureH = th;
+                        }
+                        s.outlineTextureRgba.clear();
+                        resolved = true;
+                    }
+                }
+                if (!resolved && !s.outlineTexturePath.empty()) {
+                    std::string key = assets::AssetManager::Get().ImportFileToProject(s.outlineTexturePath);
+                    if (key.empty())
+                        key = assets::AssetStore::Get().AcquireFile(s.outlineTexturePath);
+                    if (!key.empty()) {
+                        s.outlineTextureAssetKey = key;
+                        int tw = 0, th = 0;
+                        if (assets::AssetStore::Get().GetDims(key, tw, th)) {
+                            s.outlineTextureW = tw;
+                            s.outlineTextureH = th;
+                        }
+                        s.outlineTextureRgba.clear();
+                        resolved = true;
+                    }
+                }
+                if (!resolved) {
+                    // keep mode; bake will fall back to solid tint if no payload
+                }
+            }
             layer.styles.push_back(std::move(s));
         }
     }
@@ -5152,7 +5206,51 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
             }
         }
 
-        // Project assets referenced by fill / smart object keys
+        // Promote external (ext:) / path-bound assets into project session so .rayp is portable.
+        auto promoteToProject = [&](std::string& key) {
+            if (key.empty()) return;
+            if (key.size() >= 5 && key.compare(0, 5, "proj:") == 0) return;
+            if (key.size() >= 5 && (key.compare(0, 5, "core:") == 0 || key.compare(0, 5, "user:") == 0))
+                return; // library-local; not packed (user must have library / app)
+            // ext: or unknown → copy payload into proj:
+            auto pay = assets::AssetStore::Get().GetPayload(key);
+            std::string name = assets::AssetManager::Get().DisplayName(key);
+            if (pay && !pay->rgba.empty()) {
+                std::string newKey = assets::AssetManager::Get().RegisterProjectRgba(
+                    name.empty() ? "texture" : name, pay->w, pay->h,
+                    std::vector<uint8_t>(pay->rgba.begin(), pay->rgba.end()));
+                if (!newKey.empty()) {
+                    assets::AssetStore::Get().Release(key);
+                    key = newKey; // Register left ref=1
+                }
+                return;
+            }
+            // Try re-acquire from resolved path
+            std::string path = assets::AssetStore::ResolvePath(key);
+            if (path.empty()) {
+                if (const assets::TextureAsset* a = assets::AssetStore::Get().Get(key))
+                    path = a->sourcePath;
+            }
+            if (!path.empty()) {
+                std::string newKey = assets::AssetManager::Get().ImportFileToProject(path);
+                if (!newKey.empty()) {
+                    assets::AssetStore::Get().Release(key);
+                    key = newKey;
+                }
+            }
+        };
+        for (auto& layer : m_Layers) {
+            if (!layer.fill.textureAssetKey.empty())
+                promoteToProject(layer.fill.textureAssetKey);
+            if (!layer.smartAssetKey.empty())
+                promoteToProject(layer.smartAssetKey);
+            for (auto& st : layer.styles) {
+                if (!st.outlineTextureAssetKey.empty())
+                    promoteToProject(st.outlineTextureAssetKey);
+            }
+        }
+
+        // Project assets referenced by fill / outline / smart object keys
         std::vector<std::string> refKeys;
         {
             std::unordered_set<std::string> uniq;
@@ -5163,6 +5261,11 @@ bool Canvas::SaveCanvasRayp(const std::string& filepath) {
                 if (!layer.smartAssetKey.empty() &&
                     layer.smartAssetKey.compare(0, 5, "proj:") == 0)
                     uniq.insert(layer.smartAssetKey);
+                for (const auto& st : layer.styles) {
+                    if (!st.outlineTextureAssetKey.empty() &&
+                        st.outlineTextureAssetKey.compare(0, 5, "proj:") == 0)
+                        uniq.insert(st.outlineTextureAssetKey);
+                }
             }
             refKeys.assign(uniq.begin(), uniq.end());
         }
@@ -5302,6 +5405,12 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
             if (!layer.smartAssetKey.empty()) {
                 assets::AssetStore::Get().Release(layer.smartAssetKey);
                 layer.smartAssetKey.clear();
+            }
+            for (auto& st : layer.styles) {
+                if (!st.outlineTextureAssetKey.empty()) {
+                    assets::AssetStore::Get().Release(st.outlineTextureAssetKey);
+                    st.outlineTextureAssetKey.clear();
+                }
             }
             ReleaseFillPatternGpu(layer);
             if (layer.texture) layer.texture->Release();
@@ -9379,30 +9488,102 @@ bool Canvas::BindFillTextureAsset(int layerIdx, const std::string& assetKey) {
 
 bool Canvas::LoadOutlineTexture(int layerIdx, int styleIdx, const std::string& filepath) {
     if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
-    Layer& layer = m_Layers[layerIdx];
-    if (styleIdx < 0 || styleIdx >= (int)layer.styles.size()) return false;
-    LayerStyle& st = layer.styles[styleIdx];
-    if (filepath.empty()) {
-        st.outlineTexturePath.clear();
-        st.outlineTextureRgba.clear();
-        st.outlineTextureW = st.outlineTextureH = 0;
-        RequestPresentationRebuild(layerIdx);
-        return true;
+    if (styleIdx < 0 || styleIdx >= (int)m_Layers[layerIdx].styles.size()) return false;
+
+    if (filepath.empty())
+        return BindOutlineTextureAsset(layerIdx, styleIdx, {});
+
+    // Import into Project so .rayp packs without absolute paths (ref=1).
+    std::string key = assets::AssetManager::Get().ImportFileToProject(filepath);
+    if (key.empty()) {
+        key = assets::AssetStore::Get().AcquireFile(filepath);
+        if (key.empty()) {
+            Logger::Get().Error("LoadOutlineTexture failed: " + filepath);
+            return false;
+        }
     }
-    std::vector<uint8_t> px;
+    LayerStyle& st = m_Layers[layerIdx].styles[styleIdx];
+    if (!st.outlineTextureAssetKey.empty()) {
+        assets::AssetStore::Get().Release(st.outlineTextureAssetKey);
+        st.outlineTextureAssetKey.clear();
+    }
+    st.outlineTextureRgba.clear();
+    st.outlineTexturePath.clear();
+    st.outlineTextureAssetKey = key; // keep import/acquire ref
     int tw = 0, th = 0;
-    if (!ImageManager::LoadImageFromFile(filepath, px, tw, th)) {
-        Logger::Get().Error("LoadOutlineTexture failed: " + filepath);
-        return false;
+    if (assets::AssetStore::Get().GetDims(key, tw, th)) {
+        st.outlineTextureW = tw;
+        st.outlineTextureH = th;
+    } else {
+        st.outlineTextureW = st.outlineTextureH = 1;
     }
-    st.outlineTexturePath = filepath;
-    st.outlineTextureRgba = std::move(px);
-    st.outlineTextureW = tw;
-    st.outlineTextureH = th;
     st.outlineFill = OutlineFillMode::Texture;
     RequestPresentationRebuild(layerIdx);
     m_IsDocumentModified = true;
-    Logger::Get().Info("Outline texture loaded " + std::to_string(tw) + "x" + std::to_string(th));
+    Logger::Get().Info("Outline texture (import) key=" + key);
+    return true;
+}
+
+bool Canvas::BindOutlineTextureAsset(int layerIdx, int styleIdx, const std::string& assetKey) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    Layer& layer = m_Layers[layerIdx];
+    if (styleIdx < 0 || styleIdx >= (int)layer.styles.size()) return false;
+    LayerStyle& st = layer.styles[styleIdx];
+
+    auto releasePrev = [&]() {
+        if (!st.outlineTextureAssetKey.empty()) {
+            assets::AssetStore::Get().Release(st.outlineTextureAssetKey);
+            st.outlineTextureAssetKey.clear();
+        }
+        st.outlineTextureRgba.clear();
+        st.outlineTextureW = st.outlineTextureH = 0;
+        st.outlineTexturePath.clear();
+    };
+
+    if (assetKey.empty()) {
+        releasePrev();
+        RequestPresentationRebuild(layerIdx);
+        m_IsDocumentModified = true;
+        return true;
+    }
+
+    if (!assets::AssetManager::Get().IsKindAllowed(assetKey, assets::AssetKind::Texture)) {
+        assets::AssetCategory cat;
+        std::string rest;
+        bool okKind = false;
+        if (assets::ParseKey(assetKey, cat, rest)) {
+            auto k = assets::GuessKindFromPath(rest);
+            okKind = (k == assets::AssetKind::Texture || k == assets::AssetKind::Unknown);
+        }
+        if (!okKind) {
+            Logger::Get().Error("BindOutlineTextureAsset: kind not Texture for " + assetKey);
+            return false;
+        }
+    }
+
+    std::string key = assets::AssetStore::Get().AcquireKey(assetKey);
+    if (key.empty()) {
+        assets::AssetStore::Get().RequestLoad(assetKey);
+        if (!assets::AssetStore::Get().AddRef(assetKey)) {
+            assets::AssetStore::Get().EnsureMeta(assetKey, assets::AssetKind::Texture, {}, {});
+            assets::AssetStore::Get().AddRef(assetKey);
+        }
+        key = assetKey;
+    }
+
+    releasePrev();
+    st.outlineTextureAssetKey = key;
+    st.outlineFill = OutlineFillMode::Texture;
+    int tw = 0, th = 0;
+    if (assets::AssetStore::Get().GetDims(key, tw, th)) {
+        st.outlineTextureW = tw;
+        st.outlineTextureH = th;
+    } else {
+        st.outlineTextureW = st.outlineTextureH = 1;
+    }
+    RequestPresentationRebuild(layerIdx);
+    m_IsDocumentModified = true;
+    Logger::Get().Info("Outline texture bound key=" + key);
     return true;
 }
 

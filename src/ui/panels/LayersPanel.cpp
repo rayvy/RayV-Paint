@@ -321,9 +321,9 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     {
                         static int s_FillPickLayer = -1;
                         std::string picked;
-                        if (Ui::AssetPickerResult(picked) && !picked.empty()) {
-                            int target = s_FillPickLayer >= 0 ? s_FillPickLayer : ai;
-                            canvas.BindFillTextureAsset(target, picked);
+                        // Only consume picker when we opened it (avoid stealing Outline picks).
+                        if (s_FillPickLayer >= 0 && Ui::AssetPickerResult(picked) && !picked.empty()) {
+                            canvas.BindFillTextureAsset(s_FillPickLayer, picked);
                             s_FillPickLayer = -1;
                         }
                         if (al.fill.useTexture || !al.fill.textureAssetKey.empty()) {

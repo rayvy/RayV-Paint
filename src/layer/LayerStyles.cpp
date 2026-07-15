@@ -5,6 +5,7 @@
 #include <cstring>
 #include <memory>
 #include <random>
+// TexturePayload shared_ptr used for outline AssetStore pin
 
 namespace layer_fx {
 
@@ -367,8 +368,26 @@ void BuildOutlineRgba(const float* contentRgba, int w, int h,
     std::sort(stops.begin(), stops.end(),
         [](const GradientStop& a, const GradientStop& b) { return a.t < b.t; });
 
-    const bool useTex = style.outlineFill == OutlineFillMode::Texture &&
-        !style.outlineTextureRgba.empty() && style.outlineTextureW > 0 && style.outlineTextureH > 0;
+    // Pin shared payload for duration of bake (AssetStore); fall back to private RGBA.
+    std::shared_ptr<const assets::TexturePayload> outlinePay;
+    const uint8_t* texPx = nullptr;
+    int tw = 0, th = 0;
+    if (style.outlineFill == OutlineFillMode::Texture) {
+        if (!style.outlineTextureAssetKey.empty()) {
+            outlinePay = assets::AssetStore::Get().GetPayload(style.outlineTextureAssetKey);
+            if (outlinePay && !outlinePay->rgba.empty() && outlinePay->w > 0 && outlinePay->h > 0) {
+                texPx = outlinePay->rgba.data();
+                tw = outlinePay->w;
+                th = outlinePay->h;
+            }
+        }
+        if (!texPx && !style.outlineTextureRgba.empty() && style.outlineTextureW > 0 && style.outlineTextureH > 0) {
+            texPx = style.outlineTextureRgba.data();
+            tw = style.outlineTextureW;
+            th = style.outlineTextureH;
+        }
+    }
+    const bool useTex = texPx != nullptr;
 
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
@@ -393,8 +412,7 @@ void BuildOutlineRgba(const float* contentRgba, int w, int h,
                 float u = (float)x / (float)std::max(1, w) * style.outlineTexScale[0] + style.outlineTexOffset[0];
                 float v = (float)y / (float)std::max(1, h) * style.outlineTexScale[1] + style.outlineTexOffset[1];
                 float tr[4];
-                SampleTextureRGBA8(style.outlineTextureRgba.data(),
-                    style.outlineTextureW, style.outlineTextureH, u, v, tr);
+                SampleTextureRGBA8(texPx, tw, th, u, v, tr);
                 // Multiply by solid tint
                 cr = tr[0] * solidR;
                 cg = tr[1] * solidG;

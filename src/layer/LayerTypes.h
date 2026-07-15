@@ -79,8 +79,9 @@ struct LayerStyle {
     OutlinePosition outlinePos = OutlinePosition::Outside;
     OutlineFillMode outlineFill = OutlineFillMode::Solid;
     std::vector<GradientStop> outlineGradient;
-    std::string outlineTexturePath;
-    // Cached outline texture (RGBA8). Loaded by Canvas when path changes.
+    std::string outlineTexturePath;     // legacy / display only
+    std::string outlineTextureAssetKey; // AssetStore key (prefer over private RGBA)
+    // Legacy private blob — avoided when outlineTextureAssetKey is bound.
     std::vector<uint8_t> outlineTextureRgba;
     int outlineTextureW = 0;
     int outlineTextureH = 0;

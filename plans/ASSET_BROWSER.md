@@ -86,4 +86,8 @@ Only **referenced** `proj:` keys (fill + smartAssetKey).
 7. Project packing in `.rayp` — ✅  
 8. SmartObject foundation — ✅  
 9. Export/3D template formats — deferred (hooks only)  
-10. GPU textured-fill sample (no full-doc bake) — future  
+10. GPU textured-fill sample (no full-doc bake) — ✅  
+11. Outline texture via AssetStore + picker — ✅  
+12. Core pack shipped under `assets/textures/` — ✅  
+13. External → project promote on save — ✅  
+

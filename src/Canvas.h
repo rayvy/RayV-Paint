@@ -252,8 +252,10 @@ public:
     bool LoadFillTexture(int layerIdx, const std::string& filepath);
     // Bind Fill to an existing AssetManager key (Texture kind only). AddRefs key.
     bool BindFillTextureAsset(int layerIdx, const std::string& assetKey);
-    // Load texture for outline style on layer.
+    // Load texture for outline style on layer (imports to Project asset).
     bool LoadOutlineTexture(int layerIdx, int styleIdx, const std::string& filepath);
+    // Bind outline to AssetManager key (Texture kind). AddRefs key.
+    bool BindOutlineTextureAsset(int layerIdx, int styleIdx, const std::string& assetKey);
 
     // Layer styles API
     int  AddLayerStyle(int layerIdx, StyleType type);

@@ -336,6 +336,20 @@ add_custom_command(
     COMMENT "Copying UI SVG icons to output directories"
 )
 
+# Ship Core (built-in) asset library next to Core binary and launcher root
+add_custom_command(
+    TARGET RayVPaint_Core POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:RayVPaint_Core>/assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets"
+        "$<TARGET_FILE_DIR:RayVPaint_Core>/assets"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:RayVPaint_Core>/../assets"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets"
+        "$<TARGET_FILE_DIR:RayVPaint_Core>/../assets"
+    COMMENT "Copying Core assets (textures + thumbs) to output directories"
+)
+
 # Ship default config (etalon from user preferences) for first-run seed
 add_custom_command(
     TARGET RayVPaint_Core POST_BUILD

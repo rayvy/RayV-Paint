@@ -6,9 +6,11 @@
 #include "../widgets/UiPathField.h"
 #include "../widgets/UiTooltip.h"
 #include "../widgets/UiColorField.h"
+#include "../widgets/UiAssetPicker.h"
 #include "../../Canvas.h"
 #include "../../layer/LayerTypes.h"
 #include "../../core/UndoRedoManager.h"
+#include "../../assets/AssetManager.h"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
@@ -21,7 +23,7 @@ extern std::vector<float> Canvas_BuildSplineLUT(const std::vector<std::pair<floa
 
 namespace UI {
 
-void DrawLayerEffectsPanel(UIState& state, Canvas& canvas) {
+void DrawLayerEffectsPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
 // Layer Effects — modal (styles + filters, unified list)
 if (state.showLayerEffects)
     ImGui::OpenPopup("Layer Effects##modal");
@@ -298,21 +300,52 @@ if (ImGui::BeginPopupModal("Layer Effects##modal", &state.showLayerEffects, 0)) 
                     dirty |= Ui::SmartSliderFloat("t1##gs", &st.outlineGradient[1].t, 0.f, 1.f, 1.f, 0.05f);
                 }
                 if (st.outlineFill == OutlineFillMode::Texture) {
-                    static char olTexPath[512] = {};
-                    if (st.outlineTexturePath.size() < sizeof(olTexPath))
-                        std::snprintf(olTexPath, sizeof(olTexPath), "%s", st.outlineTexturePath.c_str());
-                    if (Ui::PathField("##oltex", "Texture", olTexPath, sizeof(olTexPath),
-                            Ui::ShowOpenFile,
-                            "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp\0All\0*.*\0",
-                            "Image for outline fill")) {
-                        canvas.LoadOutlineTexture(ai, state.layerEffectsSelIdx, olTexPath);
+                    static int s_OlPickLayer = -1;
+                    static int s_OlPickStyle = -1;
+                    std::string picked;
+                    // Guard before AssetPickerResult (it consumes the result).
+                    if (s_OlPickLayer >= 0 && s_OlPickStyle >= 0 &&
+                        Ui::AssetPickerResult(picked) && !picked.empty()) {
+                        canvas.BindOutlineTextureAsset(s_OlPickLayer, s_OlPickStyle, picked);
+                        s_OlPickLayer = s_OlPickStyle = -1;
+                        dirty = true;
+                    }
+                    std::string name = assets::AssetManager::Get().DisplayName(st.outlineTextureAssetKey);
+                    if (name.empty()) name = st.outlineTextureAssetKey.empty() ? "(none)" : st.outlineTextureAssetKey;
+                    ID3D11ShaderResourceView* thumb =
+                        assets::AssetManager::Get().GetThumbSrv(device, st.outlineTextureAssetKey, false);
+                    if (thumb) {
+                        ImGui::Image((ImTextureID)thumb, ImVec2(32, 32));
+                        ImGui::SameLine();
+                    }
+                    ImGui::TextWrapped("%s", name.c_str());
+                    if (ImGui::Button("Choose Asset…##oltex")) {
+                        s_OlPickLayer = ai;
+                        s_OlPickStyle = state.layerEffectsSelIdx;
+                        assets::AssetFilter f;
+                        f.kind = assets::AssetKind::Texture;
+                        Ui::OpenAssetPicker(f, "Outline Texture");
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Import File…##oltex")) {
+                        char path[512] = {};
+                        if (Ui::ShowOpenFile(path, sizeof(path),
+                            "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds\0All\0*.*\0")) {
+                            canvas.LoadOutlineTexture(ai, state.layerEffectsSelIdx, path);
+                            dirty = true;
+                        }
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Clear##oltex")) {
+                        canvas.BindOutlineTextureAsset(ai, state.layerEffectsSelIdx, "");
+                        dirty = true;
                     }
                     dirty |= Ui::SmartSliderFloat("Tex Scale X##ol", &st.outlineTexScale[0], 0.05f, 8.f, 1.f, 0.05f);
                     dirty |= Ui::SmartSliderFloat("Tex Scale Y##ol", &st.outlineTexScale[1], 0.05f, 8.f, 1.f, 0.05f);
                     dirty |= Ui::SmartSliderFloat("Tex Off X##ol", &st.outlineTexOffset[0], -2.f, 2.f, 0.f, 0.05f);
                     dirty |= Ui::SmartSliderFloat("Tex Off Y##ol", &st.outlineTexOffset[1], -2.f, 2.f, 0.f, 0.05f);
                     if (st.outlineTextureW > 0)
-                        ImGui::TextDisabled("Loaded %dx%d", st.outlineTextureW, st.outlineTextureH);
+                        ImGui::TextDisabled("Texture %dx%d", st.outlineTextureW, st.outlineTextureH);
                 }
                 ImGui::TextDisabled("Independent of layer Fill opacity");
             }
