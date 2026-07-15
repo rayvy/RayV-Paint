@@ -127,6 +127,8 @@ set(SOURCES
     src/utilities/ContentAwareFill.h
     src/core/UndoRedoManager.cpp
     src/core/UndoRedoManager.h
+    src/core/BenchmarkRunner.cpp
+    src/core/BenchmarkRunner.h
     src/core/KeymapManager.cpp
     src/core/KeymapManager.h
     src/core/ClipboardHelper.cpp

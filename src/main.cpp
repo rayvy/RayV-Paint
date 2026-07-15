@@ -40,6 +40,7 @@
 #include "core/PathUtil.h"
 #include "core/ProjectManager.h"
 #include "core/SingleInstance.h"
+#include "core/BenchmarkRunner.h"
 #include "shell/DdsThumbRegister.h"
 #include "modio/VertexLayout.h"
 #include "preview3d/MeshGpu.h"
@@ -592,6 +593,7 @@ int main(int argc, char* argv[]) {
     bool testBrushes = false;
     bool forceConsole = false;
     bool test16kMode = false;
+    bool benchmarkMode = false;
     bool allowMultiInstance = false;
     std::string scriptPath = "";
     std::string configPath = "";
@@ -615,6 +617,12 @@ int main(int argc, char* argv[]) {
             headlessMode = true;
             testMode = true;
             if (scriptPath.empty()) scriptPath = "test_16k.py";
+        } else if (arg == "--benchmark") {
+            // Interactive 8K stress suite (FPS / tiling / undo memory). Visible window.
+            benchmarkMode = true;
+            forceConsole = true;
+            allowMultiInstance = true;
+            BenchmarkRunner::Get().Enable(true);
         } else if (arg == "--headless") {
             headlessMode = true;
             testMode = true; // Headless implies auto-testing behavior
@@ -653,7 +661,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Force console if in test mode or headless mode
-    if (testMode || headlessMode) {
+    if (testMode || headlessMode || benchmarkMode) {
         forceConsole = true;
         // Tests/headless may run parallel processes — allow multi unless user wants single.
         allowMultiInstance = true;
@@ -735,7 +743,8 @@ int main(int argc, char* argv[]) {
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Using DirectX 11
-    GLFWwindow* window = glfwCreateWindow(1280, 720, "RayV Paint", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(1280, 720,
+        benchmarkMode ? "RayV Paint — BENCHMARK" : "RayV Paint", nullptr, nullptr);
     if (!window) {
         Logger::Get().Error("Failed to create GLFW window");
         glfwTerminate();
@@ -1061,8 +1070,16 @@ int main(int argc, char* argv[]) {
     uiState.backupDir = backupDir;
     uiState.backupPath = backupPath;
     uiState.showRecoveryModal = showRecoveryModal;
+    // Recovery modal blocks input; skip in automated benchmark.
+    if (benchmarkMode)
+        uiState.showRecoveryModal = false;
 
     auto lastAutoSaveTime = std::chrono::steady_clock::now();
+
+    if (benchmarkMode) {
+        Logger::Get().InfoTag("bench", "Starting interactive 8K benchmark mode");
+        BenchmarkRunner::Get().Start(ActiveCanvas(), g_pd3dDevice);
+    }
 
     // 9. Main loop
     while (!glfwWindowShouldClose(window)) {
@@ -1377,9 +1394,9 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Background Auto-Save trigger
+        // Background Auto-Save trigger (disabled during benchmark — I/O noise)
         static bool s_IsAutoSaving = false;
-        int autoSaveInterval = ConfigManager::Get().GetAutoSaveIntervalMinutes();
+        int autoSaveInterval = benchmarkMode ? 0 : ConfigManager::Get().GetAutoSaveIntervalMinutes();
         if (autoSaveInterval > 0 && ActiveCanvas().IsDocumentModified() && !s_IsAutoSaving) {
             auto currentTime = std::chrono::steady_clock::now();
             auto elapsedMinutes = std::chrono::duration_cast<std::chrono::minutes>(currentTime - lastAutoSaveTime).count();
@@ -1410,6 +1427,19 @@ int main(int argc, char* argv[]) {
         ImVec2 viewportPanelSize = ImGui::GetContentRegionAvail();
         int viewportWidth = static_cast<int>(viewportPanelSize.x);
         int viewportHeight = static_cast<int>(viewportPanelSize.y);
+
+        // Benchmark steps before canvas compose so stroke/tile work is in this frame's cost.
+        // metric uses previous frame's work time (human-ish dt for path advance).
+        static float s_benchPrevWorkMs = 16.0f;
+        if (benchmarkMode && BenchmarkRunner::Get().IsActive()) {
+            const float metricMs = s_benchPrevWorkMs > 0.5f ? s_benchPrevWorkMs : 16.0f;
+            if (!BenchmarkRunner::Get().Tick(ActiveCanvas(), g_pd3dDevice, metricMs)) {
+                processExitCode = BenchmarkRunner::Get().ExitCode();
+                Logger::Get().InfoTag("bench",
+                    "Benchmark finished mid-frame, will exit after present. code=" +
+                    std::to_string(processExitCode));
+            }
+        }
 
         if (viewportWidth > 0 && viewportHeight > 0) {
             ResizeCanvasRenderTarget(viewportWidth, viewportHeight);
@@ -2686,6 +2716,22 @@ int main(int argc, char* argv[]) {
 
 
 
+        // Benchmark HUD (before ImGui::Render so it shows in the frame)
+        if (benchmarkMode && BenchmarkRunner::Get().IsActive()) {
+            ImGui::SetNextWindowPos(ImVec2(14.f, 14.f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.78f);
+            ImGuiWindowFlags hudFlags =
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+                ImGuiWindowFlags_NoFocusOnAppearing;
+            if (ImGui::Begin("##bench_hud", nullptr, hudFlags)) {
+                ImGui::TextUnformatted(BenchmarkRunner::Get().StatusLine());
+                ImGui::Text("UI FPS: %.1f   last frame: %.1f ms", uiState.fps, uiState.frameTimeMs);
+                ImGui::TextDisabled("8K tiling / stroke / undo stress — auto-exits when done");
+            }
+            ImGui::End();
+        }
+
         // Handle Test Mode Execution: Perform 1 Frame and Exit
         if (testMode) {
             Logger::Get().Info("[TEST] Render completed. Saving config and exiting successfully.");
@@ -2700,6 +2746,11 @@ int main(int argc, char* argv[]) {
             }
             break;
         }
+
+        // Work timing (excludes VSync wait when Present blocks)
+        auto workEnd = std::chrono::high_resolution_clock::now();
+        const float frameWorkMs =
+            std::chrono::duration<float, std::milli>(workEnd - loopStart).count();
 
         // Standard Render Presentation
         ImGui::Render();
@@ -2729,6 +2780,16 @@ int main(int argc, char* argv[]) {
             uiState.fps = 1000.0f / (frameTimeAccumulator / frameCount);
             frameTimeAccumulator = 0.0f;
             frameCount = 0;
+        }
+
+        if (benchmarkMode) {
+            s_benchPrevWorkMs = frameWorkMs > 0.5f ? frameWorkMs : uiState.frameTimeMs;
+            if (BenchmarkRunner::Get().IsFinished()) {
+                processExitCode = BenchmarkRunner::Get().ExitCode();
+                Logger::Get().InfoTag("bench",
+                    "Exiting after benchmark, code=" + std::to_string(processExitCode));
+                break;
+            }
         }
     }
 
