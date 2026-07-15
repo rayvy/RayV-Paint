@@ -2069,6 +2069,21 @@ void Canvas::BackupAllActiveLayerTiles() {
             BackupTile(tx, ty);
 }
 
+void Canvas::BackupTilesInRect(int x0, int y0, int x1, int y1) {
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    if (m_Width <= 0 || m_Height <= 0) return;
+    x0 = std::max(0, x0); y0 = std::max(0, y0);
+    x1 = std::min(m_Width - 1, x1); y1 = std::min(m_Height - 1, y1);
+    if (x1 < x0 || y1 < y0) return;
+    const int ntx = (m_Width  + TILE_SIZE - 1) / TILE_SIZE;
+    const int nty = (m_Height + TILE_SIZE - 1) / TILE_SIZE;
+    int tx0 = x0 / TILE_SIZE, ty0 = y0 / TILE_SIZE;
+    int tx1 = x1 / TILE_SIZE, ty1 = y1 / TILE_SIZE;
+    for (int ty = ty0; ty <= ty1 && ty < nty; ++ty)
+        for (int tx = tx0; tx <= tx1 && tx < ntx; ++tx)
+            BackupTile(tx, ty);
+}
+
 void Canvas::CommitActiveLayerMutation(const std::string& actionName) {
     CommitTransformation(actionName);
     InvalidateWandSourceCache();
@@ -2818,6 +2833,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             lb->transformParams = DirectX::XMFLOAT4(1.0f, 1.0f, 0.0f, 0.0f);
             float flags = (layer.alphaRewrite ? 1.f : 0.f) + (isFirst ? 2.f : 0.f);
             lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
+            lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
             context->Unmap(m_LayerConstantBuffer, 0);
         }
         context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -2905,6 +2921,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                         lb->transformParams = DirectX::XMFLOAT4(1.f, 1.f, 0.f, 0.f);
                         float flags = 1.f + (gFirst ? 2.f : 0.f);
                         lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
+                        lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
                         context->Unmap(m_LayerConstantBuffer, 0);
                     }
                     context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -2957,6 +2974,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     lb->transformParams = DirectX::XMFLOAT4(1.f, 1.f, 0.f, 0.f);
                     float flags = (child.alphaRewrite ? 1.f : 0.f) + (firstInGroup ? 2.f : 0.f);
                     lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)child.blendMode, flags);
+                    lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
                     context->Unmap(m_LayerConstantBuffer, 0);
                 }
                 context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -2988,6 +3006,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 lb->transformParams = DirectX::XMFLOAT4(1.f, 1.f, 0.f, 0.f);
                 float flags = 1.f + (gFirst ? 2.f : 0.f);
                 lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
+                lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
                 context->Unmap(m_LayerConstantBuffer, 0);
             }
             context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -3027,25 +3046,13 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             if (m_IsMovingPixels && i == m_StartActiveLayerIdx && m_FloatingSRV) {
                 float uOff = (float)m_FloatingOffsetX / (float)m_Width;
                 float vOff = (float)m_FloatingOffsetY / (float)m_Height;
-                
-                // Calculate bounding box center of floating selection
-                int minX = m_Width, maxX = 0, minY = m_Height, maxY = 0;
-                bool hasPixels = false;
-                for (int y = 0; y < m_Height; ++y) {
-                    for (int x = 0; x < m_Width; ++x) {
-                        if (m_OriginalSelectionMask[y * m_Width + x] > 0) {
-                            if (x < minX) minX = x;
-                            if (x > maxX) maxX = x;
-                            if (y < minY) minY = y;
-                            if (y > maxY) maxY = y;
-                            hasPixels = true;
-                        }
-                    }
-                }
-                float cx_box = hasPixels ? (minX + maxX) * 0.5f : m_Width * 0.5f;
-                float cy_box = hasPixels ? (minY + maxY) * 0.5f : m_Height * 0.5f;
-                float centerX = cx_box / (float)m_Width;
-                float centerY = cy_box / (float)m_Height;
+                // Cached center — never re-scan full selection mask per compose frame
+                float centerX = m_FloatingCenterX / (float)m_Width;
+                float centerY = m_FloatingCenterY / (float)m_Height;
+                float rectU = (float)m_FloatingBBoxX / (float)m_Width;
+                float rectV = (float)m_FloatingBBoxY / (float)m_Height;
+                float rectSU = (float)std::max(1, m_FloatingBufW) / (float)m_Width;
+                float rectSV = (float)std::max(1, m_FloatingBufH) / (float)m_Height;
 
                 ID3D11BlendState* fBlend = layer.alphaRewrite
                     ? m_LayerBlendState
@@ -3058,6 +3065,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     lb->layerParams = DirectX::XMFLOAT4(layer.opacity, hasFMaskVal, uOff, vOff);
                     lb->transformParams = DirectX::XMFLOAT4(m_FloatingScaleX, m_FloatingScaleY, m_FloatingRotation, 1.0f); // isFloating = 1.0f
                     lb->centerParams = DirectX::XMFLOAT4(centerX, centerY, 0.0f, layer.alphaRewrite ? 1.0f : 0.0f);
+                    lb->floatRect = DirectX::XMFLOAT4(rectU, rectV, rectSU, rectSV);
                     context->Unmap(m_LayerConstantBuffer, 0);
                 }
                 context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
@@ -6165,13 +6173,12 @@ void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColo
 }
 
 void Canvas::StartMovePixels(ID3D11Device* device) {
-    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= m_Layers.size()) return;
+    if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
+    if (m_Width <= 0 || m_Height <= 0) return;
     if (m_IsMovingPixels) {
         CommitMovePixels(device);
     }
 
-    BackupAllActiveLayerTiles();
-    
     m_IsMovingPixels = true;
     m_FloatingOffsetX = 0;
     m_FloatingOffsetY = 0;
@@ -6179,156 +6186,205 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
     m_FloatingScaleY = 1.0f;
     m_FloatingRotation = 0.0f;
     m_StartActiveLayerIdx = m_ActiveLayerIdx;
-    
-    m_OriginalSelectionMask.assign(m_Width * m_Height, 255);
-    if (m_HasSelection && !m_SelectionMask.empty()) {
-        std::copy(m_SelectionMask.begin(), m_SelectionMask.end(), m_OriginalSelectionMask.begin());
-    }
-    
-    Layer& layer = m_Layers[m_ActiveLayerIdx];
-    // Floating buffer layout matches full document for shader UV compatibility,
-    // but we only fill the selection AABB (padded) to reduce CPU work on 4K+.
-    m_FloatingPixels.assign((size_t)m_Width * m_Height * 4, 0.0f);
-    m_FloatingBufW = m_Width;
-    m_FloatingBufH = m_Height;
+    m_ActiveStrokeDeltas.clear();
 
+    Layer& layer = m_Layers[m_ActiveLayerIdx];
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+
+    // ---- Tight selection AABB (document space) ----
     int minX = 0, minY = 0, maxX = m_Width - 1, maxY = m_Height - 1;
-    if (m_HasSelection) {
-        minX = m_Width; minY = m_Height; maxX = -1; maxY = -1;
-        for (int y = 0; y < m_Height; ++y) {
-            for (int x = 0; x < m_Width; ++x) {
-                if (m_OriginalSelectionMask[(size_t)y * m_Width + x] > 0) {
-                    minX = std::min(minX, x); maxX = std::max(maxX, x);
-                    minY = std::min(minY, y); maxY = std::max(maxY, y);
-                }
-            }
+    if (m_HasSelection && !m_SelectionMask.empty()) {
+        int bx = 0, by = 0, bw = 0, bh = 0;
+        if (GetSelectionBounds(bx, by, bw, bh) && bw > 0 && bh > 0) {
+            minX = bx; minY = by; maxX = bx + bw - 1; maxY = by + bh - 1;
+        } else {
+            // Empty selection mask — nothing to float
+            m_IsMovingPixels = false;
+            return;
         }
-        if (maxX < minX) { minX = 0; minY = 0; maxX = m_Width - 1; maxY = m_Height - 1; }
         // pad for soft edges / bilinear
         minX = std::max(0, minX - 2); minY = std::max(0, minY - 2);
         maxX = std::min(m_Width - 1, maxX + 2); maxY = std::min(m_Height - 1, maxY + 2);
+    } else if (layer.tileCache && !layer.tileCache->IsEmpty()) {
+        // No selection: tight AABB of existing tiles (avoids full-canvas float on 8K)
+        minX = m_Width; minY = m_Height; maxX = -1; maxY = -1;
+        const int ntx = layer.tileCache->GetTilesX();
+        const int nty = layer.tileCache->GetTilesY();
+        for (int ty = 0; ty < nty; ++ty) {
+            for (int tx = 0; tx < ntx; ++tx) {
+                if (!layer.tileCache->HasTile(tx, ty)) continue;
+                int x0 = tx * TILE_SIZE, y0 = ty * TILE_SIZE;
+                int x1 = std::min(m_Width - 1, x0 + TILE_SIZE - 1);
+                int y1 = std::min(m_Height - 1, y0 + TILE_SIZE - 1);
+                minX = std::min(minX, x0); minY = std::min(minY, y0);
+                maxX = std::max(maxX, x1); maxY = std::max(maxY, y1);
+            }
+        }
+        if (maxX < minX) {
+            m_IsMovingPixels = false;
+            return;
+        }
     }
-    m_FloatingBBoxX = minX; m_FloatingBBoxY = minY;
-    m_FloatingBBoxW = maxX - minX + 1; m_FloatingBBoxH = maxY - minY + 1;
-    
-    std::vector<float> layerPixels = ExportLayerF(layer, m_Width, m_Height);
-    
-    for (int y = minY; y <= maxY; ++y) {
-        for (int x = minX; x <= maxX; ++x) {
-            size_t maskIdx = (size_t)y * m_Width + x;
-            float weight = SelU82F(m_OriginalSelectionMask[maskIdx]);
-            if (weight > 0.0f) {
-                size_t pixelIdx = maskIdx * 4;
-                m_FloatingPixels[pixelIdx + 0] = layerPixels[pixelIdx + 0];
-                m_FloatingPixels[pixelIdx + 1] = layerPixels[pixelIdx + 1];
-                m_FloatingPixels[pixelIdx + 2] = layerPixels[pixelIdx + 2];
-                m_FloatingPixels[pixelIdx + 3] = layerPixels[pixelIdx + 3] * weight;
-                
-                layerPixels[pixelIdx + 0] *= (1.0f - weight);
-                layerPixels[pixelIdx + 1] *= (1.0f - weight);
-                layerPixels[pixelIdx + 2] *= (1.0f - weight);
-                layerPixels[pixelIdx + 3] *= (1.0f - weight);
+
+    m_FloatingBBoxX = minX;
+    m_FloatingBBoxY = minY;
+    m_FloatingBBoxW = maxX - minX + 1;
+    m_FloatingBBoxH = maxY - minY + 1;
+    m_FloatingBufW = m_FloatingBBoxW;
+    m_FloatingBufH = m_FloatingBBoxH;
+    m_FloatingCenterX = (minX + maxX) * 0.5f;
+    m_FloatingCenterY = (minY + maxY) * 0.5f;
+
+    const size_t pixCount = (size_t)m_FloatingBufW * (size_t)m_FloatingBufH;
+    const size_t estBytes = pixCount * 16ull; // RGBA32F
+    if (MemoryStats::ExceedsRamBudget(estBytes, 0.35)) {
+        Logger::Get().ErrorTag("mem",
+            "StartMovePixels: floating buffer " + MemoryStats::FormatBytes(estBytes) +
+            " exceeds RAM budget — aborting move.");
+        m_IsMovingPixels = false;
+        m_FloatingPixels.clear();
+        m_OriginalSelectionMask.clear();
+        m_FloatingBufW = m_FloatingBufH = 0;
+        return;
+    }
+
+    // Local-only buffers (not full document)
+    m_FloatingPixels.assign(pixCount * 4, 0.0f);
+    m_OriginalSelectionMask.assign(pixCount, 255);
+    if (m_HasSelection && !m_SelectionMask.empty()) {
+        for (int y = minY; y <= maxY; ++y) {
+            for (int x = minX; x <= maxX; ++x) {
+                size_t li = (size_t)(y - minY) * (size_t)m_FloatingBufW + (size_t)(x - minX);
+                m_OriginalSelectionMask[li] = m_SelectionMask[(size_t)y * (size_t)m_Width + (size_t)x];
             }
         }
     }
-    
-    SetLayerPixelsF(layer, layerPixels, m_Width, m_Height, m_CanvasFormat);
-    
+
+    // Undo backup only for tiles we will cut (source AABB)
+    BackupTilesInRect(minX, minY, maxX, maxY);
+
+    // Lift pixels tile-wise (no full-canvas ExportLayerF)
+    for (int y = minY; y <= maxY; ++y) {
+        for (int x = minX; x <= maxX; ++x) {
+            size_t li = (size_t)(y - minY) * (size_t)m_FloatingBufW + (size_t)(x - minX);
+            float weight = SelU82F(m_OriginalSelectionMask[li]);
+            if (weight <= 0.0f) continue;
+
+            float rgba[4] = {0, 0, 0, 0};
+            layer.tileCache->GetPixelF(x, y, rgba);
+            size_t pi = li * 4;
+            m_FloatingPixels[pi + 0] = rgba[0];
+            m_FloatingPixels[pi + 1] = rgba[1];
+            m_FloatingPixels[pi + 2] = rgba[2];
+            m_FloatingPixels[pi + 3] = rgba[3] * weight;
+
+            rgba[0] *= (1.0f - weight);
+            rgba[1] *= (1.0f - weight);
+            rgba[2] *= (1.0f - weight);
+            rgba[3] *= (1.0f - weight);
+            layer.tileCache->SetPixelF(x, y, rgba);
+        }
+    }
+    layer.needsUpload = true;
+    layer.thumbDirty = true;
+    layer.filtersDirty = true;
+    m_CompositeDirty = true;
+
+    // Edge RGB pad for bilinear (local buffer only — 4 cheap dilate passes)
+    const int fw = m_FloatingBufW, fh = m_FloatingBufH;
     for (int iter = 0; iter < 4; ++iter) {
-        std::vector<float> nextFloating = m_FloatingPixels;
-        for (int y = 0; y < m_Height; ++y) {
-            for (int x = 0; x < m_Width; ++x) {
-                size_t idx = (y * m_Width + x) * 4;
-                if (m_FloatingPixels[idx + 3] <= 0.05f) {
-                    int dxs[] = { 0, 0, -1, 1 };
-                    int dys[] = { -1, 1, 0, 0 };
-                    float bestAlpha = 0.0f;
-                    float padR = 0.0f, padG = 0.0f, padB = 0.0f;
-                    for (int n = 0; n < 4; ++n) {
-                        int nx = x + dxs[n];
-                        int ny = y + dys[n];
-                        if (nx >= 0 && nx < m_Width && ny >= 0 && ny < m_Height) {
-                            size_t nIdx = (ny * m_Width + nx) * 4;
-                            if (m_FloatingPixels[nIdx + 3] > bestAlpha) {
-                                bestAlpha = m_FloatingPixels[nIdx + 3];
-                                padR = m_FloatingPixels[nIdx + 0];
-                                padG = m_FloatingPixels[nIdx + 1];
-                                padB = m_FloatingPixels[nIdx + 2];
-                            }
-                        }
+        std::vector<float> next = m_FloatingPixels;
+        for (int y = 0; y < fh; ++y) {
+            for (int x = 0; x < fw; ++x) {
+                size_t idx = ((size_t)y * fw + x) * 4;
+                if (m_FloatingPixels[idx + 3] > 0.05f) continue;
+                int dxs[] = {0, 0, -1, 1};
+                int dys[] = {-1, 1, 0, 0};
+                float bestA = 0.f, pr = 0.f, pg = 0.f, pb = 0.f;
+                for (int n = 0; n < 4; ++n) {
+                    int nx = x + dxs[n], ny = y + dys[n];
+                    if (nx < 0 || ny < 0 || nx >= fw || ny >= fh) continue;
+                    size_t nIdx = ((size_t)ny * fw + nx) * 4;
+                    if (m_FloatingPixels[nIdx + 3] > bestA) {
+                        bestA = m_FloatingPixels[nIdx + 3];
+                        pr = m_FloatingPixels[nIdx + 0];
+                        pg = m_FloatingPixels[nIdx + 1];
+                        pb = m_FloatingPixels[nIdx + 2];
                     }
-                    if (bestAlpha > 0.05f) {
-                        nextFloating[idx + 0] = padR;
-                        nextFloating[idx + 1] = padG;
-                        nextFloating[idx + 2] = padB;
-                    }
+                }
+                if (bestA > 0.05f) {
+                    next[idx + 0] = pr;
+                    next[idx + 1] = pg;
+                    next[idx + 2] = pb;
                 }
             }
         }
-        m_FloatingPixels = nextFloating;
+        m_FloatingPixels.swap(next);
     }
-    
+
     if (device) {
         if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
         if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
-        
+
         D3D11_TEXTURE2D_DESC desc = {};
-        desc.Width = m_Width;
-        desc.Height = m_Height;
+        desc.Width = (UINT)fw;
+        desc.Height = (UINT)fh;
         desc.MipLevels = 1;
         desc.ArraySize = 1;
         desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         desc.SampleDesc.Count = 1;
-        desc.SampleDesc.Quality = 0;
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        
+
         D3D11_SUBRESOURCE_DATA initData = {};
         initData.pSysMem = m_FloatingPixels.data();
-        initData.SysMemPitch = m_Width * sizeof(float) * 4;
-        
+        initData.SysMemPitch = (UINT)(fw * sizeof(float) * 4);
+
         HRESULT hr = device->CreateTexture2D(&desc, &initData, &m_FloatingTexture);
-        if (SUCCEEDED(hr)) {
+        if (SUCCEEDED(hr))
             device->CreateShaderResourceView(m_FloatingTexture, nullptr, &m_FloatingSRV);
-        }
-        
-        if (layer.hasMask) {
+
+        if (layer.hasMask && !layer.mask.empty()) {
             if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
             if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
-            
-            std::vector<uint8_t> floatingMask(m_Width * m_Height, 0);
-            for (int y = 0; y < m_Height; ++y) {
-                for (int x = 0; x < m_Width; ++x) {
-                    size_t idx = y * m_Width + x;
-                    if (m_OriginalSelectionMask[idx] > 0) {
-                        floatingMask[idx] = layer.mask[idx];
-                        layer.mask[idx] = 255;
+
+            std::vector<uint8_t> floatingMask(pixCount, 0);
+            for (int y = minY; y <= maxY; ++y) {
+                for (int x = minX; x <= maxX; ++x) {
+                    size_t li = (size_t)(y - minY) * (size_t)fw + (size_t)(x - minX);
+                    if (m_OriginalSelectionMask[li] > 0) {
+                        size_t di = (size_t)y * (size_t)m_Width + (size_t)x;
+                        floatingMask[li] = layer.mask[di];
+                        layer.mask[di] = 255;
                     }
                 }
             }
             layer.maskNeedsUpload = true;
-            
+
             D3D11_TEXTURE2D_DESC mDesc = {};
-            mDesc.Width = m_Width;
-            mDesc.Height = m_Height;
+            mDesc.Width = (UINT)fw;
+            mDesc.Height = (UINT)fh;
             mDesc.MipLevels = 1;
             mDesc.ArraySize = 1;
             mDesc.Format = DXGI_FORMAT_R8_UNORM;
             mDesc.SampleDesc.Count = 1;
-            mDesc.SampleDesc.Quality = 0;
             mDesc.Usage = D3D11_USAGE_DEFAULT;
             mDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            
+
             D3D11_SUBRESOURCE_DATA mInitData = {};
             mInitData.pSysMem = floatingMask.data();
-            mInitData.SysMemPitch = m_Width * sizeof(uint8_t);
-            
+            mInitData.SysMemPitch = (UINT)fw;
+
             hr = device->CreateTexture2D(&mDesc, &mInitData, &m_FloatingMaskTexture);
-            if (SUCCEEDED(hr)) {
+            if (SUCCEEDED(hr))
                 device->CreateShaderResourceView(m_FloatingMaskTexture, nullptr, &m_FloatingMaskSRV);
-            }
         }
     }
+
+    Logger::Get().InfoTag("perf",
+        "StartMovePixels floating " + std::to_string(fw) + "x" + std::to_string(fh) +
+        " (" + MemoryStats::FormatBytes(estBytes) + ") center=(" +
+        std::to_string((int)m_FloatingCenterX) + "," + std::to_string((int)m_FloatingCenterY) + ")");
 }
 
 void Canvas::UpdateMovePixels(ID3D11Device* device, int dx, int dy) {
@@ -6387,165 +6443,150 @@ static float sampleBilinearMask(const std::vector<uint8_t>& mask, int width, int
 
 void Canvas::CommitMovePixels(ID3D11Device* device) {
     if (!m_IsMovingPixels) return;
-    
-    if (m_StartActiveLayerIdx >= 0 && m_StartActiveLayerIdx < m_Layers.size()) {
-        Layer& layer = m_Layers[m_StartActiveLayerIdx];
-        
-        // Calculate bounding box center of floating selection
-        int minX = m_Width, maxX = 0, minY = m_Height, maxY = 0;
-        bool hasPixels = false;
-        for (int y = 0; y < m_Height; ++y) {
-            for (int x = 0; x < m_Width; ++x) {
-                if (m_OriginalSelectionMask[y * m_Width + x] > 0) {
-                    if (x < minX) minX = x;
-                    if (x > maxX) maxX = x;
-                    if (y < minY) minY = y;
-                    if (y > maxY) maxY = y;
-                    hasPixels = true;
-                }
-            }
-        }
-        float cx = hasPixels ? (minX + maxX) * 0.5f : m_Width * 0.5f;
-        float cy = hasPixels ? (minY + maxY) * 0.5f : m_Height * 0.5f;
-        
-        std::vector<float> finalPixels = ExportLayerF(layer, m_Width, m_Height);
-        for (int y = 0; y < m_Height; ++y) {
-            for (int x = 0; x < m_Width; ++x) {
-                // Compute inverse transformation
-                float px = (float)x - cx;
-                float py = (float)y - cy;
-                
-                // Inverse translation
-                px -= (float)m_FloatingOffsetX;
-                py -= (float)m_FloatingOffsetY;
-                
-                // Inverse rotation
-                float angle = -m_FloatingRotation;
-                float cosA = std::cos(angle);
-                float sinA = std::sin(angle);
-                float rx = px * cosA - py * sinA;
-                float ry = px * sinA + py * cosA;
-                
-                // Inverse scale
-                float sx = rx;
-                float sy = ry;
-                if (m_FloatingScaleX > 0.0001f) sx /= m_FloatingScaleX;
-                if (m_FloatingScaleY > 0.0001f) sy /= m_FloatingScaleY;
-                
-                // Translate back to center
-                float srcX = sx + cx;
-                float srcY = sy + cy;
-                
-                if (srcX >= 0.0f && srcX <= (float)m_Width - 1.0f && srcY >= 0.0f && srcY <= (float)m_Height - 1.0f) {
-                    float srcAlpha = sampleBilinearChannel(m_FloatingPixels, m_Width, m_Height, srcX, srcY, 3);
-                    if (srcAlpha > 0.0f) {
-                        size_t destIdx = (y * m_Width + x) * 4;
-                        float destAlpha = finalPixels[destIdx + 3];
-                        float outAlpha = srcAlpha + destAlpha * (1.0f - srcAlpha);
-                        if (outAlpha > 0.0f) {
-                            float srcR = sampleBilinearChannel(m_FloatingPixels, m_Width, m_Height, srcX, srcY, 0);
-                            float srcG = sampleBilinearChannel(m_FloatingPixels, m_Width, m_Height, srcX, srcY, 1);
-                            float srcB = sampleBilinearChannel(m_FloatingPixels, m_Width, m_Height, srcX, srcY, 2);
-                            
-                            finalPixels[destIdx + 0] = (srcR * srcAlpha + finalPixels[destIdx + 0] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
-                            finalPixels[destIdx + 1] = (srcG * srcAlpha + finalPixels[destIdx + 1] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
-                            finalPixels[destIdx + 2] = (srcB * srcAlpha + finalPixels[destIdx + 2] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
-                        }
-                        finalPixels[destIdx + 3] = outAlpha;
-                    }
-                }
-            }
-        }
-        SetLayerPixelsF(layer, finalPixels, m_Width, m_Height, m_CanvasFormat);
 
-        // Register transform in undo (StartMovePixels already captured oldState for all tiles).
-        {
-            int prevActive = m_ActiveLayerIdx;
-            m_ActiveLayerIdx = m_StartActiveLayerIdx;
-            CommitTransformation("Transform");
-            m_ActiveLayerIdx = prevActive;
+    if (m_StartActiveLayerIdx >= 0 && m_StartActiveLayerIdx < (int)m_Layers.size() &&
+        m_FloatingBufW > 0 && m_FloatingBufH > 0 && !m_FloatingPixels.empty()) {
+        Layer& layer = m_Layers[m_StartActiveLayerIdx];
+        EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+
+        const float cx = m_FloatingCenterX;
+        const float cy = m_FloatingCenterY;
+        const int fw = m_FloatingBufW;
+        const int fh = m_FloatingBufH;
+        const int ox = m_FloatingBBoxX;
+        const int oy = m_FloatingBBoxY;
+
+        // Destination AABB of transformed source corners (with pad)
+        auto xformCorner = [&](float sx, float sy, float& dx, float& dy) {
+            float px = (sx - cx) * m_FloatingScaleX;
+            float py = (sy - cy) * m_FloatingScaleY;
+            float cosA = std::cos(m_FloatingRotation);
+            float sinA = std::sin(m_FloatingRotation);
+            dx = px * cosA - py * sinA + cx + (float)m_FloatingOffsetX;
+            dy = px * sinA + py * cosA + cy + (float)m_FloatingOffsetY;
+        };
+        float cxs[4], cys[4];
+        xformCorner((float)ox, (float)oy, cxs[0], cys[0]);
+        xformCorner((float)(ox + fw - 1), (float)oy, cxs[1], cys[1]);
+        xformCorner((float)(ox + fw - 1), (float)(oy + fh - 1), cxs[2], cys[2]);
+        xformCorner((float)ox, (float)(oy + fh - 1), cxs[3], cys[3]);
+        float dMinX = cxs[0], dMaxX = cxs[0], dMinY = cys[0], dMaxY = cys[0];
+        for (int i = 1; i < 4; ++i) {
+            dMinX = std::min(dMinX, cxs[i]); dMaxX = std::max(dMaxX, cxs[i]);
+            dMinY = std::min(dMinY, cys[i]); dMaxY = std::max(dMaxY, cys[i]);
         }
-        
-        if (layer.hasMask && m_FloatingMaskSRV) {
-            std::vector<uint8_t> finalMask = layer.mask;
-            for (int y = 0; y < m_Height; ++y) {
-                for (int x = 0; x < m_Width; ++x) {
-                    float px = (float)x - cx;
-                    float py = (float)y - cy;
-                    px -= (float)m_FloatingOffsetX;
-                    py -= (float)m_FloatingOffsetY;
-                    
-                    float angle = -m_FloatingRotation;
-                    float cosA = std::cos(angle);
-                    float sinA = std::sin(angle);
-                    float rx = px * cosA - py * sinA;
-                    float ry = px * sinA + py * cosA;
-                    
-                    float sx = rx;
-                    float sy = ry;
-                    if (m_FloatingScaleX > 0.0001f) sx /= m_FloatingScaleX;
-                    if (m_FloatingScaleY > 0.0001f) sy /= m_FloatingScaleY;
-                    
-                    float srcX = sx + cx;
-                    float srcY = sy + cy;
-                    
-                    if (srcX >= 0.0f && srcX <= (float)m_Width - 1.0f && srcY >= 0.0f && srcY <= (float)m_Height - 1.0f) {
-                        float maskWeight = sampleBilinearMask(m_OriginalSelectionMask, m_Width, m_Height, srcX, srcY);
-                        if (maskWeight > 0.0f) {
-                            size_t destIdx = y * m_Width + x;
-                            finalMask[destIdx] = SelF2U8(maskWeight);
-                        }
-                    }
+        int destX0 = std::max(0, (int)std::floor(dMinX) - 2);
+        int destY0 = std::max(0, (int)std::floor(dMinY) - 2);
+        int destX1 = std::min(m_Width - 1, (int)std::ceil(dMaxX) + 2);
+        int destY1 = std::min(m_Height - 1, (int)std::ceil(dMaxY) + 2);
+
+        // Also cover source cut region (already backed up) and destination for undo
+        int prevActive = m_ActiveLayerIdx;
+        m_ActiveLayerIdx = m_StartActiveLayerIdx;
+        BackupTilesInRect(destX0, destY0, destX1, destY1);
+
+        const float invCos = std::cos(-m_FloatingRotation);
+        const float invSin = std::sin(-m_FloatingRotation);
+        const float invSx = (m_FloatingScaleX > 1e-4f) ? (1.f / m_FloatingScaleX) : 0.f;
+        const float invSy = (m_FloatingScaleY > 1e-4f) ? (1.f / m_FloatingScaleY) : 0.f;
+
+        for (int y = destY0; y <= destY1; ++y) {
+            for (int x = destX0; x <= destX1; ++x) {
+                float px = (float)x - cx - (float)m_FloatingOffsetX;
+                float py = (float)y - cy - (float)m_FloatingOffsetY;
+                float rx = px * invCos - py * invSin;
+                float ry = px * invSin + py * invCos;
+                float srcX = rx * invSx + cx;
+                float srcY = ry * invSy + cy;
+
+                // Local floating coords
+                float lx = srcX - (float)ox;
+                float ly = srcY - (float)oy;
+                if (lx < -0.5f || ly < -0.5f || lx > (float)fw - 0.5f || ly > (float)fh - 0.5f)
+                    continue;
+
+                float srcAlpha = sampleBilinearChannel(m_FloatingPixels, fw, fh, lx, ly, 3);
+                if (srcAlpha <= 0.0f) continue;
+
+                float dest[4] = {0, 0, 0, 0};
+                layer.tileCache->GetPixelF(x, y, dest);
+                float destAlpha = dest[3];
+                float outAlpha = srcAlpha + destAlpha * (1.0f - srcAlpha);
+                if (outAlpha > 0.0f) {
+                    float srcR = sampleBilinearChannel(m_FloatingPixels, fw, fh, lx, ly, 0);
+                    float srcG = sampleBilinearChannel(m_FloatingPixels, fw, fh, lx, ly, 1);
+                    float srcB = sampleBilinearChannel(m_FloatingPixels, fw, fh, lx, ly, 2);
+                    dest[0] = (srcR * srcAlpha + dest[0] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                    dest[1] = (srcG * srcAlpha + dest[1] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                    dest[2] = (srcB * srcAlpha + dest[2] * destAlpha * (1.0f - srcAlpha)) / outAlpha;
+                }
+                dest[3] = outAlpha;
+                layer.tileCache->SetPixelF(x, y, dest);
+            }
+        }
+        layer.needsUpload = true;
+        layer.thumbDirty = true;
+        layer.filtersDirty = true;
+        m_CompositeDirty = true;
+
+        CommitTransformation("Transform");
+        m_ActiveLayerIdx = prevActive;
+
+        if (layer.hasMask && m_FloatingMaskSRV && !layer.mask.empty()) {
+            for (int y = destY0; y <= destY1; ++y) {
+                for (int x = destX0; x <= destX1; ++x) {
+                    float px = (float)x - cx - (float)m_FloatingOffsetX;
+                    float py = (float)y - cy - (float)m_FloatingOffsetY;
+                    float rx = px * invCos - py * invSin;
+                    float ry = px * invSin + py * invCos;
+                    float srcX = rx * invSx + cx;
+                    float srcY = ry * invSy + cy;
+                    float lx = srcX - (float)ox;
+                    float ly = srcY - (float)oy;
+                    if (lx < 0.f || ly < 0.f || lx > (float)(fw - 1) || ly > (float)(fh - 1))
+                        continue;
+                    float maskWeight = sampleBilinearMask(m_OriginalSelectionMask, fw, fh, lx, ly);
+                    if (maskWeight > 0.0f)
+                        layer.mask[(size_t)y * (size_t)m_Width + (size_t)x] = SelF2U8(maskWeight);
                 }
             }
-            layer.mask = finalMask;
             layer.maskNeedsUpload = true;
         }
-        
-        if (m_HasSelection) {
-            std::vector<uint8_t> shiftedSelection(m_Width * m_Height, 0);
-            for (int y = 0; y < m_Height; ++y) {
-                for (int x = 0; x < m_Width; ++x) {
-                    float px = (float)x - cx;
-                    float py = (float)y - cy;
-                    px -= (float)m_FloatingOffsetX;
-                    py -= (float)m_FloatingOffsetY;
-                    
-                    float angle = -m_FloatingRotation;
-                    float cosA = std::cos(angle);
-                    float sinA = std::sin(angle);
-                    float rx = px * cosA - py * sinA;
-                    float ry = px * sinA + py * cosA;
-                    
-                    float sx = rx;
-                    float sy = ry;
-                    if (m_FloatingScaleX > 0.0001f) sx /= m_FloatingScaleX;
-                    if (m_FloatingScaleY > 0.0001f) sy /= m_FloatingScaleY;
-                    
-                    float srcX = sx + cx;
-                    float srcY = sy + cy;
-                    
-                    if (srcX >= 0.0f && srcX <= (float)m_Width - 1.0f && srcY >= 0.0f && srcY <= (float)m_Height - 1.0f) {
-                        float maskWeight = sampleBilinearMask(m_OriginalSelectionMask, m_Width, m_Height, srcX, srcY);
-                        shiftedSelection[y * m_Width + x] = SelF2U8(maskWeight);
-                    }
+
+        if (m_HasSelection && !m_OriginalSelectionMask.empty()) {
+            std::vector<uint8_t> shiftedSelection((size_t)m_Width * (size_t)m_Height, 0);
+            for (int y = destY0; y <= destY1; ++y) {
+                for (int x = destX0; x <= destX1; ++x) {
+                    float px = (float)x - cx - (float)m_FloatingOffsetX;
+                    float py = (float)y - cy - (float)m_FloatingOffsetY;
+                    float rx = px * invCos - py * invSin;
+                    float ry = px * invSin + py * invCos;
+                    float srcX = rx * invSx + cx;
+                    float srcY = ry * invSy + cy;
+                    float lx = srcX - (float)ox;
+                    float ly = srcY - (float)oy;
+                    if (lx < 0.f || ly < 0.f || lx > (float)(fw - 1) || ly > (float)(fh - 1))
+                        continue;
+                    float maskWeight = sampleBilinearMask(m_OriginalSelectionMask, fw, fh, lx, ly);
+                    shiftedSelection[(size_t)y * (size_t)m_Width + (size_t)x] = SelF2U8(maskWeight);
                 }
             }
-            m_SelectionMask = shiftedSelection;
+            m_SelectionMask = std::move(shiftedSelection);
             UpdateSelectionMaskTexture(device);
         }
     }
-    
+
     if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
     if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
     if (m_FloatingMaskTexture) { m_FloatingMaskTexture->Release(); m_FloatingMaskTexture = nullptr; }
     if (m_FloatingMaskSRV) { m_FloatingMaskSRV->Release(); m_FloatingMaskSRV = nullptr; }
     m_FloatingPixels.clear();
     m_OriginalSelectionMask.clear();
+    m_FloatingBufW = m_FloatingBufH = 0;
     m_WarpMode = WarpOperatorMode::None;
     m_WarpControls.clear();
     m_WarpSourcePixels.clear();
-    
+
     m_IsMovingPixels = false;
 }
 
@@ -6711,27 +6752,52 @@ bool Canvas::GetWarpControl(int index, float& outX, float& outY) const {
 
 void Canvas::RebuildWarpPreviewTexture(ID3D11Device* device) {
     if (!device || m_WarpMode == WarpOperatorMode::None || m_WarpSourcePixels.empty()) return;
-    const int w = m_Width, h = m_Height;
-    if ((int)m_WarpSourcePixels.size() < w * h * 4) return;
+    const int srcW = m_WarpBBoxW;
+    const int srcH = m_WarpBBoxH;
+    if (srcW < 1 || srcH < 1) return;
+    if ((int)m_WarpSourcePixels.size() < srcW * srcH * 4) return;
 
-    m_FloatingPixels.assign((size_t)w * h * 4, 0.f);
-
-    // Expand scan region to control convex hull
-    float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+    // Dest hull from control points → tight floating buffer (not full canvas)
+    float minXf = 1e9f, minYf = 1e9f, maxXf = -1e9f, maxYf = -1e9f;
     for (auto& p : m_WarpControls) {
-        minX = std::min(minX, p.first); maxX = std::max(maxX, p.first);
-        minY = std::min(minY, p.second); maxY = std::max(maxY, p.second);
+        minXf = std::min(minXf, p.first); maxXf = std::max(maxXf, p.first);
+        minYf = std::min(minYf, p.second); maxYf = std::max(maxYf, p.second);
     }
-    int x0 = std::max(0, (int)std::floor(minX) - 1);
-    int y0 = std::max(0, (int)std::floor(minY) - 1);
-    int x1 = std::min(w - 1, (int)std::ceil(maxX) + 1);
-    int y1 = std::min(h - 1, (int)std::ceil(maxY) + 1);
+    int x0 = std::max(0, (int)std::floor(minXf) - 1);
+    int y0 = std::max(0, (int)std::floor(minYf) - 1);
+    int x1 = std::min(m_Width - 1, (int)std::ceil(maxXf) + 1);
+    int y1 = std::min(m_Height - 1, (int)std::ceil(maxYf) + 1);
+    if (x1 < x0 || y1 < y0) return;
+
+    const int outW = x1 - x0 + 1;
+    const int outH = y1 - y0 + 1;
+    m_FloatingBBoxX = x0;
+    m_FloatingBBoxY = y0;
+    m_FloatingBBoxW = outW;
+    m_FloatingBBoxH = outH;
+    m_FloatingBufW = outW;
+    m_FloatingBufH = outH;
+    m_FloatingCenterX = (x0 + x1) * 0.5f;
+    m_FloatingCenterY = (y0 + y1) * 0.5f;
+    m_FloatingPixels.assign((size_t)outW * (size_t)outH * 4, 0.f);
+
+    float sx0 = m_WarpSourceCorners[0].first, sy0 = m_WarpSourceCorners[0].second;
+    float sx1c = m_WarpSourceCorners[1].first, sy1c = m_WarpSourceCorners[2].second;
+    float srcSpanW = std::max(1.f, sx1c - sx0), srcSpanH = std::max(1.f, sy1c - sy0);
+
+    auto writeSample = [&](int x, int y, float sx, float sy) {
+        // Source floating buffer is local to original warp bbox
+        float lx = sx - (float)m_WarpBBoxX;
+        float ly = sy - (float)m_WarpBBoxY;
+        int dx = x - x0, dy = y - y0;
+        if (dx < 0 || dy < 0 || dx >= outW || dy >= outH) return;
+        size_t di = ((size_t)dy * outW + dx) * 4;
+        for (int c = 0; c < 4; ++c)
+            m_FloatingPixels[di + c] = SampleBilinearFloat(m_WarpSourcePixels, srcW, srcH, lx, ly, c);
+    };
 
     if (m_WarpMode == WarpOperatorMode::Perspective && m_WarpControls.size() >= 4) {
         auto A = m_WarpControls[0], B = m_WarpControls[1], C = m_WarpControls[2], D = m_WarpControls[3];
-        float sx0 = m_WarpSourceCorners[0].first, sy0 = m_WarpSourceCorners[0].second;
-        float sx1 = m_WarpSourceCorners[1].first, sy1 = m_WarpSourceCorners[2].second; // x1,y1
-        float srcW = std::max(1.f, sx1 - sx0), srcH = std::max(1.f, sy1 - sy0);
         for (int y = y0; y <= y1; ++y) {
             for (int x = x0; x <= x1; ++x) {
                 float u, v;
@@ -6742,19 +6808,11 @@ void Canvas::RebuildWarpPreviewTexture(ID3D11Device* device) {
                 if (u < -0.01f || u > 1.01f || v < -0.01f || v > 1.01f) continue;
                 u = std::clamp(u, 0.f, 1.f);
                 v = std::clamp(v, 0.f, 1.f);
-                float sx = sx0 + u * srcW;
-                float sy = sy0 + v * srcH;
-                size_t di = ((size_t)y * w + x) * 4;
-                for (int c = 0; c < 4; ++c)
-                    m_FloatingPixels[di + c] = SampleBilinearFloat(m_WarpSourcePixels, w, h, sx, sy, c);
+                writeSample(x, y, sx0 + u * srcSpanW, sy0 + v * srcSpanH);
             }
         }
     } else if (m_WarpMode == WarpOperatorMode::Mesh && m_WarpMeshN >= 2) {
         const int n = m_WarpMeshN;
-        float sx0 = m_WarpSourceCorners[0].first, sy0 = m_WarpSourceCorners[0].second;
-        float sx1 = m_WarpSourceCorners[1].first, sy1 = m_WarpSourceCorners[2].second;
-        float srcW = std::max(1.f, sx1 - sx0), srcH = std::max(1.f, sy1 - sy0);
-        // For each dest cell, inv-bilinear within warped cell → source cell
         for (int y = y0; y <= y1; ++y) {
             for (int x = x0; x <= x1; ++x) {
                 bool found = false;
@@ -6773,7 +6831,6 @@ void Canvas::RebuildWarpPreviewTexture(ID3D11Device* device) {
                         if (u < -0.02f || u > 1.02f || v < -0.02f || v > 1.02f) continue;
                         u = std::clamp(u, 0.f, 1.f);
                         v = std::clamp(v, 0.f, 1.f);
-                        // Source cell UV
                         float gu0 = (float)i / (float)(n - 1);
                         float gv0 = (float)j / (float)(n - 1);
                         float gu1 = (float)(i + 1) / (float)(n - 1);
@@ -6784,27 +6841,23 @@ void Canvas::RebuildWarpPreviewTexture(ID3D11Device* device) {
                     }
                 }
                 if (!found) continue;
-                float sx = sx0 + su * srcW;
-                float sy = sy0 + sv * srcH;
-                size_t di = ((size_t)y * w + x) * 4;
-                for (int c = 0; c < 4; ++c)
-                    m_FloatingPixels[di + c] = SampleBilinearFloat(m_WarpSourcePixels, w, h, sx, sy, c);
+                writeSample(x, y, sx0 + su * srcSpanW, sy0 + sv * srcSpanH);
             }
         }
     }
 
-    // Upload floating texture
+    // Upload tight floating texture
     if (m_FloatingTexture) { m_FloatingTexture->Release(); m_FloatingTexture = nullptr; }
     if (m_FloatingSRV) { m_FloatingSRV->Release(); m_FloatingSRV = nullptr; }
     D3D11_TEXTURE2D_DESC desc = {};
-    desc.Width = w; desc.Height = h; desc.MipLevels = 1; desc.ArraySize = 1;
+    desc.Width = (UINT)outW; desc.Height = (UINT)outH; desc.MipLevels = 1; desc.ArraySize = 1;
     desc.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
     desc.SampleDesc.Count = 1;
     desc.Usage = D3D11_USAGE_DEFAULT;
     desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     D3D11_SUBRESOURCE_DATA init = {};
     init.pSysMem = m_FloatingPixels.data();
-    init.SysMemPitch = (UINT)(w * 4 * sizeof(float));
+    init.SysMemPitch = (UINT)(outW * 4 * sizeof(float));
     if (SUCCEEDED(device->CreateTexture2D(&desc, &init, &m_FloatingTexture)) && m_FloatingTexture)
         device->CreateShaderResourceView(m_FloatingTexture, nullptr, &m_FloatingSRV);
     m_CompositeDirty = true;
@@ -6882,23 +6935,16 @@ void Canvas::DrawMoveGizmo(ImDrawList* dl, const std::function<ImVec2(float, flo
         return;
     }
     
-    int minX = m_Width, maxX = 0, minY = m_Height, maxY = 0;
-    bool hasPixels = false;
-    for (int y = 0; y < m_Height; ++y) {
-        for (int x = 0; x < m_Width; ++x) {
-            if (m_OriginalSelectionMask[y * m_Width + x] > 0) {
-                if (x < minX) minX = x;
-                if (x > maxX) maxX = x;
-                if (y < minY) minY = y;
-                if (y > maxY) maxY = y;
-                hasPixels = true;
-            }
-        }
-    }
-    
-    if (hasPixels) {
-        float cx = (minX + maxX) * 0.5f;
-        float cy = (minY + maxY) * 0.5f;
+    // Use cached floating bbox (local buffer) — never scan full canvas for gizmo
+    if (m_FloatingBBoxW <= 0 || m_FloatingBBoxH <= 0) return;
+    int minX = m_FloatingBBoxX;
+    int minY = m_FloatingBBoxY;
+    int maxX = m_FloatingBBoxX + m_FloatingBBoxW - 1;
+    int maxY = m_FloatingBBoxY + m_FloatingBBoxH - 1;
+
+    {
+        float cx = m_FloatingCenterX;
+        float cy = m_FloatingCenterY;
         float cosA = std::cos(m_FloatingRotation);
         float sinA = std::sin(m_FloatingRotation);
         

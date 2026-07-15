@@ -27,6 +27,8 @@ cbuffer LayerBuffer : register(b1)
     float4 u_TransformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
     // x,y: center; z: blendMode; w: alphaRewrite (1=overwrite A, 0=A is RGB strength)
     float4 u_CenterParams;
+    // Floating tex rect in document UV: xy=origin, zw=size (0 size = full-doc legacy)
+    float4 u_FloatRect;
 };
 
 Texture2D g_Texture : register(t0);
@@ -199,17 +201,34 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
         }
         
         uv = rotated + center;
+
+        // Tight floating texture: map document UV → local floating UV
+        if (u_FloatRect.z > 1e-6f && u_FloatRect.w > 1e-6f)
+        {
+            float2 fuv = (uv - u_FloatRect.xy) / u_FloatRect.zw;
+            if (fuv.x < 0.0f || fuv.x > 1.0f || fuv.y < 0.0f || fuv.y > 1.0f)
+            {
+                discard;
+                return float4(0.0f, 0.0f, 0.0f, 0.0f);
+            }
+            uv = fuv;
+        }
+        else if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
+        {
+            discard;
+            return float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
     }
     else
     {
         // Normal layer offset translation
         uv -= u_LayerParams.zw;
-    }
 
-    if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
-    {
-        discard;
-        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f)
+        {
+            discard;
+            return float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
     }
 
     float4 col = g_Texture.Sample(g_Sampler, uv);
@@ -223,6 +242,7 @@ float4 PSLayerBlend(PS_INPUT input) : SV_TARGET
 
     if (u_LayerParams.y > 0.5f)
     {
+        // Mask uses same UV as content (local floating UV when isFloating+floatRect)
         float maskVal = g_LayerMask.Sample(g_Sampler, uv).r;
         col.a *= maskVal;
     }

@@ -640,6 +640,10 @@ private:
         DirectX::XMFLOAT4 transformParams; // x: scaleX, y: scaleY, z: rotation, w: isFloating
         // x,y: center; z: blendMode; w: alphaRewrite (1=overwrite A, 0=A is RGB strength only)
         DirectX::XMFLOAT4 centerParams;
+        // Floating texture rect in document UV (only when isFloating):
+        // xy = origin (bbox min / canvasSize), zw = size (bbox / canvasSize).
+        // Zero size → legacy full-document floating UV.
+        DirectX::XMFLOAT4 floatRect;
     };
 
 
@@ -892,10 +896,14 @@ private:
 
     // Move Pixels State
     bool m_IsMovingPixels = false;
-    std::vector<float> m_FloatingPixels;
-    // BBox of floating content in document space (for perf; full buffer may still be used as fallback)
+    std::vector<float> m_FloatingPixels; // tight AABB (m_FloatingBufW x m_FloatingBufH), not full canvas
+    // BBox of floating content in document space (origin of local floating buffer)
     int m_FloatingBBoxX = 0, m_FloatingBBoxY = 0, m_FloatingBBoxW = 0, m_FloatingBBoxH = 0;
-    int m_FloatingBufW = 0, m_FloatingBufH = 0; // size of m_FloatingPixels layout
+    int m_FloatingBufW = 0, m_FloatingBufH = 0; // size of m_FloatingPixels layout (= bbox w/h)
+    // Cached selection center (document pixels) — avoids O(W*H) scan every compose frame
+    float m_FloatingCenterX = 0.f;
+    float m_FloatingCenterY = 0.f;
+    // Selection mask cropped to floating bbox (size = bufW*bufH). Empty → treat as fully selected.
     std::vector<uint8_t> m_OriginalSelectionMask;
     int m_FloatingOffsetX = 0;
     int m_FloatingOffsetY = 0;
@@ -903,6 +911,9 @@ private:
     float m_FloatingScaleX = 1.0f;
     float m_FloatingScaleY = 1.0f;
     float m_FloatingRotation = 0.0f; // in radians
+
+    // Backup tiles that intersect a document-space rect (inclusive).
+    void BackupTilesInRect(int x0, int y0, int x1, int y1);
 
     ID3D11Texture2D* m_FloatingTexture = nullptr;
     ID3D11ShaderResourceView* m_FloatingSRV = nullptr;
