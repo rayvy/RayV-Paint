@@ -17,6 +17,7 @@
 #include "core/UndoRedoManager.h"
 #include "core/GpuStagingUpload.h"
 #include "core/GpuTileStore.h"
+#include "core/UpdateScheduler.h"
 #include "core/GpuFxBlur.h"
 #include "core/AsyncFilterJob.h"
 #include "modio/ModTypes.h"
@@ -746,6 +747,10 @@ private:
     // Sparse GPU tile surfaces for large documents (VRAM-friendly).
     GpuTileStore m_GpuTiles;
     static constexpr int kTiledGpuMinDim = 2048;
+    // Phase C LOD stroke: cap GPU tile uploads per frame while painting.
+    // Idle / stroke-end flush with a much higher budget.
+    static constexpr int kLodStrokeUploadBudget = 8;
+    static constexpr int kIdleUploadBudget = 256;
     bool UseTiledGpu() const { return std::max(m_Width, m_Height) > kTiledGpuMinDim; }
     // Styles need full-layer presentation bake → classic texture. Filters OK on tiles.
     bool UseTiledGpuForLayer(const Layer& layer) const {
@@ -757,6 +762,9 @@ private:
     void EnsureGpuBlur(ID3D11Device* device, ID3D11DeviceContext* ctx);
     void SubmitAsyncFilterBake(int layerIdx);
     void PollAsyncFilterResults();
+    // Phase C: deferred presentation / thumb jobs via UpdateScheduler.
+    void ScheduleDeferredPresentation(int layerIdx);
+    void ScheduleThumbJob(int layerIdx, int size);
     void DrawTiledLayer(ID3D11DeviceContext* context, Layer& layer,
                         float opacityMul, bool useMask, bool isFirst);
     ID3D11BlendState* m_LayerBlendState = nullptr;

@@ -133,6 +133,8 @@ set(SOURCES
     src/core/GpuStagingUpload.h
     src/core/GpuTileStore.cpp
     src/core/GpuTileStore.h
+    src/core/UpdateScheduler.cpp
+    src/core/UpdateScheduler.h
     src/core/GpuFxBlur.cpp
     src/core/GpuFxBlur.h
     src/core/AsyncFilterJob.cpp

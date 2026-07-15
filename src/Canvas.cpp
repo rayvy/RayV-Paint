@@ -778,6 +778,7 @@ bool Canvas::Initialize(ID3D11Device* device) {
 
 void Canvas::Shutdown() {
     ReleaseCompositeResources();
+    UpdateScheduler::Get().CancelAll();
 
     if (m_VertexBuffer) { m_VertexBuffer->Release(); m_VertexBuffer = nullptr; }
     if (m_TileQuadVB) { m_TileQuadVB->Release(); m_TileQuadVB = nullptr; }
@@ -934,18 +935,21 @@ void Canvas::DrawTiledLayer(ID3D11DeviceContext* context, Layer& layer,
 
     m_GpuTiles.ForEachTile(layer.gpuSurfaceId, [&](int tx, int ty, const GpuTileStore::TileGpu& tg) {
         if (!tg.srv) return;
+        // Document-space positions (where the tile sits on the canvas).
         const float u0 = (float)(tx * TILE_SIZE) * invW;
         const float v0 = (float)(ty * TILE_SIZE) * invH;
         const float u1 = (float)(tx * TILE_SIZE + tg.w) * invW;
         const float v1 = (float)(ty * TILE_SIZE + tg.h) * invH;
+        // Texture UVs: atlas sub-rect or full 0..1 for standalone tiles.
+        const float tu0 = tg.U0(), tv0 = tg.V0(), tu1 = tg.U1(), tv1 = tg.V1();
 
         D3D11_MAPPED_SUBRESOURCE vm = {};
         if (FAILED(context->Map(m_TileQuadVB, 0, D3D11_MAP_WRITE_DISCARD, 0, &vm))) return;
         Vertex* v = (Vertex*)vm.pData;
-        v[0] = { DirectX::XMFLOAT2(u0, v0), DirectX::XMFLOAT2(0.f, 0.f) };
-        v[1] = { DirectX::XMFLOAT2(u1, v0), DirectX::XMFLOAT2(1.f, 0.f) };
-        v[2] = { DirectX::XMFLOAT2(u1, v1), DirectX::XMFLOAT2(1.f, 1.f) };
-        v[3] = { DirectX::XMFLOAT2(u0, v1), DirectX::XMFLOAT2(0.f, 1.f) };
+        v[0] = { DirectX::XMFLOAT2(u0, v0), DirectX::XMFLOAT2(tu0, tv0) };
+        v[1] = { DirectX::XMFLOAT2(u1, v0), DirectX::XMFLOAT2(tu1, tv0) };
+        v[2] = { DirectX::XMFLOAT2(u1, v1), DirectX::XMFLOAT2(tu1, tv1) };
+        v[3] = { DirectX::XMFLOAT2(u0, v1), DirectX::XMFLOAT2(tu0, tv1) };
         context->Unmap(m_TileQuadVB, 0);
 
         D3D11_MAPPED_SUBRESOURCE mapped = {};
@@ -979,6 +983,99 @@ void Canvas::DrawTiledLayer(ID3D11DeviceContext* context, Layer& layer,
 
     // Restore full-screen VB for subsequent draws
     context->IASetVertexBuffers(0, 1, &m_VertexBuffer, &stride, &offset);
+}
+
+void Canvas::ScheduleDeferredPresentation(int layerIdx) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return;
+    UpdateScheduler::Key key{ UpdateScheduler::Kind::Presentation, layerIdx, 0 };
+    if (UpdateScheduler::Get().IsPending(key)) return;
+    UpdateScheduler::Get().Submit(
+        key,
+        UpdateScheduler::Priority::High,
+        /*work=*/{},
+        [this, layerIdx]() {
+            if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return;
+            Layer& layer = m_Layers[layerIdx];
+            if (!LayerStylesPreviewActive(layer) && !layer.HasEnabledStyles())
+                return;
+            RebuildLayerPresentation(layer, /*fullQuality=*/false);
+            layer.gpuDisplayKind = 0xFF;
+            layer.needsUpload = true;
+            if (layer.presentationCache)
+                layer.presentationCache->MarkAllDirty();
+            MarkCompositeDirty();
+            layer.thumbDirty = true;
+        });
+}
+
+void Canvas::ScheduleThumbJob(int layerIdx, int size) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size() || size < 1) return;
+    if (m_IsStrokeActive || m_IsMovingPixels) return;
+    Layer& layer = m_Layers[layerIdx];
+    if (!layer.thumbDirty || layer.isGroup || !layer.tileCache) return;
+
+    UpdateScheduler::Key key{ UpdateScheduler::Kind::Thumb, layerIdx, size };
+    if (UpdateScheduler::Get().IsPending(key)) return;
+
+    // Sample only size×size on the main thread (never full-document export — 8K would
+    // allocate 256 MiB per thumb). Apply just uploads the small GPU texture.
+    const TileCache* cache = LayerExportCache(layer);
+    if (!cache) return;
+    const int docW = m_Width, docH = m_Height;
+    auto rgba = std::make_shared<std::vector<uint8_t>>((size_t)size * size * 4, 0);
+    for (int y = 0; y < size; ++y) {
+        const int sy = (docH > 0) ? (int)((int64_t)y * docH / size) : 0;
+        for (int x = 0; x < size; ++x) {
+            const int sx = (docW > 0) ? (int)((int64_t)x * docW / size) : 0;
+            float f[4] = {};
+            cache->GetPixelF(sx, sy, f);
+            size_t di = ((size_t)y * size + x) * 4;
+            (*rgba)[di + 0] = HalfFloat::FloatToU8(f[0]);
+            (*rgba)[di + 1] = HalfFloat::FloatToU8(f[1]);
+            (*rgba)[di + 2] = HalfFloat::FloatToU8(f[2]);
+            (*rgba)[di + 3] = 255;
+        }
+    }
+
+    UpdateScheduler::Get().Submit(
+        key,
+        UpdateScheduler::Priority::Low,
+        /*work=*/{},
+        [this, layerIdx, size, rgba]() {
+            if (layerIdx < 0 || layerIdx >= (int)m_Layers.size() || !rgba || rgba->empty())
+                return;
+            Layer& layer = m_Layers[layerIdx];
+            if (!layer.thumbDirty && layer.thumbSRV && layer.thumbSize == size) return;
+
+            ID3D11Device* device = nullptr;
+            if (layer.thumbTex)
+                layer.thumbTex->GetDevice(&device);
+            else if (layer.texture)
+                layer.texture->GetDevice(&device);
+            if (!device) return;
+
+            if (layer.thumbSRV) { layer.thumbSRV->Release(); layer.thumbSRV = nullptr; }
+            if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
+
+            D3D11_TEXTURE2D_DESC td = {};
+            td.Width = (UINT)size;
+            td.Height = (UINT)size;
+            td.MipLevels = 1;
+            td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            D3D11_SUBRESOURCE_DATA init = {};
+            init.pSysMem = rgba->data();
+            init.SysMemPitch = (UINT)(size * 4);
+            if (SUCCEEDED(device->CreateTexture2D(&td, &init, &layer.thumbTex)) && layer.thumbTex) {
+                device->CreateShaderResourceView(layer.thumbTex, nullptr, &layer.thumbSRV);
+                layer.thumbSize = size;
+                layer.thumbDirty = false;
+            }
+            device->Release();
+        });
 }
 
 void Canvas::SubmitAsyncFilterBake(int layerIdx) {
@@ -1568,7 +1665,9 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
     if (UseTiledGpuForLayer(layer)) {
         if (layer.gpuSurfaceId)
             m_GpuTiles.DestroySurface(layer.gpuSurfaceId);
-        layer.gpuSurfaceId = m_GpuTiles.CreateSurface(device, m_Width, m_Height, GetLayerDxgiFormat());
+        // Atlas packs many 256² tiles into 2048² pages (fewer textures / less VRAM churn).
+        layer.gpuSurfaceId = m_GpuTiles.CreateSurface(device, m_Width, m_Height, GetLayerDxgiFormat(),
+                                                       /*useAtlas=*/true);
         layer.gpuDisplayKind = 0xFF; // force re-upload
         if (layer.tileCache) {
             layer.tileCache->MarkAllDirty();
@@ -2783,7 +2882,7 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                 RefreshFilteredCache(al, /*onlyDirtyTiles=*/true);
                 al.gpuDisplayKind = 0xFF; // force GPU re-upload of filtered result
             }
-            // Styles bake after stroke (was deferred mid-stroke to avoid lag)
+            // Styles bake after stroke (sync — deferred apply raced with undo/history).
             if (LayerStylesPreviewActive(al)) {
                 al.presentationDirty = true;
                 al.stylesDirty = true;
@@ -2931,6 +3030,9 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     context->GetDevice(&device);
     if (device)
         EnsureGpuBlur(device, context);
+    // Phase C: drain finished scheduler jobs (budgeted apply).
+    if (UpdateScheduler::Get().PendingCount() > 0)
+        UpdateScheduler::Get().Poll(m_IsStrokeActive ? 1.5 : 6.0);
     PollAsyncFilterResults();
     // Moving floating content: dirty its AABB (not full proxy every frame).
     if (m_IsMovingPixels && m_FloatingBBoxW > 0 && m_FloatingBBoxH > 0) {
@@ -3115,17 +3217,60 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             size_t dirtyUploaded = 0;
             const bool hadPending = src->HasPendingGpuWork() || layerNeedsUpload;
             const int bpp = src->GetBytesPerPixel();
-            src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
-                layerHadUploads = true;
-                ++dirtyUploaded;
-                UploadLayerContentTile(device, context, layer, tx, ty, data, bpp);
-                InvalidateCompositeRect(tx * TILE_SIZE, ty * TILE_SIZE,
-                    std::min(m_Width - 1, tx * TILE_SIZE + TILE_SIZE - 1),
-                    std::min(m_Height - 1, ty * TILE_SIZE + TILE_SIZE - 1));
-            });
-            src->ClearAllDirty();
-            layer.needsUpload = false;
-            if (layerHadUploads || filtersWereDirty || stylesWereDirty || layerNeedsUpload || hadPending) {
+
+            // Phase C LOD stroke: budget mid-stroke uploads (nearest pen first).
+            // Idle path flushes everything (same as Phase B).
+            const bool isActiveStrokeLayer =
+                m_IsStrokeActive && (int)i == m_ActiveLayerIdx;
+
+            if (!isActiveStrokeLayer) {
+                src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
+                    layerHadUploads = true;
+                    ++dirtyUploaded;
+                    UploadLayerContentTile(device, context, layer, tx, ty, data, bpp);
+                    InvalidateCompositeRect(tx * TILE_SIZE, ty * TILE_SIZE,
+                        std::min(m_Width - 1, tx * TILE_SIZE + TILE_SIZE - 1),
+                        std::min(m_Height - 1, ty * TILE_SIZE + TILE_SIZE - 1));
+                });
+                src->ClearAllDirty();
+                layer.needsUpload = false;
+            } else {
+                struct Key { int tx, ty; float d2; };
+                std::vector<Key> keys;
+                keys.reserve(32);
+                src->ForEachDirtyTile([&](int tx, int ty, const uint8_t*, int) {
+                    float cx = (float)(tx * TILE_SIZE + TILE_SIZE / 2) - m_PrevStabilizedX;
+                    float cy = (float)(ty * TILE_SIZE + TILE_SIZE / 2) - m_PrevStabilizedY;
+                    keys.push_back({ tx, ty, cx * cx + cy * cy });
+                });
+                std::sort(keys.begin(), keys.end(),
+                    [](const Key& a, const Key& b) { return a.d2 < b.d2; });
+                const int n = std::min((int)keys.size(), kLodStrokeUploadBudget);
+                for (int di = 0; di < n; ++di) {
+                    const int tx = keys[(size_t)di].tx, ty = keys[(size_t)di].ty;
+                    const uint8_t* data = src->GetTileData(tx, ty);
+                    static thread_local std::vector<uint8_t> zeroTile;
+                    if (!data) {
+                        const size_t need = (size_t)TILE_SIZE * TILE_SIZE * (size_t)std::max(1, bpp);
+                        if (zeroTile.size() < need) zeroTile.assign(need, 0);
+                        data = zeroTile.data();
+                    }
+                    UploadLayerContentTile(device, context, layer, tx, ty, data, bpp);
+                    src->ClearDirty(tx, ty);
+                    InvalidateCompositeRect(tx * TILE_SIZE, ty * TILE_SIZE,
+                        std::min(m_Width - 1, tx * TILE_SIZE + TILE_SIZE - 1),
+                        std::min(m_Height - 1, ty * TILE_SIZE + TILE_SIZE - 1));
+                    layerHadUploads = true;
+                    ++dirtyUploaded;
+                }
+                const bool lodDeferred = src->HasPendingGpuWork();
+                layer.needsUpload = lodDeferred;
+                if (lodDeferred)
+                    m_CompositeDirty = true;
+            }
+
+            if (layerHadUploads || filtersWereDirty || stylesWereDirty || layerNeedsUpload ||
+                hadPending || layer.needsUpload) {
                 needsCompositeRebuild = true;
                 if (!m_IsStrokeActive) {
                     layer.thumbDirty = true;
@@ -4330,11 +4475,10 @@ void Canvas::CreateLayerFromPixels(ID3D11Device* device, const std::string& name
 }
 
 bool Canvas::Undo() {
+    UpdateScheduler::Get().CancelAll();
     bool res = m_UndoRedoManager.Undo(this);
     if (res) {
         m_IsDocumentModified = true;
-        // Always force composite rebuild after history travel even if a
-        // command forgot to mark dirty (belt-and-suspenders with PaintStrokeCommand).
         m_CompositeDirty = true;
         Logger::Get().DebugTag("gpu", "Undo applied — composite marked dirty");
     }
@@ -4342,6 +4486,7 @@ bool Canvas::Undo() {
 }
 
 bool Canvas::Redo() {
+    UpdateScheduler::Get().CancelAll();
     bool res = m_UndoRedoManager.Redo(this);
     if (res) {
         m_IsDocumentModified = true;
@@ -4368,7 +4513,12 @@ std::string Canvas::GetRedoName() const {
 }
 
 void Canvas::ClearAllLayersNoUndo() {
+    UpdateScheduler::Get().CancelAll();
     for (auto& L : m_Layers) {
+        if (L.gpuSurfaceId) {
+            m_GpuTiles.DestroySurface(L.gpuSurfaceId);
+            L.gpuSurfaceId = 0;
+        }
         if (L.texture) { L.texture->Release(); L.texture = nullptr; }
         if (L.srv) { L.srv->Release(); L.srv = nullptr; }
         if (L.maskTexture) { L.maskTexture->Release(); L.maskTexture = nullptr; }
@@ -10256,11 +10406,15 @@ ID3D11ShaderResourceView* Canvas::GetLayerThumbSRV(ID3D11Device* device, int lay
     if (!layer.thumbDirty && layer.thumbSRV && layer.thumbSize == size)
         return layer.thumbSRV;
 
-    // Idle-only rebuild: during stroke/move keep stale thumb (avoids O(size²) GetPixelF thrash).
+    // Idle-only rebuild: during stroke/move keep stale thumb (avoids O(size²) thrash).
     if (layer.thumbDirty && layer.thumbSRV && layer.thumbSize == size &&
         (m_IsStrokeActive || m_IsMovingPixels))
         return layer.thumbSRV;
 
+    // Stale thumb while idle: rebuild sync (scheduler path deferred — keep hot path simple).
+    // ScheduleThumbJob remains available for future batching.
+
+    // Rebuild thumb (sync).
     if (layer.thumbSRV) { layer.thumbSRV->Release(); layer.thumbSRV = nullptr; }
     if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
 

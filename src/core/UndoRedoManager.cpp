@@ -295,6 +295,10 @@ LayerStackCommand::LayerStackCommand(const std::string& name, Kind kind, Snap sn
 void LayerStackCommand::RemoveAt(Canvas* canvas, int index) {
     if (!canvas || index < 0 || index >= (int)canvas->m_Layers.size()) return;
     auto& L = canvas->m_Layers[index];
+    if (L.gpuSurfaceId) {
+        canvas->m_GpuTiles.DestroySurface(L.gpuSurfaceId);
+        L.gpuSurfaceId = 0;
+    }
     if (L.texture) { L.texture->Release(); L.texture = nullptr; }
     if (L.srv) { L.srv->Release(); L.srv = nullptr; }
     if (L.maskTexture) { L.maskTexture->Release(); L.maskTexture = nullptr; }
