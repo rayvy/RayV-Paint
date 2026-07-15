@@ -61,6 +61,7 @@ if (ImGui::BeginPopupModal("Layer Effects##modal", &state.showLayerEffects, 0)) 
     auto markStyleDirty = [&](Layer& layer) {
         ensureFxUndoBegin(layer);
         int idx = canvas.GetActiveLayerIndex();
+        layer.gpuDisplayKind = 0xFF;
         canvas.RequestPresentationRebuild(idx);
         // Groups: also dirty self if editing group layer
         if (layer.isGroup) {
@@ -71,6 +72,8 @@ if (ImGui::BeginPopupModal("Layer Effects##modal", &state.showLayerEffects, 0)) 
         ensureFxUndoBegin(layer);
         layer.filtersDirty = true;
         layer.presentationDirty = true;
+        layer.gpuDisplayKind = 0xFF; // force GPU re-upload after filter change
+        if (layer.tileCache) layer.tileCache->MarkAllDirty();
         if (layer.isGroup || layer.HasEnabledStyles())
             canvas.RequestPresentationRebuild(canvas.GetActiveLayerIndex());
         else

@@ -540,8 +540,16 @@ void ApplyPixelFilters(std::vector<float>& rgba, int w, int h, const std::vector
             break;
         }
         case FilterType::AlphaInvert:
-            for (int i = 0; i < n; ++i)
-                rgba[(size_t)i * 4 + 3] = 1.f - rgba[(size_t)i * 4 + 3];
+            // Invert alpha of real pixels only. Fully empty (transparent black) stays
+            // empty — otherwise tile edges / sparse holes become opaque black squares.
+            for (int i = 0; i < n; ++i) {
+                size_t idx = (size_t)i * 4;
+                float a = rgba[idx + 3];
+                float rgbSum = rgba[idx + 0] + rgba[idx + 1] + rgba[idx + 2];
+                if (a <= 1e-6f && rgbSum <= 1e-6f)
+                    continue;
+                rgba[idx + 3] = 1.f - a;
+            }
             break;
         case FilterType::Noise: {
             const bool col = (f.p[1] > 0.5f);

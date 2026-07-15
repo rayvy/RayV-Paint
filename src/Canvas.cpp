@@ -650,6 +650,18 @@ bool Canvas::Initialize(ID3D11Device* device) {
         return false;
     }
 
+    // Dynamic quad VB for sparse GPU-tile draws (pos/uv updated per tile)
+    {
+        D3D11_BUFFER_DESC tbd = {};
+        tbd.Usage = D3D11_USAGE_DYNAMIC;
+        tbd.ByteWidth = sizeof(Vertex) * 4;
+        tbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        tbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateBuffer(&tbd, nullptr, &m_TileQuadVB))) {
+            Logger::Get().WarnTag("gpu", "TileQuadVB create failed — tiled GPU draw disabled");
+        }
+    }
+
     // 5. Create Index Buffer
     unsigned short indices[] = {
         0, 1, 2,
@@ -768,6 +780,10 @@ void Canvas::Shutdown() {
     ReleaseCompositeResources();
 
     if (m_VertexBuffer) { m_VertexBuffer->Release(); m_VertexBuffer = nullptr; }
+    if (m_TileQuadVB) { m_TileQuadVB->Release(); m_TileQuadVB = nullptr; }
+    m_GpuTiles.Shutdown();
+    m_GpuBlur.Shutdown();
+    m_AsyncFilters.CancelAll();
     if (m_IndexBuffer) { m_IndexBuffer->Release(); m_IndexBuffer = nullptr; }
     if (m_ConstantBuffer) { m_ConstantBuffer->Release(); m_ConstantBuffer = nullptr; }
     if (m_LayerConstantBuffer) { m_LayerConstantBuffer->Release(); m_LayerConstantBuffer = nullptr; }
@@ -841,7 +857,7 @@ void Canvas::InvalidateCompositeRect(int x0, int y0, int x1, int y1) {
 void Canvas::UploadLayerTile(ID3D11DeviceContext* context, ID3D11Texture2D* dest,
                              int tx, int ty, const uint8_t* data, int bytesPerPixel,
                              int docW, int docH) {
-    if (!context || !dest || !data || bytesPerPixel < 1) return;
+    if (!context || !data || bytesPerPixel < 1) return;
     const int x0 = tx * TILE_SIZE;
     const int y0 = ty * TILE_SIZE;
     const int w = std::min(TILE_SIZE, docW - x0);
@@ -851,19 +867,212 @@ void Canvas::UploadLayerTile(ID3D11DeviceContext* context, ID3D11Texture2D* dest
     const int pitch = TILE_SIZE * bytesPerPixel;
     ID3D11Device* device = nullptr;
     context->GetDevice(&device);
-    if (device) {
-        m_TileStaging.Ensure(device, GetLayerDxgiFormat(), TILE_SIZE, TILE_SIZE, 16);
-        device->Release();
-    }
-    if (m_TileStaging.IsReady() &&
-        m_TileStaging.UploadRegion(context, dest, x0, y0, w, h, data, pitch))
-        return;
 
-    // Fallback: UpdateSubresource (driver path)
-    D3D11_BOX box = {};
-    box.left = (UINT)x0; box.top = (UINT)y0; box.front = 0;
-    box.right = (UINT)(x0 + w); box.bottom = (UINT)(y0 + h); box.back = 1;
-    context->UpdateSubresource(dest, 0, &box, data, (UINT)pitch, 0);
+    // Prefer sparse GPU tile store when dest is null (tiled surface path uses UploadLayerTileToLayer)
+    if (dest) {
+        if (device) {
+            m_TileStaging.Ensure(device, GetLayerDxgiFormat(), TILE_SIZE, TILE_SIZE, 16);
+        }
+        if (m_TileStaging.IsReady() &&
+            m_TileStaging.UploadRegion(context, dest, x0, y0, w, h, data, pitch)) {
+            if (device) device->Release();
+            return;
+        }
+        D3D11_BOX box = {};
+        box.left = (UINT)x0; box.top = (UINT)y0; box.front = 0;
+        box.right = (UINT)(x0 + w); box.bottom = (UINT)(y0 + h); box.back = 1;
+        context->UpdateSubresource(dest, 0, &box, data, (UINT)pitch, 0);
+    }
+    if (device) device->Release();
+}
+
+void Canvas::UploadLayerContentTile(ID3D11Device* device, ID3D11DeviceContext* context,
+                                    Layer& layer, int tx, int ty, const uint8_t* data, int bpp) {
+    if (!context || !data || bpp < 1) return;
+    const int x0 = tx * TILE_SIZE;
+    const int y0 = ty * TILE_SIZE;
+    const int w = std::min(TILE_SIZE, m_Width - x0);
+    const int h = std::min(TILE_SIZE, m_Height - y0);
+    if (w < 1 || h < 1) return;
+    const int pitch = TILE_SIZE * bpp;
+    if (layer.gpuSurfaceId && device) {
+        m_GpuTiles.UploadTile(device, context, layer.gpuSurfaceId, tx, ty, data, pitch, w, h);
+        return;
+    }
+    if (layer.texture)
+        UploadLayerTile(context, layer.texture, tx, ty, data, bpp, m_Width, m_Height);
+}
+
+void Canvas::EnsureGpuBlur(ID3D11Device* device, ID3D11DeviceContext* ctx) {
+    if (m_GpuBlurTried || !device || !ctx) return;
+    m_GpuBlurTried = true;
+    std::wstring path = GetExecutableDir() + L"\\shaders\\LayerFxBlur.hlsl";
+    gpu_fx::InitGpuBlur(m_GpuBlur, device, ctx, path.c_str());
+}
+
+void Canvas::DrawTiledLayer(ID3D11DeviceContext* context, Layer& layer,
+                            float opacityMul, bool useMask, bool isFirst) {
+    if (!context || !layer.gpuSurfaceId || !m_TileQuadVB || m_Width < 1 || m_Height < 1) return;
+    if (m_GpuTiles.TileCount(layer.gpuSurfaceId) == 0) return;
+
+    ID3D11BlendState* blend = isFirst ? m_LayerBlendStateReplace
+        : ((!layer.alphaRewrite && m_LayerBlendStateAlphaPreserve)
+            ? m_LayerBlendStateAlphaPreserve : m_LayerBlendState);
+    context->OMSetBlendState(blend, nullptr, 0xFFFFFFFF);
+    context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr);
+
+    UINT stride = sizeof(Vertex);
+    UINT offset = 0;
+    context->IASetVertexBuffers(0, 1, &m_TileQuadVB, &stride, &offset);
+    context->IASetIndexBuffer(m_IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(m_LayerVertexShader, nullptr, 0);
+    context->PSSetShader(m_LayerBlendPixelShader, nullptr, 0);
+
+    const float invW = 1.f / (float)m_Width;
+    const float invH = 1.f / (float)m_Height;
+
+    m_GpuTiles.ForEachTile(layer.gpuSurfaceId, [&](int tx, int ty, const GpuTileStore::TileGpu& tg) {
+        if (!tg.srv) return;
+        const float u0 = (float)(tx * TILE_SIZE) * invW;
+        const float v0 = (float)(ty * TILE_SIZE) * invH;
+        const float u1 = (float)(tx * TILE_SIZE + tg.w) * invW;
+        const float v1 = (float)(ty * TILE_SIZE + tg.h) * invH;
+
+        D3D11_MAPPED_SUBRESOURCE vm = {};
+        if (FAILED(context->Map(m_TileQuadVB, 0, D3D11_MAP_WRITE_DISCARD, 0, &vm))) return;
+        Vertex* v = (Vertex*)vm.pData;
+        v[0] = { DirectX::XMFLOAT2(u0, v0), DirectX::XMFLOAT2(0.f, 0.f) };
+        v[1] = { DirectX::XMFLOAT2(u1, v0), DirectX::XMFLOAT2(1.f, 0.f) };
+        v[2] = { DirectX::XMFLOAT2(u1, v1), DirectX::XMFLOAT2(1.f, 1.f) };
+        v[3] = { DirectX::XMFLOAT2(u0, v1), DirectX::XMFLOAT2(0.f, 1.f) };
+        context->Unmap(m_TileQuadVB, 0);
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+            LayerBuffer* lb = (LayerBuffer*)mapped.pData;
+            float hasMaskVal = (useMask && layer.hasMask && layer.maskSRV) ? 1.f : 0.f;
+            lb->layerParams = DirectX::XMFLOAT4(opacityMul, hasMaskVal, 0.f, 0.f);
+            lb->transformParams = DirectX::XMFLOAT4(1.f, 1.f, 0.f, 0.f);
+            float flags = (layer.alphaRewrite ? 1.f : 0.f) + (isFirst ? 2.f : 0.f);
+            lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
+            lb->floatRect = DirectX::XMFLOAT4(0.f, 0.f, 0.f, 0.f);
+            context->Unmap(m_LayerConstantBuffer, 0);
+        }
+        context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
+        context->PSSetShaderResources(0, 1, const_cast<ID3D11ShaderResourceView**>(&tg.srv));
+        if (useMask && layer.maskSRV)
+            context->PSSetShaderResources(1, 1, &layer.maskSRV);
+        else {
+            ID3D11ShaderResourceView* n = nullptr;
+            context->PSSetShaderResources(1, 1, &n);
+        }
+        if (layer.blendMode != BlendMode::Normal && m_CompositeHistoryTexture && m_CompositeHistorySRV) {
+            context->CopyResource(m_CompositeHistoryTexture, m_CompositeTexture);
+            context->PSSetShaderResources(2, 1, &m_CompositeHistorySRV);
+        } else {
+            ID3D11ShaderResourceView* n = nullptr;
+            context->PSSetShaderResources(2, 1, &n);
+        }
+        context->DrawIndexed(6, 0, 0);
+    });
+
+    // Restore full-screen VB for subsequent draws
+    context->IASetVertexBuffers(0, 1, &m_VertexBuffer, &stride, &offset);
+}
+
+void Canvas::SubmitAsyncFilterBake(int layerIdx) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return;
+    Layer& layer = m_Layers[layerIdx];
+    if (!layer.tileCache || !LayerFilterListHasEnabled(layer.filters)) return;
+
+    async_fx::FilterJobInput job;
+    job.layerIdx = layerIdx;
+    job.docW = m_Width;
+    job.docH = m_Height;
+    job.format = m_CanvasFormat;
+    job.filters = layer.filters;
+    job.halo = layer_fx::MaxFilterSupportRadius(layer.filters);
+
+    // Seeds: stroke deltas or all dirty / all present tiles
+    std::unordered_set<uint64_t> seedSet;
+    auto addSeed = [&](int tx, int ty) {
+        seedSet.insert(((uint64_t)(uint32_t)tx) | ((uint64_t)(uint32_t)ty << 32));
+    };
+    if (!m_ActiveStrokeDeltas.empty() && layerIdx == m_ActiveLayerIdx) {
+        for (const auto& p : m_ActiveStrokeDeltas)
+            addSeed(p.second.tileX, p.second.tileY);
+    } else {
+        for (int ty = 0; ty < layer.tileCache->GetTilesY(); ++ty)
+            for (int tx = 0; tx < layer.tileCache->GetTilesX(); ++tx)
+                if (layer.tileCache->HasTile(tx, ty) &&
+                    (layer.filtersDirty || layer.tileCache->IsDirty(tx, ty)))
+                    addSeed(tx, ty);
+    }
+    if (seedSet.empty()) {
+        for (int ty = 0; ty < layer.tileCache->GetTilesY(); ++ty)
+            for (int tx = 0; tx < layer.tileCache->GetTilesX(); ++tx)
+                if (layer.tileCache->HasTile(tx, ty))
+                    addSeed(tx, ty);
+    }
+    for (uint64_t k : seedSet)
+        job.seeds.emplace_back((int)(k & 0xffffffffu), (int)(k >> 32));
+
+    // Neighbor tiles for halo
+    const int expand = (job.halo + TILE_SIZE - 1) / TILE_SIZE;
+    std::unordered_set<uint64_t> need;
+    for (auto [sx, sy] : job.seeds) {
+        for (int dy = -expand; dy <= expand; ++dy)
+            for (int dx = -expand; dx <= expand; ++dx) {
+                int tx = sx + dx, ty = sy + dy;
+                if (tx < 0 || ty < 0 || tx >= layer.tileCache->GetTilesX() ||
+                    ty >= layer.tileCache->GetTilesY())
+                    continue;
+                if (!layer.tileCache->HasTile(tx, ty)) continue;
+                need.insert(((uint64_t)(uint32_t)tx) | ((uint64_t)(uint32_t)ty << 32));
+            }
+    }
+
+    const int bpp = layer.tileCache->GetBytesPerPixel();
+    job.contentTiles.reserve(need.size());
+    for (uint64_t k : need) {
+        int tx = (int)(k & 0xffffffffu), ty = (int)(k >> 32);
+        const uint8_t* raw = layer.tileCache->GetTileData(tx, ty);
+        if (!raw) continue;
+        async_fx::FilterJobInput::SnapTile snap;
+        snap.tx = tx; snap.ty = ty;
+        snap.validW = std::min(TILE_SIZE, m_Width - tx * TILE_SIZE);
+        snap.validH = std::min(TILE_SIZE, m_Height - ty * TILE_SIZE);
+        snap.bytes.assign(raw, raw + (size_t)TILE_SIZE * TILE_SIZE * bpp);
+        job.contentTiles.push_back(std::move(snap));
+    }
+
+    try {
+        m_AsyncFilters.Submit(std::move(job));
+    } catch (...) {
+        // Pool not ready — sync fallback
+        RefreshFilteredCache(layer, /*onlyDirtyTiles=*/true);
+    }
+}
+
+void Canvas::PollAsyncFilterResults() {
+    auto results = m_AsyncFilters.Poll();
+    for (auto& r : results) {
+        if (r.layerIdx < 0 || r.layerIdx >= (int)m_Layers.size()) continue;
+        Layer& layer = m_Layers[r.layerIdx];
+        if (!layer.filteredCache) {
+            layer.filteredCache = std::make_unique<TileCache>();
+            layer.filteredCache->Init(m_Width, m_Height, m_CanvasFormat);
+        }
+        for (auto& t : r.tiles) {
+            if (t.rgba.empty() || t.w < 1 || t.h < 1) continue;
+            layer.filteredCache->ImportRGBA32F(t.rgba.data(), t.w, t.h, t.x0, t.y0);
+        }
+        layer.filtersDirty = false;
+        layer.presentationDirty = true;
+        layer.needsUpload = true;
+        MarkCompositeDirty();
+    }
 }
 
 void Canvas::CreateCompositeResources(ID3D11Device* device) {
@@ -1354,13 +1563,37 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
     if (layer.texture) { layer.texture->Release(); layer.texture = nullptr; }
     if (layer.srv)     { layer.srv->Release();     layer.srv     = nullptr; }
 
-    // D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION is typically 16384.
+    // Large docs without layer styles: sparse GPU tiles (VRAM-friendly).
+    // Styles require full presentation bake → classic full texture.
+    if (UseTiledGpuForLayer(layer)) {
+        if (layer.gpuSurfaceId)
+            m_GpuTiles.DestroySurface(layer.gpuSurfaceId);
+        layer.gpuSurfaceId = m_GpuTiles.CreateSurface(device, m_Width, m_Height, GetLayerDxgiFormat());
+        layer.gpuDisplayKind = 0xFF; // force re-upload
+        if (layer.tileCache) {
+            layer.tileCache->MarkAllDirty();
+            layer.needsUpload = true;
+        } else {
+            layer.needsUpload = false;
+        }
+        Logger::Get().InfoTag("gpu",
+            "RecreateLayerTexture tiled surface id=" + std::to_string(layer.gpuSurfaceId) +
+            " " + std::to_string(m_Width) + "x" + std::to_string(m_Height));
+        return;
+    }
+
+    if (layer.gpuSurfaceId) {
+        m_GpuTiles.DestroySurface(layer.gpuSurfaceId);
+        layer.gpuSurfaceId = 0;
+    }
+    layer.gpuDisplayKind = 0xFF;
+
     constexpr UINT kMaxTexDim = D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION;
     if ((UINT)m_Width > kMaxTexDim || (UINT)m_Height > kMaxTexDim) {
         Logger::Get().ErrorTag("gpu",
             "RecreateLayerTexture: canvas " + std::to_string(m_Width) + "x" +
             std::to_string(m_Height) + " exceeds D3D11 max texture dim " +
-            std::to_string(kMaxTexDim) + ". Need tiled GPU layers (B1b).");
+            std::to_string(kMaxTexDim));
         return;
     }
 
@@ -1393,12 +1626,11 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
     device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
     Logger::Get().InfoTag("gpu", "RecreateLayerTexture OK");
 
-    // Upload existing TileCache data if available
     if (layer.tileCache) {
         layer.tileCache->MarkAllDirty();
         layer.needsUpload = true;
     }
-    layer.needsUpload = false; // will be handled by ComposeLayers dirty loop
+    layer.needsUpload = false;
     MemoryStats::LogSnapshot("after_RecreateLayerTexture");
 }
 
@@ -1717,6 +1949,10 @@ void Canvas::DeleteLayer(int index) {
     }
     if (m_Layers[index].texture) m_Layers[index].texture->Release();
     if (m_Layers[index].srv) m_Layers[index].srv->Release();
+    if (m_Layers[index].gpuSurfaceId) {
+        m_GpuTiles.DestroySurface(m_Layers[index].gpuSurfaceId);
+        m_Layers[index].gpuSurfaceId = 0;
+    }
     if (m_Layers[index].maskTexture) m_Layers[index].maskTexture->Release();
     if (m_Layers[index].maskSRV) m_Layers[index].maskSRV->Release();
     if (m_Layers[index].thumbSRV) { m_Layers[index].thumbSRV->Release(); m_Layers[index].thumbSRV = nullptr; }
@@ -2539,13 +2775,20 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
         if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
             auto& al = m_Layers[m_ActiveLayerIdx];
             al.thumbDirty = true;
-            // Re-mark stroke tiles dirty so incremental FX refilter sees them (compose may
-            // have cleared dirty flags while uploading raw mid-stroke).
+            // Sync filter bake on stroke end (correct seams; async was causing ghost tiles).
             if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(al.filters) && al.tileCache) {
                 for (const auto& pair : m_ActiveStrokeDeltas) {
                     al.tileCache->MarkDirty(pair.second.tileX, pair.second.tileY);
                 }
                 RefreshFilteredCache(al, /*onlyDirtyTiles=*/true);
+                al.gpuDisplayKind = 0xFF; // force GPU re-upload of filtered result
+            }
+            // Styles bake after stroke (was deferred mid-stroke to avoid lag)
+            if (LayerStylesPreviewActive(al)) {
+                al.presentationDirty = true;
+                al.stylesDirty = true;
+                RebuildLayerPresentation(al, /*fullQuality=*/false);
+                al.gpuDisplayKind = 0xFF;
             }
             if (al.HasEnabledStyles()) {
                 al.presentationDirty = true;
@@ -2686,6 +2929,9 @@ void Canvas::Update(float viewportWidth, float viewportHeight, bool isMouseOverC
 void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
     ID3D11Device* device = nullptr;
     context->GetDevice(&device);
+    if (device)
+        EnsureGpuBlur(device, context);
+    PollAsyncFilterResults();
     // Moving floating content: dirty its AABB (not full proxy every frame).
     if (m_IsMovingPixels && m_FloatingBBoxW > 0 && m_FloatingBBoxH > 0) {
         const float sx = std::max(std::fabs(m_FloatingScaleX), 1.f);
@@ -2775,20 +3021,22 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 continue;
             }
 
-            if (!layer.texture) {
+            if (!layer.texture && !layer.gpuSurfaceId) {
                 if (layer.needsUpload || (layer.tileCache && layer.tileCache->GetTileCount() > 0) ||
                     layer.HasEnabledStyles()) {
                     RecreateLayerTexture(device, layer);
                 }
-                if (!layer.texture) continue;
+                if (!layer.texture && !layer.gpuSurfaceId) continue;
             }
 
-            // Filters: NEVER refilter mid-stroke on the active paint layer — blur halo CPU
-            // was the main "modifiers kill FPS" path. Paint raw; bake FX on Stroke End.
+            // Filters: NEVER refilter mid-stroke on the active paint layer.
+            // Stroke end bakes FX (sync RefreshFilteredCache — reliable seams).
             const bool isActivePaintLayer =
                 m_IsStrokeActive && (int)i == m_ActiveLayerIdx;
             bool filtersWereDirty = false;
-            bool stylesWereDirty = LayerStylesPreviewActive(layer) &&
+            // Do NOT thrash compose every frame for sticky stylesDirty mid-stroke
+            // (styles bake is deferred until pen-up — avoids lag when Outline/Shadow exist).
+            bool stylesWereDirty = !m_IsStrokeActive && LayerStylesPreviewActive(layer) &&
                 (layer.stylesDirty || layer.presentationDirty);
 
             if (m_EffectsPreviewEnabled && LayerFilterListHasEnabled(layer.filters) &&
@@ -2800,25 +3048,68 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     RefreshFilteredCache(layer, /*onlyDirtyTiles=*/true);
                     filtersWereDirty = true;
                 }
+            } else if (!LayerFilterListHasEnabled(layer.filters) && layer.filteredCache) {
+                // Filter disabled/removed: drop filtered cache so GPU falls back to raw immediately
+                layer.filteredCache.reset();
+                layer.filtersDirty = false;
+                if (layer.tileCache) layer.tileCache->MarkAllDirty();
+                layer.gpuDisplayKind = 0xFF;
+                filtersWereDirty = true;
             }
             if (LayerStylesPreviewActive(layer) && !m_IsStrokeActive)
                 RebuildLayerPresentation(layer);
+            // Styles removed: drop presentation so we don't keep drawing baked styles
+            if (!layer.HasEnabledStyles() && layer.presentationCache) {
+                layer.presentationCache.reset();
+                layer.stylesDirty = false;
+                layer.presentationDirty = false;
+                if (layer.tileCache) layer.tileCache->MarkAllDirty();
+                layer.gpuDisplayKind = 0xFF;
+                stylesWereDirty = true;
+            }
 
             // Pick source: presentation (styles, idle) > filtered (idle FX) > raw
             // Active stroke always uses raw tileCache for lightning-fast dabs.
             TileCache* src = nullptr;
+            uint8_t wantKind = 0; // 0=raw 1=filtered 2=presentation
             bool layerNeedsUpload = layer.needsUpload;
             const bool usePres = !isActivePaintLayer && LayerStylesPreviewActive(layer) &&
                 !m_IsStrokeActive &&
                 layer.presentationCache && !layer.presentationCache->IsEmpty();
-            if (usePres)
+            if (usePres) {
                 src = layer.presentationCache.get();
-            else if (!isActivePaintLayer && m_EffectsPreviewEnabled &&
-                     LayerFilterListHasEnabled(layer.filters) &&
-                     layer.filteredCache && !layer.filteredCache->IsEmpty() && !layer.filtersDirty)
+                wantKind = 2;
+            } else if (!isActivePaintLayer && m_EffectsPreviewEnabled &&
+                       LayerFilterListHasEnabled(layer.filters) &&
+                       layer.filteredCache && !layer.filteredCache->IsEmpty() && !layer.filtersDirty) {
                 src = layer.filteredCache.get();
-            if (!src) src = layer.tileCache.get();
+                wantKind = 1;
+            }
+            if (!src) {
+                src = layer.tileCache.get();
+                wantKind = 0;
+            }
             if (!src) continue;
+
+            // Ensure correct GPU backing: styles → classic full texture; else tiled if large.
+            if (layer.HasEnabledStyles() && layer.gpuSurfaceId) {
+                // Switch to classic for styles
+                RecreateLayerTexture(device, layer);
+            } else if (!layer.HasEnabledStyles() && UseTiledGpuForLayer(layer) &&
+                       !layer.gpuSurfaceId && !layer.IsFill()) {
+                RecreateLayerTexture(device, layer);
+            } else if (!layer.texture && !layer.gpuSurfaceId && !layer.IsFill()) {
+                RecreateLayerTexture(device, layer);
+            }
+
+            // Display source changed (raw↔filtered↔presentation): full re-upload
+            if (layer.gpuDisplayKind != wantKind) {
+                if (layer.gpuSurfaceId)
+                    m_GpuTiles.ClearSurface(layer.gpuSurfaceId);
+                src->MarkAllDirty();
+                layer.gpuDisplayKind = wantKind;
+                layerNeedsUpload = true;
+            }
 
             bool layerHadUploads = false;
             size_t dirtyUploaded = 0;
@@ -2827,14 +3118,11 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
                 layerHadUploads = true;
                 ++dirtyUploaded;
-                UploadLayerTile(context, layer.texture, tx, ty, data, bpp, m_Width, m_Height);
-                // Expand composite dirty by this tile (paint may already have dab AABB)
+                UploadLayerContentTile(device, context, layer, tx, ty, data, bpp);
                 InvalidateCompositeRect(tx * TILE_SIZE, ty * TILE_SIZE,
                     std::min(m_Width - 1, tx * TILE_SIZE + TILE_SIZE - 1),
                     std::min(m_Height - 1, ty * TILE_SIZE + TILE_SIZE - 1));
             });
-            // Always clear dirty after GPU upload. Stroke End re-marks tiles from
-            // m_ActiveStrokeDeltas before RefreshFilteredCache (FX bake).
             src->ClearAllDirty();
             layer.needsUpload = false;
             if (layerHadUploads || filtersWereDirty || stylesWereDirty || layerNeedsUpload || hadPending) {
@@ -3164,7 +3452,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             continue;
         }
 
-        if (layer.srv) {
+        if (layer.srv || layer.gpuSurfaceId) {
             if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV)) {
                 ID3D11Device* device = nullptr;
                 context->GetDevice(&device);
@@ -3180,7 +3468,14 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 layer.presentationCache && !layer.presentationCache->IsEmpty();
             const float op = baked ? 1.f : layer.opacity;
             const bool useMask = !baked && layer.hasMask && layer.maskSRV;
-            drawLayerSrv(layer, layer.srv, useMask, op);
+            const bool isFirst = firstVisible && m_LayerBlendStateReplace;
+            // Tiled GPU path only for raw/filtered (no styles). Styles use classic srv.
+            if (layer.gpuSurfaceId && !baked && !layer.HasEnabledStyles()) {
+                DrawTiledLayer(context, layer, op, useMask, isFirst);
+                firstVisible = false;
+            } else if (layer.srv) {
+                drawLayerSrv(layer, layer.srv, useMask, op);
+            }
 
             if (m_IsMovingPixels && i == m_StartActiveLayerIdx && m_FloatingSRV) {
                 float uOff = (float)m_FloatingOffsetX / (float)m_Width;
@@ -8258,6 +8553,7 @@ void Canvas::RefreshFilteredCache(Layer& layer, bool onlyDirtyTiles) {
             }
         }
 
+        // CPU filters only — GPU blur preview was producing tile seams / ghost frames.
         layer_fx::ApplyPixelFilters(region, rw, rh, layer.filters, rx0, ry0);
 
         const int ox = x0 - rx0;
@@ -8738,6 +9034,7 @@ void Canvas::RefreshCanvas(ID3D11Device* device) {
         L.needsUpload = true;
         L.thumbDirty = true;
         L.maskNeedsUpload = L.hasMask;
+        L.gpuDisplayKind = 0xFF;
         if (m_EffectsPreviewEnabled) {
             if (LayerFilterListHasEnabled(L.filters))
                 L.filtersDirty = true;
@@ -8746,13 +9043,17 @@ void Canvas::RefreshCanvas(ID3D11Device* device) {
                 L.presentationDirty = true;
             }
         }
-        // Drop GPU layer textures so ComposeLayers recreates clean views
+        // Drop GPU layer textures + sparse surfaces so ComposeLayers recreates clean views
         if (device) {
             if (L.texture) { L.texture->Release(); L.texture = nullptr; }
             if (L.srv) { L.srv->Release(); L.srv = nullptr; }
+            if (L.gpuSurfaceId) {
+                m_GpuTiles.DestroySurface(L.gpuSurfaceId);
+                L.gpuSurfaceId = 0;
+            }
         }
     }
-    m_CompositeDirty = true;
+    MarkCompositeDirty();
     m_ChannelPreviewDirty = true;
     m_SelectionMaskNeedsUpload = m_HasSelection;
     Logger::Get().InfoTag("gpu", "RefreshCanvas: forced tile re-upload + recompose");
@@ -8806,6 +9107,7 @@ int Canvas::AddLayerStyle(int layerIdx, StyleType type) {
         s.outlinePos = OutlinePosition::Outside;
     }
     layer.styles.push_back(s);
+    layer.gpuDisplayKind = 0xFF;
     m_IsDocumentModified = true;
     CommitLayerPropsEdit(layerIdx, before, "Add Layer Style");
     // Debounced bake — never full-res float composite on the same click (crash/lag on 4K+)

@@ -9,12 +9,16 @@
 #include <functional>
 #include <memory>
 #include <chrono>
+#include <algorithm>
 #include "core/TileCache.h"
 #include "core/MaskTiles.h"
 #include "core/PaintEngine.h"
 #include "core/DdsHelper.h"
 #include "core/UndoRedoManager.h"
 #include "core/GpuStagingUpload.h"
+#include "core/GpuTileStore.h"
+#include "core/GpuFxBlur.h"
+#include "core/AsyncFilterJob.h"
 #include "modio/ModTypes.h"
 #include "layer/LayerTypes.h"
 #include "texset/TextureSetTypes.h"
@@ -48,6 +52,12 @@ struct Layer {
 
     ID3D11Texture2D* texture = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
+    // Sparse GPU tiles (GpuTileStore). Non-zero ⇒ prefer tiled draw over full texture.
+    // Full texture still used for small docs / fill / styles / fallback.
+    uint32_t gpuSurfaceId = 0;
+    // What is currently uploaded into GPU surface/texture: 0=raw, 1=filtered, 2=presentation.
+    // Mismatch forces full re-upload (fixes filter toggle / FX ghosting).
+    uint8_t gpuDisplayKind = 0xFF;
     bool needsUpload = false; // set true to force full re-upload (fallback)
 
     // UI list thumb (small RGB, A forced 255 when ignore-alpha / buffer view)
@@ -704,6 +714,7 @@ private:
     // Direct3D 11 Resources
     ID3D11Buffer* m_VertexBuffer = nullptr;
     ID3D11Buffer* m_IndexBuffer = nullptr;
+    ID3D11Buffer* m_TileQuadVB = nullptr; // DYNAMIC 4-vertex quad for sparse GPU tiles
     ID3D11Buffer* m_ConstantBuffer = nullptr;
     ID3D11Buffer* m_LayerConstantBuffer = nullptr;
 
@@ -732,6 +743,22 @@ private:
     int  m_CompositeDirtyX1 = -1, m_CompositeDirtyY1 = -1;
     // Staging ring for DEFAULT layer texture uploads (tile-sized).
     GpuStagingUpload m_TileStaging;
+    // Sparse GPU tile surfaces for large documents (VRAM-friendly).
+    GpuTileStore m_GpuTiles;
+    static constexpr int kTiledGpuMinDim = 2048;
+    bool UseTiledGpu() const { return std::max(m_Width, m_Height) > kTiledGpuMinDim; }
+    // Styles need full-layer presentation bake → classic texture. Filters OK on tiles.
+    bool UseTiledGpuForLayer(const Layer& layer) const {
+        return UseTiledGpu() && layer.CanPaintContent() && !layer.HasEnabledStyles();
+    }
+    gpu_fx::GpuBlurContext m_GpuBlur;
+    bool m_GpuBlurTried = false;
+    async_fx::AsyncFilterQueue m_AsyncFilters;
+    void EnsureGpuBlur(ID3D11Device* device, ID3D11DeviceContext* ctx);
+    void SubmitAsyncFilterBake(int layerIdx);
+    void PollAsyncFilterResults();
+    void DrawTiledLayer(ID3D11DeviceContext* context, Layer& layer,
+                        float opacityMul, bool useMask, bool isFirst);
     ID3D11BlendState* m_LayerBlendState = nullptr;
     // RGB: SRC_ALPHA/INV_SRC_ALPHA; Alpha: ZERO/ONE — keeps dest A (Alpha Rewrite OFF)
     ID3D11BlendState* m_LayerBlendStateAlphaPreserve = nullptr;
@@ -748,6 +775,9 @@ private:
     void UploadLayerTile(ID3D11DeviceContext* context, ID3D11Texture2D* dest,
                          int tx, int ty, const uint8_t* data, int bytesPerPixel,
                          int docW, int docH);
+    // Upload into layer: GpuTileStore if surface active, else classic texture.
+    void UploadLayerContentTile(ID3D11Device* device, ID3D11DeviceContext* context,
+                                Layer& layer, int tx, int ty, const uint8_t* data, int bpp);
 
     PaintTarget m_PaintTarget = PaintTarget::LayerContent;
     void EnsureActiveLayerMaskAllocated();

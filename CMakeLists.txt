@@ -131,6 +131,12 @@ set(SOURCES
     src/core/BenchmarkRunner.h
     src/core/GpuStagingUpload.cpp
     src/core/GpuStagingUpload.h
+    src/core/GpuTileStore.cpp
+    src/core/GpuTileStore.h
+    src/core/GpuFxBlur.cpp
+    src/core/GpuFxBlur.h
+    src/core/AsyncFilterJob.cpp
+    src/core/AsyncFilterJob.h
     src/core/KeymapManager.cpp
     src/core/KeymapManager.h
     src/core/ClipboardHelper.cpp
@@ -211,6 +217,7 @@ set(SOURCES
 # Shaders
 set(SHADER_FILES
     src/shaders/Canvas.hlsl
+    src/shaders/LayerFxBlur.hlsl
     src/shaders/Preview3D.hlsl
     src/shaders/Preview3D_Outline.hlsl
 )
