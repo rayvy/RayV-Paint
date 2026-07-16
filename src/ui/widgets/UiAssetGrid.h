@@ -11,6 +11,7 @@ struct AssetGridState {
     int selected = -1;
     std::string selectedKey;
     char search[128] = {};
+    bool searchOpen = false; // icon → expand full-width field
     int categoryTab = 0; // 0=All 1=Core 2=User 3=Project
     float cellSize = 88.f;
     std::string hoverKey;

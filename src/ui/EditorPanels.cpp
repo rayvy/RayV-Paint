@@ -2262,76 +2262,109 @@ namespace UI {
             if (window) {
                 isVertical = (window->Size.y > window->Size.x);
             }
-            // Size constraints apply when floating; when docked, also clamp dock node cross-axis
             if (isVertical) {
-                ImGui::SetNextWindowSizeConstraints(ImVec2(16.0f, 100.0f), ImVec2(64.0f, 16384.0f));
+                ImGui::SetNextWindowSizeConstraints(ImVec2(36.0f, 100.0f), ImVec2(64.0f, 16384.0f));
             } else {
-                ImGui::SetNextWindowSizeConstraints(ImVec2(100.0f, 16.0f), ImVec2(16384.0f, 64.0f));
+                ImGui::SetNextWindowSizeConstraints(ImVec2(100.0f, 36.0f), ImVec2(16384.0f, 64.0f));
             }
             Ui::BeginDockPanel("Toolbar", &state.showToolbar);
-
-            // Docked toolbar: Dear ImGui ignores SetNextWindowSizeConstraints on docked
-            // windows — size is owned by the DockNode. Clamp SizeRef every frame so the
-            // strip stays thin while docked (floating still uses constraints above).
-            if (ImGuiWindow* tw = ImGui::GetCurrentWindow()) {
-                if (tw->DockNode && !tw->DockNode->IsFloatingNode() && tw->DockNode->HostWindow) {
-                    ImGuiDockNode* node = tw->DockNode;
-                    // Only constrain leaf nodes that host this toolbar (not the whole dockspace)
-                    if (!node->IsSplitNode()) {
-                        if (isVertical) {
-                            float w = std::clamp(node->SizeRef.x > 1.f ? node->SizeRef.x : node->Size.x, 36.0f, 64.0f);
-                            node->SizeRef.x = w;
-                            if (std::fabs(node->Size.x - w) > 1.0f)
-                                ImGui::DockBuilderSetNodeSize(node->ID, ImVec2(w, node->Size.y));
-                        } else {
-                            float h = std::clamp(node->SizeRef.y > 1.f ? node->SizeRef.y : node->Size.y, 36.0f, 64.0f);
-                            node->SizeRef.y = h;
-                            if (std::fabs(node->Size.y - h) > 1.0f)
-                                ImGui::DockBuilderSetNodeSize(node->ID, ImVec2(node->Size.x, h));
-                        }
-                    }
-                }
-            }
+            // Hard clamp: no overshoot while dragging splitter
+            Ui::ClampDockLeafCrossAxis(isVertical, 36.0f, 64.0f);
 
             ImVec2 avail = ImGui::GetContentRegionAvail();
 
-            std::string brushBind = KeymapManager::Get().GetActionShortcutString("BrushTool");
-            std::string eraserBind = KeymapManager::Get().GetActionShortcutString("EraserTool");
-            std::string panBind = KeymapManager::Get().GetActionShortcutString("PanTool");
-            std::string rotateBind = KeymapManager::Get().GetActionShortcutString("RotateTool");
-            std::string fillBind = KeymapManager::Get().GetActionShortcutString("BucketFillTool");
-            std::string gradientBind = KeymapManager::Get().GetActionShortcutString("GradientTool");
-            std::string pipetteBind = KeymapManager::Get().GetActionShortcutString("PipetteTool");
-            std::string smudgeBind  = KeymapManager::Get().GetActionShortcutString("SmudgeTool");
-            std::string selectBind = KeymapManager::Get().GetActionShortcutString("SelectToolGroup");
-            std::string lassoBind = KeymapManager::Get().GetActionShortcutString("LassoToolGroup");
-            std::string wandBind = KeymapManager::Get().GetActionShortcutString("WandToolGroup");
-            std::string transformBind = KeymapManager::Get().GetActionShortcutString("TransformTool");
+            // ---- Hotkey-driven grouping: same key+mods → one stack; else separate ----
+            struct ToolDef {
+                const char* action;
+                const char* display;
+                ActiveTool tool;
+                bool erase = false;
+            };
+            static const ToolDef kAllTools[] = {
+                { "BrushTool", "Brush", ActiveTool::Brush, false },
+                { "EraserTool", "Eraser", ActiveTool::Eraser, true },
+                { "StampTool", "Stamp", ActiveTool::Stamp, false },
+                { "BucketFillTool", "Fill", ActiveTool::BucketFill, false },
+                { "GradientTool", "Gradient", ActiveTool::Gradient, false },
+                { "SmudgeTool", "Smudge", ActiveTool::Smudge, false },
+                { "BlurTool", "Blur", ActiveTool::BlurTool, false },
+                { "PipetteTool", "Pipette", ActiveTool::Pipette, false },
+                { "RectSelectTool", "Rect Select", ActiveTool::RectSelect, false },
+                { "EllipseSelectTool", "Ellipse Select", ActiveTool::EllipseSelect, false },
+                { "LassoSelectTool", "Lasso", ActiveTool::LassoSelect, false },
+                { "PolygonalLassoTool", "Poly Lasso", ActiveTool::PolygonalLasso, false },
+                { "MagicWandTool", "Magic Wand", ActiveTool::MagicWand, false },
+                { "QuickSelectTool", "Quick Select", ActiveTool::QuickSelect, false },
+                { "SmartSelectTool", "Smart Select", ActiveTool::SmartSelect, false },
+                { "TransformTool", "Move", ActiveTool::MovePixels, false },
+                { "PanTool", "Hand", ActiveTool::Pan, false },
+            };
 
-            static const ToolVariant s_SelectVariants[] = {
-                { "RectSelectTool", "Rectangular Selection", ActiveTool::RectSelect },
-                { "EllipseSelectTool", "Ellipse Selection", ActiveTool::EllipseSelect },
+            struct KeySig {
+                int key = 0;
+                bool ctrl = false, shift = false, alt = false;
+                bool operator==(const KeySig& o) const {
+                    return key == o.key && ctrl == o.ctrl && shift == o.shift && alt == o.alt;
+                }
             };
-            static const ToolVariant s_LassoVariants[] = {
-                { "LassoSelectTool", "Lasso Selection", ActiveTool::LassoSelect },
-                { "PolygonalLassoTool", "Polygonal Lasso", ActiveTool::PolygonalLasso },
+            auto bindingOf = [](const char* action) -> KeySig {
+                KeySig s;
+                const auto& map = KeymapManager::Get().GetBindings();
+                auto it = map.find(action);
+                if (it == map.end() || it->second.key == 0) return s;
+                s.key = it->second.key;
+                s.ctrl = it->second.ctrl;
+                s.shift = it->second.shift;
+                s.alt = it->second.alt;
+                return s;
             };
-            static const ToolVariant s_WandVariants[] = {
-                { "MagicWandTool", "Magic Wand", ActiveTool::MagicWand },
-                { "QuickSelectTool", "Quick Selection", ActiveTool::QuickSelect },
-                { "SmartSelectTool", "Smart Select", ActiveTool::SmartSelect },
+
+            // Catalog group actions also share a key — fold members onto group key if member unbound
+            auto effectiveKey = [&](const ToolDef& t) -> KeySig {
+                KeySig s = bindingOf(t.action);
+                if (s.key != 0) return s;
+                if (t.tool == ActiveTool::RectSelect || t.tool == ActiveTool::EllipseSelect)
+                    return bindingOf("SelectToolGroup");
+                if (t.tool == ActiveTool::LassoSelect || t.tool == ActiveTool::PolygonalLasso)
+                    return bindingOf("LassoToolGroup");
+                if (t.tool == ActiveTool::MagicWand || t.tool == ActiveTool::QuickSelect ||
+                    t.tool == ActiveTool::SmartSelect)
+                    return bindingOf("WandToolGroup");
+                return s;
             };
+
+            // Build ordered unique slots: first occurrence order of tools, merged by key
+            struct Slot {
+                KeySig key;
+                std::vector<int> toolIdx; // indices into kAllTools
+            };
+            std::vector<Slot> slots;
+            for (int i = 0; i < (int)IM_ARRAYSIZE(kAllTools); ++i) {
+                KeySig k = effectiveKey(kAllTools[i]);
+                int found = -1;
+                if (k.key != 0) {
+                    for (int s = 0; s < (int)slots.size(); ++s) {
+                        if (slots[s].key.key != 0 && slots[s].key == k) { found = s; break; }
+                    }
+                }
+                if (found >= 0)
+                    slots[found].toolIdx.push_back(i);
+                else {
+                    Slot sl;
+                    sl.key = k;
+                    sl.toolIdx.push_back(i);
+                    slots.push_back(std::move(sl));
+                }
+            }
 
             static std::string s_RebindAction = "";
-            constexpr int kToolbarButtonCount = 11;
+            const int nSlots = (int)slots.size();
             const bool hasSeparator = true;
-            // Adaptive icon size from dock/window content region (works docked + floating)
-            float btnSize = ComputeAdaptiveToolButtonSize(avail, isVertical, kToolbarButtonCount + 1 /*+Reset*/, hasSeparator);
+            float btnSize = ComputeAdaptiveToolButtonSize(avail, isVertical, nSlots + 1 /* color */, hasSeparator);
             float gap = isVertical ? ImGui::GetStyle().ItemSpacing.y : ImGui::GetStyle().ItemSpacing.x;
 
-            ToolbarBeginLayout(avail, isVertical, kToolbarButtonCount, btnSize, gap, hasSeparator);
+            ToolbarBeginLayout(avail, isVertical, nSlots, btnSize, gap, hasSeparator);
 
-            // Capture full item rects for floating square accent outline
             ImVec2 accentMin(0, 0), accentMax(0, 0);
             bool accentHasTarget = false;
             auto markAccent = [&]() {
@@ -2342,54 +2375,58 @@ namespace UI {
                 }
             };
 
-            RenderToolButton("BrushTool", "Brush", ActiveTool::Brush, false, brushBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-            if (activeTool == ActiveTool::Brush && !brush.erase) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            {
-                std::string stampBind = KeymapManager::Get().GetActionShortcutString("StampTool");
-                RenderToolButton("StampTool", "Stamp", ActiveTool::Stamp, false, stampBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-                if (activeTool == ActiveTool::Stamp) markAccent();
+            for (int si = 0; si < nSlots; ++si) {
+                if (si) ToolbarAdvance(isVertical, gap);
+                const Slot& sl = slots[si];
+                if (sl.toolIdx.size() == 1) {
+                    const ToolDef& t = kAllTools[sl.toolIdx[0]];
+                    std::string bind = KeymapManager::Get().GetActionShortcutString(t.action);
+                    if (bind == "—" || bind == "None") bind.clear();
+                    // Fall back to group shortcut string for display
+                    if (bind.empty() && sl.key.key != 0) {
+                        if (t.tool == ActiveTool::RectSelect || t.tool == ActiveTool::EllipseSelect)
+                            bind = KeymapManager::Get().GetActionShortcutString("SelectToolGroup");
+                        else if (t.tool == ActiveTool::LassoSelect || t.tool == ActiveTool::PolygonalLasso)
+                            bind = KeymapManager::Get().GetActionShortcutString("LassoToolGroup");
+                        else if (UI::IsWandTool(t.tool))
+                            bind = KeymapManager::Get().GetActionShortcutString("WandToolGroup");
+                        if (bind == "—" || bind == "None") bind.clear();
+                    }
+                    RenderToolButton(t.action, t.display, t.tool, t.erase, bind, btnSize,
+                        s_RebindAction, activeTool, brush, canvas);
+                    bool on = (activeTool == t.tool);
+                    if (t.tool == ActiveTool::Brush)
+                        on = (activeTool == ActiveTool::Brush && brush.erase == t.erase) ||
+                             (t.erase && activeTool == ActiveTool::Eraser);
+                    if (t.erase)
+                        on = (activeTool == ActiveTool::Eraser ||
+                              (activeTool == ActiveTool::Brush && brush.erase));
+                    if (on) markAccent();
+                } else {
+                    // Multi-tool stack for shared hotkey
+                    std::vector<ToolVariant> vars;
+                    vars.reserve(sl.toolIdx.size());
+                    for (int ti : sl.toolIdx) {
+                        const ToolDef& t = kAllTools[ti];
+                        vars.push_back({ t.action, t.display, t.tool });
+                    }
+                    std::string bind;
+                    if (sl.key.key != 0)
+                        bind = KeymapManager::Get().GetActionShortcutString(kAllTools[sl.toolIdx[0]].action);
+                    if (bind == "—" || bind == "None") bind.clear();
+                    char gid[64];
+                    std::snprintf(gid, sizeof(gid), "DynGroup_%d_%d", sl.key.key, (int)sl.toolIdx.size());
+                    RenderGroupedToolButton(gid, kAllTools[sl.toolIdx[0]].action,
+                        vars.data(), (int)vars.size(), "Tools (same hotkey)",
+                        bind, btnSize, s_RebindAction, activeTool);
+                    for (int ti : sl.toolIdx) {
+                        if (activeTool == kAllTools[ti].tool) { markAccent(); break; }
+                    }
+                    // Keep erase flag consistent when Eraser shares a stack with Brush
+                    if (activeTool == ActiveTool::Eraser) brush.erase = true;
+                    else if (activeTool == ActiveTool::Brush) brush.erase = false;
+                }
             }
-            ToolbarAdvance(isVertical, gap);
-            RenderToolButton("EraserTool", "Eraser", ActiveTool::Eraser, true, eraserBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-            if (activeTool == ActiveTool::Eraser || (activeTool == ActiveTool::Brush && brush.erase)) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            RenderToolButton("BucketFillTool", "Fill", ActiveTool::BucketFill, false, fillBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-            if (activeTool == ActiveTool::BucketFill) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            RenderToolButton("GradientTool", "Gradient", ActiveTool::Gradient, false, gradientBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-            if (activeTool == ActiveTool::Gradient) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            RenderToolButton("SmudgeTool", "Smudge", ActiveTool::Smudge, false, smudgeBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-            if (activeTool == ActiveTool::Smudge) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            {
-                std::string blurBind = KeymapManager::Get().GetActionShortcutString("BlurTool");
-                // Reuse smudge icon if no dedicated blur tool icon
-                RenderToolButton("BlurTool", "Blur", ActiveTool::BlurTool, false, blurBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-                if (activeTool == ActiveTool::BlurTool) markAccent();
-            }
-            ToolbarAdvance(isVertical, gap);
-            RenderToolButton("PipetteTool", "Pipette", ActiveTool::Pipette, false, pipetteBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-            if (activeTool == ActiveTool::Pipette) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            RenderGroupedToolButton("SelectGroup", "SelectToolGroup", s_SelectVariants, IM_ARRAYSIZE(s_SelectVariants),
-                "Selection Tools", selectBind, btnSize, s_RebindAction, activeTool);
-            if (UI::IsSelectTool(activeTool)) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            RenderGroupedToolButton("LassoGroup", "LassoToolGroup", s_LassoVariants, IM_ARRAYSIZE(s_LassoVariants),
-                "Lasso Tools", lassoBind, btnSize, s_RebindAction, activeTool);
-            if (UI::IsLassoTool(activeTool)) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            RenderGroupedToolButton("WandGroup", "WandToolGroup", s_WandVariants, IM_ARRAYSIZE(s_WandVariants),
-                "Wand / Selection Tools", wandBind, btnSize, s_RebindAction, activeTool);
-            if (UI::IsWandTool(activeTool)) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            RenderToolButton("TransformTool", "Move", ActiveTool::MovePixels, false, transformBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-            if (activeTool == ActiveTool::MovePixels) markAccent();
-            ToolbarAdvance(isVertical, gap);
-            RenderToolButton("PanTool", "Hand", ActiveTool::Pan, false, panBind + " / " + rotateBind, btnSize, s_RebindAction, activeTool, brush, canvas);
-            if (activeTool == ActiveTool::Pan) markAccent();
 
             // Floating square outline — jumps tool-to-tool (EaseOutCubic via exp-smooth)
             {

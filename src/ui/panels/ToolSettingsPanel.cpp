@@ -4,8 +4,10 @@
 #include "../widgets/UiPanel.h"
 #include "../widgets/UiDropdown.h"
 #include "../widgets/UiIconToggle.h"
+#include "../widgets/UiIconButton.h"
 #include "../widgets/UiVisualSlider.h"
 #include "../widgets/UiTooltip.h"
+#include "../icons/SvgIconCache.h"
 #include "../../core/ConfigManager.h"
 #include "../../core/ImageManager.h"
 #include "../../core/PaintEngine.h"
@@ -26,14 +28,8 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
 
     ImVec2 preAvail = ImGui::GetContentRegionAvail(); // may be 0 before begin
     Ui::BeginDockPanel("Tool Settings", &state.showToolSettings);
-    // Constrain strip when docked wide
-    if (ImGuiWindow* tw = ImGui::GetCurrentWindow()) {
-        if (tw->DockNode && !tw->DockNode->IsFloatingNode() && tw->Size.x > tw->Size.y) {
-            float h = std::clamp(tw->Size.y, 28.f, 48.f);
-            if (std::fabs(tw->Size.y - h) > 1.f && tw->DockNode)
-                ImGui::DockBuilderSetNodeSize(tw->DockNode->ID, ImVec2(tw->DockNode->Size.x, h));
-        }
-    }
+    // Horizontal tool strip: hard height clamp (no rubber-band stretch)
+    Ui::ClampDockLeafCrossAxis(/*verticalStrip=*/false, 28.f, 48.f);
 
     ImVec2 tsAvail = ImGui::GetContentRegionAvail();
     bool tsHorizontal = (tsAvail.x >= tsAvail.y * 0.85f);
@@ -62,15 +58,19 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
             if (ImGui::SmallButton("Clear##stamp_src"))
                 canvas.StampClearSource();
         }
-        // Brush blend mode (erase ignores)
+        // Brush blend mode — icon + combo (no verbose label)
         if (activeTool == ActiveTool::Brush && !brush.erase) {
             static const char* blendNames[] = {
                 "Normal","Multiply","Screen","Overlay","Add","Subtract","Darken","Lighten","HardLight","SoftLight"
             };
             int bi = (int)brush.blendMode;
-            ImGui::SetNextItemWidth(110.f);
-            if (Ui::Combo("##brush_blend", &bi, blendNames, IM_ARRAYSIZE(blendNames), "Brush Blend Mode"))
+            Ui::IconButton("##blend_ico", "ts_blend_mode", ImVec2(22, 22),
+                "Blend mode", true, false);
+            ImGui::SameLine(0, 4);
+            ImGui::SetNextItemWidth(100.f);
+            if (Ui::Combo("##brush_blend", &bi, blendNames, IM_ARRAYSIZE(blendNames), "Blend mode"))
                 brush.blendMode = (BlendMode)bi;
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Brush blend mode");
             ImGui::SameLine();
         }
         // Brush tips: ids persisted on Canvas (.rayp brush_tip_id / custom pixels)
@@ -113,6 +113,8 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
         const char* tipNames[] = { "Soft", "Hard", "Pencil", "Air", "Custom" };
         const char* tipIds[] = { "soft_round", "hard_round", "pencil", "airbrush", "custom" };
         int tipIdx = state.brushTipPreset;
+        Ui::IconButton("##tip_ico", "ts_brush_tip", ImVec2(22, 22), "Brush tip shape", true, false);
+        ImGui::SameLine(0, 4);
         ImGui::SetNextItemWidth(72.f);
         if (Ui::Combo("##tip", &tipIdx, tipNames, IM_ARRAYSIZE(tipNames))) {
             state.brushTipPreset = tipIdx;
@@ -124,7 +126,7 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
         }
         if (ImGui::IsItemHovered()) Ui::Tooltip("Brush tip (saved in project)");
         ImGui::SameLine();
-        if (ImGui::SmallButton("Load Tip...")) {
+        if (ImGui::SmallButton("Load…")) {
             char path[512] = "";
             if (Ui::ShowOpenFile(path, sizeof(path), "Images (*.png;*.jpg;*.bmp;*.tga)\0*.png;*.jpg;*.bmp;*.tga\0All\0*.*\0")) {
                 std::vector<uint8_t> px; int tw = 0, th = 0;

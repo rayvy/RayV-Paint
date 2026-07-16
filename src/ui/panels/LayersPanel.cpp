@@ -55,7 +55,9 @@ static void DrawLayerDropHighlight(const ImVec2& rmin, const ImVec2& rmax, bool 
 
 void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
     if (!state.showLayers) return;
+        // Outer panel never scrolls — only LayersList child does.
         Ui::BeginDockPanel("Layers", &state.showLayers);
+        Ui::ClampDockLeafBox(180.f, 520.f, 160.f, 2400.f);
         if (ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows)) {
             g_IsLayersHovered = true;
         }
@@ -398,10 +400,10 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
             }
         }
 
-        // List fills remaining height minus bottom bar
-        // ImGui-safe row: ONE line via SameLine + SetCursorPosY from lineStartY (never SetCursorScreenPos chain)
+        // List fills remaining height minus bottom bar (only this region scrolls)
         const float barH = 40.f;
-        ImGui::BeginChild("LayersList", ImVec2(0, -barH), true);
+        ImGui::BeginChild("LayersList", ImVec2(0, -barH), true,
+            ImGuiWindowFlags_None);
         const float thumb = 28.0f;
         const float eyeSz = 22.0f;
         const float rowPad = 10.0f;

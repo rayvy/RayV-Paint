@@ -1,5 +1,9 @@
 #include "UiAssetGrid.h"
 #include "../style/UiTokens.h"
+#include "../style/UiMotion.h"
+#include "../icons/SvgIconCache.h"
+#include "../widgets/UiIconButton.h"
+#include "../widgets/UiTooltip.h"
 #include "../../assets/AssetManager.h"
 #include <imgui.h>
 #include <algorithm>
@@ -18,21 +22,72 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
     bool activated = false;
     ImGui::PushID(id);
 
-    // Search
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##search", "Search assets…", st.search, sizeof(st.search));
+    // ---- Header: search icon expands; categories fade when searching ----
+    static Ui::AnimFloat s_searchExpand;
+    const bool wantExpand = st.searchOpen || st.search[0] != '\0';
+    s_searchExpand.SetTarget(wantExpand ? 1.f : 0.f, T.durMed, Ui::EaseKind::EaseOutCubic);
+    s_searchExpand.Update(Ui::DeltaTime());
+    const float expT = s_searchExpand.value;
 
-    // Category tabs
-    const char* tabs[] = { "All", "Core", "User", "Project" };
-    for (int i = 0; i < 4; ++i) {
-        if (i) ImGui::SameLine();
-        bool sel = (st.categoryTab == i);
-        if (sel) ImGui::PushStyleColor(ImGuiCol_Button, T.accent);
-        if (ImGui::SmallButton(tabs[i])) st.categoryTab = i;
-        if (sel) ImGui::PopStyleColor();
+    const float rowH = 26.f;
+    const float iconBtn = 26.f;
+    ImVec2 row0 = ImGui::GetCursorScreenPos();
+    float availW = ImGui::GetContentRegionAvail().x;
+
+    // Search icon button (always)
+    {
+        auto r = Ui::IconButton("##search_ico", "search", ImVec2(iconBtn, iconBtn),
+            st.searchOpen ? "Close search" : "Search assets", true, st.searchOpen);
+        if (r.clicked) {
+            st.searchOpen = !st.searchOpen;
+            if (!st.searchOpen && st.search[0] == '\0') {
+                // collapsed empty
+            } else if (st.searchOpen) {
+                ImGui::SetKeyboardFocusHere();
+            }
+        }
     }
 
-    // Filter items client-side for tab + search
+    // Expanding search field over the rest of the row
+    const float searchW = std::max(0.f, (availW - iconBtn - 6.f) * expT);
+    if (searchW > 8.f) {
+        ImGui::SameLine(0, 4);
+        ImGui::SetNextItemWidth(searchW);
+        ImGui::InputTextWithHint("##search", "Search…", st.search, sizeof(st.search));
+        if (st.searchOpen && ImGui::IsKeyPressed(ImGuiKey_Escape) && !ImGui::IsItemActive()) {
+            st.searchOpen = false;
+            st.search[0] = 0;
+        }
+    }
+
+    // Category tabs — fade + shrink when search expands
+    const float catAlpha = 1.f - expT;
+    if (catAlpha > 0.02f) {
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, catAlpha);
+        // Next line only when search not fully expanded (avoid double height flash)
+        if (expT < 0.85f) {
+            // same row if space: draw after icon when collapsed
+            if (expT < 0.15f) {
+                ImGui::SameLine(0, 8);
+            } else {
+                ImGui::SetCursorScreenPos(ImVec2(row0.x + iconBtn + 4.f + searchW + 6.f, row0.y));
+            }
+            const char* tabs[] = { "All", "Core", "User", "Project" };
+            for (int i = 0; i < 4; ++i) {
+                if (i) ImGui::SameLine(0, 4);
+                bool sel = (st.categoryTab == i);
+                if (sel) ImGui::PushStyleColor(ImGuiCol_Button, T.accent);
+                if (ImGui::SmallButton(tabs[i])) st.categoryTab = i;
+                if (sel) ImGui::PopStyleColor();
+            }
+        }
+        ImGui::PopStyleVar();
+    }
+    // Reserve header row height
+    ImGui::SetCursorScreenPos(ImVec2(row0.x, row0.y + rowH + 4.f));
+    ImGui::Dummy(ImVec2(1, 0));
+
+    // Filter items
     std::vector<const assets::AssetInfo*> view;
     view.reserve(items.size());
     std::string q = st.search;
@@ -51,7 +106,9 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
         view.push_back(&e);
     }
 
-    ImGui::BeginChild("##assetgrid", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 1.2f), true);
+    // Content-only scroll (footer buttons live outside AssetGrid in panel)
+    ImGui::BeginChild("##assetgrid", ImVec2(0, 0), false,
+        ImGuiWindowFlags_None);
     const float cell = st.cellSize;
     const float pad = T.s2;
     float avail = ImGui::GetContentRegionAvail().x;
@@ -68,16 +125,13 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
         ImU32 bg = ImGui::GetColorU32(selected ? T.accent : T.bgElevated);
         dl->AddRectFilled(p0, ImVec2(p0.x + cell, p0.y + cell + 18.f), bg, T.rSm);
 
-        // Progressive: only kick decode for near-visible cells (not whole library).
         const bool nearView = ImGui::IsRectVisible(
             ImVec2(p0.x, p0.y - prefetch),
             ImVec2(p0.x + cell, p0.y + cell + 18.f + prefetch));
 
         ID3D11ShaderResourceView* srv = nullptr;
-        // GetThumbSrv enqueues work — call only for near-viewport (cached hits are instant).
         if (device && nearView)
             srv = assets::AssetManager::Get().GetThumbSrv(device, e->key, false);
-        // Kick async full load only if needed for dims later — thumbs self-load
         ImVec2 imgMin(p0.x + 4, p0.y + 4);
         ImVec2 imgMax(p0.x + cell - 4, p0.y + cell - 4);
         if (srv) {
@@ -88,7 +142,6 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
             const bool failed = assets::AssetManager::Get().IsThumbFailed(e->key);
             const ImVec2 c((imgMin.x + imgMax.x) * 0.5f, (imgMin.y + imgMax.y) * 0.5f);
             if (pending) {
-                // Async in flight — spinner until Poll uploads GPU thumb.
                 const float rad = (imgMax.x - imgMin.x) * 0.14f;
                 const float t = (float)ImGui::GetTime() * 7.5f;
                 for (int s = 0; s < 8; ++s) {
@@ -100,7 +153,6 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
                         IM_COL32(130, 175, 255, (int)(fade * 220.f)), 6);
                 }
             } else {
-                // Failed / not yet kicked — static mark (GetThumbSrv kicks load).
                 const char* mark = failed ? "!" : "…";
                 ImVec2 ts = ImGui::CalcTextSize(mark);
                 dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
@@ -108,7 +160,6 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
             }
         }
 
-        // Label
         char label[64];
         std::snprintf(label, sizeof(label), "%.12s", e->displayName.c_str());
         dl->AddText(ImVec2(p0.x + 4, p0.y + cell + 2), ImGui::GetColorU32(T.textPrimary), label);
@@ -123,7 +174,6 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
                 st.hoverTimer += ImGui::GetIO().DeltaTime;
             }
             if (st.hoverTimer >= T.tooltipDelaySec * 0.5f) {
-                // HQ preview popup
                 ID3D11ShaderResourceView* hi =
                     device ? assets::AssetManager::Get().GetThumbSrv(device, e->key, true) : nullptr;
                 ImGui::BeginTooltip();
@@ -149,19 +199,7 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
         ImGui::PopID();
         ++i;
     }
-    if (view.empty()) {
-        ImGui::TextDisabled(assets::AssetManager::Get().IsIndexReady()
-            ? "No assets in this category"
-            : "Indexing libraries…");
-    }
     ImGui::EndChild();
-
-    // Footer selection info
-    if (!st.selectedKey.empty()) {
-        ImGui::TextDisabled("%s", assets::AssetManager::Get().DisplayName(st.selectedKey).c_str());
-    } else {
-        ImGui::TextDisabled("%d item(s)", (int)view.size());
-    }
 
     ImGui::PopID();
     return activated;

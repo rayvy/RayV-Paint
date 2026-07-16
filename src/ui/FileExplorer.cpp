@@ -1679,16 +1679,23 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
     const bool iconView = (st.viewMode != ExplorerViewMode::Details);
 
     if (!iconView) {
-        // Details table
-        if (ImGui::BeginTable("##fstable", 4,
-                ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY |
-                ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
-                ImGuiTableFlags_SizingStretchProp)) {
+        // Details / List — own scroll region with fixed usable columns (not crushed by side form).
+        const ImVec2 listAvail = ImGui::GetContentRegionAvail();
+        ImGui::BeginChild("##list_scroll", listAvail, false,
+            ImGuiWindowFlags_HorizontalScrollbar);
+        const ImGuiTableFlags tflags =
+            ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp |
+            ImGuiTableFlags_NoHostExtendX | ImGuiTableFlags_ScrollY |
+            ImGuiTableFlags_Hideable;
+        // Height must be explicit for ScrollY; fill the child.
+        if (ImGui::BeginTable("##fstable", 4, tflags, ImGui::GetContentRegionAvail())) {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 72);
-            ImGui::TableSetupColumn("Date modified", ImGuiTableColumnFlags_WidthFixed, 130);
-            ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 80);
+            // Name eats remaining space; Type wide enough for BC7/sRGB labels.
+            ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+            ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 120.f);
+            ImGui::TableSetupColumn("Date", ImGuiTableColumnFlags_WidthFixed, 148.f);
+            ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 88.f);
             ImGui::TableHeadersRow();
 
             ImGuiListClipper clipper;
@@ -1697,17 +1704,31 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                 for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
                     const FsEntry& e = entries[i];
                     ImGui::PushID(i);
-                    ImGui::TableNextRow();
+                    ImGui::TableNextRow(ImGuiTableRowFlags_None, ImGui::GetFrameHeight() + 4.f);
                     ImGui::TableNextColumn();
                     bool sel = (st.selectedPath == e.fullPath) || IsMultiSelected(st, e.fullPath);
-                    std::string label = (e.isDir ? "[dir] " : "") + e.name;
-                    if (ImGui::Selectable(label.c_str(), sel,
+                    // Folder prefix via glyph space — keep name readable
+                    char label[512];
+                    if (e.isDir)
+                        std::snprintf(label, sizeof(label), "  %s", e.name.c_str());
+                    else
+                        std::snprintf(label, sizeof(label), "%s", e.name.c_str());
+                    if (ImGui::Selectable(label, sel,
                             ImGuiSelectableFlags_SpanAllColumns |
-                            ImGuiSelectableFlags_AllowDoubleClick)) {
+                            ImGuiSelectableFlags_AllowDoubleClick |
+                            ImGuiSelectableFlags_AllowOverlap)) {
                         onActivate(e);
                     }
                     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
                         onDouble(e);
+                    if (e.isDir) {
+                        // tiny folder mark in leading space
+                        ImVec2 rmin = ImGui::GetItemRectMin();
+                        DrawFolderGlyph(ImGui::GetWindowDrawList(),
+                            ImVec2(rmin.x + 2.f, rmin.y + 4.f),
+                            ImVec2(rmin.x + 16.f, rmin.y + ImGui::GetItemRectSize().y - 4.f),
+                            IM_COL32(230, 190, 80, 220));
+                    }
                     ImGui::TableNextColumn();
                     ImGui::TextUnformatted(e.typeLabel.c_str());
                     ImGui::TableNextColumn();
@@ -1720,6 +1741,7 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             }
             ImGui::EndTable();
         }
+        ImGui::EndChild();
     } else {
         // Icon grid — progressive thumbs: only request visible (+1 screen prefetch).
         // Never enqueue all 500 at once (that felt like "wait then all appear").
