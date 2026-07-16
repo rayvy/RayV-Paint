@@ -1,12 +1,15 @@
 # API Standardization (Operators, Context, Registry)
 
-**Status:** In progress — O0–O3 largely landed:
+**Status:** In progress — O0–O4 largely landed:
 - `ActionCatalog` + `AppContext` + `TryConsumeAction`
-- **`OperatorRegistry` + `RegisterEditorOperators`** + `DispatchKeymapFrame` (main no longer grows if-chains)
+- **`OperatorRegistry` + `RegisterEditorOperators`** + `DispatchKeymapFrame`
 - **`MenuAction` / `Invoke`** for File/Image/Select menus
-- SmartSlider exact entry across tool settings, adjust modals, settings, brush popup, preview3d
-- Keybindings UI by category; footer Context panel  
-Remaining: Python O4, Deselect as catalog op, drain any leftover raw sliders, optional operator palette (O5).  
+- SmartSlider exact entry (tool settings, adjust modals, settings, brush popup, preview3d)
+- Keybindings UI by category; footer Context panel
+- **Python O4 ops:** `rayv.ops.list/invoke/can_invoke`
+- **Python O4 doc:** `rayv.doc` — open/save rayp/image, layers, get/set pixels & rgba8, mask, selection (`ScriptDocApi`)
+- Deselect, Paste, SwapColors as catalog ops  
+Remaining: optional operator palette (O5), brush rvpbf via Python, residual raw sliders, PSD/KRA converters on top of doc API.  
 **Motivation:** The editor “works”, but control flow is vibe-coded: UI/hotkeys call Canvas ad-hoc, context is implicit, duplication grows. Inspiration: **Blender** (operators + context + register), not a full Blender port.  
 **Related:** `Documentation.MD` (file formats). Interchange converters: `plans/Standartization(Krita/Photoshop).MD` (**depends on this plan**, does not replace it).
 

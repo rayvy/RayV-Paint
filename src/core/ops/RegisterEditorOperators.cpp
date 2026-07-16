@@ -65,6 +65,35 @@ void RegisterEditorOperators(OperatorHost host) {
             Logger::Get().Warn("PasteAsNewLayer: no image on clipboard");
         return Ok();
     });
+    // Paste policy: external system image wins when newer than last internal copy;
+    // else layer clipboard; else paste content into active (or new layer fallback).
+    R.Register("Paste", [H] {
+        if (!H().canvas || !H().device) return OperatorResult::Cancelled;
+        const bool externalImage =
+            ClipboardHelper::HasClipboardImage() &&
+            ClipboardHelper::IsSystemClipboardNewerThanLastCopy();
+        if (externalImage) {
+            if (H().canvas->IsEditingLayerMask()) {
+                if (!H().canvas->PasteContentIntoActive(H().device))
+                    Logger::Get().Warn("Paste: failed to paste into mask");
+            } else if (!H().canvas->PasteContentAsNewLayer(H().device, "Pasted Layer")) {
+                Logger::Get().Warn("Paste: failed to paste system image as layer");
+            }
+        } else if (H().canvas->HasLayerClipboard()) {
+            H().canvas->PasteLayersFromClipboard(H().device);
+        } else if (!H().canvas->PasteContentIntoActive(H().device)) {
+            if (!H().canvas->PasteContentAsNewLayer(H().device, "Pasted Layer"))
+                Logger::Get().Warn("Paste: clipboard has no pasteable image");
+        }
+        return Ok();
+    });
+    R.Register("SwapColors", [H] {
+        if (!H().brush || !H().secondaryColor) return OperatorResult::Cancelled;
+        for (int i = 0; i < 4; ++i)
+            std::swap(H().brush->color[i], H().secondaryColor[i]);
+        if (H().colorSwapPending) *H().colorSwapPending = true;
+        return Ok();
+    });
     R.Register("DuplicateLayer", [H] {
         if (!H().canvas || !H().device || !H().ui) return OperatorResult::Cancelled;
         if (!H().ui->selectedLayers.empty()) {
@@ -254,6 +283,12 @@ void RegisterEditorOperators(OperatorHost host) {
     // --- Selection / Image ---
     R.Register("SelectAll", [H] {
         if (H().canvas) H().canvas->SelectAll();
+        return Ok();
+    });
+    R.Register("Deselect", [H] {
+        if (!H().canvas || !H().device) return OperatorResult::Cancelled;
+        H().canvas->ClearSelection();
+        H().canvas->UpdateSelectionMaskTexture(H().device);
         return Ok();
     });
     R.Register("InvertSelection", [H] {

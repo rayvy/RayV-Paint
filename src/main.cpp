@@ -40,7 +40,11 @@
 #include "core/ops/ActionCatalog.h"
 #include "core/ops/OperatorRegistry.h"
 #include "core/ops/OperatorHost.h"
+#include "scripting/ScriptDocApi.h"
+#include "scripting/ScriptMainThread.h"
+#include "scripting/ScriptUiPreview.h"
 #include "core/ClipboardHelper.h"
+#include "core/CrashGuard.h"
 #include "core/BrushLibrary.h"
 #include "core/PathUtil.h"
 #include "core/ProjectManager.h"
@@ -592,6 +596,14 @@ void ApplyTheme(const std::string& themeName) {
 int main(int argc, char* argv[]) {
     auto startupStart = std::chrono::high_resolution_clock::now();
 
+    // Process-wide crash capture BEFORE anything that can AV/abort.
+    // Writes Documents/RayVPaint/user/crash_last.log + minidump.
+    {
+        std::string crashDir = ConfigManager::GetUserSubdirectory("user");
+        CrashGuard::Install(crashDir);
+        CrashGuard::NoteCheckpoint("main_entry");
+    }
+
     // 1. CLI Arguments parsing
     bool testMode = false;
     bool headlessMode = false;
@@ -693,6 +705,9 @@ int main(int argc, char* argv[]) {
     Logger::Get().Init(logPath);
     Logger::Get().Info("===================================================");
     Logger::Get().Info("Starting RayVPaint tech-art editor...");
+    Logger::Get().Info("CrashGuard active → user/crash_last.log + crash_*.dmp on fatal faults");
+    CrashGuard::NoteCheckpoint("logger_ready");
+    Logger::Get().Flush();
 
     auto time_prev = startupStart;
     auto log_step = [&](const std::string& stepName) {
@@ -731,15 +746,15 @@ int main(int argc, char* argv[]) {
     assets::AssetManager::Get().Startup();
     log_step("AssetManager");
 
-    // 4. Initialize Scripting Engine
-    if (!scriptPath.empty() || headlessMode || testMode) {
-        ScriptingEngine::Get().Initialize();
-    } else {
-        std::thread([]() {
-            ScriptingEngine::Get().Initialize();
-        }).detach();
+    // 4. Initialize Scripting Engine — ALWAYS on main thread.
+    // Background-thread Python init races with ReloadPlugins/DrawPluginsUi and causes silent AVs.
+    CrashGuard::NoteCheckpoint("scripting_init");
+    script::SetMainThread();
+    if (!ScriptingEngine::Get().Initialize()) {
+        Logger::Get().Warn("Python scripting failed to initialize — plugins disabled");
     }
-    log_step("Scripting Engine Init Link/Start");
+    log_step("Scripting Engine Init");
+    Logger::Get().Flush();
 
     // Canvas dimensions and GPU resources are created lazily when the user opens or creates a document.
 
@@ -843,6 +858,8 @@ int main(int argc, char* argv[]) {
         glfwTerminate();
         return 1;
     }
+    script::SetDevice(g_pd3dDevice);
+    script::UiPreviewSetDevice(g_pd3dDevice, g_pd3dDeviceContext);
     log_step("ProjectManager + Canvas Renderer D3D Init");
 
     // Check for crash recovery / autosave restore
@@ -1052,7 +1069,45 @@ int main(int argc, char* argv[]) {
     g_StartupTimeMs = std::chrono::duration<double, std::milli>(startupEnd - startupStart).count();
     Logger::Get().Info("Startup completed in: " + std::to_string(g_StartupTimeMs) + " ms");
 
-    // Execute script from CLI if provided
+    // Trackers + UI state before operators (CLI scripts need registry too).
+    int currentWindowWidth = 1280;
+    int currentWindowHeight = 720;
+    glfwGetFramebufferSize(window, &currentWindowWidth, &currentWindowHeight);
+
+    UI::UIState uiState;
+    uiState.startupTimeMs = g_StartupTimeMs;
+    uiState.backupDir = backupDir;
+    uiState.backupPath = backupPath;
+    uiState.showRecoveryModal = showRecoveryModal;
+
+    // OperatorRegistry — single execute path for catalog actions (hotkeys / menus / Python).
+    {
+        core::ops::OperatorHost host;
+        host.canvas = &ActiveCanvas();
+        host.ui = &uiState;
+        host.device = g_pd3dDevice;
+        host.brush = &g_Brush;
+        host.secondaryColor = g_SecondaryColor;
+        host.activeTool = &g_ActiveTool;
+        host.lastSelectTool = &g_LastSelectTool;
+        host.lastLassoTool = &g_LastLassoTool;
+        host.lastWandTool = &g_LastWandTool;
+        host.freeTransformMode = &g_FreeTransformMode;
+        host.toolBeforeFreeTransform = &g_ToolBeforeFreeTransform;
+        host.toolBeforeWarp = &g_ToolBeforeWarp;
+        host.warpDragIndex = &g_WarpDragIndex;
+        host.colorSwapPending = &g_ColorSwapPending;
+        core::ops::RegisterEditorOperators(host);
+        core::ops::BindOperatorHostFrame(&ActiveCanvas(), g_pd3dDevice);
+    }
+    // Plugins load on first ImGui frame (window already visible) — avoids startup hang/AV
+    // before Present, and ensures ImGui context exists for any plugin on_load misuse.
+    static bool s_PluginsLoadPending = true;
+    // Recovery modal blocks input; skip in automated benchmark.
+    if (benchmarkMode)
+        uiState.showRecoveryModal = false;
+
+    // Execute script from CLI if provided (after operators registered).
     if (!scriptPath.empty()) {
         Logger::Get().InfoTag("test", "Running script: " + scriptPath);
         MemoryStats::LogSnapshot("before_script");
@@ -1071,39 +1126,6 @@ int main(int argc, char* argv[]) {
                 " WS_MiB=" + std::to_string(GetProcessWorkingSetMiB()));
         }
     }
-
-    // Trackers
-    int currentWindowWidth = 1280;
-    int currentWindowHeight = 720;
-    glfwGetFramebufferSize(window, &currentWindowWidth, &currentWindowHeight);
-
-    UI::UIState uiState;
-    uiState.startupTimeMs = g_StartupTimeMs;
-    uiState.backupDir = backupDir;
-    uiState.backupPath = backupPath;
-    uiState.showRecoveryModal = showRecoveryModal;
-
-    // OperatorRegistry — single execute path for catalog actions (hotkeys + menus).
-    {
-        core::ops::OperatorHost host;
-        host.canvas = &ActiveCanvas();
-        host.ui = &uiState;
-        host.device = g_pd3dDevice;
-        host.brush = &g_Brush;
-        host.secondaryColor = g_SecondaryColor;
-        host.activeTool = &g_ActiveTool;
-        host.lastSelectTool = &g_LastSelectTool;
-        host.lastLassoTool = &g_LastLassoTool;
-        host.lastWandTool = &g_LastWandTool;
-        host.freeTransformMode = &g_FreeTransformMode;
-        host.toolBeforeFreeTransform = &g_ToolBeforeFreeTransform;
-        host.toolBeforeWarp = &g_ToolBeforeWarp;
-        host.warpDragIndex = &g_WarpDragIndex;
-        core::ops::RegisterEditorOperators(host);
-    }
-    // Recovery modal blocks input; skip in automated benchmark.
-    if (benchmarkMode)
-        uiState.showRecoveryModal = false;
 
     auto lastAutoSaveTime = std::chrono::steady_clock::now();
 
@@ -1170,6 +1192,26 @@ int main(int argc, char* argv[]) {
             }
         }
         ImGui::NewFrame();
+        CrashGuard::NoteCheckpoint("imgui_new_frame");
+        // Drain worker → main jobs before plugins (Comfy/async apply pattern).
+        script::PollMainThreadJobs(64);
+        // Deferred plugin load: first frame after ImGui is alive
+        if (s_PluginsLoadPending) {
+            s_PluginsLoadPending = false;
+            // Benchmark isolates host paint path — skip Python plugins entirely.
+            if (!benchmarkMode) {
+                CrashGuard::NoteCheckpoint("plugins_reload");
+                std::string sum;
+                if (ScriptingEngine::Get().IsInitialized() &&
+                    ScriptingEngine::Get().ReloadPlugins(&sum))
+                    Logger::Get().Info("Startup plugins: " + sum);
+                else
+                    Logger::Get().Warn("Startup plugins: " + sum);
+                Logger::Get().Flush();
+            } else {
+                Logger::Get().Info("Startup plugins: skipped (benchmark mode)");
+            }
+        }
         core::ops::AppContext::BeginFrame();
         g_IsViewportHovered = false;
         g_IsLayersHovered = false;
@@ -1236,26 +1278,6 @@ int main(int argc, char* argv[]) {
                 core::ops::Invoke("QuickExport");
             }
             uiState.freeTransformActive = g_FreeTransformMode;
-
-            // Paste stays host-side: system clipboard vs layer clipboard policy.
-            if (core::ops::TryConsumeAction("Paste")) {
-                const bool externalImage =
-                    ClipboardHelper::HasClipboardImage() &&
-                    ClipboardHelper::IsSystemClipboardNewerThanLastCopy();
-                if (externalImage) {
-                    if (ActiveCanvas().IsEditingLayerMask()) {
-                        if (!ActiveCanvas().PasteContentIntoActive(g_pd3dDevice))
-                            Logger::Get().Warn("Paste: failed to paste into mask");
-                    } else if (!ActiveCanvas().PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer")) {
-                        Logger::Get().Warn("Paste: failed to paste system image as layer");
-                    }
-                } else if (ActiveCanvas().HasLayerClipboard()) {
-                    ActiveCanvas().PasteLayersFromClipboard(g_pd3dDevice);
-                } else if (!ActiveCanvas().PasteContentIntoActive(g_pd3dDevice)) {
-                    if (!ActiveCanvas().PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
-                        Logger::Get().Warn("Paste: clipboard has no pasteable image");
-                }
-            }
         }
 
         // Background Auto-Save trigger (disabled during benchmark — I/O noise)
@@ -1978,26 +2000,7 @@ int main(int argc, char* argv[]) {
                 g_FreeTransformMode = false;
             }
 
-            // Keyboard: Ctrl+D = Deselect — respect AppContext (not only WantTextInput)
-            if (!core::ops::AppContext::Get().blocksDocumentOps &&
-                (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) &&
-                !ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyShift) {
-                if (ImGui::IsKeyPressed(ImGuiKey_D)) {
-                    ActiveCanvas().ClearSelection();
-                    ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
-                }
-            }
-
-            // X = swap primary/secondary — blocked while FE / text / modals own input
-            if (!core::ops::AppContext::Get().blocksDocumentOps &&
-                ImGui::IsKeyPressed(ImGuiKey_X) &&
-                !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt) {
-                std::swap(g_Brush.color[0], g_SecondaryColor[0]);
-                std::swap(g_Brush.color[1], g_SecondaryColor[1]);
-                std::swap(g_Brush.color[2], g_SecondaryColor[2]);
-                std::swap(g_Brush.color[3], g_SecondaryColor[3]);
-                g_ColorSwapPending = true; // toolbar/Colors play cross-fade
-            }
+            // Deselect (Ctrl+D) and SwapColors (X) are catalog ops → DispatchKeymapFrame.
 
             // Selection modifiers: Ctrl = add, Alt = subtract (Photoshop-like)
             auto selAdd = []() { return ImGui::GetIO().KeyCtrl; };

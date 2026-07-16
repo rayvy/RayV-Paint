@@ -39,12 +39,26 @@ bool OperatorRegistry::HasExecute(std::string_view id) const {
     return it != m_Ops.end() && static_cast<bool>(it->second.execute);
 }
 
+const char* OperatorRegistry::ResultName(OperatorResult r) {
+    switch (r) {
+    case OperatorResult::Finished: return "finished";
+    case OperatorResult::Cancelled: return "cancelled";
+    case OperatorResult::PassThrough: return "pass_through";
+    case OperatorResult::Blocked: return "blocked";
+    default: return "unknown";
+    }
+}
+
 OperatorResult OperatorRegistry::Invoke(std::string_view id) {
+    return InvokeForScript(id, /*force=*/false);
+}
+
+OperatorResult OperatorRegistry::InvokeForScript(std::string_view id, bool force) {
     auto& ctx = AppContext::Get();
     const ActionDef* def = ActionCatalog::Find(id);
     ActionScope scope = def ? def->scope : ActionScope::Document;
 
-    if (!ctx.Allows(scope)) {
+    if (!force && !ctx.Allows(scope)) {
         const char* why = "blocked by context";
         if (ctx.wantTextInput || ctx.uiKeyboardCapture) why = "text/UI owns keyboard";
         else if (ctx.fileExplorerOpen) why = "File Explorer open";

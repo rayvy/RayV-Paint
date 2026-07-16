@@ -24,6 +24,7 @@ struct OperatorHost {
     ActiveTool* toolBeforeFreeTransform = nullptr;
     ActiveTool* toolBeforeWarp = nullptr;
     int* warpDragIndex = nullptr;
+    bool* colorSwapPending = nullptr; // UI cross-fade when SwapColors runs
 };
 
 // Register all catalog-backed execute handlers. Call once after host fields are valid.

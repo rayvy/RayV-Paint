@@ -5731,6 +5731,58 @@ std::vector<float> Canvas::GetComposedPixels() {
     return ComposeVisibleLayers(m_Layers, m_Width, m_Height);
 }
 
+bool Canvas::BeginScriptPixelEdit(int layerIndex) {
+    if (layerIndex < 0 || layerIndex >= (int)m_Layers.size()) {
+        Logger::Get().ErrorTag("script", "BeginScriptPixelEdit: bad layer");
+        return false;
+    }
+    auto& layer = m_Layers[layerIndex];
+    if (layer.isGroup || layer.IsFill() || !layer.CanPaintContent()) {
+        Logger::Get().ErrorTag("script", "BeginScriptPixelEdit: layer not paint-raster");
+        return false;
+    }
+    if (m_ScriptPixelEditActive) {
+        Logger::Get().WarnTag("script", "BeginScriptPixelEdit: previous session still open — cancelling it");
+        CancelScriptPixelEdit();
+    }
+    if (m_IsStrokeActive) {
+        Logger::Get().ErrorTag("script", "BeginScriptPixelEdit: paint stroke active — finish stroke first");
+        return false;
+    }
+    m_ScriptPixelEditPrevActive = m_ActiveLayerIdx;
+    m_ActiveLayerIdx = layerIndex;
+    EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
+    BackupAllActiveLayerTiles();
+    m_ScriptPixelEditActive = true;
+    m_ScriptPixelEditLayer = layerIndex;
+    return true;
+}
+
+bool Canvas::EndScriptPixelEdit(const std::string& actionName) {
+    if (!m_ScriptPixelEditActive) {
+        Logger::Get().ErrorTag("script", "EndScriptPixelEdit: no active session");
+        return false;
+    }
+    const std::string name = actionName.empty() ? "Script Edit" : actionName;
+    CommitActiveLayerMutation(name);
+    m_ScriptPixelEditActive = false;
+    m_ScriptPixelEditLayer = -1;
+    if (m_ScriptPixelEditPrevActive >= 0 && m_ScriptPixelEditPrevActive < (int)m_Layers.size())
+        m_ActiveLayerIdx = m_ScriptPixelEditPrevActive;
+    m_ScriptPixelEditPrevActive = -1;
+    return true;
+}
+
+void Canvas::CancelScriptPixelEdit() {
+    if (!m_ScriptPixelEditActive) return;
+    RestoreActiveLayerMutation();
+    m_ScriptPixelEditActive = false;
+    m_ScriptPixelEditLayer = -1;
+    if (m_ScriptPixelEditPrevActive >= 0 && m_ScriptPixelEditPrevActive < (int)m_Layers.size())
+        m_ActiveLayerIdx = m_ScriptPixelEditPrevActive;
+    m_ScriptPixelEditPrevActive = -1;
+}
+
 void Canvas::CommitTransformation(const std::string& actionName) {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= static_cast<int>(m_Layers.size())) return;
     auto& layer = m_Layers[m_ActiveLayerIdx];

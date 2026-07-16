@@ -44,8 +44,12 @@ public:
     const OperatorEntry* Find(std::string_view id) const;
     std::vector<const OperatorEntry*> List() const;
 
-    // Poll AppContext + run execute (no keymap). For menus / Python later.
+    // Poll AppContext + run execute (no keymap). For menus / UI.
     OperatorResult Invoke(std::string_view id);
+
+    // Scripting: same execute, but optionally ignore UI ownership poll
+    // (headless / automation). Prefer force=false so FE/text still block.
+    OperatorResult InvokeForScript(std::string_view id, bool force = false);
 
     // For each registered op: if keymap trigger pending → TryConsume + exec.
     // Call once per frame after AppContext::UpdateFromFrame.
@@ -53,6 +57,9 @@ public:
 
     // True if this id has an execute handler (catalog may list more ids).
     bool HasExecute(std::string_view id) const;
+
+    // Human result name for Python / logs.
+    static const char* ResultName(OperatorResult r);
 
 private:
     std::unordered_map<std::string, OperatorEntry> m_Ops;

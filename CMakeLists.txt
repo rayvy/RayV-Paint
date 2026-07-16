@@ -151,6 +151,8 @@ set(SOURCES
     src/core/AsyncFilterJob.h
     src/core/KeymapManager.cpp
     src/core/KeymapManager.h
+    src/core/CrashGuard.cpp
+    src/core/CrashGuard.h
     src/core/ops/ActionCatalog.cpp
     src/core/ops/ActionCatalog.h
     src/core/ops/AppContext.cpp
@@ -192,6 +194,16 @@ set(SOURCES
     src/preview3d/PreviewRenderer.h
     src/scripting/ScriptingEngine.cpp
     src/scripting/ScriptingEngine.h
+    src/scripting/ScriptDocApi.cpp
+    src/scripting/ScriptDocApi.h
+    src/scripting/ScriptPluginHost.cpp
+    src/scripting/ScriptPluginHost.h
+    src/scripting/ScriptMainThread.cpp
+    src/scripting/ScriptMainThread.h
+    src/scripting/ScriptImage.cpp
+    src/scripting/ScriptImage.h
+    src/scripting/ScriptUiPreview.cpp
+    src/scripting/ScriptUiPreview.h
     src/ui/EditorPanels.cpp
     src/ui/EditorPanels.h
     src/ui/FileExplorer.cpp
@@ -358,7 +370,16 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_SOURCE_DIR}/assets"
         "$<TARGET_FILE_DIR:RayVPaint_Core>/../assets"
-    COMMENT "Copying Core assets (textures + thumbs) to output directories"
+    # Built-in Python plugins next to exe (also under assets/scripts in tree)
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:RayVPaint_Core>/scripts"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets/scripts"
+        "$<TARGET_FILE_DIR:RayVPaint_Core>/scripts"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:RayVPaint_Core>/../scripts"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/assets/scripts"
+        "$<TARGET_FILE_DIR:RayVPaint_Core>/../scripts"
+    COMMENT "Copying Core assets (textures + thumbs) + builtin scripts to output directories"
 )
 
 # Ship default config (etalon from user preferences) for first-run seed

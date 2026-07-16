@@ -72,8 +72,8 @@ void Logger::Log(LogLevel level, const std::string& message) {
 
     if (m_FileStream.is_open()) {
         m_FileStream << fullLogLine << std::endl;
-        // Flush errors immediately so crash-adjacent failures survive.
-        if (level == LogLevel::LogLevel_Error) {
+        // Flush errors + warnings so crash-adjacent failures survive without a full crash handler.
+        if (level >= LogLevel::LogLevel_Warning) {
             m_FileStream.flush();
         }
     }

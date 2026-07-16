@@ -646,6 +646,22 @@ public:
 
     std::vector<float> GetComposedPixels();
 
+    // --- Script / plugin pixel edit (undoable) ---
+    // BeginScriptPixelEdit: select layer, snapshot tiles for undo.
+    // Then use script set_pixels / set_layer_rgba8 / fill_rect on that layer.
+    // EndScriptPixelEdit: push one PaintStrokeCommand named actionName.
+    // CancelScriptPixelEdit: restore snapshot, no undo entry.
+    bool BeginScriptPixelEdit(int layerIndex);
+    bool EndScriptPixelEdit(const std::string& actionName);
+    void CancelScriptPixelEdit();
+    bool IsScriptPixelEditActive() const { return m_ScriptPixelEditActive; }
+    int  ScriptPixelEditLayer() const { return m_ScriptPixelEditLayer; }
+
+    // Selection AABB (document pixels). Returns false if no selection / empty.
+    bool GetSelectionBoundsPublic(int& outX, int& outY, int& outW, int& outH) const {
+        return GetSelectionBounds(outX, outY, outW, outH);
+    }
+
 private:
     void BackupTile(int tileX, int tileY);
     // Snapshot every tile in the active layer grid (empty tiles get empty oldState).
@@ -883,6 +899,11 @@ private:
     UndoRedoManager m_UndoRedoManager;
     std::unordered_map<int, TileDelta> m_ActiveStrokeDeltas;
     bool m_IsDocumentModified = false;
+
+    // Script pixel edit session (BeginScriptPixelEdit … EndScriptPixelEdit)
+    bool m_ScriptPixelEditActive = false;
+    int  m_ScriptPixelEditLayer = -1;
+    int  m_ScriptPixelEditPrevActive = -1;
     std::string m_CurrentProjectFilePath;
 
     std::string m_ExportPath = "";

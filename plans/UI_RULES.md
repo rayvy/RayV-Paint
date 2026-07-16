@@ -35,6 +35,8 @@
 | Hotkeys / action SSOT | `core::ops::ActionCatalog` + `KeymapManager` |
 | Execute façade | `core::ops::OperatorRegistry` + `RegisterEditorOperators` |
 | Menus | `core::ops::MenuAction(id)` / `Invoke(id)` |
+| Python ops | `rayv.ops.list()` / `rayv.ops.invoke(id, force=False)` |
+| Python document | `rayv.doc.*` (`ScriptDocApi`) — open/save, layers, pixels, mask, selection |
 | Input ownership | `core::ops::AppContext` + `TryConsumeAction` / DispatchKeymapFrame |
 | Color + optional pipette | `UiColorField` (`ColorFieldFlags_Pipette` / `FullPicker`) |
 | Tooltips (delay) | `UiTooltip` |
@@ -135,6 +137,7 @@ Frame:
 |----|--------|
 | Add action to **ActionCatalog** + **RegisterEditorOperators** one-liner | New `if (TryConsumeAction)` chain in main |
 | `MenuAction("Foo")` / `Invoke("Foo")` for menus | Hardcoded labels + direct Canvas calls that skip poll |
+| Python automation via `rayv.ops.invoke` | Parallel Python API that bypasses registry |
 | Block document ops via ActionScope + AppContext | Special-case Backspace in three places |
 | SmartSliderFloat for params | New raw SliderFloat without exact entry |
 

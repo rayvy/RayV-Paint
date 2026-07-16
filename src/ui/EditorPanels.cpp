@@ -16,6 +16,15 @@
 #include "../core/KeymapManager.h"
 #include "../core/ImageManager.h"
 #include "../scripting/ScriptingEngine.h"
+#include "../scripting/ScriptPluginHost.h"
+#include "../scripting/ScriptMainThread.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#endif
 #include "../core/ThreadPool.h"
 #include "style/UiTokens.h"
 #include "style/UiMotion.h"
@@ -846,10 +855,7 @@ namespace UI {
             // ---- Select Menu ----
             if (ImGui::BeginMenu("Select")) {
                 core::ops::MenuAction("SelectAll");
-                if (ImGui::MenuItem("Deselect", "Ctrl+D")) {
-                    canvas.ClearSelection();
-                    canvas.UpdateSelectionMaskTexture(device);
-                }
+                core::ops::MenuAction("Deselect");
                 core::ops::MenuAction("InvertSelection");
                 ImGui::EndMenu();
             }
@@ -886,6 +892,41 @@ namespace UI {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Scripting")) {
+                if (ImGui::MenuItem("Refresh Scripts")) {
+                    std::string sum;
+                    if (ScriptingEngine::Get().ReloadPlugins(&sum))
+                        Logger::Get().Info("Scripts refreshed: " + sum);
+                    else
+                        Logger::Get().Error("Scripts refresh failed: " + sum);
+                }
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("Reload {exe}/scripts + Documents/RayVPaint/scripts");
+
+                ImGui::Separator();
+                // Dynamic plugin open entries
+                {
+                    auto& host = script::ScriptPluginHost::Get();
+                    if (host.List().empty()) {
+                        ImGui::TextDisabled("(no plugins — Refresh Scripts)");
+                    } else {
+                        for (const auto& p : host.List()) {
+                            std::string label = p.title;
+                            if (p.source == "user") label += "  [user]";
+                            else label += "  [builtin]";
+                            if (ImGui::MenuItem(label.c_str()))
+                                host.RequestOpen(p.id);
+                        }
+                    }
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Open user scripts folder")) {
+                    std::string dir = script::ScriptPluginHost::UserScriptsDir();
+#ifdef _WIN32
+                    ShellExecuteA(nullptr, "open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+                    (void)dir;
+#endif
+                }
                 if (ImGui::MenuItem("Run test command")) {
                     ScriptingEngine::Get().RunString("import rayv; rayv.log_warn('Executing scripting check.')");
                 }
@@ -1457,10 +1498,13 @@ namespace UI {
                 ImGui::Separator();
                 ImGui::TextDisabled("Document ops blocked: %s", ctx.blocksDocumentOps ? "YES" : "no");
                 ImGui::TextDisabled("Canvas interaction blocked: %s", ctx.blocksCanvasInteraction ? "YES" : "no");
+                ImGui::TextDisabled("Registered executes: %d",
+                    (int)core::ops::OperatorRegistry::Get().List().size());
                 ImGui::Separator();
                 ImGui::TextUnformatted("Poll matrix (sample)");
                 static const char* kSample[] = {
-                    "FillSecondary", "DeleteContent", "Undo", "BrushTool", "AdjustNoise", "LassoToolGroup"
+                    "FillSecondary", "DeleteContent", "Undo", "BrushTool", "AdjustNoise",
+                    "LassoToolGroup", "Deselect", "Paste", "SwapColors"
                 };
                 if (ImGui::BeginTable("##poll", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
                     ImGui::TableSetupColumn("Action");
@@ -3043,5 +3087,10 @@ namespace UI {
                 ImGui::EndPopup();
             }
         }
+
+        // Python plugins (built-in + Documents/RayVPaint/scripts) draw ImGui here
+        ScriptingEngine::Get().DrawPluginsUi();
+        // Jobs posted during on_ui (e.g. immediate apply) run before Present.
+        script::PollMainThreadJobs(32);
     }
 }

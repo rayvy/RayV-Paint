@@ -100,10 +100,15 @@ static const ActionDef kActions[] = {
     // --- Selection ---
     { "SelectAll", "Select All", ActionCategory::Selection, ActionScope::Document, ActionRole::Direct,
       nullptr, GLFW_KEY_A, true, false, false, true, nullptr },
+    { "Deselect", "Deselect", ActionCategory::Selection, ActionScope::Document, ActionRole::Direct,
+      nullptr, GLFW_KEY_D, true, false, false, true, "Ctrl+D — clear selection" },
     { "InvertSelection", "Invert Selection", ActionCategory::Selection, ActionScope::Document, ActionRole::Direct,
       nullptr, GLFW_KEY_I, true, true, false, true, nullptr },
     { "CropToSelection", "Crop Canvas to Selection", ActionCategory::Selection, ActionScope::Document, ActionRole::Direct,
       nullptr, GLFW_KEY_X, true, false, false, true, nullptr },
+    // --- Colors (edit) ---
+    { "SwapColors", "Swap Primary / Secondary", ActionCategory::Edit, ActionScope::Document, ActionRole::Direct,
+      nullptr, GLFW_KEY_X, false, false, false, true, "X — swap brush primary/secondary" },
 
     // --- Image ---
     { "InvertColors", "Invert Colors", ActionCategory::Image, ActionScope::Document, ActionRole::Direct,

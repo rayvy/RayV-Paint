@@ -286,3 +286,303 @@ Documents/RayVPaint/
 | Shader presets | `src/preview3d/MaterialConfig.*` |
 | Fill / outline bind | `src/Canvas.*`, `src/layer/LayerStyles.*` |
 | Browser UI | `src/ui/panels/AssetBrowserPanel.*`, `src/ui/widgets/UiAsset*` |
+| Python host | `src/scripting/ScriptingEngine.*`, `ScriptDocApi.*`, `ScriptPluginHost.*`, `ScriptMainThread.*`, `ScriptImage.*`, `ScriptUiPreview.*` |
+| Crash capture | `src/core/CrashGuard.*` → `Documents/RayVPaint/user/crash_last.log` + `crash_*.dmp` |
+| Built-in plugins | `{exe}/scripts/*.py` (shipped from `assets/scripts/`) |
+| User plugins | `Documents/RayVPaint/scripts/*.py` |
+
+---
+
+## 9. Python scripting (authoritative API for writers)
+
+**Audience:** humans and AI assistants writing plugins **using only this document** (and `user/rayv_paint.log` / `user/crash_last.log` if something fails).  
+Runtime: **`import rayv`**.  
+
+**Safety:** invalid arguments are **refused** (`False` / empty / `{ok: False, error: ...}`) and **logged**. They must not crash the host.
+
+**Crash diagnostics:** on fatal faults the host writes  
+`Documents/RayVPaint/user/crash_last.log` and a minidump `crash_*.dmp`, plus a MessageBox.
+
+### 9.1 Where scripts live
+
+| Location | Path | When loaded |
+|----------|------|-------------|
+| **Built-in** | `{exe}/scripts/*.py` | Startup + **Scripting → Refresh Scripts** |
+| **User** | `Documents/RayVPaint/scripts/*.py` | Same |
+| **CLI one-shot** | any path | `--script path.py` (after operators registered) |
+
+Rules:
+
+- Filename stem = plugin id (`tiled_export.py` → id `tiled_export`).
+- Files starting with `_` are ignored as plugins.
+- Each plugin is a module. Optional:
+
+```python
+PLUGIN = {
+    "name": "Human Title",   # menu label base
+    "menu": "Menu entry…",   # optional
+}
+
+def on_load():
+    """Called once when the plugin is (re)imported."""
+    pass
+
+def on_open():
+    """Called when user picks the plugin in Scripting menu."""
+    pass
+
+def on_ui():
+    """Called every ImGui frame. Draw windows only here (via rayv.ui)."""
+    pass
+```
+
+Menu: **Scripting → Refresh Scripts**, then the plugin list.  
+**Scripting → Open user scripts folder** opens the User directory.
+
+### 9.2 Logging
+
+```python
+rayv.log_debug("…")
+rayv.log_info("…")
+rayv.log_warn("…")
+rayv.log_error("…")
+```
+
+Messages appear in the app log / console with a `[Python]` prefix when relevant.
+
+### 9.3 Operators — `rayv.ops`
+
+Same registry as hotkeys/menus (`ActionCatalog` + `OperatorRegistry`).
+
+| Call | Meaning |
+|------|---------|
+| `rayv.ops.list()` | List of dicts: `id`, `label`, `category`, `shortcut`, `has_execute`, `can_invoke`, `note` |
+| `rayv.ops.has_execute(id)` | Handler registered? |
+| `rayv.ops.can_invoke(id)` | Poll would pass **now** (text field / File Explorer / modals block document ops) |
+| `rayv.ops.invoke(id, force=False)` | Run op. Returns `"finished"` \| `"blocked"` \| `"cancelled"` \| `"pass_through"` |
+
+- `force=False` (default): respects **AppContext** (safe for UI-driven code).
+- `force=True`: skip poll — use for **headless / CLI tests** only.
+
+Examples of ids: `SelectAll`, `Deselect`, `FillSecondary`, `Undo`, `BrushTool`, `AdjustNoise`, `SwapColors`, `Paste`.
+
+```python
+rayv.ops.invoke("SelectAll", force=True)
+rayv.ops.invoke("Deselect", force=True)
+```
+
+### 9.4 Threading contract — `rayv.host` (**required for async / ComfyUI-style tools**)
+
+| Rule | Detail |
+|------|--------|
+| **Main thread** | UI frame + `on_ui()` + host job drain. |
+| **Mutating `rayv.doc.*`** | **Only on main thread.** Off-main → refused + log: *use `rayv.host.call_on_main`*. |
+| **Workers** | Free to run `urllib` / sockets / long CPU. **Do not** call `doc.set_*` from the worker. |
+| **Apply results** | Worker finishes → `rayv.host.call_on_main(lambda: apply())`. Host drains the queue **every frame** (before and after plugin `on_ui`). |
+
+| Call | Notes |
+|------|--------|
+| `rayv.host.is_main_thread()` | bool |
+| `rayv.host.call_on_main(fn)` | Thread-safe; queues `fn` for main. Returns job id (int). |
+| `rayv.host.pending_jobs()` | Queue depth (debug) |
+
+**Canonical async pattern (external generator):**
+
+```python
+import threading, rayv
+
+_state = {"busy": False, "progress": 0.0, "status": "", "preview_key": "gen_preview"}
+
+def _worker(prompt, model, init_png_bytes):
+    try:
+        # … HTTP to Comfy / other service (seconds) …
+        # result_png = response body
+        dec = rayv.image.decode(result_png)
+        if not dec["ok"]:
+            raise RuntimeError(dec["error"])
+        rgba, w, h = dec["rgba8"], dec["width"], dec["height"]
+        def apply():
+            layer = rayv.doc.active_layer()
+            if not rayv.doc.begin_edit(layer):
+                _state["status"] = "begin_edit failed"
+                _state["busy"] = False
+                return
+            # place at selection origin or (0,0)
+            bb = rayv.doc.selection_bounds()
+            x = bb[0] if bb else 0
+            y = bb[1] if bb else 0
+            ok = rayv.doc.set_layer_rgba8(layer, w, h, rgba, x, y)
+            if ok:
+                rayv.doc.end_edit("AI Generate")
+                rayv.ui.set_image_rgba8(_state["preview_key"], rgba, w, h)
+                _state["status"] = "applied"
+            else:
+                rayv.doc.cancel_edit()
+                _state["status"] = "set_layer_rgba8 refused"
+            _state["busy"] = False
+            _state["progress"] = 1.0
+        rayv.host.call_on_main(apply)
+    except Exception as e:
+        def fail():
+            _state["busy"] = False
+            _state["status"] = str(e)
+            rayv.log_error(str(e))
+        rayv.host.call_on_main(fail)
+
+def on_ui():
+    # progress_bar + Generate button; start thread only if not busy
+    rayv.ui.progress_bar(_state["progress"], _state["status"])
+    if _state["busy"]:
+        return
+    if rayv.ui.button("Generate"):
+        _state["busy"] = True
+        _state["progress"] = 0.05
+        # build init image on main, then start worker
+        reg = rayv.doc.get_region_for_generate(rayv.doc.active_layer())
+        # … encode reg to PNG via rayv.image.encode_png if needed …
+        threading.Thread(target=_worker, args=(...), daemon=True).start()
+```
+
+### 9.5 Document — `rayv.doc`
+
+Active project tab only. Coordinates: **integer document pixels**.  
+Float colors: **straight RGBA 0..1**. Large buffers rejected (~8K² / RAM budget).
+
+#### Document meta
+
+| Call | Returns / notes |
+|------|-----------------|
+| `width()`, `height()`, `size()` → `(w,h)` | |
+| `bit_depth()` | `"U8"` \| `"F16"` \| `"F32"` |
+| `path()`, `is_modified()` | |
+| `tile_size()`, `active_tile_count()` | Engine tile edge (256) |
+| `open` / `save_rayp` / `save_image` / `new_blank` | **Main thread** |
+
+#### Layers
+
+| Call | Notes |
+|------|--------|
+| `layer_count()`, `layers()` | dicts: `index`, `name`, `visible`, `opacity`, `is_group`, `has_mask`, `can_paint`, `active` |
+| `active_layer()`, `set_active_layer(i)` | set_* main thread |
+| `create_layer(name)`, `delete_layer(i)` | main thread |
+| name / visible / opacity getters & setters | setters main thread |
+
+Groups / Fill: content paint APIs refuse.
+
+#### Pixels
+
+| Call | Notes |
+|------|--------|
+| `get_pixel` / `get_pixels` / `get_layer_rgba8` | Prefer main thread (document may change) |
+| `set_pixel` / `set_pixels` / `set_layer_rgba8` / `fill_rect` | **Main thread only** |
+| `get_region_for_generate(layer)` | dict `{x,y,w,h,rgba}` — selection bbox if any, else full layer |
+| `notify_changed(layer)` | Force GPU dirty |
+
+#### Undoable pixel session (**use for AI apply**)
+
+| Call | Notes |
+|------|--------|
+| `begin_edit(layer)` | Snapshot tiles; **main thread** |
+| `end_edit(action_name="Script Edit")` | One **Ctrl+Z** step |
+| `cancel_edit()` | Restore snapshot |
+| `is_edit_active()` | bool |
+
+Without `begin_edit`/`end_edit`, pixel writes still work but **are not undoable**.
+
+#### Mask & selection
+
+| Call | Notes |
+|------|--------|
+| `has_mask` / `create_mask` / `get_mask` / `set_mask` | |
+| `has_selection` / `get_selection` / `set_selection` | |
+| `selection_bounds()` | `(x,y,w,h)` or `None` |
+
+#### Tiled composite export
+
+```python
+result = rayv.doc.export_tiles(out_dir, "tile_{x}_{y}.png", tiles_x, tiles_y, mode="count")
+# → { "ok": bool, "count": int, "error": str }
+```
+
+| `mode` | `tiles_x` / `tiles_y` |
+|--------|------------------------|
+| `"count"` | Number of tiles on each axis (**1..64**); last cells absorb remainder |
+| `"size"` | Tile size in **pixels**; ≤64 tiles per axis |
+
+### 9.6 Images — `rayv.image` (no pip / PIL required)
+
+Host embeds STB. Suitable for Comfy PNG responses.
+
+| Call | Result |
+|------|--------|
+| `decode(data: bytes)` | `{ok, width, height, rgba8: bytes, error}` |
+| `encode_png(rgba8, w, h)` | `{ok, png: bytes, error}` |
+| `load_file(path)` | same shape as decode |
+| `save_file(path, rgba8, w, h)` | `{ok, error}` |
+
+`rgba8` length must be `w*h*4`. Max dimension class ~8K²; oversize refused.
+
+### 9.7 UI — `rayv.ui` (only inside `on_ui`)
+
+| Call | Returns |
+|------|---------|
+| `begin` / `end` | `(visible, is_open)` |
+| `open_popup` / `begin_popup_modal` / `end_popup` | modal: `(visible, is_open)` |
+| `text` / `text_wrapped` / `text_disabled` | |
+| `separator` / `spacing` / `same_line` | |
+| `button` → bool | |
+| `checkbox` / `input_int` / `input_text` / `combo` | `(changed, value)` |
+| **`progress_bar(fraction, overlay="")`** | `fraction` in 0..1 |
+| **`set_image_rgba8(key, rgba8, w, h)`** | bool — GPU preview upload |
+| **`image(key, display_w=0, display_h=0)`** | bool — draw preview |
+| **`destroy_image(key)`** | |
+
+Preview keys are strings (e.g. `"gen_preview"`). Max texture side 8192.
+
+### 9.8 Plugin host — `rayv.plugins`
+
+| Call | Notes |
+|------|--------|
+| `reload()` → `(ok, summary)` | Rescan `{exe}/scripts` + `Documents/RayVPaint/scripts` |
+| `open(id)` | Queue `on_open` |
+| `list()` | id, title, path, source (`builtin`\|`user`) |
+| `builtin_dir()`, `user_dir()` | Absolute paths |
+
+### 9.9 Logging & crashes
+
+```python
+rayv.log_debug / log_info / log_warn / log_error
+```
+
+| File | Role |
+|------|------|
+| `Documents/RayVPaint/user/rayv_paint.log` | Normal app log |
+| `Documents/RayVPaint/user/crash_last.log` | Last fatal (ACCESS_VIOLATION, abort, …) |
+| `Documents/RayVPaint/user/crash_*.dmp` | Minidump for debugging |
+
+If a plugin misbehaves, the host tries to **disable plugin UI** for the session rather than silent exit.
+
+### 9.10 What is intentionally **out of scope** (for now)
+
+| Missing | Workaround / future |
+|---------|---------------------|
+| Register new keymap operators from Python | Use plugin menu + modal |
+| Dirty-tile push events | Poll `active_tile_count` / full region if needed |
+| `rayv.assets` AssetManager | Save files under user dirs; assets later |
+| Guaranteed third-party pip in embed | Use `rayv.image` + stdlib `urllib` |
+
+### 9.11 Built-in samples
+
+| Plugin | Path | Role |
+|--------|------|------|
+| Tiled Export | `{exe}/scripts/tiled_export.py` | Sync export UI |
+| Tiled Export + Paint | `Documents/RayVPaint/scripts/tiled_export_paint.py` | Export + `fill_rect` demo |
+
+### 9.12 CLI
+
+```text
+RayVPaint_Core.exe --script path\to\file.py --headless
+RayVPaint_Core.exe --benchmark --perf
+```
+
+On main thread in CLI, `doc.*` mutations are allowed after host registration.
