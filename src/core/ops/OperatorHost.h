@@ -33,4 +33,7 @@ void RegisterEditorOperators(OperatorHost host);
 // Call every frame before DispatchKeymapFrame — project tabs change the active Canvas*.
 void BindOperatorHostFrame(Canvas* canvas, ID3D11Device* device);
 
+// Live host (tools / active canvas) — for hotkey cycle resolution.
+OperatorHost& GetOperatorHost();
+
 } // namespace core::ops

@@ -37,6 +37,13 @@ public:
     // Consumes a singular trigger flag. Returns true if the action was triggered since last check.
     bool ConsumeActionTrigger(const std::string& actionName);
 
+    // Peek without consume (for multi-tool same-key cycle resolution).
+    bool PeekActionTrigger(const std::string& actionName) const;
+    void ClearActionTrigger(const std::string& actionName);
+    void SetActionTrigger(const std::string& actionName);
+    // All action ids with a pending press trigger this frame.
+    std::vector<std::string> ListTriggeredActions() const;
+
     // Returns if the action is currently held down
     bool IsActionActive(const std::string& actionName) const;
 

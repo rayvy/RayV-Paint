@@ -204,12 +204,16 @@ set(SOURCES
     src/scripting/ScriptDocApi.h
     src/scripting/ScriptPluginHost.cpp
     src/scripting/ScriptPluginHost.h
+    src/scripting/ScriptDockRegistry.cpp
+    src/scripting/ScriptDockRegistry.h
     src/scripting/ScriptMainThread.cpp
     src/scripting/ScriptMainThread.h
     src/scripting/ScriptImage.cpp
     src/scripting/ScriptImage.h
     src/scripting/ScriptUiPreview.cpp
     src/scripting/ScriptUiPreview.h
+    src/scripting/ScriptViewApi.cpp
+    src/scripting/ScriptViewApi.h
     src/ui/EditorPanels.cpp
     src/ui/EditorPanels.h
     src/ui/FileExplorer.cpp

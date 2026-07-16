@@ -22,6 +22,7 @@
 #include "../core/ImageManager.h"
 #include "../scripting/ScriptingEngine.h"
 #include "../scripting/ScriptPluginHost.h"
+#include "../scripting/ScriptDockRegistry.h"
 #include "../scripting/ScriptMainThread.h"
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -717,6 +718,113 @@ namespace UI {
         Ui::TooltipSetDelay(Ui::Tokens().tooltipDelaySec);
         ImGuiViewport* mainViewport = ImGui::GetMainViewport();
 
+        // 0. Custom title bar (undecorated window): drag + project tabs + window controls
+        {
+            const float titleH = 32.f;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f, 4.f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.f, 0.f));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.f));
+            ImGui::BeginViewportSideBar("##TitleBar", mainViewport, ImGuiDir_Up, titleH,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoDocking);
+
+            // Drag region: full bar minus right buttons
+            const float btnW = 42.f;
+            const float rightCtrls = btnW * 3.f + 8.f;
+            ImVec2 barMin = ImGui::GetWindowPos();
+            ImVec2 barSize = ImGui::GetWindowSize();
+            ImGui::InvisibleButton("##title_drag", ImVec2(std::max(40.f, barSize.x - rightCtrls - 8.f), titleH - 4.f));
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+                if (GLFWwindow* gw = window) {
+                    int wx = 0, wy = 0;
+                    glfwGetWindowPos(gw, &wx, &wy);
+                    ImVec2 d = ImGui::GetIO().MouseDelta;
+                    glfwSetWindowPos(gw, wx + (int)d.x, wy + (int)d.y);
+                }
+            }
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && window) {
+                if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED))
+                    glfwRestoreWindow(window);
+                else
+                    glfwMaximizeWindow(window);
+            }
+            // Draw title + tabs over drag region
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                auto& tok = Ui::Tokens();
+                dl->AddText(ImVec2(barMin.x + 10.f, barMin.y + 8.f), tok.ColU32(tok.textSecondary), "RayV");
+                float tabX = barMin.x + 52.f;
+                float tabY = barMin.y + 4.f;
+                auto tabs = ProjectManager::Get().ListTabs();
+                for (const auto& tab : tabs) {
+                    std::string label = tab.title;
+                    if (tab.dirty) label += " *";
+                    ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+                    float tw = ts.x + 28.f;
+                    ImVec2 a(tabX, tabY);
+                    ImVec2 b(tabX + tw, tabY + titleH - 8.f);
+                    ImU32 bg = tab.active ? IM_COL32(50, 70, 110, 220) : IM_COL32(35, 35, 42, 180);
+                    dl->AddRectFilled(a, b, bg, 4.f);
+                    dl->AddText(ImVec2(a.x + 8.f, a.y + 4.f), tok.ColU32(tok.textPrimary), label.c_str());
+                    // Hit: select tab
+                    if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(0) &&
+                        !ImGui::IsMouseDragging(0)) {
+                        if (!tab.active) ProjectManager::Get().SwitchTo(tab.id);
+                    }
+                    // Close x
+                    ImVec2 xa(b.x - 16.f, a.y + 4.f);
+                    ImVec2 xb(b.x - 4.f, a.y + 16.f);
+                    if (ImGui::IsMouseHoveringRect(xa, ImVec2(b.x - 2.f, b.y - 2.f))) {
+                        dl->AddText(xa, IM_COL32(255, 120, 120, 255), "x");
+                        if (ImGui::IsMouseClicked(0)) {
+                            if (!ProjectManager::Get().CloseProject(tab.id, false)) {
+                                g_ProjectTabCloseRequest.projectId = tab.id;
+                                g_ProjectTabCloseRequest.pending = true;
+                            }
+                        }
+                    } else {
+                        dl->AddText(xa, tok.ColU32(tok.textSecondary), "x");
+                    }
+                    tabX += tw + 4.f;
+                }
+                // New tab
+                ImVec2 na(tabX, tabY);
+                ImVec2 nb(tabX + 22.f, tabY + titleH - 8.f);
+                dl->AddRectFilled(na, nb, IM_COL32(40, 40, 48, 200), 4.f);
+                dl->AddText(ImVec2(na.x + 6.f, na.y + 3.f), tok.ColU32(tok.textPrimary), "+");
+                if (ImGui::IsMouseHoveringRect(na, nb) && ImGui::IsMouseClicked(0))
+                    ProjectManager::Get().CreateEmptyProject();
+            }
+
+            // Window controls (right)
+            ImGui::SetCursorScreenPos(ImVec2(barMin.x + barSize.x - rightCtrls, barMin.y + 2.f));
+            if (ImGui::SmallButton("—##min")) {
+                if (window) glfwIconifyWindow(window);
+            }
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Minimize");
+            ImGui::SameLine(0, 2);
+            if (ImGui::SmallButton("[]##max")) {
+                if (window) {
+                    if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED))
+                        glfwRestoreWindow(window);
+                    else
+                        glfwMaximizeWindow(window);
+                }
+            }
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Maximize / Restore");
+            ImGui::SameLine(0, 2);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.f));
+            if (ImGui::SmallButton("X##close")) {
+                if (window) glfwSetWindowShouldClose(window, GLFW_TRUE);
+            }
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Close");
+
+            ImGui::End();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar(2);
+        }
+
         // 1. Persistent Header (Main Menu Bar)
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
@@ -884,6 +992,7 @@ namespace UI {
                 ImGui::MenuItem("Colors Window", nullptr, &state.showColors);
                 ImGui::MenuItem("Tool Settings", nullptr, &state.showToolSettings);
                 ImGui::MenuItem("Console logs", nullptr, &state.showConsole);
+                script::ScriptDockRegistry::Get().DrawViewMenuItems();
                 ImGui::Separator();
                 {
                     bool fxPrev = canvas.GetEffectsPreviewEnabled();
@@ -1082,85 +1191,6 @@ namespace UI {
             }
 
             ImGui::EndMainMenuBar();
-        }
-
-        // ---- Project tabs (hard-wired under menu bar — Photoshop-style documents) ----
-        {
-            const float tabBarH = 28.0f;
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 3.0f));
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 4.0f));
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 0.0f));
-            ImGui::BeginViewportSideBar("##ProjectTabBar", mainViewport, ImGuiDir_Up, tabBarH,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings);
-
-            auto tabs = ProjectManager::Get().ListTabs();
-            for (const auto& tab : tabs) {
-                ImGui::PushID(tab.id);
-                std::string label = tab.title;
-                if (tab.dirty) label += " *";
-
-                // Active tab: slightly brighter button
-                if (tab.active) {
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-                }
-                if (ImGui::Button(label.c_str())) {
-                    if (!tab.active)
-                        ProjectManager::Get().SwitchTo(tab.id);
-                }
-                if (tab.active)
-                    ImGui::PopStyleColor(2);
-
-                // Middle-click close
-                if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
-                    if (!ProjectManager::Get().CloseProject(tab.id, false)) {
-                        g_ProjectTabCloseRequest.projectId = tab.id;
-                        g_ProjectTabCloseRequest.pending = true;
-                    }
-                }
-
-                // Close X on same line
-                ImGui::SameLine(0.0f, 0.0f);
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4.0f, 4.0f));
-                if (ImGui::SmallButton("x")) {
-                    if (!ProjectManager::Get().CloseProject(tab.id, false)) {
-                        g_ProjectTabCloseRequest.projectId = tab.id;
-                        g_ProjectTabCloseRequest.pending = true;
-                    }
-                }
-                ImGui::PopStyleVar();
-
-                if (ImGui::BeginPopupContextItem("##proj_tab_ctx")) {
-                    if (ImGui::MenuItem("Close")) {
-                        if (!ProjectManager::Get().CloseProject(tab.id, false)) {
-                            g_ProjectTabCloseRequest.projectId = tab.id;
-                            g_ProjectTabCloseRequest.pending = true;
-                        }
-                    }
-                    if (ImGui::MenuItem("Close Others")) {
-                        auto all = ProjectManager::Get().ListTabs();
-                        for (const auto& o : all) {
-                            if (o.id == tab.id) continue;
-                            ProjectManager::Get().CloseProject(o.id, true);
-                        }
-                        ProjectManager::Get().SwitchTo(tab.id);
-                    }
-                    ImGui::EndPopup();
-                }
-
-                ImGui::SameLine();
-                ImGui::PopID();
-            }
-
-            // New project tab
-            if (ImGui::Button("+")) {
-                ProjectManager::Get().CreateEmptyProject();
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
-                ImGui::SetTooltip("New project tab");
-
-            ImGui::End();
-            ImGui::PopStyleVar(3);
         }
 
         // Dirty close confirm
@@ -1438,7 +1468,7 @@ namespace UI {
             endOperatorModal();
         }
 
-        // 2. Persistent Footer (Status Bar + jobs + notification bar)
+        // 2. Persistent Footer — FIXED height (never jumps when jobs appear)
         core::JobManager::Get().PruneFinished(2500.0);
         const auto jobs = core::JobManager::Get().Snapshot();
         bool hasActiveJob = false;
@@ -1451,11 +1481,13 @@ namespace UI {
         const bool feBusy = UI::FileExplorerIsBusy();
         const bool assetsBusy = assets::AssetManager::Get().IsBusy();
         const bool showBusyChrome = hasActiveJob || feBusy || assetsBusy || g_LoadingState.isLoading;
-        const float statusBarH = showBusyChrome ? 48.0f : 28.0f;
+        // Always 28px — job status is centered in-band (no second row)
+        const float statusBarH = 28.0f;
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
         ImGui::BeginViewportSideBar("##StatusBar", mainViewport, ImGuiDir_Down, statusBarH,
-            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
+            ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_NoScrollbar);
         
         const char* toolLabel = "Hand";
         switch (activeTool) {
@@ -1484,116 +1516,109 @@ namespace UI {
             const int bpp = BytesPerPixel(Canvas::FormatForBitDepth(canvas.GetDocumentBitDepth()));
             const bool floatDoc = (canvas.GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8);
 
-            // Reserve right side: Context + notification chip
+            // Layout: LEFT metrics | CENTER job (fixed slot) | RIGHT notify + context
+            // Heights fixed — job strip never changes footer height.
+            const float winW = ImGui::GetWindowWidth();
             const float contextBtnW = 72.f;
-            const float notifyChipW = 160.f;
-            const float rightReserve = contextBtnW + notifyChipW + 28.f;
+            const float notifyChipW = 148.f;
+            const float centerJobW = 280.f;
+            const float rightReserve = contextBtnW + notifyChipW + 16.f;
+            const float leftMax = std::max(80.f, winW - rightReserve - centerJobW - 24.f);
 
-            // Left metrics (clipped by available width)
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - rightReserve);
-            if (floatDoc) {
-                ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | %s (%dB/px) | Brush RGBA %.4f %.4f %.4f %.4f | Zoom: %.0f%% | Tool: %s",
-                    state.startupTimeMs, state.frameTimeMs, state.fps,
-                    canvas.GetWidth(), canvas.GetHeight(),
-                    bdLabel, bpp,
-                    brush.color[0], brush.color[1], brush.color[2], brush.color[3],
-                    canvas.GetZoom() * 100.0f, toolLabel);
-            } else {
-                ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | %s (%dB/px) | RGB %d %d %d | Zoom: %.0f%% | Threads: %d | Tool: %s",
-                    state.startupTimeMs, state.frameTimeMs, state.fps,
-                    canvas.GetWidth(), canvas.GetHeight(),
-                    bdLabel, bpp,
-                    (int)std::lround(std::clamp(brush.color[0], 0.f, 1.f) * 255.f),
-                    (int)std::lround(std::clamp(brush.color[1], 0.f, 1.f) * 255.f),
-                    (int)std::lround(std::clamp(brush.color[2], 0.f, 1.f) * 255.f),
-                    canvas.GetZoom() * 100.0f,
-                    ThreadPool::Get().GetThreadCount(), toolLabel);
+            // LEFT — compact metrics (clipped)
+            {
+                char left[256];
+                if (floatDoc) {
+                    std::snprintf(left, sizeof(left),
+                        "%.0fms | %.0f FPS | %dx%d %s | Z%.0f%% | %s",
+                        state.frameTimeMs, state.fps,
+                        canvas.GetWidth(), canvas.GetHeight(), bdLabel,
+                        canvas.GetZoom() * 100.f, toolLabel);
+                } else {
+                    std::snprintf(left, sizeof(left),
+                        "%.0f FPS | %dx%d | Z%.0f%% | %s",
+                        state.fps, canvas.GetWidth(), canvas.GetHeight(),
+                        canvas.GetZoom() * 100.f, toolLabel);
+                }
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + leftMax);
+                ImGui::TextUnformatted(left);
+                ImGui::PopTextWrapPos();
             }
-            ImGui::PopTextWrapPos();
 
-            // Busy row: spinner + job / FE background work (input stays free)
-            if (showBusyChrome) {
-                // Animated spinner glyph (app is alive — never freeze UI for IO)
-                {
+            // CENTER — fixed job slot (always reserved position, content optional)
+            {
+                const float centerX = (winW - centerJobW) * 0.5f;
+                ImGui::SameLine(std::max(leftMax + 8.f, centerX));
+                ImGui::BeginChild("##footer_job", ImVec2(centerJobW, 22.f), false,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                if (showBusyChrome) {
                     ImDrawList* dl = ImGui::GetWindowDrawList();
                     ImVec2 p = ImGui::GetCursorScreenPos();
-                    const float r = 6.f;
-                    const ImVec2 c(p.x + r + 2.f, p.y + ImGui::GetTextLineHeight() * 0.5f);
+                    const float r = 5.f;
+                    const ImVec2 c(p.x + r + 1.f, p.y + 10.f);
                     const float t = (float)ImGui::GetTime() * 7.5f;
                     for (int i = 0; i < 8; ++i) {
                         const float a = t + (float)i * 6.2831853f / 8.f;
                         const float fade = 0.2f + 0.8f * ((float)i / 8.f);
                         dl->AddCircleFilled(
                             ImVec2(c.x + std::cos(a) * r, c.y + std::sin(a) * r),
-                            2.0f,
-                            IM_COL32(130, 175, 255, (int)(fade * 255.f)), 6);
+                            1.8f, IM_COL32(130, 175, 255, (int)(fade * 255.f)), 6);
                     }
-                    ImGui::Dummy(ImVec2(r * 2.f + 8.f, ImGui::GetTextLineHeight()));
-                    ImGui::SameLine();
-                }
+                    ImGui::Dummy(ImVec2(r * 2.f + 6.f, 18.f));
+                    ImGui::SameLine(0, 4);
 
-                bool drewJob = false;
-                for (const auto& j : jobs) {
-                    if (j.state != core::JobState::Running && j.state != core::JobState::Cancelling)
-                        continue;
-                    ImGui::Text("%s", j.name.c_str());
-                    ImGui::SameLine();
-                    if (j.progress >= 0.f) {
-                        char pbuf[32];
-                        std::snprintf(pbuf, sizeof(pbuf), "%d%%", (int)std::lround(j.progress * 100.f));
-                        ImGui::ProgressBar(j.progress, ImVec2(120.f, 0.f), pbuf);
-                    } else {
-                        ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(), ImVec2(120.f, 0.f), j.status.c_str());
+                    bool drew = false;
+                    for (const auto& j : jobs) {
+                        if (j.state != core::JobState::Running && j.state != core::JobState::Cancelling)
+                            continue;
+                        char line[160];
+                        if (j.progress >= 0.f)
+                            std::snprintf(line, sizeof(line), "%s %d%%", j.name.c_str(),
+                                (int)std::lround(j.progress * 100.f));
+                        else
+                            std::snprintf(line, sizeof(line), "%s…", j.name.c_str());
+                        ImGui::TextUnformatted(line);
+                        if (j.cancellable) {
+                            ImGui::SameLine();
+                            char cid[40];
+                            std::snprintf(cid, sizeof(cid), "x##j%llu", (unsigned long long)j.id);
+                            if (ImGui::SmallButton(cid))
+                                core::JobManager::Get().RequestCancel(j.id);
+                        }
+                        drew = true;
+                        break;
                     }
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("%s", j.status.c_str());
-                    if (j.cancellable) {
-                        ImGui::SameLine();
-                        char cid[48];
-                        std::snprintf(cid, sizeof(cid), "Cancel##job%llu", (unsigned long long)j.id);
-                        if (ImGui::SmallButton(cid))
-                            core::JobManager::Get().RequestCancel(j.id);
+                    if (!drew) {
+                        if (g_LoadingState.isLoading)
+                            ImGui::TextUnformatted("Opening…");
+                        else if (state.fileExplorer.dirListingBusy)
+                            ImGui::TextUnformatted("Indexing folder…");
+                        else if (assets::AssetManager::Get().IsIndexScanning())
+                            ImGui::TextUnformatted("Indexing assets…");
+                        else if (feBusy || assetsBusy)
+                            ImGui::TextUnformatted("Background…");
                     }
-                    drewJob = true;
-                    break; // show primary active job
                 }
-                if (!drewJob && (feBusy || assetsBusy || g_LoadingState.isLoading)) {
-                    if (g_LoadingState.isLoading)
-                        ImGui::TextUnformatted("Opening document…");
-                    else if (state.fileExplorer.dirListingBusy)
-                        ImGui::TextUnformatted("Indexing folder…");
-                    else if (state.fileExplorer.thumbsPending > 0)
-                        ImGui::Text("FE previews… (%d)", state.fileExplorer.thumbsPending);
-                    else if (assets::AssetManager::Get().IsIndexScanning())
-                        ImGui::TextUnformatted("Indexing asset libraries…");
-                    else if (assets::AssetManager::Get().ThumbPendingCount() > 0)
-                        ImGui::Text("Asset thumbs… (%d)",
-                            assets::AssetManager::Get().ThumbPendingCount());
-                    else
-                        ImGui::TextUnformatted("Background work…");
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("UI stays responsive · Threads: %d",
-                        (int)ThreadPool::Get().GetThreadCount());
-                }
+                ImGui::EndChild();
             }
 
-            // Notification chip (32-char preview) — click opens history
+            // RIGHT — notification + context (absolute positions, stable)
             {
-                std::string preview = core::Notifications::Get().LatestPreview(32);
-                if (preview.empty()) preview = "No notifications";
+                std::string preview = core::Notifications::Get().LatestPreview(28);
+                if (preview.empty()) preview = "—";
                 ImVec4 col(0.75f, 0.78f, 0.85f, 1.f);
                 switch (core::Notifications::Get().LatestLevel()) {
                 case core::NotifyLevel::Warning: col = ImVec4(1.f, 0.82f, 0.4f, 1.f); break;
                 case core::NotifyLevel::Error:   col = ImVec4(1.f, 0.45f, 0.45f, 1.f); break;
                 default: break;
                 }
-                ImGui::SameLine(ImGui::GetWindowWidth() - rightReserve + 4.f);
+                ImGui::SameLine(winW - rightReserve + 4.f);
                 ImGui::PushStyleColor(ImGuiCol_Text, col);
                 if (ImGui::SmallButton((preview + "##notify").c_str()))
                     ImGui::OpenPopup("##NotifyHistory");
                 ImGui::PopStyleColor();
                 if (ImGui::IsItemHovered())
-                    Ui::Tooltip("Notifications — click for history");
+                    Ui::Tooltip("Notifications");
 
                 if (ImGui::BeginPopup("##NotifyHistory")) {
                     ImGui::TextUnformatted("Notification history");
@@ -1612,20 +1637,17 @@ namespace UI {
                         if (ImGui::Selectable(n.message.c_str(), false))
                             ImGui::SetClipboardText(n.message.c_str());
                         ImGui::PopStyleColor();
-                        if (ImGui::IsItemHovered())
-                            Ui::Tooltip("Click to copy");
                     }
                     ImGui::EndChild();
                     ImGui::EndPopup();
                 }
-            }
 
-            // Context debug toggle (right side of status bar)
-            ImGui::SameLine(ImGui::GetWindowWidth() - contextBtnW - 12.f);
-            if (ImGui::SmallButton(state.showContextDebug ? "Context*" : "Context"))
-                state.showContextDebug = !state.showContextDebug;
-            if (ImGui::IsItemHovered())
-                Ui::Tooltip("AppContext live dump — focus, text ownership, blocked ops");
+                ImGui::SameLine(winW - contextBtnW - 10.f);
+                if (ImGui::SmallButton(state.showContextDebug ? "Context*" : "Context"))
+                    state.showContextDebug = !state.showContextDebug;
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("AppContext live dump");
+            }
         }
         
         ImGui::End();
@@ -2417,8 +2439,29 @@ namespace UI {
                     char gid[64];
                     std::snprintf(gid, sizeof(gid), "DynGroup_%d_%d", sl.key.key, (int)sl.toolIdx.size());
                     RenderGroupedToolButton(gid, kAllTools[sl.toolIdx[0]].action,
-                        vars.data(), (int)vars.size(), "Tools (same hotkey)",
+                        vars.data(), (int)vars.size(), "Tools (same hotkey — cycle)",
                         bind, btnSize, s_RebindAction, activeTool);
+                    // Explicit multi-tool marker (stack count + corner chevron)
+                    {
+                        ImVec2 rmin = ImGui::GetItemRectMin();
+                        ImVec2 rmax = ImGui::GetItemRectMax();
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        auto& tok = Ui::Tokens();
+                        // Bottom-right fold / chevron
+                        float s = std::max(6.f, btnSize * 0.22f);
+                        ImVec2 c(rmax.x - 2.f, rmax.y - 2.f);
+                        dl->AddTriangleFilled(
+                            ImVec2(c.x - s, c.y), ImVec2(c.x, c.y), ImVec2(c.x, c.y - s),
+                            tok.ColU32(tok.accent));
+                        // Small count badge top-right
+                        char nb[8];
+                        std::snprintf(nb, sizeof(nb), "%d", (int)sl.toolIdx.size());
+                        ImVec2 ts = ImGui::CalcTextSize(nb);
+                        ImVec2 bp(rmax.x - ts.x - 3.f, rmin.y + 1.f);
+                        dl->AddRectFilled(ImVec2(bp.x - 2.f, bp.y), ImVec2(rmax.x - 1.f, bp.y + ts.y + 1.f),
+                            IM_COL32(20, 20, 28, 200), 2.f);
+                        dl->AddText(bp, tok.ColU32(tok.textPrimary), nb);
+                    }
                     for (int ti : sl.toolIdx) {
                         if (activeTool == kAllTools[ti].tool) { markAccent(); break; }
                     }
@@ -3536,9 +3579,7 @@ namespace UI {
             ImGui::End();
         }
 
-        // Python plugins (built-in + Documents/RayVPaint/scripts) draw ImGui here
-        ScriptingEngine::Get().DrawPluginsUi();
-        // Jobs posted during on_ui (e.g. immediate apply) run before Present.
-        script::PollMainThreadJobs(32);
+        // Python plugins draw in main.cpp *after* the canvas viewport so that
+        // rayv.view has a current snapshot and overlays sit above the canvas.
     }
 }

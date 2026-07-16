@@ -1,9 +1,11 @@
 #include "ScriptingEngine.h"
 #include "ScriptDocApi.h"
 #include "ScriptPluginHost.h"
+#include "ScriptDockRegistry.h"
 #include "ScriptMainThread.h"
 #include "ScriptImage.h"
 #include "ScriptUiPreview.h"
+#include "ScriptViewApi.h"
 #include "../core/Logger.h"
 #include "../core/ConfigManager.h"
 #include "../core/KeymapManager.h"
@@ -407,9 +409,81 @@ PYBIND11_EMBEDDED_MODULE(rayv, m) {
         bool show = ImGui::Begin(title.c_str(), &o);
         return py::make_tuple(show, o);
     }, py::arg("title"), py::arg("is_open") = true,
-       "Returns (visible, is_open). Always call end() if visible.");
+       "Returns (visible, is_open). Always call end() if visible. Windows are dockable.");
 
     ui.def("end", []() { ImGui::End(); });
+
+    // Absolute placement (call before begin / begin_overlay)
+    ui.def("set_next_window_pos", [](float x, float y, float pivot_x, float pivot_y) {
+        ImGui::SetNextWindowPos(ImVec2(x, y), ImGuiCond_Always, ImVec2(pivot_x, pivot_y));
+    }, py::arg("x"), py::arg("y"), py::arg("pivot_x") = 0.f, py::arg("pivot_y") = 0.f,
+       "Screen coords. pivot 0..1 (0.5,1 = bottom-center of window at x,y).");
+
+    ui.def("set_next_window_size", [](float w, float h) {
+        ImGui::SetNextWindowSize(ImVec2(w, h), ImGuiCond_Always);
+    }, py::arg("w"), py::arg("h"));
+
+    ui.def("set_next_window_bg_alpha", [](float alpha) {
+        ImGui::SetNextWindowBgAlpha(std::clamp(alpha, 0.f, 1.f));
+    }, py::arg("alpha"));
+
+    // Floating HUD over canvas (no dock). Pair with set_next_window_pos + view.selection_screen_rect.
+    ui.def("begin_overlay", [](const std::string& id, bool is_open) {
+        bool o = is_open;
+        ImGuiWindowFlags flags =
+            ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoSavedSettings |
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse |
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing;
+        // Stable id: use ### so label can be empty chrome
+        std::string name = std::string("###overlay_") + id;
+        bool show = ImGui::Begin(name.c_str(), is_open ? &o : nullptr, flags);
+        return py::make_tuple(show, o);
+    }, py::arg("id"), py::arg("is_open") = true,
+       "Non-docked floating chrome. Returns (visible, is_open). Call end_overlay() when visible.");
+
+    ui.def("end_overlay", []() { ImGui::End(); });
+
+    // ---- Script docks (registered panels in dockspace + View menu) ----
+    ui.def("register_dock", [](const std::string& dock_id, const std::string& title, bool default_open) {
+        return script::ScriptDockRegistry::Get().Register(dock_id, title, default_open);
+    }, py::arg("dock_id"), py::arg("title") = "", py::arg("default_open") = true,
+       "Register a dockable panel. Call once from on_load(). Draw with begin_dock/end_dock.");
+
+    ui.def("unregister_dock", [](const std::string& dock_id) {
+        script::ScriptDockRegistry::Get().Unregister(dock_id);
+    }, py::arg("dock_id"));
+
+    ui.def("begin_dock", [](const std::string& dock_id) {
+        bool vis = false;
+        bool began = script::ScriptDockRegistry::Get().Begin(dock_id, &vis);
+        // Returns (visible, is_open) — is_open false if user closed dock
+        bool open = script::ScriptDockRegistry::Get().IsOpen(dock_id);
+        if (!began)
+            return py::make_tuple(false, open);
+        return py::make_tuple(true, open);
+    }, py::arg("dock_id"),
+       "Begin registered dock panel. Returns (visible, is_open). Call end_dock() when visible.");
+
+    ui.def("end_dock", []() {
+        script::ScriptDockRegistry::Get().End();
+    });
+
+    ui.def("set_dock_open", [](const std::string& dock_id, bool open) {
+        return script::ScriptDockRegistry::Get().SetOpen(dock_id, open);
+    }, py::arg("dock_id"), py::arg("open"));
+
+    ui.def("list_docks", []() {
+        py::list out;
+        for (const auto& d : script::ScriptDockRegistry::Get().List()) {
+            py::dict x;
+            x["id"] = d.id;
+            x["title"] = d.title;
+            x["open"] = d.open;
+            out.append(x);
+        }
+        return out;
+    });
 
     ui.def("open_popup", [](const std::string& id) {
         ImGui::OpenPopup(id.c_str());
@@ -492,6 +566,52 @@ PYBIND11_EMBEDDED_MODULE(rayv, m) {
     ui.def("destroy_image", [](const std::string& key) {
         script::UiPreviewDestroy(key);
     }, py::arg("key"));
+
+    // ------------------------------------------------------------------
+    // rayv.view — canvas viewport transform (doc ↔ screen)
+    // ------------------------------------------------------------------
+    py::module_ view = m.def_submodule("view",
+        "Canvas viewport transform. Valid after the host lays out the canvas each frame.\n"
+        "Use with ui.set_next_window_pos + ui.begin_overlay for selection-context HUD.");
+
+    view.def("valid", &script::IsViewValid,
+        "False on first frames / headless / empty viewport.");
+
+    view.def("zoom", &script::ViewZoom);
+    view.def("pan", []() {
+        return py::make_tuple(script::ViewPanX(), script::ViewPanY());
+    });
+    view.def("rotation_rad", &script::ViewRotationRad);
+
+    view.def("viewport_rect", []() -> py::object {
+        float x, y, w, h;
+        if (!script::ViewportScreenRect(x, y, w, h))
+            return py::none();
+        return py::make_tuple(x, y, w, h);
+    }, "Canvas image rect in screen space: (x, y, w, h) or None.");
+
+    view.def("doc_to_screen", [](float doc_x, float doc_y) -> py::object {
+        float sx, sy;
+        if (!script::DocToScreen(doc_x, doc_y, sx, sy))
+            return py::none();
+        return py::make_tuple(sx, sy);
+    }, py::arg("doc_x"), py::arg("doc_y"),
+       "Document pixel → absolute screen coords (sx, sy) or None.");
+
+    view.def("screen_to_doc", [](float sx, float sy) -> py::object {
+        float dx, dy;
+        if (!script::ScreenToDoc(sx, sy, dx, dy))
+            return py::none();
+        return py::make_tuple(dx, dy);
+    }, py::arg("sx"), py::arg("sy"),
+       "Screen → document pixel float (x, y) or None.");
+
+    view.def("selection_screen_rect", []() -> py::object {
+        float x, y, w, h;
+        if (!script::SelectionScreenRect(x, y, w, h))
+            return py::none();
+        return py::make_tuple(x, y, w, h);
+    }, "Screen AABB of selection (maps 4 doc corners). None if no selection / invalid view.");
 
     // ------------------------------------------------------------------
     // rayv.plugins — reload / open / list

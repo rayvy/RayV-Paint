@@ -286,7 +286,7 @@ Documents/RayVPaint/
 | Shader presets | `src/preview3d/MaterialConfig.*` |
 | Fill / outline bind | `src/Canvas.*`, `src/layer/LayerStyles.*` |
 | Browser UI | `src/ui/panels/AssetBrowserPanel.*`, `src/ui/widgets/UiAsset*` |
-| Python host | `src/scripting/ScriptingEngine.*`, `ScriptDocApi.*`, `ScriptPluginHost.*`, `ScriptMainThread.*`, `ScriptImage.*`, `ScriptUiPreview.*` |
+| Python host | `src/scripting/ScriptingEngine.*`, `ScriptDocApi.*`, `ScriptViewApi.*`, `ScriptPluginHost.*`, `ScriptMainThread.*`, `ScriptImage.*`, `ScriptUiPreview.*` |
 | Crash capture | `src/core/CrashGuard.*` → `Documents/RayVPaint/user/crash_last.log` + `crash_*.dmp` |
 | Built-in plugins | `{exe}/scripts/*.py` (shipped from `assets/scripts/`) |
 | User plugins | `Documents/RayVPaint/scripts/*.py` |
@@ -526,7 +526,16 @@ Host embeds STB. Suitable for Comfy PNG responses.
 
 | Call | Returns |
 |------|---------|
-| `begin` / `end` | `(visible, is_open)` |
+| `begin` / `end` | `(visible, is_open)` — free floating/dockable window |
+| **`register_dock(dock_id, title="", default_open=True)`** | bool — register a dock panel (call from `on_load`) |
+| **`unregister_dock(dock_id)`** | |
+| **`begin_dock(dock_id)` / `end_dock()`** | `(visible, is_open)` — themed dock panel in dockspace |
+| **`set_dock_open(dock_id, open)`** | bool |
+| **`list_docks()`** | list of `{id, title, open}` |
+| **`set_next_window_pos(x, y, pivot_x=0, pivot_y=0)`** | screen coords; pivot 0..1 (e.g. `0.5, 1` = bottom-center) |
+| **`set_next_window_size(w, h)`** | |
+| **`set_next_window_bg_alpha(a)`** | 0..1 |
+| **`begin_overlay(id)` / `end_overlay()`** | `(visible, is_open)` — non-docked HUD over canvas |
 | `open_popup` / `begin_popup_modal` / `end_popup` | modal: `(visible, is_open)` |
 | `text` / `text_wrapped` / `text_disabled` | |
 | `separator` / `spacing` / `same_line` | |
@@ -539,7 +548,107 @@ Host embeds STB. Suitable for Comfy PNG responses.
 
 Preview keys are strings (e.g. `"gen_preview"`). Max texture side 8192.
 
-### 9.8 Plugin host — `rayv.plugins`
+Call **`set_next_window_*` immediately before** `begin` / `begin_overlay` (ImGui next-window state).
+
+#### Registered docks (preferred for long-lived panels)
+
+Docks join the host **dockspace**, appear under **View → Plugin docks**, and keep open state for the session.
+
+```python
+PLUGIN = {"name": "My Dock", "id": "my_dock"}
+
+def on_load():
+    rayv.ui.register_dock("my_dock", title="My Dock", default_open=True)
+
+def on_ui():
+    visible, is_open = rayv.ui.begin_dock("my_dock")
+    if not visible:
+        return
+    rayv.ui.text("Hello from a registered dock")
+    if rayv.ui.button("Close"):
+        rayv.ui.set_dock_open("my_dock", False)
+    rayv.ui.end_dock()
+```
+
+Use free `begin`/`end` for temporary windows; use `register_dock` + `begin_dock` when the panel should live in the layout like Layers / Assets.  
+Use **`begin_overlay` + `rayv.view`** for buttons glued to the selection / canvas (see §9.8).
+
+### 9.8 View & canvas overlays — `rayv.view`
+
+Document pixels ↔ **absolute screen / ImGui coordinates**.  
+Host publishes a snapshot **each frame after the canvas image is laid out**; plugin `on_ui()` runs **after** that, so coords are current for overlays.
+
+| Call | Returns |
+|------|---------|
+| **`valid()`** | bool — `False` headless / first frames / empty viewport |
+| **`zoom()`** | float |
+| **`pan()`** | `(pan_x, pan_y)` — same units as host canvas pan |
+| **`rotation_rad()`** | float |
+| **`viewport_rect()`** | `(x, y, w, h)` screen rect of canvas **image**, or `None` |
+| **`doc_to_screen(doc_x, doc_y)`** | `(sx, sy)` or `None` |
+| **`screen_to_doc(sx, sy)`** | `(doc_x, doc_y)` float or `None` |
+| **`selection_screen_rect()`** | `(x, y, w, h)` screen AABB of selection (4 corners mapped), or `None` |
+
+Also related on `rayv.doc` (document space only):
+
+| Call | Notes |
+|------|--------|
+| `has_selection()` / `selection_bounds()` | doc-space AABB |
+| `get_region_for_generate(layer)` | pixels for init image |
+| `get_selection()` | full mask `w*h` |
+
+**Coordinates:** document = integer pixel grid of the active project; screen = ImGui absolute (same as mouse).  
+Rotation / flip of the viewport are included in the map.
+
+#### Pattern: contextual button under selection (AI Generative Fill)
+
+```python
+import rayv
+
+PLUGIN = {"name": "Comfy Fill", "id": "comfy_fill"}
+_state = {"show_prompt": False, "prompt": ""}
+
+def on_ui():
+    # --- Floating action under the marquee ---
+    if rayv.view.valid() and rayv.doc.has_selection():
+        r = rayv.view.selection_screen_rect()
+        if r is not None:
+            x, y, w, h = r
+            # Bottom-center of selection AABB, slightly below
+            rayv.ui.set_next_window_pos(x + w * 0.5, y + h + 8.0, pivot_x=0.5, pivot_y=0.0)
+            rayv.ui.set_next_window_bg_alpha(0.92)
+            vis, _ = rayv.ui.begin_overlay("ai_gen_fill")
+            if vis:
+                if rayv.ui.button("AI Generative Fill"):
+                    _state["show_prompt"] = True
+                    rayv.ui.open_popup("##gen_fill_prompt")
+                rayv.ui.end_overlay()
+
+    # --- Prompt popup (anywhere in on_ui) ---
+    if _state["show_prompt"]:
+        show, open_ = rayv.ui.begin_popup_modal("##gen_fill_prompt", True)
+        if show:
+            ch, _state["prompt"] = rayv.ui.input_text("Prompt", _state["prompt"])
+            if rayv.ui.button("Generate"):
+                # reg = rayv.doc.get_region_for_generate(rayv.doc.active_layer())
+                # start worker → call_on_main apply (see §9.4)
+                _state["show_prompt"] = False
+            rayv.ui.same_line()
+            if rayv.ui.button("Cancel"):
+                _state["show_prompt"] = False
+            rayv.ui.end_popup()
+        if not open_:
+            _state["show_prompt"] = False
+```
+
+**Notes for plugin authors:**
+
+- Always guard with `rayv.view.valid()` and `has_selection()` / `selection_screen_rect() is not None`.
+- Overlay windows are **not docked**, no title bar; `id` must be stable per widget.
+- Prefer dock UI for heavy settings; use overlay only for short contextual actions.
+- In **headless / CLI**, `view.valid()` is `False` — use dock/modal or no UI.
+
+### 9.9 Plugin host — `rayv.plugins`
 
 | Call | Notes |
 |------|--------|
@@ -548,7 +657,7 @@ Preview keys are strings (e.g. `"gen_preview"`). Max texture side 8192.
 | `list()` | id, title, path, source (`builtin`\|`user`) |
 | `builtin_dir()`, `user_dir()` | Absolute paths |
 
-### 9.9 Logging & crashes
+### 9.10 Logging & crashes
 
 ```python
 rayv.log_debug / log_info / log_warn / log_error
@@ -562,7 +671,7 @@ rayv.log_debug / log_info / log_warn / log_error
 
 If a plugin misbehaves, the host tries to **disable plugin UI** for the session rather than silent exit.
 
-### 9.10 What is intentionally **out of scope** (for now)
+### 9.11 What is intentionally **out of scope** (for now)
 
 | Missing | Workaround / future |
 |---------|---------------------|
@@ -570,15 +679,17 @@ If a plugin misbehaves, the host tries to **disable plugin UI** for the session 
 | Dirty-tile push events | Poll `active_tile_count` / full region if needed |
 | `rayv.assets` AssetManager | Save files under user dirs; assets later |
 | Guaranteed third-party pip in embed | Use `rayv.image` + stdlib `urllib` |
+| Persist plugin dock open flags across restarts | Session-only for now; re-register in `on_load` |
+| GPU / drawlist primitives from Python | Overlay windows + buttons only |
 
-### 9.11 Built-in samples
+### 9.12 Built-in samples
 
 | Plugin | Path | Role |
 |--------|------|------|
 | Tiled Export | `{exe}/scripts/tiled_export.py` | Sync export UI |
 | Tiled Export + Paint | `Documents/RayVPaint/scripts/tiled_export_paint.py` | Export + `fill_rect` demo |
 
-### 9.12 CLI
+### 9.13 CLI
 
 ```text
 RayVPaint_Core.exe --script path\to\file.py --headless

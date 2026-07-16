@@ -17,6 +17,8 @@ void BindOperatorHostFrame(Canvas* canvas, ID3D11Device* device) {
     g_Host.device = device;
 }
 
+OperatorHost& GetOperatorHost() { return g_Host; }
+
 void RegisterEditorOperators(OperatorHost host) {
     g_Host = host;
     auto& R = OperatorRegistry::Get();

@@ -45,6 +45,7 @@
 #include "core/ops/OperatorRegistry.h"
 #include "core/ops/OperatorHost.h"
 #include "scripting/ScriptDocApi.h"
+#include "scripting/ScriptViewApi.h"
 #include "scripting/ScriptMainThread.h"
 #include "scripting/ScriptUiPreview.h"
 #include "core/ClipboardHelper.h"
@@ -793,6 +794,10 @@ int main(int argc, char* argv[]) {
     }
 
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // Using DirectX 11
+    // Custom ImGui title bar — reclaim Windows chrome space (min/max/close drawn in UI).
+    if (!testMode && !headlessMode)
+        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+
     GLFWwindow* window = glfwCreateWindow(1280, 720,
         benchmarkMode ? "RayV Paint — BENCHMARK" : "RayV Paint", nullptr, nullptr);
     if (!window) {
@@ -803,6 +808,23 @@ int main(int argc, char* argv[]) {
     log_step("GLFW Window Creation");
 
     HWND hWnd = glfwGetWin32Window(window);
+
+    // Startup: fill work area (maximized / all available monitor space)
+    if (!testMode && !headlessMode) {
+        GLFWmonitor* mon = glfwGetPrimaryMonitor();
+        if (mon) {
+            const GLFWvidmode* mode = glfwGetVideoMode(mon);
+            int mx = 0, my = 0, mw = 0, mh = 0;
+            glfwGetMonitorWorkarea(mon, &mx, &my, &mw, &mh);
+            if (mw > 0 && mh > 0) {
+                glfwSetWindowPos(window, mx, my);
+                glfwSetWindowSize(window, mw, mh);
+            } else if (mode) {
+                glfwSetWindowSize(window, mode->width, mode->height);
+            }
+        }
+        glfwMaximizeWindow(window);
+    }
 
     // Load and set the application icon from resource ID 1 (IDI_ICON1)
     HICON hIcon = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(1));
@@ -1397,6 +1419,25 @@ int main(int argc, char* argv[]) {
 
             // Calculate precise mouse coordinates using the actual image bounding box
             ImVec2 imageMin = ImGui::GetItemRectMin();
+            // Publish view transform for Python plugins (rayv.view / selection HUD).
+            {
+                script::ViewSnapshot vs;
+                vs.valid = true;
+                vs.imageMinX = imageMin.x;
+                vs.imageMinY = imageMin.y;
+                vs.viewportW = static_cast<float>(viewportWidth);
+                vs.viewportH = static_cast<float>(viewportHeight);
+                const auto pan = ActiveCanvas().GetPan();
+                vs.panX = pan.x;
+                vs.panY = pan.y;
+                vs.zoom = ActiveCanvas().GetZoom();
+                vs.rotationRad = ActiveCanvas().GetRotationAngle();
+                vs.flipH = ActiveCanvas().GetViewportFlipH();
+                vs.flipV = ActiveCanvas().GetViewportFlipV();
+                vs.docW = ActiveCanvas().GetWidth();
+                vs.docH = ActiveCanvas().GetHeight();
+                script::PublishViewSnapshot(vs);
+            }
             ImVec2 mousePos = ImGui::GetMousePos();
             float localMouseX = mousePos.x - imageMin.x;
             float localMouseY = mousePos.y - imageMin.y;
@@ -2660,7 +2701,12 @@ int main(int argc, char* argv[]) {
 
         ImGui::End();
 
-
+        // Python plugins after viewport so rayv.view is current and overlays draw above canvas.
+        // (View snapshot published when canvas Image is laid out; invalid if no viewport.)
+        if (viewportWidth <= 0 || viewportHeight <= 0)
+            script::InvalidateViewSnapshot();
+        ScriptingEngine::Get().DrawPluginsUi();
+        script::PollMainThreadJobs(32);
 
         // Benchmark HUD (before ImGui::Render so it shows in the frame)
         if (benchmarkMode && BenchmarkRunner::Get().IsActive()) {

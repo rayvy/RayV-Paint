@@ -233,6 +233,27 @@ bool KeymapManager::ConsumeActionTrigger(const std::string& actionName) {
     return false;
 }
 
+bool KeymapManager::PeekActionTrigger(const std::string& actionName) const {
+    auto it = m_TriggeredActions.find(actionName);
+    return it != m_TriggeredActions.end() && it->second;
+}
+
+void KeymapManager::ClearActionTrigger(const std::string& actionName) {
+    auto it = m_TriggeredActions.find(actionName);
+    if (it != m_TriggeredActions.end()) it->second = false;
+}
+
+void KeymapManager::SetActionTrigger(const std::string& actionName) {
+    m_TriggeredActions[actionName] = true;
+}
+
+std::vector<std::string> KeymapManager::ListTriggeredActions() const {
+    std::vector<std::string> out;
+    for (const auto& kv : m_TriggeredActions)
+        if (kv.second) out.push_back(kv.first);
+    return out;
+}
+
 bool KeymapManager::IsActionActive(const std::string& actionName) const {
     auto it = m_HeldActions.find(actionName);
     if (it != m_HeldActions.end()) {
