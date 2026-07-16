@@ -15,8 +15,10 @@
 #include "../core/Logger.h"
 #include "../core/JobManager.h"
 #include "../core/Notifications.h"
+#include "../core/AutoSaveManager.h"
 #include "../core/KeymapManager.h"
 #include "../assets/AssetManager.h"
+#include "../core/ImageManager.h"
 #include "../core/ImageManager.h"
 #include "../scripting/ScriptingEngine.h"
 #include "../scripting/ScriptPluginHost.h"
@@ -58,6 +60,7 @@
 #include <fstream>
 #include <sstream>
 #include <unordered_map>
+#include <ctime>
 
 extern void ApplyTheme(const std::string& themeName);
 extern bool g_IsLayersHovered;
@@ -1817,6 +1820,7 @@ namespace UI {
                 state.defW = ConfigManager::Get().GetDefaultWidth();
                 state.defH = ConfigManager::Get().GetDefaultHeight();
                 state.autoSaveMins = ConfigManager::Get().GetAutoSaveIntervalMinutes();
+                state.autosaveMaxPerProject = ConfigManager::Get().GetAutosaveMaxPerProject();
                 state.maxUndo = ConfigManager::Get().GetMaxUndoSteps();
                 state.maxUndoMem = ConfigManager::Get().GetMaxUndoMemoryMB();
                 state.maxBrushRadius = ConfigManager::Get().GetMaxBrushRadius();
@@ -1860,8 +1864,10 @@ namespace UI {
                     if (ImGui::InputText("Backups Directory", tempBackupDir, IM_ARRAYSIZE(tempBackupDir))) {
                         state.backupDir = tempBackupDir;
                     }
-                    Ui::SmartSliderInt("Autosave (minutes)", &state.autoSaveMins, 0, 60, 5, 1);
-                    ImGui::TextDisabled("Set to 0 to disable periodic auto-saves");
+                    Ui::SmartSliderInt("Autosave (minutes)", &state.autoSaveMins, 0, 60, 3, 1);
+                    ImGui::TextDisabled("Default 3 min. Set 0 to disable periodic auto-saves (quit save still runs).");
+                    Ui::SmartSliderInt("Max autosaves per project", &state.autosaveMaxPerProject, 1, 30, 5, 1);
+                    ImGui::TextDisabled("Keeps newest N files per project BASE (UNTITLED / stem). Includes quit saves.");
 
                     ImGui::Spacing();
                     ImGui::Text("Undo / Redo Cache Limits");
@@ -2006,6 +2012,7 @@ namespace UI {
                 ConfigManager::Get().SetDefaultHeight(state.defH);
                 ConfigManager::Get().SetBackupDir(state.backupDir);
                 ConfigManager::Get().SetAutoSaveIntervalMinutes(state.autoSaveMins);
+                ConfigManager::Get().SetAutosaveMaxPerProject(state.autosaveMaxPerProject);
                 ConfigManager::Get().SetMaxUndoSteps(state.maxUndo);
                 ConfigManager::Get().SetMaxUndoMemoryMB(state.maxUndoMem);
                 ConfigManager::Get().SetMaxBrushRadius(state.maxBrushRadius);
@@ -2076,7 +2083,160 @@ namespace UI {
 
         // Save/Load Project + Config: File Explorer only (see triggers above)
 
-        // Restore Backup Modal
+        // Cold start: Recent autosaves browser (previews + open)
+        if (state.showRecentAutosaves) {
+            ImGui::OpenPopup("Recent Autosaves##recents");
+            state.showRecentAutosaves = false;
+        }
+        {
+            ImGuiViewport* vp = ImGui::GetMainViewport();
+            ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+            ImGui::SetNextWindowSize(ImVec2(720, 480), ImGuiCond_Appearing);
+            if (ImGui::BeginPopupModal("Recent Autosaves##recents", nullptr,
+                    ImGuiWindowFlags_NoCollapse)) {
+                ImGui::TextUnformatted("Welcome back — recent autosaves");
+                ImGui::TextDisabled("UNTITLED / project · time stamp · type · quit saves included");
+                ImGui::Separator();
+
+                static std::vector<core::AutosaveEntry> s_recent;
+                static bool s_loaded = false;
+                static int s_sel = -1;
+                static std::unordered_map<std::string, ID3D11ShaderResourceView*> s_prevSrv;
+                static std::unordered_map<std::string, ID3D11Texture2D*> s_prevTex;
+                if (!s_loaded) {
+                    s_recent = core::AutoSaveManager::Get().ListRecent(40);
+                    s_loaded = true;
+                    s_sel = s_recent.empty() ? -1 : 0;
+                }
+
+                ImGui::BeginChild("##recent_list", ImVec2(0, -ImGui::GetFrameHeightWithSpacing() * 1.4f), true);
+                const float thumb = 72.f;
+                for (int i = 0; i < (int)s_recent.size(); ++i) {
+                    const auto& e = s_recent[i];
+                    ImGui::PushID(i);
+                    bool selected = (s_sel == i);
+
+                    // Lazy-load preview PNG once
+                    ID3D11ShaderResourceView* srv = nullptr;
+                    if (device && !e.previewPath.empty()) {
+                        auto it = s_prevSrv.find(e.previewPath);
+                        if (it != s_prevSrv.end()) {
+                            srv = it->second;
+                        } else {
+                            std::vector<uint8_t> px;
+                            int w = 0, h = 0;
+                            if (ImageManager::LoadImageFromFile(e.previewPath, px, w, h) && w > 0 && h > 0) {
+                                D3D11_TEXTURE2D_DESC td = {};
+                                td.Width = (UINT)w; td.Height = (UINT)h; td.MipLevels = 1; td.ArraySize = 1;
+                                td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                                td.SampleDesc.Count = 1;
+                                td.Usage = D3D11_USAGE_DEFAULT;
+                                td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                                D3D11_SUBRESOURCE_DATA init = {};
+                                init.pSysMem = px.data();
+                                init.SysMemPitch = (UINT)w * 4;
+                                ID3D11Texture2D* tex = nullptr;
+                                if (SUCCEEDED(device->CreateTexture2D(&td, &init, &tex)) && tex) {
+                                    ID3D11ShaderResourceView* nsrv = nullptr;
+                                    if (SUCCEEDED(device->CreateShaderResourceView(tex, nullptr, &nsrv)) && nsrv) {
+                                        s_prevTex[e.previewPath] = tex;
+                                        s_prevSrv[e.previewPath] = nsrv;
+                                        srv = nsrv;
+                                    } else {
+                                        tex->Release();
+                                    }
+                                }
+                            }
+                            if (!srv) s_prevSrv[e.previewPath] = nullptr; // mark tried
+                        }
+                    }
+
+                    if (srv) {
+                        ImGui::Image((ImTextureID)srv, ImVec2(thumb, thumb));
+                    } else {
+                        ImGui::Dummy(ImVec2(thumb, thumb));
+                        ImDrawList* dl = ImGui::GetWindowDrawList();
+                        ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                        dl->AddRectFilled(a, b, IM_COL32(40, 44, 52, 255), 4.f);
+                        dl->AddText(ImVec2(a.x + 8, a.y + thumb * 0.4f), IM_COL32(180, 180, 190, 255), "no preview");
+                    }
+                    ImGui::SameLine();
+                    ImGui::BeginGroup();
+                    std::string label = e.baseName + "  ·  " + e.projectType +
+                        (e.isQuit ? "  ·  quit" : "");
+                    if (ImGui::Selectable(label.c_str(), selected, 0, ImVec2(0, thumb * 0.45f)))
+                        s_sel = i;
+                    // time
+                    if (e.mtime > 0) {
+                        std::time_t tt = (std::time_t)e.mtime;
+                        std::tm tm{};
+#ifdef _WIN32
+                        localtime_s(&tm, &tt);
+#else
+                        localtime_r(&tt, &tm);
+#endif
+                        char tbuf[64];
+                        std::strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", &tm);
+                        ImGui::TextDisabled("%s", tbuf);
+                    }
+                    ImGui::TextDisabled("%s", e.displayName.c_str());
+                    ImGui::EndGroup();
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                        s_sel = i;
+                        // fall through open
+                    }
+                    ImGui::Separator();
+                    ImGui::PopID();
+                }
+                if (s_recent.empty()) {
+                    ImGui::TextDisabled("No autosaves yet. Paint something — saves every %d min.",
+                        ConfigManager::Get().GetAutoSaveIntervalMinutes());
+                }
+                ImGui::EndChild();
+
+                auto openSelected = [&]() {
+                    if (s_sel < 0 || s_sel >= (int)s_recent.size()) return;
+                    const std::string path = s_recent[s_sel].raypPath;
+                    int id = ProjectManager::Get().ActivateOrPrepareOpen(path);
+                    if (id >= 0) {
+                        Project* p = ProjectManager::Get().FindProject(id);
+                        if (p && p->canvas)
+                            TriggerBackgroundOpenDocument(path, device, *p->canvas);
+                    }
+                    s_loaded = false;
+                    ImGui::CloseCurrentPopup();
+                };
+
+                if (ImGui::Button("Open selected", ImVec2(140, 0)))
+                    openSelected();
+                ImGui::SameLine();
+                if (ImGui::Button("New blank", ImVec2(120, 0))) {
+                    s_loaded = false;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Refresh list", ImVec2(120, 0))) {
+                    s_loaded = false;
+                    s_recent = core::AutoSaveManager::Get().ListRecent(40);
+                    s_loaded = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Close", ImVec2(100, 0))) {
+                    s_loaded = false;
+                    ImGui::CloseCurrentPopup();
+                }
+
+                // Double-click open
+                if (s_sel >= 0 && s_sel < (int)s_recent.size() &&
+                    ImGui::IsMouseDoubleClicked(0) && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
+                    // handled per-row above roughly; keep button primary
+                }
+
+                ImGui::EndPopup();
+            }
+        }
+
+        // Legacy single-file recovery (old autosave_backup.rayp)
         if (ImGui::BeginPopupModal("Restore Auto-Saved Session?", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::Text("It looks like the application closed unexpectedly.");
             ImGui::Text("Would you like to restore your auto-saved session?");

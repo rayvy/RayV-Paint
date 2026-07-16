@@ -31,6 +31,7 @@
 #include "Logger.h"
 #include "core/JobManager.h"
 #include "core/Notifications.h"
+#include "core/AutoSaveManager.h"
 #include "ThreadPool.h"
 #include "ui/FileExplorer.h"
 #include "assets/AssetManager.h"
@@ -884,10 +885,15 @@ int main(int argc, char* argv[]) {
     script::UiPreviewSetDevice(g_pd3dDevice, g_pd3dDeviceContext);
     log_step("ProjectManager + Canvas Renderer D3D Init");
 
-    // Check for crash recovery / autosave restore
+    // Autosave root + cold-start recent picker (no CLI document args)
     std::string backupDir = ConfigManager::Get().GetBackupDir();
-    std::string backupPath = backupDir + "/autosave_backup.rayp";
-    bool showRecoveryModal = std::filesystem::exists(backupPath);
+    std::string backupPath = backupDir + "/autosave_backup.rayp"; // legacy single-file
+    const bool coldStartNoDoc =
+        startupImagePath.empty() && scriptPath.empty() && !benchmarkMode &&
+        exportToPath.empty() && !probeFileExplorer && !headlessMode && !testMode;
+    bool showRecentAutosaves = coldStartNoDoc;
+    // Legacy crash recovery only if no multi-autosave recents UI (or file still present)
+    bool showRecoveryModal = !showRecentAutosaves && std::filesystem::exists(backupPath);
 
     // Load startup document if specified on CLI (image or .rayp project) → new/reuse project tab
     if (!startupImagePath.empty()) {
@@ -1128,6 +1134,9 @@ int main(int argc, char* argv[]) {
     uiState.backupDir = backupDir;
     uiState.backupPath = backupPath;
     uiState.showRecoveryModal = showRecoveryModal;
+    uiState.showRecentAutosaves = showRecentAutosaves;
+    uiState.autoSaveMins = ConfigManager::Get().GetAutoSaveIntervalMinutes();
+    uiState.autosaveMaxPerProject = ConfigManager::Get().GetAutosaveMaxPerProject();
 
     // Agent/bench: open File Explorer once so first-frame ListDirectory is timed ([perf] tags).
     if (probeFileExplorer) {
@@ -1194,7 +1203,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    auto lastAutoSaveTime = std::chrono::steady_clock::now();
+
 
     if (benchmarkMode) {
         Logger::Get().InfoTag("bench", "Starting interactive 8K benchmark mode");
@@ -1348,28 +1357,10 @@ int main(int argc, char* argv[]) {
             uiState.freeTransformActive = g_FreeTransformMode;
         }
 
-        // Background Auto-Save trigger (disabled during benchmark — I/O noise)
-        static bool s_IsAutoSaving = false;
-        int autoSaveInterval = benchmarkMode ? 0 : ConfigManager::Get().GetAutoSaveIntervalMinutes();
-        if (autoSaveInterval > 0 && ActiveCanvas().IsDocumentModified() && !s_IsAutoSaving) {
-            auto currentTime = std::chrono::steady_clock::now();
-            auto elapsedMinutes = std::chrono::duration_cast<std::chrono::minutes>(currentTime - lastAutoSaveTime).count();
-            if (elapsedMinutes >= autoSaveInterval) {
-                s_IsAutoSaving = true;
-                std::filesystem::create_directories(uiState.backupDir);
-                Logger::Get().Info("Triggering background auto-save to " + uiState.backupPath);
-                if (Project* proj = ProjectManager::Get().ActiveProject())
-                    proj->InjectTextureSetsIntoCanvas();
-                ActiveCanvas().SaveCanvasRaypAsync(uiState.backupPath, [](bool success) {
-                    s_IsAutoSaving = false;
-                    if (success) {
-                        Logger::Get().Info("Background auto-save completed successfully.");
-                    } else {
-                        Logger::Get().Error("Background auto-save failed.");
-                    }
-                });
-                lastAutoSaveTime = currentTime;
-            }
+        // Periodic autosave (rotation + previews). Disabled in benchmark / agent one-shots.
+        if (!benchmarkMode && !testMode) {
+            if (Project* proj = ProjectManager::Get().ActiveProject())
+                core::AutoSaveManager::Get().TryPeriodicSave(proj, ActiveCanvas());
         }
 
         // 9.5 Draw Canvas Viewport
@@ -2783,12 +2774,23 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Delete autosave backup on clean exit
+    // Quit autosave — keep a timestamped copy (not deleted on clean exit).
+    if (!benchmarkMode && !testMode && !headlessMode) {
+        try {
+            if (Project* proj = ProjectManager::Get().ActiveProject()) {
+                // Sync quit save (wait briefly for async job): snapshot starts immediately.
+                core::AutoSaveManager::Get().SaveOnQuit(proj, ActiveCanvas());
+                // Give worker a moment to flush package (best-effort; process may still exit early).
+                for (int i = 0; i < 50 && core::AutoSaveManager::Get().IsBusy(); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        } catch (...) {}
+    }
+    // Remove legacy single-file crash backup only (new system keeps history).
     try {
         std::string bPath = ConfigManager::Get().GetBackupDir() + "/autosave_backup.rayp";
-        if (std::filesystem::exists(bPath)) {
+        if (std::filesystem::exists(bPath))
             std::filesystem::remove(bPath);
-        }
     } catch (...) {}
 
     // Cleanup Subsystems in reverse order

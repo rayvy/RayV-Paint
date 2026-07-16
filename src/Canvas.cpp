@@ -5816,7 +5816,9 @@ static bool SaveCanvasRaypFromSnapshots(
     }
 }
 
-void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void(bool)> callback) {
+void Canvas::SaveCanvasRaypAsync(const std::string& filepath,
+                                 std::function<void(bool)> callback,
+                                 const std::string& previewPngPath) {
     int width = m_Width;
     int height = m_Height;
     int activeLayer = m_ActiveLayerIdx;
@@ -5852,10 +5854,69 @@ void Canvas::SaveCanvasRaypAsync(const std::string& filepath, std::function<void
         layers.push_back(std::move(snap));
     }
 
-    std::thread([filepath, width, height, activeLayer, projectType, exportMeta,
+    std::thread([filepath, previewPngPath, width, height, activeLayer, projectType, exportMeta,
                  layers = std::move(layers), callback]() mutable {
         bool success = SaveCanvasRaypFromSnapshots(
             filepath, width, height, activeLayer, projectType, exportMeta, layers);
+
+        // Small preview for Recent Autosaves UI (worker-side; does not touch live Canvas).
+        if (success && !previewPngPath.empty() && width > 0 && height > 0 && !layers.empty()) {
+            try {
+                const int maxSide = 128;
+                float scale = 1.f;
+                if (width > maxSide || height > maxSide)
+                    scale = (float)maxSide / (float)std::max(width, height);
+                const int pw = std::max(1, (int)(width * scale + 0.5f));
+                const int ph = std::max(1, (int)(height * scale + 0.5f));
+                std::vector<uint8_t> out((size_t)pw * ph * 4, 0);
+
+                auto sampleLayer = [&](const RaypLayerSnapshot& L, int dx, int dy,
+                                       float& r, float& g, float& b, float& a) {
+                    r = g = b = a = 0.f;
+                    if (L.pixels.size() < (size_t)width * height * 4) return;
+                    int sx = std::min(width - 1, (int)((dx + 0.5f) * width / (float)pw));
+                    int sy = std::min(height - 1, (int)((dy + 0.5f) * height / (float)ph));
+                    size_t i = ((size_t)sy * width + sx) * 4;
+                    r = L.pixels[i + 0]; g = L.pixels[i + 1];
+                    b = L.pixels[i + 2]; a = L.pixels[i + 3];
+                    if (L.hasMask && L.mask.size() == (size_t)width * height)
+                        a *= (L.mask[(size_t)sy * width + sx] / 255.f);
+                };
+
+                for (int y = 0; y < ph; ++y) {
+                    for (int x = 0; x < pw; ++x) {
+                        float dr = 0, dg = 0, db = 0, da = 0;
+                        for (const auto& L : layers) {
+                            bool visible = true;
+                            try {
+                                if (L.meta.contains("visible"))
+                                    visible = L.meta["visible"].get<bool>();
+                                if (L.meta.contains("isGroup") && L.meta["isGroup"].get<bool>())
+                                    continue;
+                            } catch (...) {}
+                            if (!visible) continue;
+                            float sr, sg, sb, sa;
+                            sampleLayer(L, x, y, sr, sg, sb, sa);
+                            // src-over
+                            float outA = sa + da * (1.f - sa);
+                            if (outA > 1e-6f) {
+                                dr = (sr * sa + dr * da * (1.f - sa)) / outA;
+                                dg = (sg * sa + dg * da * (1.f - sa)) / outA;
+                                db = (sb * sa + db * da * (1.f - sa)) / outA;
+                                da = outA;
+                            }
+                        }
+                        size_t o = ((size_t)y * pw + x) * 4;
+                        out[o + 0] = (uint8_t)std::clamp(dr * 255.f, 0.f, 255.f);
+                        out[o + 1] = (uint8_t)std::clamp(dg * 255.f, 0.f, 255.f);
+                        out[o + 2] = (uint8_t)std::clamp(db * 255.f, 0.f, 255.f);
+                        out[o + 3] = (uint8_t)std::clamp(da * 255.f, 0.f, 255.f);
+                    }
+                }
+                ImageManager::SaveRGBA8ToFile(previewPngPath, out.data(), pw, ph);
+            } catch (...) {}
+        }
+
         if (callback) callback(success);
     }).detach();
 }

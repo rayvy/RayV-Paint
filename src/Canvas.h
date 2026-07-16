@@ -641,7 +641,10 @@ public:
 
     // Native RAYP Format
     bool SaveCanvasRayp(const std::string& filepath);
-    void SaveCanvasRaypAsync(const std::string& filepath, std::function<void(bool)> callback = nullptr);
+    // Async package write. Optional previewPngPath: worker writes a small PNG composite for recents UI.
+    void SaveCanvasRaypAsync(const std::string& filepath,
+                             std::function<void(bool)> callback = nullptr,
+                             const std::string& previewPngPath = {});
     bool LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, LoadProgressFn progress = nullptr);
 
     // Texture Set library meta (JSON) — owned by Project; mirrored here for .rayp I/O.

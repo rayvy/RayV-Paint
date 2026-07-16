@@ -1,5 +1,6 @@
 {
-    "autosave_interval_minutes": 10,
+    "autosave_interval_minutes": 3,
+    "autosave_max_per_project": 5,
     "backup_dir": "C:\\Users\\Rayvy\\Documents\\RayVPaint\\autosaves",
     "default_height": 4096,
     "default_width": 4096,

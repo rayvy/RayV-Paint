@@ -116,6 +116,8 @@ set(SOURCES
     src/core/JobManager.h
     src/core/Notifications.cpp
     src/core/Notifications.h
+    src/core/AutoSaveManager.cpp
+    src/core/AutoSaveManager.h
     src/core/MemoryStats.cpp
     src/core/MemoryStats.h
     src/core/ThreadPool.cpp

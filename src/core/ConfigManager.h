@@ -36,6 +36,10 @@ public:
     int GetAutoSaveIntervalMinutes() const;
     void SetAutoSaveIntervalMinutes(int minutes);
 
+    // Max autosave files kept per project BASE (UNTITLED / stem). Default 5.
+    int GetAutosaveMaxPerProject() const;
+    void SetAutosaveMaxPerProject(int n);
+
     int GetMaxUndoSteps() const;
     void SetMaxUndoSteps(int steps);
 
@@ -63,7 +67,8 @@ private:
 
     std::string m_Theme = "Dark";
     std::string m_BackupDir = "backups";
-    int m_AutoSaveIntervalMinutes = 10;
+    int m_AutoSaveIntervalMinutes = 3;   // default: every 3 minutes
+    int m_AutosaveMaxPerProject = 5;     // rotation limit per project BASE
     int m_MaxUndoSteps = 50;
     int m_MaxUndoMemoryMB = 512;
     float m_MaxBrushRadius = 250.0f;

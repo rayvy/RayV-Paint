@@ -101,6 +101,7 @@ namespace UI {
         bool openLoadConfigModal = false;
         bool openSaveConfigModal = false;
         bool showRecoveryModal = false;
+        bool showRecentAutosaves = false; // cold start: recent autosaves picker
 
         // Move / Free Transform action signals
         bool commitTransform = false;
@@ -123,7 +124,8 @@ namespace UI {
         int defW = 1024;
         int defH = 1024;
         std::string backupDir = "";
-        int autoSaveMins = 5;
+        int autoSaveMins = 3;
+        int autosaveMaxPerProject = 5;
         int maxUndo = 100;
         int maxUndoMem = 512;
         float maxBrushRadius = 250.f;

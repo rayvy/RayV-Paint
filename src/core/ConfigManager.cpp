@@ -1,6 +1,7 @@
 #include "ConfigManager.h"
 #include "Logger.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <fstream>
 #include <windows.h>
 #include <shlobj.h>
@@ -105,6 +106,7 @@ bool ConfigManager::Load(const std::string& configFilePath) {
         if (j.contains("theme"))          m_Theme = j["theme"].get<std::string>();
         if (j.contains("backup_dir"))     m_BackupDir = j["backup_dir"].get<std::string>();
         if (j.contains("autosave_interval_minutes")) m_AutoSaveIntervalMinutes = j["autosave_interval_minutes"].get<int>();
+        if (j.contains("autosave_max_per_project")) m_AutosaveMaxPerProject = j["autosave_max_per_project"].get<int>();
         if (j.contains("max_undo_steps")) m_MaxUndoSteps = j["max_undo_steps"].get<int>();
         if (j.contains("max_undo_memory_mb")) m_MaxUndoMemoryMB = j["max_undo_memory_mb"].get<int>();
         if (j.contains("max_brush_radius")) m_MaxBrushRadius = j["max_brush_radius"].get<float>();
@@ -136,6 +138,7 @@ bool ConfigManager::Save(const std::string& configFilePath) {
         j["theme"]          = m_Theme;
         j["backup_dir"]     = m_BackupDir;
         j["autosave_interval_minutes"] = m_AutoSaveIntervalMinutes;
+        j["autosave_max_per_project"] = m_AutosaveMaxPerProject;
         j["max_undo_steps"] = m_MaxUndoSteps;
         j["max_undo_memory_mb"] = m_MaxUndoMemoryMB;
         j["max_brush_radius"] = m_MaxBrushRadius;
@@ -240,6 +243,16 @@ int ConfigManager::GetAutoSaveIntervalMinutes() const {
 void ConfigManager::SetAutoSaveIntervalMinutes(int minutes) {
     std::lock_guard<std::mutex> lock(m_Mutex);
     m_AutoSaveIntervalMinutes = minutes;
+}
+
+int ConfigManager::GetAutosaveMaxPerProject() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return m_AutosaveMaxPerProject;
+}
+
+void ConfigManager::SetAutosaveMaxPerProject(int n) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    m_AutosaveMaxPerProject = std::max(1, n);
 }
 
 int ConfigManager::GetMaxUndoSteps() const {
