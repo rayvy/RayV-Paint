@@ -181,13 +181,14 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
         MiniSlider("##spc", &brush.spacing, 0.01f, 5.f, "Spacing", 70.f);
         ImGui::SameLine();
         ImGui::SetNextItemWidth(60.f);
-        ImGui::SliderInt("##stb", &brush.stabilization, 1, 50);
+        ImGui::SetNextItemWidth(60.f);
+        Ui::SmartSliderInt("##stb", &brush.stabilization, 1, 50, 1, 1);
         if (ImGui::IsItemHovered()) Ui::Tooltip("Stabilization");
         ImGui::SameLine();
         ImGui::SetNextItemWidth(70.f);
-        ImGui::SliderFloat("##rot", &brush.rotationDeg, 0.f, 360.f, "R %.0f°");
+        Ui::SmartSliderFloat("##rot", &brush.rotationDeg, 0.f, 360.f, 0.f, 1.f, "R %.0f°");
         if (ImGui::IsItemHovered())
-            Ui::Tooltip("Brush rotation — PLACEHOLDER\nNot applied by paint engine yet (saved in presets).\nFuture: Ctrl+Alt+LMB drag to rotate.");
+            Ui::Tooltip("Brush rotation (tip) — Ctrl+Alt+LMB drag in viewport\nDouble-click slider for exact value");
 
         if (activeTool == ActiveTool::Brush) {
             ImGui::SameLine();
@@ -261,13 +262,13 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
             float sy = canvas.GetFloatingScaleY();
             float rotDeg = canvas.GetFloatingRotation() * (180.0f / 3.14159265f);
             ImGui::SetNextItemWidth(80.f);
-            if (ImGui::SliderFloat("##sx", &sx, 0.05f, 5.f, "X:%.2f")) canvas.SetFloatingScaleX(sx);
+            if (Ui::SmartSliderFloat("##sx", &sx, 0.05f, 5.f, 1.f, 0.05f, "X:%.2f")) canvas.SetFloatingScaleX(sx);
             ImGui::SameLine();
             ImGui::SetNextItemWidth(80.f);
-            if (ImGui::SliderFloat("##sy", &sy, 0.05f, 5.f, "Y:%.2f")) canvas.SetFloatingScaleY(sy);
+            if (Ui::SmartSliderFloat("##sy", &sy, 0.05f, 5.f, 1.f, 0.05f, "Y:%.2f")) canvas.SetFloatingScaleY(sy);
             ImGui::SameLine();
             ImGui::SetNextItemWidth(90.f);
-            if (ImGui::SliderFloat("##rot", &rotDeg, -180.f, 180.f, "%.0f°"))
+            if (Ui::SmartSliderFloat("##rot", &rotDeg, -180.f, 180.f, 0.f, 1.f, "%.0f°"))
                 canvas.SetFloatingRotation(rotDeg * (3.14159265f / 180.0f));
             ImGui::SameLine();
             if (ImGui::Button("H")) canvas.SetFloatingScaleX(-canvas.GetFloatingScaleX());

@@ -2,6 +2,7 @@
 #include "FileExplorer.h"
 #include "../core/ops/AppContext.h"
 #include "../core/ops/ActionCatalog.h"
+#include "../core/ops/OperatorRegistry.h"
 #include "panels/LayersPanel.h"
 #include "panels/AssetBrowserPanel.h"
 #include "panels/ChannelsPanel.h"
@@ -388,11 +389,11 @@ namespace UI {
                 ImGui::Separator();
                 ImGui::Text("Parameters");
                 float maxR = ConfigManager::Get().GetMaxBrushRadius();
-                ImGui::SliderFloat("Size", &brush.radius, 1.f, maxR, "%.1f px");
-                ImGui::SliderFloat("Hardness", &brush.hardness, 0.f, 1.f, "%.2f");
-                ImGui::SliderFloat("Opacity", &brush.opacity, 0.f, 1.f, "%.2f");
-                ImGui::SliderFloat("Spacing", &brush.spacing, 0.01f, 2.f, "%.2f");
-                ImGui::SliderInt("Stabilization", &brush.stabilization, 1, 50);
+                Ui::SmartSliderFloat("Size", &brush.radius, 1.f, maxR, 20.f, 1.f, "%.1f px");
+                Ui::SmartSliderFloat("Hardness", &brush.hardness, 0.f, 1.f, 0.5f, 0.05f, "%.2f");
+                Ui::SmartSliderFloat("Opacity", &brush.opacity, 0.f, 1.f, 1.f, 0.05f, "%.2f");
+                Ui::SmartSliderFloat("Spacing", &brush.spacing, 0.01f, 2.f, 0.1f, 0.05f, "%.2f");
+                Ui::SmartSliderInt("Stabilization", &brush.stabilization, 1, 50, 1, 1);
 
                 ImGui::Separator();
                 ImGui::Text("Tablet pressure");
@@ -403,10 +404,10 @@ namespace UI {
                 ImGui::Separator();
                 ImGui::Text("Rotation / dynamics");
                 ImGui::TextDisabled("Applied in paint engine (tip rotation + dab scatter/jitter)");
-                ImGui::SliderFloat("Rotation", &brush.rotationDeg, 0.f, 360.f, "%.0f°");
+                Ui::SmartSliderFloat("Rotation", &brush.rotationDeg, 0.f, 360.f, 0.f, 1.f, "%.0f°");
                 ImGui::Checkbox("Pressure → Rotation", &brush.pressureRotation);
-                ImGui::SliderFloat("Scatter", &brush.scatter, 0.f, 1.f, "%.2f");
-                ImGui::SliderFloat("Angle jitter", &brush.angleJitter, 0.f, 1.f, "%.2f");
+                Ui::SmartSliderFloat("Scatter", &brush.scatter, 0.f, 1.f, 0.f, 0.05f, "%.2f");
+                Ui::SmartSliderFloat("Angle jitter", &brush.angleJitter, 0.f, 1.f, 0.f, 0.05f, "%.2f");
 
                 ImGui::Separator();
                 ImGui::BeginDisabled(!has || meta.isBuiltin);
@@ -696,49 +697,39 @@ namespace UI {
         // 1. Persistent Header (Main Menu Bar)
         if (ImGui::BeginMainMenuBar()) {
             if (ImGui::BeginMenu("File")) {
-                if (ImGui::MenuItem("New Project…", KeymapManager::Get().GetActionShortcutString("NewProject").c_str())) {
-                    state.openNewProjectWizard = true;
-                }
+                // Catalog-backed: same poll + execute as hotkeys
+                core::ops::MenuAction("NewProject");
                 if (ImGui::MenuItem("New Blank Tab")) {
                     ProjectManager::Get().CreateEmptyProject();
                 }
                 if (ImGui::MenuItem("Import Texture…")) {
                     UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
                 }
-                if (ImGui::MenuItem("Open Project (.rayp)", KeymapManager::Get().GetActionShortcutString("OpenProject").c_str())) {
-                    UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::OpenProject);
-                }
-                if (ImGui::MenuItem("Save Project (.rayp)", KeymapManager::Get().GetActionShortcutString("SaveProject").c_str())) {
-                    UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::SaveProject);
-                }
+                core::ops::MenuAction("OpenProject");
+                core::ops::MenuAction("SaveProject");
                 ImGui::Separator();
                 if (ImGui::MenuItem("Import Image...", "Ctrl+I")) {
                     state.openImportModal = true;
                 }
-                if (ImGui::MenuItem("Quick Export", KeymapManager::Get().GetActionShortcutString("QuickExport").c_str())) {
-                    state.openQuickExportTrigger = true;
-                }
+                core::ops::MenuAction("QuickExport");
                 {
+                    // Prefill export path for Simple, then same AdvancedExport operator
                     const bool advanced = canvas.GetProjectType() != Canvas::ProjectType::Simple;
                     const char* aeLabel = advanced ? "Batch Export…" : "Advanced Export…";
-                    if (ImGui::MenuItem(aeLabel, KeymapManager::Get().GetActionShortcutString("AdvancedExport").c_str())) {
-                        if (advanced)
-                            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ExportTemplate);
-                        else {
-                            // Single-file advanced export with format panel in FE
-                            if (!canvas.GetExportPath().empty()) {
-                                try {
-                                    auto p = std::filesystem::path(PathUtil::Utf8ToWide(canvas.GetExportPath()));
-                                    std::string dir = PathUtil::WideToUtf8(p.parent_path().wstring());
-                                    std::string fn = PathUtil::WideToUtf8(p.filename().wstring());
-                                    if (!dir.empty()) state.fileExplorer.currentDir = dir;
-                                    if (!fn.empty())
-                                        std::snprintf(state.fileExplorer.saveFileName,
-                                            sizeof(state.fileExplorer.saveFileName), "%s", fn.c_str());
-                                } catch (...) {}
-                            }
-                            UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::AdvancedExport);
+                    std::string sc = KeymapManager::Get().GetActionShortcutString("AdvancedExport");
+                    if (ImGui::MenuItem(aeLabel, (sc == "—" || sc == "None") ? nullptr : sc.c_str())) {
+                        if (!advanced && !canvas.GetExportPath().empty()) {
+                            try {
+                                auto p = std::filesystem::path(PathUtil::Utf8ToWide(canvas.GetExportPath()));
+                                std::string dir = PathUtil::WideToUtf8(p.parent_path().wstring());
+                                std::string fn = PathUtil::WideToUtf8(p.filename().wstring());
+                                if (!dir.empty()) state.fileExplorer.currentDir = dir;
+                                if (!fn.empty())
+                                    std::snprintf(state.fileExplorer.saveFileName,
+                                        sizeof(state.fileExplorer.saveFileName), "%s", fn.c_str());
+                            } catch (...) {}
                         }
+                        core::ops::Invoke("AdvancedExport");
                     }
                 }
                 ImGui::Separator();
@@ -766,16 +757,22 @@ namespace UI {
                 if (canvas.CanUndo()) {
                     undoLabel += " (" + canvas.GetUndoName() + ")";
                 }
-                if (ImGui::MenuItem(undoLabel.c_str(), KeymapManager::Get().GetActionShortcutString("Undo").c_str(), false, canvas.CanUndo())) {
-                    canvas.Undo();
+                std::string undoSc = KeymapManager::Get().GetActionShortcutString("Undo");
+                if (ImGui::MenuItem(undoLabel.c_str(),
+                        (undoSc == "—" || undoSc == "None") ? nullptr : undoSc.c_str(),
+                        false, canvas.CanUndo())) {
+                    core::ops::Invoke("Undo");
                 }
 
                 std::string redoLabel = "Redo";
                 if (canvas.CanRedo()) {
                     redoLabel += " (" + canvas.GetRedoName() + ")";
                 }
-                if (ImGui::MenuItem(redoLabel.c_str(), KeymapManager::Get().GetActionShortcutString("Redo").c_str(), false, canvas.CanRedo())) {
-                    canvas.Redo();
+                std::string redoSc = KeymapManager::Get().GetActionShortcutString("Redo");
+                if (ImGui::MenuItem(redoLabel.c_str(),
+                        (redoSc == "—" || redoSc == "None") ? nullptr : redoSc.c_str(),
+                        false, canvas.CanRedo())) {
+                    core::ops::Invoke("Redo");
                 }
                 ImGui::EndMenu();
             }
@@ -783,9 +780,7 @@ namespace UI {
                 if (ImGui::MenuItem("Canvas Edit...")) {
                     state.openCanvasSizeModal = true;
                 }
-                if (ImGui::MenuItem("Crop to Selection", KeymapManager::Get().GetActionShortcutString("CropToSelection").c_str(), false, canvas.HasSelection())) {
-                    canvas.CropCanvasToSelection(device);
-                }
+                core::ops::MenuAction("CropToSelection", canvas.HasSelection());
                 ImGui::Separator();
                 if (ImGui::MenuItem("Rotate Canvas 90 CW")) {
                     canvas.RotateCanvas90(device, true);
@@ -808,43 +803,26 @@ namespace UI {
                 }
                 ImGui::EndMenu();
             }
-            // ---- Image Menu (operators) ----
+            // ---- Image Menu (catalog operators) ----
             if (ImGui::BeginMenu("Image")) {
                 bool hasLayer = canvas.GetActiveLayerIndex() != -1;
-                if (ImGui::MenuItem("Free Transform...", KeymapManager::Get().GetActionShortcutString("FreeTransform").c_str(), false, hasLayer)) {
-                    state.requestFreeTransform = true;
-                }
-                if (ImGui::MenuItem("Perspective Warp...", KeymapManager::Get().GetActionShortcutString("PerspectiveWarp").c_str(), false, hasLayer)) {
-                    state.requestPerspectiveWarp = true;
-                }
-                if (ImGui::MenuItem("Mesh Warp...", KeymapManager::Get().GetActionShortcutString("MeshWarp").c_str(), false, hasLayer)) {
-                    state.requestMeshWarp = true;
-                }
+                core::ops::MenuAction("FreeTransform", hasLayer);
+                core::ops::MenuAction("PerspectiveWarp", hasLayer);
+                core::ops::MenuAction("MeshWarp", hasLayer);
                 ImGui::Separator();
-                if (ImGui::MenuItem("Refresh Canvas", KeymapManager::Get().GetActionShortcutString("RefreshCanvas").c_str())) {
-                    canvas.RefreshCanvas(device);
-                }
+                core::ops::MenuAction("RefreshCanvas");
                 ImGui::Separator();
-                if (ImGui::MenuItem("Invert Colors", KeymapManager::Get().GetActionShortcutString("InvertColors").c_str(), false, hasLayer))
-                    canvas.InvertColors();
-                if (ImGui::MenuItem("Invert Alpha", KeymapManager::Get().GetActionShortcutString("InvertAlpha").c_str(), false, hasLayer))
-                    canvas.InvertAlpha();
+                core::ops::MenuAction("InvertColors", hasLayer);
+                core::ops::MenuAction("InvertAlpha", hasLayer);
                 ImGui::Separator();
-                if (ImGui::MenuItem("Blur...", KeymapManager::Get().GetActionShortcutString("AdjustBlur").c_str(), false, hasLayer))
-                    state.showBlurModal = true;
-                if (ImGui::MenuItem("HSV Adjust...", KeymapManager::Get().GetActionShortcutString("AdjustHSV").c_str(), false, hasLayer))
-                    state.showHSVModal = true;
-                if (ImGui::MenuItem("Curves...", KeymapManager::Get().GetActionShortcutString("AdjustCurves").c_str(), false, hasLayer))
-                    state.showCurvesModal = true;
-                if (ImGui::MenuItem("Add Noise...", KeymapManager::Get().GetActionShortcutString("AdjustNoise").c_str(), false, hasLayer))
-                    state.showNoiseModal = true;
+                core::ops::MenuAction("AdjustBlur", hasLayer);
+                core::ops::MenuAction("AdjustHSV", hasLayer);
+                core::ops::MenuAction("AdjustCurves", hasLayer);
+                core::ops::MenuAction("AdjustNoise", hasLayer);
                 ImGui::Separator();
                 {
                     bool canCaf = hasLayer && canvas.HasSelection();
-                    if (ImGui::MenuItem("Content-Aware Fill...",
-                            KeymapManager::Get().GetActionShortcutString("ContentAwareFill").c_str(),
-                            false, canCaf))
-                        state.requestContentAwareFill = true;
+                    if (core::ops::MenuAction("ContentAwareFill", canCaf)) { /* ran */ }
                     if (ImGui::IsItemHovered() && !canCaf)
                         Ui::Tooltip("Requires an active selection (region to fill) on a paint layer.");
                 }
@@ -867,12 +845,12 @@ namespace UI {
             }
             // ---- Select Menu ----
             if (ImGui::BeginMenu("Select")) {
-                if (ImGui::MenuItem("Select All", "Ctrl+A")) canvas.SelectAll();
+                core::ops::MenuAction("SelectAll");
                 if (ImGui::MenuItem("Deselect", "Ctrl+D")) {
                     canvas.ClearSelection();
                     canvas.UpdateSelectionMaskTexture(device);
                 }
-                if (ImGui::MenuItem("Invert Selection", "Ctrl+Shift+I")) canvas.InvertSelection();
+                core::ops::MenuAction("InvertSelection");
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("View")) {
@@ -1194,7 +1172,7 @@ namespace UI {
                 canvas.UpdateAdjustPreviewBlur(state.blurRadius);
             ImGui::Text("Blur (3-pass box) — preview on active layer");
             ImGui::TextDisabled("Respects selection; only this layer");
-            if (ImGui::SliderFloat("Radius", &state.blurRadius, 0.5f, 80.0f, "%.1f px")) {
+            if (Ui::SmartSliderFloat("Radius", &state.blurRadius, 0.5f, 80.0f, 5.f, 0.5f, "%.1f px")) {
                 if (ensureAdjPreview())
                     canvas.UpdateAdjustPreviewBlur(state.blurRadius);
             }
@@ -1220,9 +1198,9 @@ namespace UI {
             ImGui::Text("Hue / Saturation / Value");
             ImGui::TextDisabled("Live preview on active layer · selection mask");
             bool ch = false;
-            ch |= ImGui::SliderFloat("Hue", &state.hsvH, -0.5f, 0.5f, "%.3f");
-            ch |= ImGui::SliderFloat("Saturation", &state.hsvS, -1.0f, 1.0f, "%.3f");
-            ch |= ImGui::SliderFloat("Value", &state.hsvV, -1.0f, 1.0f, "%.3f");
+            ch |= Ui::SmartSliderFloat("Hue", &state.hsvH, -0.5f, 0.5f, 0.f, 0.01f, "%.3f");
+            ch |= Ui::SmartSliderFloat("Saturation", &state.hsvS, -1.0f, 1.0f, 0.f, 0.05f, "%.3f");
+            ch |= Ui::SmartSliderFloat("Value", &state.hsvV, -1.0f, 1.0f, 0.f, 0.05f, "%.3f");
             if (ch || ImGui::IsItemDeactivatedAfterEdit()) {
                 if (ensureAdjPreview())
                     canvas.UpdateAdjustPreviewHSV(state.hsvH, state.hsvS, state.hsvV);
@@ -1250,7 +1228,7 @@ namespace UI {
             if (!s_AdjPreviewBegun) ensureAdjPreview();
             ImGui::TextDisabled("Live preview (stable seed until Apply)");
             bool ch = false;
-            ch |= ImGui::SliderFloat("Strength", &state.noiseStrength, 0.0f, 1.0f, "%.3f");
+            ch |= Ui::SmartSliderFloat("Strength", &state.noiseStrength, 0.0f, 1.0f, 0.1f, 0.05f, "%.3f");
             ch |= ImGui::Checkbox("Color Noise", &state.noiseColor);
             if (ch) {
                 if (ensureAdjPreview())
@@ -1684,7 +1662,7 @@ namespace UI {
                     ImGui::Spacing();
                     ImGui::Text("Brush");
                     ImGui::Separator();
-                    ImGui::SliderFloat("Max brush radius (px)", &state.maxBrushRadius, 10.f, 1000.f, "%.0f");
+                    Ui::SmartSliderFloat("Max brush radius (px)", &state.maxBrushRadius, 10.f, 1000.f, 250.f, 1.f, "%.0f");
                     ImGui::TextDisabled("Ctrl+Alt+RMB size range; 1 screen px = 1/zoom canvas px (WYSIWYG)");
 
                     ImGui::Spacing();
@@ -1696,14 +1674,14 @@ namespace UI {
                     if (ImGui::InputText("Backups Directory", tempBackupDir, IM_ARRAYSIZE(tempBackupDir))) {
                         state.backupDir = tempBackupDir;
                     }
-                    ImGui::SliderInt("Autosave (minutes)", &state.autoSaveMins, 0, 60, "%d min");
+                    Ui::SmartSliderInt("Autosave (minutes)", &state.autoSaveMins, 0, 60, 5, 1);
                     ImGui::TextDisabled("Set to 0 to disable periodic auto-saves");
 
                     ImGui::Spacing();
                     ImGui::Text("Undo / Redo Cache Limits");
                     ImGui::Separator();
-                    ImGui::SliderInt("Max History Steps", &state.maxUndo, 5, 200, "%d steps");
-                    ImGui::SliderInt("Max RAM Cache Size", &state.maxUndoMem, 64, 2048, "%d MB");
+                    Ui::SmartSliderInt("Max History Steps", &state.maxUndo, 5, 200, 100, 1);
+                    Ui::SmartSliderInt("Max RAM Cache Size", &state.maxUndoMem, 64, 2048, 512, 16);
                     
                     ImGui::EndTabItem();
                 }
@@ -2849,12 +2827,12 @@ namespace UI {
                         auto& L = s_Preview.Lighting();
                         float yawDeg = L.yaw * (180.f / 3.14159265f);
                         float pitchDeg = L.pitch * (180.f / 3.14159265f);
-                        if (ImGui::SliderFloat("Yaw", &yawDeg, -180.f, 180.f, "%.0f°"))
+                        if (Ui::SmartSliderFloat("Yaw", &yawDeg, -180.f, 180.f, 0.f, 1.f, "%.0f°"))
                             L.yaw = yawDeg * (3.14159265f / 180.f);
-                        if (ImGui::SliderFloat("Pitch", &pitchDeg, -89.f, 89.f, "%.0f°"))
+                        if (Ui::SmartSliderFloat("Pitch", &pitchDeg, -89.f, 89.f, 0.f, 1.f, "%.0f°"))
                             L.pitch = pitchDeg * (3.14159265f / 180.f);
-                        ImGui::SliderFloat("Intensity", &L.intensity, 0.f, 2.f);
-                        ImGui::SliderFloat("Ambient", &L.ambient, 0.f, 1.f);
+                        Ui::SmartSliderFloat("Intensity", &L.intensity, 0.f, 2.f, 1.f, 0.05f, "%.2f");
+                        Ui::SmartSliderFloat("Ambient", &L.ambient, 0.f, 1.f, 0.3f, 0.05f, "%.2f");
                         ImGui::Checkbox("Follow camera", &L.followCamera);
                         if (ImGui::Button("Left")) { L.yaw = -0.9f; L.pitch = 0.4f; }
                         ImGui::SameLine();
@@ -2920,10 +2898,10 @@ namespace UI {
                             }
 
                             auto& mat = items[s_SelPart].material;
-                            ImGui::SliderFloat("Toon thr", &mat.toonThreshold, 0.f, 1.f);
-                            ImGui::SliderFloat("Toon soft", &mat.toonSoftness, 0.01f, 0.5f);
-                            ImGui::SliderFloat("Rim", &mat.rimStrength, 0.f, 1.5f);
-                            ImGui::SliderFloat("SSS", &mat.sssStrength, 0.f, 1.f);
+                            Ui::SmartSliderFloat("Toon thr", &mat.toonThreshold, 0.f, 1.f, 0.5f, 0.05f, "%.2f");
+                            Ui::SmartSliderFloat("Toon soft", &mat.toonSoftness, 0.01f, 0.5f, 0.1f, 0.01f, "%.2f");
+                            Ui::SmartSliderFloat("Rim", &mat.rimStrength, 0.f, 1.5f, 0.5f, 0.05f, "%.2f");
+                            Ui::SmartSliderFloat("SSS", &mat.sssStrength, 0.f, 1.f, 0.f, 0.05f, "%.2f");
                             ImGui::Checkbox("Normal map", &mat.useNormalMap);
                             ImGui::SameLine();
                             ImGui::Checkbox("Normal RG only", &mat.normalRGOnly);
@@ -2981,7 +2959,7 @@ namespace UI {
                         ImGui::Checkbox("Flip X", &O.flipX);
                         ImGui::Checkbox("Flip Y", &O.flipY);
                         ImGui::Checkbox("Flip Z", &O.flipZ);
-                        ImGui::SliderFloat("Yaw offset", &O.yawOffsetDeg, -180.f, 180.f, "%.0f°");
+                        Ui::SmartSliderFloat("Yaw offset", &O.yawOffsetDeg, -180.f, 180.f, 0.f, 1.f, "%.0f°");
                         if (ImGui::Button("ZZZ default (+Z up)")) {
                             O.upAxis = preview3d::ModelUpAxis::PlusZ;
                             O.flipX = O.flipY = O.flipZ = false;
@@ -3012,8 +2990,8 @@ namespace UI {
                         ImGui::Checkbox("Glow (soon)", &P.enableGlow);
                         ImGui::Checkbox("Bloom (soon)", &P.enableBloom);
                         ImGui::EndDisabled();
-                        ImGui::SliderFloat("Outline thick (view)", &P.outlineThickness, 0.2f, 3.0f, "%.2f");
-                        ImGui::SliderFloat("Outline ink (albedo*)", &P.outlineAlbedoMul, 0.15f, 0.75f, "%.2f");
+                        Ui::SmartSliderFloat("Outline thick (view)", &P.outlineThickness, 0.2f, 3.0f, 1.f, 0.05f, "%.2f");
+                        Ui::SmartSliderFloat("Outline ink (albedo*)", &P.outlineAlbedoMul, 0.15f, 0.75f, 0.4f, 0.05f, "%.2f");
                         ImGui::Checkbox("Outline × COLOR.r (thick)", &P.outlineUseVertexColor);
                         ImGui::TextDisabled("View-space expand ≈ game (not 3D balloon).\nInk ~0.4 = soft; 0.15 = black.");
                         ImGui::Checkbox("Fixed outline tint", &P.outlineUseFixedTint);

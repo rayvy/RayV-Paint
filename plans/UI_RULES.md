@@ -33,7 +33,9 @@
 | Dropdowns (click + hold) | `UiDropdown` |
 | Sliders | `Ui::SmartSliderFloat` / `Ui::SmartSliderInt` / `VisualSlider` |
 | Hotkeys / action SSOT | `core::ops::ActionCatalog` + `KeymapManager` |
-| Input ownership | `core::ops::AppContext` + `TryConsumeAction` |
+| Execute façade | `core::ops::OperatorRegistry` + `RegisterEditorOperators` |
+| Menus | `core::ops::MenuAction(id)` / `Invoke(id)` |
+| Input ownership | `core::ops::AppContext` + `TryConsumeAction` / DispatchKeymapFrame |
 | Color + optional pipette | `UiColorField` (`ColorFieldFlags_Pipette` / `FullPicker`) |
 | Tooltips (delay) | `UiTooltip` |
 | Dock panels | `UiPanel` |
@@ -121,16 +123,18 @@ UiColorField(label, float rgba[4], UiColorFieldFlags)
 ```
 Frame:
   AppContext::BeginFrame()
-  UI::RenderAll(...)          // widgets may NotifyUiKeyboardCapture()
+  BindOperatorHostFrame(&ActiveCanvas(), device)
+  UI::RenderAll(...)          // MenuAction / NotifyUiKeyboardCapture
   AppContext::UpdateFromFrame(io, uiState, ...)
-  TryConsumeAction("FillSecondary") → poll scope → execute or drain
+  OperatorRegistry::DispatchKeymapFrame()  // poll + execute registered ops
+  UI one-shot flags → Invoke(id)
   if (!BlocksCanvasInteraction()) handle paint / selection
 ```
 
 | Do | Don't |
 |----|--------|
-| Add action to ActionCatalog with category/label/scope | Add `m_Bindings["Foo"]` only in KeymapManager |
-| `TryConsumeAction("Foo")` in main | `if (!WantTextInput) ConsumeActionTrigger` only |
+| Add action to **ActionCatalog** + **RegisterEditorOperators** one-liner | New `if (TryConsumeAction)` chain in main |
+| `MenuAction("Foo")` / `Invoke("Foo")` for menus | Hardcoded labels + direct Canvas calls that skip poll |
 | Block document ops via ActionScope + AppContext | Special-case Backspace in three places |
 | SmartSliderFloat for params | New raw SliderFloat without exact entry |
 

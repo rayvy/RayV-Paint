@@ -38,6 +38,8 @@
 #include "core/KeymapManager.h"
 #include "core/ops/AppContext.h"
 #include "core/ops/ActionCatalog.h"
+#include "core/ops/OperatorRegistry.h"
+#include "core/ops/OperatorHost.h"
 #include "core/ClipboardHelper.h"
 #include "core/BrushLibrary.h"
 #include "core/PathUtil.h"
@@ -1080,6 +1082,25 @@ int main(int argc, char* argv[]) {
     uiState.backupDir = backupDir;
     uiState.backupPath = backupPath;
     uiState.showRecoveryModal = showRecoveryModal;
+
+    // OperatorRegistry — single execute path for catalog actions (hotkeys + menus).
+    {
+        core::ops::OperatorHost host;
+        host.canvas = &ActiveCanvas();
+        host.ui = &uiState;
+        host.device = g_pd3dDevice;
+        host.brush = &g_Brush;
+        host.secondaryColor = g_SecondaryColor;
+        host.activeTool = &g_ActiveTool;
+        host.lastSelectTool = &g_LastSelectTool;
+        host.lastLassoTool = &g_LastLassoTool;
+        host.lastWandTool = &g_LastWandTool;
+        host.freeTransformMode = &g_FreeTransformMode;
+        host.toolBeforeFreeTransform = &g_ToolBeforeFreeTransform;
+        host.toolBeforeWarp = &g_ToolBeforeWarp;
+        host.warpDragIndex = &g_WarpDragIndex;
+        core::ops::RegisterEditorOperators(host);
+    }
     // Recovery modal blocks input; skip in automated benchmark.
     if (benchmarkMode)
         uiState.showRecoveryModal = false;
@@ -1159,6 +1180,9 @@ int main(int argc, char* argv[]) {
             --g_LayerPreviewRefreshFrames;
         }
 
+        // Bind active tab Canvas before UI (menus Invoke operators during RenderAll).
+        core::ops::BindOperatorHostFrame(&ActiveCanvas(), g_pd3dDevice);
+
         // Render all UI Panels and Modals (Toolbar, Properties, Layers, Brush settings, Console logs, Colors)
         UI::RenderAll(uiState, ActiveCanvas(), g_Brush, g_ActiveTool, g_pd3dDevice, g_pd3dDeviceContext, window);
 
@@ -1184,242 +1208,41 @@ int main(int argc, char* argv[]) {
                 toolLabel);
         }
 
-        // Hotkeys: ALWAYS TryConsume (drains triggers). AppContext poll blocks execute
-        // while text / File Explorer / settings / modals own input — do NOT gate only on WantTextInput.
+        // Hotkeys via OperatorRegistry (ActionCatalog + AppContext poll).
+        // New actions: register in ActionCatalog + RegisterEditorOperators — not here.
         {
-            if (core::ops::TryConsumeAction("Undo")) {
-                ActiveCanvas().Undo();
-            }
-            if (core::ops::TryConsumeAction("Redo")) {
-                ActiveCanvas().Redo();
-            }
-            if (core::ops::TryConsumeAction("SaveProject")) {
-                UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::SaveProject);
-            }
-            if (core::ops::TryConsumeAction("OpenProject")) {
-                UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::OpenProject);
-            }
-            if (core::ops::TryConsumeAction("NewProject")) {
-                uiState.openNewProjectWizard = true;
-            }
-            if (core::ops::TryConsumeAction("BrushTool")) {
-                g_ActiveTool = ActiveTool::Brush;
-                g_Brush.erase = false;
-            }
-            if (core::ops::TryConsumeAction("EraserTool")) {
-                g_ActiveTool = ActiveTool::Eraser;
-                g_Brush.erase = true;
-            }
-            if (core::ops::TryConsumeAction("BucketFillTool")) {
-                g_ActiveTool = ActiveTool::BucketFill;
-            }
-            if (core::ops::TryConsumeAction("GradientTool")) {
-                g_ActiveTool = ActiveTool::Gradient;
-            }
-            if (core::ops::TryConsumeAction("PipetteTool")) {
-                g_ActiveTool = ActiveTool::Pipette;
-            }
-            if (core::ops::TryConsumeAction("SelectToolGroup")) {
-                if (UI::IsSelectTool(g_ActiveTool)) {
-                    g_ActiveTool = UI::CycleSelectTool(g_ActiveTool);
-                } else {
-                    g_ActiveTool = g_LastSelectTool;
-                }
-                g_LastSelectTool = g_ActiveTool;
-            }
-            if (core::ops::TryConsumeAction("LassoToolGroup")) {
-                if (UI::IsLassoTool(g_ActiveTool)) {
-                    g_ActiveTool = UI::CycleLassoTool(g_ActiveTool);
-                } else {
-                    g_ActiveTool = g_LastLassoTool;
-                }
-                g_LastLassoTool = g_ActiveTool;
-            }
-            if (core::ops::TryConsumeAction("WandToolGroup")) {
-                if (UI::IsWandTool(g_ActiveTool)) {
-                    g_ActiveTool = UI::CycleWandTool(g_ActiveTool);
-                } else {
-                    g_ActiveTool = g_LastWandTool;
-                }
-                g_LastWandTool = g_ActiveTool;
-            }
-            // Direct binds for group members (optional; default unbound → "via L/S/W")
-            if (core::ops::TryConsumeAction("RectSelectTool"))    g_ActiveTool = ActiveTool::RectSelect;
-            if (core::ops::TryConsumeAction("EllipseSelectTool")) g_ActiveTool = ActiveTool::EllipseSelect;
-            if (core::ops::TryConsumeAction("LassoSelectTool"))   { g_ActiveTool = ActiveTool::LassoSelect; g_LastLassoTool = g_ActiveTool; }
-            if (core::ops::TryConsumeAction("PolygonalLassoTool")){ g_ActiveTool = ActiveTool::PolygonalLasso; g_LastLassoTool = g_ActiveTool; }
-            if (core::ops::TryConsumeAction("MagicWandTool"))     { g_ActiveTool = ActiveTool::MagicWand; g_LastWandTool = g_ActiveTool; }
-            if (core::ops::TryConsumeAction("SmartSelectTool"))   { g_ActiveTool = ActiveTool::SmartSelect; g_LastWandTool = g_ActiveTool; }
-            if (core::ops::TryConsumeAction("QuickSelectTool"))   { g_ActiveTool = ActiveTool::QuickSelect; g_LastWandTool = g_ActiveTool; }
-            if (core::ops::TryConsumeAction("PanTool")) {
-                g_ActiveTool = ActiveTool::Pan;
-            }
-            if (core::ops::TryConsumeAction("RotateTool")) {
-                g_ActiveTool = ActiveTool::Pan;
-            }
-            if (core::ops::TryConsumeAction("TransformTool")) {
-                // V = Move tool (pixels only)
-                g_FreeTransformMode = false;
-                g_ActiveTool = ActiveTool::MovePixels;
-            }
-            auto enterFreeTransform = [&]() {
-                if (!g_FreeTransformMode) {
-                    g_ToolBeforeFreeTransform = g_ActiveTool;
-                    if (g_ToolBeforeFreeTransform == ActiveTool::MovePixels)
-                        g_ToolBeforeFreeTransform = ActiveTool::Brush;
-                }
-                g_FreeTransformMode = true;
-                g_ActiveTool = ActiveTool::MovePixels;
-                if (!ActiveCanvas().IsMovingPixels())
-                    ActiveCanvas().StartMovePixels(g_pd3dDevice);
-            };
-            if (core::ops::TryConsumeAction("FreeTransform") || uiState.requestFreeTransform) {
+            core::ops::BindOperatorHostFrame(&ActiveCanvas(), g_pd3dDevice);
+            core::ops::OperatorRegistry::Get().DispatchKeymapFrame();
+
+            // UI one-shot requests (menus set flags; same operators as hotkeys)
+            if (uiState.requestFreeTransform) {
                 uiState.requestFreeTransform = false;
-                enterFreeTransform();
+                core::ops::Invoke("FreeTransform");
+            }
+            if (uiState.requestContentAwareFill) {
+                uiState.requestContentAwareFill = false;
+                core::ops::Invoke("ContentAwareFill");
+            }
+            if (uiState.requestPerspectiveWarp) {
+                uiState.requestPerspectiveWarp = false;
+                core::ops::Invoke("PerspectiveWarp");
+            }
+            if (uiState.requestMeshWarp) {
+                uiState.requestMeshWarp = false;
+                core::ops::Invoke("MeshWarp");
+            }
+            if (uiState.openQuickExportTrigger) {
+                uiState.openQuickExportTrigger = false;
+                core::ops::Invoke("QuickExport");
             }
             uiState.freeTransformActive = g_FreeTransformMode;
-            if (core::ops::TryConsumeAction("SmudgeTool")) {
-                g_ActiveTool = ActiveTool::Smudge;
-            }
-            if (core::ops::TryConsumeAction("BlurTool")) {
-                g_ActiveTool = ActiveTool::BlurTool;
-            }
-            if (core::ops::TryConsumeAction("StampTool")) {
-                g_ActiveTool = ActiveTool::Stamp;
-            }
-            if (core::ops::TryConsumeAction("ContentAwareFill") || uiState.requestContentAwareFill) {
-                uiState.requestContentAwareFill = false;
-                ActiveCanvas().ApplyContentAwareFill(g_pd3dDevice);
-            }
-            if (core::ops::TryConsumeAction("RefreshCanvas")) {
-                ActiveCanvas().RefreshCanvas(g_pd3dDevice);
-            }
-            if (core::ops::TryConsumeAction("PerspectiveWarp") || uiState.requestPerspectiveWarp) {
-                uiState.requestPerspectiveWarp = false;
-                g_ToolBeforeWarp = g_ActiveTool;
-                ActiveCanvas().StartWarpOperator(g_pd3dDevice, Canvas::WarpOperatorMode::Perspective);
-                g_WarpDragIndex = -1;
-            }
-            if (core::ops::TryConsumeAction("MeshWarp") || uiState.requestMeshWarp) {
-                uiState.requestMeshWarp = false;
-                g_ToolBeforeWarp = g_ActiveTool;
-                ActiveCanvas().StartWarpOperator(g_pd3dDevice, Canvas::WarpOperatorMode::Mesh);
-                g_WarpDragIndex = -1;
-            }
-            if (core::ops::TryConsumeAction("SelectAll")) {
-                ActiveCanvas().SelectAll();
-            }
-            if (core::ops::TryConsumeAction("DuplicateLayer")) {
-                if (!uiState.selectedLayers.empty()) {
-                    ActiveCanvas().DuplicateLayers(g_pd3dDevice, uiState.selectedLayers);
-                    // Refresh selection to new clones is best-effort: leave active as set by core
-                    uiState.selectedLayers.clear();
-                    if (ActiveCanvas().GetActiveLayerIndex() >= 0)
-                        uiState.selectedLayers.push_back(ActiveCanvas().GetActiveLayerIndex());
-                } else if (ActiveCanvas().GetActiveLayerIndex() >= 0) {
-                    int neu = ActiveCanvas().DuplicateLayer(g_pd3dDevice, ActiveCanvas().GetActiveLayerIndex());
-                    uiState.selectedLayers.clear();
-                    if (neu >= 0) uiState.selectedLayers.push_back(neu);
-                }
-            }
-            if (core::ops::TryConsumeAction("CropToSelection")) {
-                if (ActiveCanvas().HasSelection()) {
-                    ActiveCanvas().CropCanvasToSelection(g_pd3dDevice);
-                }
-            }
-            if (core::ops::TryConsumeAction("InvertSelection")) {
-                ActiveCanvas().InvertSelection();
-            }
-            if (core::ops::TryConsumeAction("InvertColors")) {
-                ActiveCanvas().InvertColors();
-            }
-            if (core::ops::TryConsumeAction("InvertAlpha")) {
-                ActiveCanvas().InvertAlpha();
-            }
-            if (core::ops::TryConsumeAction("AdjustHSV")) {
-                uiState.showHSVModal = true;
-            }
-            if (core::ops::TryConsumeAction("AdjustCurves")) {
-                uiState.showCurvesModal = true;
-            }
-            if (core::ops::TryConsumeAction("AdjustBlur")) {
-                uiState.showBlurModal = true;
-            }
-            if (core::ops::TryConsumeAction("AdjustNoise")) {
-                uiState.showNoiseModal = true;
-            }
-            // Ctrl+Shift+E: Advanced → Batch Export folder FE; Simple → Advanced Export FE
-            if (core::ops::TryConsumeAction("AdvancedExport")) {
-                const bool advanced =
-                    ActiveCanvas().GetProjectType() != Canvas::ProjectType::Simple;
-                if (advanced)
-                    UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::ExportTemplate);
-                else
-                    UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::AdvancedExport);
-            }
 
-            if (core::ops::TryConsumeAction("QuickExport") || uiState.openQuickExportTrigger) {
-                uiState.openQuickExportTrigger = false;
-                const bool advanced =
-                    ActiveCanvas().GetProjectType() != Canvas::ProjectType::Simple;
-
-                // Advanced+: batch export all enabled maps with channel packing
-                if (advanced) {
-                    if (Project* proj = ProjectManager::Get().ActiveProject()) {
-                        int n = proj->QuickExportAllMaps();
-                        if (n > 0)
-                            Logger::Get().Info("Batch export: " + std::to_string(n) + " map(s) written");
-                        else
-                            Logger::Get().Error("Batch export: no maps written");
-                    }
-                } else {
-                    // Simple: single file export via hard container (DDS/PNG)
-                    std::string used;
-                    if (ActiveCanvas().ExportWithProjectSettings(&used))
-                        Logger::Get().Info("Quick exported: " + used);
-                    else
-                        Logger::Get().Error("Quick export failed: " +
-                            (used.empty() ? ActiveCanvas().GetExportPath() : used));
-                }
-            }
-            if (core::ops::TryConsumeAction("AdvancedExport")) {
-                uiState.openExportAdvancedModal = true;
-            }
-            if (core::ops::TryConsumeAction("FillSecondary")) {
-                if (ActiveCanvas().HasSelection() || ActiveCanvas().GetActiveLayerIndex() >= 0)
-                    ActiveCanvas().FillSelection(g_SecondaryColor);
-            }
-            if (core::ops::TryConsumeAction("DeleteContent")) {
-                ActiveCanvas().DeleteSelectionContent();
-            }
-            if (core::ops::TryConsumeAction("CopyLayers")) {
-                std::vector<int> idxs = uiState.selectedLayers;
-                if (idxs.empty() && ActiveCanvas().GetActiveLayerIndex() >= 0)
-                    idxs.push_back(ActiveCanvas().GetActiveLayerIndex());
-                ActiveCanvas().CopyLayersToClipboard(idxs);
-            }
-            if (core::ops::TryConsumeAction("Copy")) {
-                // Selection or active layer content → system + internal content clipboard
-                if (!ActiveCanvas().CopyContentToClipboard()) {
-                    // Fallback: merged composite (legacy)
-                    std::vector<float> composite = ActiveCanvas().GetCompositePixels();
-                    ClipboardHelper::CopyImageToClipboard(composite, ActiveCanvas().GetWidth(), ActiveCanvas().GetHeight());
-                }
-            }
-            if (core::ops::TryConsumeAction("PasteAsNewLayer")) {
-                if (!ActiveCanvas().PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
-                    Logger::Get().Warn("PasteAsNewLayer: no image on clipboard");
-            }
+            // Paste stays host-side: system clipboard vs layer clipboard policy.
             if (core::ops::TryConsumeAction("Paste")) {
-                // External image (Chrome/Blender/PS PNG) takes priority over internal
-                // layer/content clipboard when the system clipboard was overwritten.
                 const bool externalImage =
                     ClipboardHelper::HasClipboardImage() &&
                     ClipboardHelper::IsSystemClipboardNewerThanLastCopy();
-
                 if (externalImage) {
-                    // Mask paint target → stamp into mask (UV layout → mask workflow).
-                    // Otherwise always new layer so transparency is preserved cleanly.
                     if (ActiveCanvas().IsEditingLayerMask()) {
                         if (!ActiveCanvas().PasteContentIntoActive(g_pd3dDevice))
                             Logger::Get().Warn("Paste: failed to paste into mask");
@@ -1429,12 +1252,11 @@ int main(int argc, char* argv[]) {
                 } else if (ActiveCanvas().HasLayerClipboard()) {
                     ActiveCanvas().PasteLayersFromClipboard(g_pd3dDevice);
                 } else if (!ActiveCanvas().PasteContentIntoActive(g_pd3dDevice)) {
-                    // Fallback: system image as new layer (first paste / no internal content)
                     if (!ActiveCanvas().PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
                         Logger::Get().Warn("Paste: clipboard has no pasteable image");
                 }
             }
-        } // end hotkey dispatch (context-gated via TryConsumeAction)
+        }
 
         // Background Auto-Save trigger (disabled during benchmark — I/O noise)
         static bool s_IsAutoSaving = false;

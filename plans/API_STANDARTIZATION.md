@@ -1,6 +1,12 @@
 # API Standardization (Operators, Context, Registry)
 
-**Status:** In progress — O0/O1/O2/O3 foundation landed in tree (`src/core/ops/*`, KeymapManager ← ActionCatalog, TryConsumeAction + AppContext, SmartSlider exact entry, Keybindings categories, footer Context). Remaining: full operator execute registry, menu labels from catalog, Python O4, migrate remaining raw sliders.  
+**Status:** In progress — O0–O3 largely landed:
+- `ActionCatalog` + `AppContext` + `TryConsumeAction`
+- **`OperatorRegistry` + `RegisterEditorOperators`** + `DispatchKeymapFrame` (main no longer grows if-chains)
+- **`MenuAction` / `Invoke`** for File/Image/Select menus
+- SmartSlider exact entry across tool settings, adjust modals, settings, brush popup, preview3d
+- Keybindings UI by category; footer Context panel  
+Remaining: Python O4, Deselect as catalog op, drain any leftover raw sliders, optional operator palette (O5).  
 **Motivation:** The editor “works”, but control flow is vibe-coded: UI/hotkeys call Canvas ad-hoc, context is implicit, duplication grows. Inspiration: **Blender** (operators + context + register), not a full Blender port.  
 **Related:** `Documentation.MD` (file formats). Interchange converters: `plans/Standartization(Krita/Photoshop).MD` (**depends on this plan**, does not replace it).
 

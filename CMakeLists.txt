@@ -155,6 +155,10 @@ set(SOURCES
     src/core/ops/ActionCatalog.h
     src/core/ops/AppContext.cpp
     src/core/ops/AppContext.h
+    src/core/ops/OperatorRegistry.cpp
+    src/core/ops/OperatorRegistry.h
+    src/core/ops/OperatorHost.h
+    src/core/ops/RegisterEditorOperators.cpp
     src/core/ClipboardHelper.cpp
     src/core/ClipboardHelper.h
     src/core/ProjectManager.cpp
