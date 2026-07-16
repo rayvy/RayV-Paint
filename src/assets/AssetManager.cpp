@@ -5,11 +5,13 @@
 #include "../core/ImageManager.h"
 #include "../core/Logger.h"
 #include "../core/ThreadPool.h"
+#include "../package/PackageIO.h"
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <random>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -159,18 +161,101 @@ bool AssetManager::Find(const std::string& key, AssetInfo& out) const {
 
 std::string AssetManager::ImportFileToUser(const std::string& path) {
     if (path.empty()) return {};
-    if (GuessKindFromPath(path) != AssetKind::Texture) {
+    // Accept raw images or existing .rvpaf
+    AssetKind gk = GuessKindFromPath(path);
+    if (gk != AssetKind::Texture && gk != AssetKind::Unknown) {
         Logger::Get().Error("AssetManager: ImportFileToUser rejects non-texture: " + path);
         return {};
     }
     std::string rel;
     try {
         std::string fname = fs::path(path).filename().string();
-        rel = UniqueUserRelPath(fname);
+        std::string stem = fs::path(path).stem().string();
+        // Always store as .rvpaf in user library
+        rel = UniqueUserRelPath(stem + ".rvpaf");
+        // Fix UniqueUserRelPath if it kept wrong ext
+        if (rel.size() < 6 || rel.substr(rel.size() - 6) != ".rvpaf") {
+            auto dot = rel.find_last_of('.');
+            if (dot != std::string::npos) rel = rel.substr(0, dot) + ".rvpaf";
+            else rel += ".rvpaf";
+        }
         fs::path dest = fs::u8path(AssetStore::UserRoot()) / fs::u8path(rel);
         fs::create_directories(dest.parent_path());
-        fs::copy_file(fs::u8path(path), dest, fs::copy_options::overwrite_existing);
-        AssetThumbCache::Get().EnsureThumbsOnDisk(dest.string(), true, true);
+
+        std::string ext = fs::path(path).extension().string();
+        for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+        if (ext == ".rvpaf") {
+            fs::copy_file(fs::u8path(path), dest, fs::copy_options::overwrite_existing);
+        } else {
+            // Build RVPAF from image
+            std::vector<uint8_t> px;
+            int w = 0, h = 0;
+            if (!ImageManager::LoadImageFromFile(path, px, w, h) || w <= 0 || h <= 0)
+                return {};
+            // Re-read original file bytes for image.png resource
+            std::vector<uint8_t> fileBytes;
+            {
+                std::ifstream in(fs::u8path(path), std::ios::binary);
+                if (in)
+                    fileBytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            }
+            // Thumbs
+            std::vector<uint8_t> lo, hi;
+            int lw = 0, lh = 0, hw = 0, hh = 0;
+            // Use simple downscale via thumb cache helper: write temp thumbs then read
+            AssetThumbCache::Get().EnsureThumbsFromRgba("tmp_import", w, h, px.data(), true);
+            // Encode thumbs as PNG via ImageManager
+            fs::path tmpDir = fs::u8path(AssetStore::UserRoot()).parent_path() / "temp";
+            fs::create_directories(tmpDir);
+            fs::path tLo = tmpDir / "import_t32.png";
+            fs::path tHi = tmpDir / "import_t128.png";
+            // Generate downscaled CPU and save
+            auto down = [](const uint8_t* src, int sw, int sh, int maxSide,
+                           std::vector<uint8_t>& dst, int& dw, int& dh) {
+                float scale = 1.f;
+                if (sw > maxSide || sh > maxSide)
+                    scale = (float)maxSide / (float)std::max(sw, sh);
+                dw = std::max(1, (int)(sw * scale + 0.5f));
+                dh = std::max(1, (int)(sh * scale + 0.5f));
+                dst.assign((size_t)dw * dh * 4, 0);
+                for (int y = 0; y < dh; ++y) {
+                    int sy = std::min(sh - 1, y * sh / dh);
+                    for (int x = 0; x < dw; ++x) {
+                        int sx = std::min(sw - 1, x * sw / dw);
+                        size_t di = ((size_t)y * dw + x) * 4;
+                        size_t si = ((size_t)sy * sw + sx) * 4;
+                        dst[di]=src[si]; dst[di+1]=src[si+1]; dst[di+2]=src[si+2]; dst[di+3]=src[si+3];
+                    }
+                }
+            };
+            down(px.data(), w, h, 32, lo, lw, lh);
+            down(px.data(), w, h, 128, hi, hw, hh);
+            ImageManager::SaveRGBA8ToFile(tLo.string(), lo.data(), lw, lh);
+            ImageManager::SaveRGBA8ToFile(tHi.string(), hi.data(), hw, hh);
+            std::vector<uint8_t> loPng, hiPng;
+            {
+                std::ifstream in(tLo, std::ios::binary);
+                if (in) loPng.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            }
+            {
+                std::ifstream in(tHi, std::ios::binary);
+                if (in) hiPng.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            }
+            if (fileBytes.empty()) {
+                // fallback: save rgba as png first
+                fs::path tmpImg = tmpDir / "import_img.png";
+                ImageManager::SaveRGBA8ToFile(tmpImg.string(), px.data(), w, h);
+                std::ifstream in(tmpImg, std::ios::binary);
+                if (in) fileBytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+            }
+            rvp::Package pkg;
+            rvp::BuildTexturePackage(pkg, stem, stem, fileBytes, loPng, hiPng, w, h);
+            std::string err;
+            if (!rvp::WritePackage(dest.string(), pkg, &err)) {
+                Logger::Get().Error("ImportFileToUser package: " + err);
+                return {};
+            }
+        }
     } catch (const std::exception& e) {
         Logger::Get().Error(std::string("AssetManager ImportFileToUser: ") + e.what());
         return {};
@@ -187,7 +272,7 @@ std::string AssetManager::ImportFileToUser(const std::string& path) {
     info.key = acq;
     info.category = AssetCategory::User;
     info.kind = AssetKind::Texture;
-    info.displayName = fs::path(rel).filename().string();
+    info.displayName = fs::path(rel).stem().string();
     info.sourcePath = AssetStore::ResolvePath(acq);
     int w = 0, h = 0;
     AssetStore::Get().GetDims(acq, w, h);

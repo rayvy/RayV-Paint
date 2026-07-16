@@ -1,4 +1,5 @@
 #include "KeymapManager.h"
+#include "ops/ActionCatalog.h"
 #include "ConfigManager.h"
 #include "Logger.h"
 #include <GLFW/glfw3.h>
@@ -39,32 +40,39 @@ const std::vector<std::pair<std::string, int>>& KeymapManager::GetKeyList() {
 }
 
 std::string KeymapManager::GetKeyName(int key) {
+    if (key == 0 || key == -1) return "None";
     for (const auto& pair : s_Keys) {
         if (pair.second == key) return pair.first;
     }
-    return "Unknown";
+    return "None";
 }
 
 KeyCombination KeyCombination::FromString(const std::string& str) {
     KeyCombination combo;
+    // Unbound sentinels (catalog + old "Unknown" display)
+    if (str.empty() || str == "None" || str == "—" || str == "-" || str == "Unknown" ||
+        str == "none" || str == "unbound") {
+        combo.key = 0;
+        combo.scancode = -1;
+        return combo;
+    }
+
     std::stringstream ss(str);
     std::string token;
     std::vector<std::string> tokens;
-    
+
     while (std::getline(ss, token, '+')) {
         tokens.push_back(token);
     }
 
     for (size_t i = 0; i < tokens.size(); ++i) {
         std::string t = tokens[i];
-        // Trim whitespace if any
         t.erase(std::remove_if(t.begin(), t.end(), ::isspace), t.end());
-        
+
         if (t == "Ctrl") combo.ctrl = true;
         else if (t == "Shift") combo.shift = true;
         else if (t == "Alt") combo.alt = true;
         else {
-            // Find key code
             for (const auto& pair : s_Keys) {
                 if (pair.first == t) {
                     combo.key = pair.second;
@@ -73,15 +81,22 @@ KeyCombination KeyCombination::FromString(const std::string& str) {
             }
         }
     }
+    if (combo.key == 0 && !combo.ctrl && !combo.shift && !combo.alt) {
+        // "Ctrl+" alone or garbage → unbound
+        combo.key = 0;
+    }
     return combo;
 }
 
 std::string KeyCombination::ToString() const {
+    if (IsUnbound()) return "None";
     std::string res;
     if (ctrl) res += "Ctrl+";
     if (shift) res += "Shift+";
     if (alt) res += "Alt+";
-    res += KeymapManager::GetKeyName(key);
+    std::string kn = KeymapManager::GetKeyName(key);
+    if (kn == "None" || kn.empty()) return "None";
+    res += kn;
     return res;
 }
 
@@ -91,76 +106,18 @@ KeymapManager& KeymapManager::Get() {
 }
 
 void KeymapManager::Initialize() {
-    // Default key combinations
-    m_Bindings["Undo"] = KeyCombination{ GLFW_KEY_Z, -1, true, false, false };
-    m_Bindings["Redo"] = KeyCombination{ GLFW_KEY_Y, -1, true, false, false };
-    m_Bindings["SaveProject"] = KeyCombination{ GLFW_KEY_S, -1, true, false, false };
-    m_Bindings["OpenProject"] = KeyCombination{ GLFW_KEY_O, -1, true, false, false };
-    m_Bindings["NewProject"] = KeyCombination{ GLFW_KEY_N, -1, true, false, false }; // Ctrl+N
-    m_Bindings["BrushTool"] = KeyCombination{ GLFW_KEY_B, -1, false, false, false };
-    m_Bindings["EraserTool"] = KeyCombination{ GLFW_KEY_E, -1, false, false, false };
-    // Reserved for UI brush picker popup (RMB also opens it). No default key binding.
-    m_Bindings["BrushPopup"] = KeyCombination{ -1, -1, false, false, false };
-    m_Bindings["PanTool"] = KeyCombination{ GLFW_KEY_H, -1, false, false, false };
-    m_Bindings["RotateTool"] = KeyCombination{ GLFW_KEY_R, -1, false, false, false };
-    m_Bindings["QuickExport"] = KeyCombination{ GLFW_KEY_E, -1, true, false, false };
-    m_Bindings["AdvancedExport"] = KeyCombination{ GLFW_KEY_E, -1, true, true, false };
-    m_Bindings["Copy"]  = KeyCombination{ GLFW_KEY_C, -1, true, false, false };
-    m_Bindings["Paste"] = KeyCombination{ GLFW_KEY_V, -1, true, false, false };
-    m_Bindings["PasteAsNewLayer"] = KeyCombination{ GLFW_KEY_V, -1, true, true, false }; // Ctrl+Shift+V
-    m_Bindings["CopyLayers"] = KeyCombination{ GLFW_KEY_C, -1, true, true, false }; // Ctrl+Shift+C
-    m_Bindings["TransformTool"] = KeyCombination{ GLFW_KEY_V, -1, false, false, false }; // Move tool
-    m_Bindings["FreeTransform"] = KeyCombination{ GLFW_KEY_T, -1, true, false, false };  // Ctrl+T
-    m_Bindings["RefreshCanvas"] = KeyCombination{ GLFW_KEY_F5, -1, false, false, false };
-    m_Bindings["PerspectiveWarp"] = KeyCombination{ GLFW_KEY_P, -1, true, true, false }; // Ctrl+Shift+P
-    m_Bindings["MeshWarp"] = KeyCombination{ GLFW_KEY_W, -1, true, true, false }; // Ctrl+Shift+W
-    m_Bindings["BlurTool"] = KeyCombination{ 0, -1, false, false, false };
-    // Stamp: unbound by default (toolbar); avoid clashing with Select-group S
-    m_Bindings["StampTool"] = KeyCombination{ 0, -1, false, false, false };
-    m_Bindings["ContentAwareFill"] = KeyCombination{ 0, -1, false, false, false };
-    m_Bindings["FillSecondary"] = KeyCombination{ GLFW_KEY_BACKSPACE, -1, false, false, false };
-    m_Bindings["DeleteContent"] = KeyCombination{ GLFW_KEY_DELETE, -1, false, false, false };
-
-    m_Bindings["BucketFillTool"] = KeyCombination{ GLFW_KEY_F, -1, false, false, false };
-    m_Bindings["GradientTool"] = KeyCombination{ GLFW_KEY_G, -1, false, false, false };
-    m_Bindings["PipetteTool"] = KeyCombination{ GLFW_KEY_I, -1, false, false, false };
-    m_Bindings["SmudgeTool"] = KeyCombination{ GLFW_KEY_Y, -1, false, false, false };
-
-    // Image / Selection operations
-    m_Bindings["SelectAll"]        = KeyCombination{ GLFW_KEY_A, -1, true, false, false };
-    m_Bindings["CropToSelection"]  = KeyCombination{ GLFW_KEY_X, -1, true, false, false }; // Ctrl+X = crop canvas to selection
-    m_Bindings["InvertSelection"]  = KeyCombination{ GLFW_KEY_I, -1, true, true,  false }; // Ctrl+Shift+I
-    m_Bindings["InvertColors"]     = KeyCombination{ GLFW_KEY_I, -1, true, false, false }; // Ctrl+I
-    m_Bindings["InvertAlpha"]      = KeyCombination{ GLFW_KEY_I, -1, true, false, true  }; // Ctrl+Alt+I
-    m_Bindings["AdjustHSV"]        = KeyCombination{ GLFW_KEY_U, -1, true, false, false }; // Ctrl+U
-    m_Bindings["AdjustCurves"]     = KeyCombination{ GLFW_KEY_M, -1, true, false, false }; // Ctrl+M
-    m_Bindings["AdjustBlur"]       = KeyCombination{ GLFW_KEY_B, -1, true, true,  false }; // Ctrl+Shift+B
-    m_Bindings["AdjustNoise"]      = KeyCombination{ -1, -1, false, false, false }; // unbound — set in Keybinds panel
-    m_Bindings["DuplicateLayer"]   = KeyCombination{ GLFW_KEY_J, -1, true, false, false }; // Ctrl+J like PS
-
-    // Tool groups: one key cycles between variants (repeat press)
-    m_Bindings["SelectToolGroup"] = KeyCombination{ GLFW_KEY_S, -1, false, false, false };
-    m_Bindings["WandToolGroup"] = KeyCombination{ GLFW_KEY_W, -1, false, false, false };
-    m_Bindings["LassoToolGroup"] = KeyCombination{ GLFW_KEY_L, -1, false, false, false };
-
-    // Per-variant entries (unbound; activated via group cycling or toolbar)
-    m_Bindings["RectSelectTool"] = KeyCombination{ 0, -1, false, false, false };
-    m_Bindings["EllipseSelectTool"] = KeyCombination{ 0, -1, false, false, false };
-    m_Bindings["LassoSelectTool"] = KeyCombination{ 0, -1, false, false, false };
-    m_Bindings["PolygonalLassoTool"] = KeyCombination{ 0, -1, false, false, false };
-    m_Bindings["MagicWandTool"] = KeyCombination{ 0, -1, false, false, false };
-    m_Bindings["SmartSelectTool"] = KeyCombination{ 0, -1, false, false, false };
-    m_Bindings["QuickSelectTool"] = KeyCombination{ 0, -1, false, false, false };
-
-    // Resolve their scancodes
+    // Single source of truth: ActionCatalog (not a hand-maintained parallel list).
+    m_Bindings.clear();
+    core::ops::ActionCatalog::ApplyDefaultsTo(m_Bindings);
     ResolveScancodes();
+    Logger::Get().Info("KeymapManager: loaded " + std::to_string(m_Bindings.size()) +
+                       " default actions from ActionCatalog");
 }
 
 void KeymapManager::ResolveScancodes() {
     for (auto& pair : m_Bindings) {
-        if (pair.second.key != 0) {
+        if (!pair.second.IsUnbound() && pair.second.key != 0) {
             pair.second.scancode = glfwGetKeyScancode(pair.second.key);
-            Logger::Get().Debug("Resolved scancode for " + pair.first + " (" + pair.second.ToString() + "): " + std::to_string(pair.second.scancode));
         } else {
             pair.second.scancode = -1;
         }
@@ -185,7 +142,10 @@ bool KeymapManager::Load(const std::string& path) {
         for (auto& el : data.items()) {
             std::string actionName = el.key();
             std::string comboStr = el.value().get<std::string>();
-            m_Bindings[actionName] = KeyCombination::FromString(comboStr);
+            // Only apply known catalog / existing bindings; ignore orphans silently.
+            if (m_Bindings.count(actionName) || core::ops::ActionCatalog::Find(actionName)) {
+                m_Bindings[actionName] = KeyCombination::FromString(comboStr);
+            }
         }
         ResolveScancodes();
         Logger::Get().Info("Loaded custom keymap configuration from " + filePath);
@@ -232,8 +192,8 @@ bool KeymapManager::ProcessKeyEvent(int key, int scancode, int action, int mods)
     bool matched = false;
     for (const auto& pair : m_Bindings) {
         const auto& combo = pair.second;
-        
-        // Match by layout-agnostic scancode if resolved, otherwise fallback to virtual key
+        if (combo.IsUnbound()) continue;
+
         bool keyMatches = false;
         if (combo.scancode != -1 && scancode != -1) {
             keyMatches = (combo.scancode == scancode);
@@ -256,18 +216,18 @@ bool KeymapManager::ProcessKeyEvent(int key, int scancode, int action, int mods)
 
 void KeymapManager::BindAction(const std::string& actionName, const KeyCombination& combo) {
     m_Bindings[actionName] = combo;
-    // Resolve new scancode immediately
-    if (combo.key != 0) {
+    if (!combo.IsUnbound() && combo.key != 0) {
         m_Bindings[actionName].scancode = glfwGetKeyScancode(combo.key);
     } else {
         m_Bindings[actionName].scancode = -1;
+        m_Bindings[actionName].key = 0;
     }
 }
 
 bool KeymapManager::ConsumeActionTrigger(const std::string& actionName) {
     auto it = m_TriggeredActions.find(actionName);
     if (it != m_TriggeredActions.end() && it->second) {
-        it->second = false; // Reset trigger
+        it->second = false;
         return true;
     }
     return false;
@@ -284,7 +244,20 @@ bool KeymapManager::IsActionActive(const std::string& actionName) const {
 std::string KeymapManager::GetActionShortcutString(const std::string& actionName) const {
     auto it = m_Bindings.find(actionName);
     if (it != m_Bindings.end()) {
+        // Prefer em-dash for UI readability; ToString uses "None" for JSON.
+        if (it->second.IsUnbound()) {
+            // Group members: show parent group shortcut as hint
+            if (const auto* def = core::ops::ActionCatalog::Find(actionName)) {
+                if (def->role == core::ops::ActionRole::GroupMember && def->groupId) {
+                    auto git = m_Bindings.find(def->groupId);
+                    if (git != m_Bindings.end() && !git->second.IsUnbound()) {
+                        return "via " + git->second.ToString();
+                    }
+                }
+            }
+            return "—";
+        }
         return it->second.ToString();
     }
-    return "None";
+    return "—";
 }

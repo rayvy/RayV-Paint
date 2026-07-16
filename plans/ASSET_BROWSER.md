@@ -1,6 +1,7 @@
 # Asset Browser
 
-**Status:** Core + UI + Fill + project packing + SmartObject foundation implemented (2026-07).
+**Status:** Core + UI + Fill + packing + SO foundation + RVPAF/RVPCF/RVPBF packages.  
+**Canonical docs:** `Documentation.MD` (terminology + file standards).
 
 ## Categories (ownership, not file types)
 

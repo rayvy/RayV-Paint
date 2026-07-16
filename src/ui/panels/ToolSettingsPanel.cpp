@@ -40,10 +40,12 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
     (void)preAvail;
     (void)tsHorizontal;
 
+    // Exact text entry via kit (double-click / Ctrl+click). Do not use raw ImGui::SliderFloat.
     auto MiniSlider = [&](const char* id, float* v, float mn, float mx, const char* tip, float width = 110.f) {
         ImGui::SetNextItemWidth(width);
-        ImGui::SliderFloat(id, v, mn, mx, "%.2f");
-        if (ImGui::IsItemHovered()) Ui::Tooltip(tip);
+        float def = (mn + mx) * 0.5f;
+        if (Ui::SmartSliderFloat(id, v, mn, mx, def, 0.f, "%.2f") && tip) { /* value changed */ }
+        if (ImGui::IsItemHovered() && tip) Ui::Tooltip(tip);
     };
 
     bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser ||

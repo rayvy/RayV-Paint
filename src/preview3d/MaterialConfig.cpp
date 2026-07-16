@@ -1,9 +1,11 @@
 #include "MaterialConfig.h"
+#include "../package/PackageIO.h"
 #include "../core/Logger.h"
 #include "../core/PathUtil.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -398,13 +400,22 @@ int ShaderPresetLibrary::LoadDirectory(const std::string& dirUtf8) {
         for (auto& ent : fs::directory_iterator(root)) {
             if (!ent.is_regular_file()) continue;
             auto ext = ent.path().extension().wstring();
-            if (ext != L".json" && ext != L".JSON") continue;
-            std::ifstream in(ent.path());
-            if (!in) continue;
-            std::string content((std::istreambuf_iterator<char>(in)), {});
+            for (auto& c : ext) c = (wchar_t)towlower(c);
+            if (ext != L".rvpcf") continue;
+            rvp::Package pkg;
+            if (!rvp::ReadPackage(PathUtil::WideToUtf8(ent.path().wstring()), pkg, nullptr) ||
+                pkg.format != rvp::PackageFormat::RVPCF)
+                continue;
+            std::string content = pkg.GetText(rvp::paths::kConfigJson);
+            if (content.empty()) continue;
+            // Prefer kind=shader_preset when declared
+            try {
+                auto man = nlohmann::json::parse(pkg.manifestJson);
+                std::string kind = man.value("kind", "shader_preset");
+                if (kind != "shader_preset") continue;
+            } catch (...) {}
             MaterialConfig m;
             if (!FromJson(content, m)) continue;
-            // replace by id
             bool replaced = false;
             for (auto& p : m_Presets) {
                 if (p.id == m.id) { p = m; replaced = true; break; }
@@ -413,7 +424,7 @@ int ShaderPresetLibrary::LoadDirectory(const std::string& dirUtf8) {
             ++n;
         }
     } catch (...) {}
-    if (n) Logger::Get().Info("ShaderPresetLibrary: loaded " + std::to_string(n) + " from " + dirUtf8);
+    if (n) Logger::Get().Info("ShaderPresetLibrary: loaded " + std::to_string(n) + " RVPCF from " + dirUtf8);
     return n;
 }
 
@@ -439,11 +450,17 @@ bool ShaderPresetLibrary::SavePreset(const MaterialConfig& cfg, const std::strin
     try {
         auto dir = PathUtil::FromUtf8(dirUtf8);
         fs::create_directories(dir);
-        auto path = dir / (cfg.id + ".json");
-        std::ofstream out(path);
-        if (!out) return false;
-        out << ToJson(cfg);
-        // update memory
+        rvp::Package pkg;
+        if (!rvp::BuildConfigPackage(pkg, rvp::ConfigKind::ShaderPreset, cfg.id,
+                                     cfg.displayName.empty() ? cfg.id : cfg.displayName,
+                                     ToJson(cfg)))
+            return false;
+        auto path = dir / (cfg.id + ".rvpcf");
+        std::string err;
+        if (!rvp::WritePackage(PathUtil::WideToUtf8(path.wstring()), pkg, &err)) {
+            Logger::Get().Error("ShaderPresetLibrary: save failed " + err);
+            return false;
+        }
         bool replaced = false;
         for (auto& p : m_Presets) {
             if (p.id == cfg.id) { p = cfg; replaced = true; break; }

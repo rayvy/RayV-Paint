@@ -1,19 +1,10 @@
-# Core (built-in) assets
+# Core library (`{exe}/assets/`)
 
-Shipped next to the app as `{exe}/assets/`.
+See **Documentation.MD** (repo root) for full terminology.
 
-## Layout
+| Path | Format | Role |
+|------|--------|------|
+| `textures/*.rvpaf` | RVPAF | Built-in textures |
+| `configs/*.rvpcf` | RVPCF | Export templates etc. |
 
-```
-assets/
-  textures/
-    *.png                 # full assets
-    *.thumbnail.png       # 32×32 browser grid
-    *.thumbnail_h.png     # 128×128 hover preview
-```
-
-## Keys
-
-`core:textures/checker.png` etc.
-
-Read-only — user imports go to User library (`Documents/RayVPaint/assets/`).
+Read-only. User content lives under `Documents/RayVPaint/`.

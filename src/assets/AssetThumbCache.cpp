@@ -3,9 +3,12 @@
 #include "../core/ImageManager.h"
 #include "../core/Logger.h"
 #include "../core/ThreadPool.h"
+#include "../package/PackageIO.h"
+#include <stb_image.h>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 
 namespace fs = std::filesystem;
 
@@ -178,6 +181,35 @@ ID3D11ShaderResourceView* AssetThumbCache::GetSrv(ID3D11Device* device, const st
             path = a->sourcePath;
     }
 
+    auto tryPackageThumb = [&](bool hi) -> bool {
+        if (path.empty()) return false;
+        std::string ext;
+        try {
+            ext = fs::path(path).extension().string();
+            for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+        } catch (...) {}
+        if (ext != ".rvpaf") return false;
+        rvp::Package pkg;
+        if (!rvp::ReadPackage(path, pkg, nullptr)) return false;
+        const char* resName = hi ? rvp::paths::kThumbHPng : rvp::paths::kThumbPng;
+        const std::vector<uint8_t>* blob = pkg.Get(resName);
+        if (!blob && hi) blob = pkg.Get(rvp::paths::kThumbPng);
+        if (!blob || blob->empty()) return false;
+        int w = 0, h = 0, n = 0;
+        stbi_uc* img = stbi_load_from_memory(blob->data(), (int)blob->size(), &w, &h, &n, 4);
+        if (!img || w <= 0 || h <= 0) {
+            if (img) stbi_image_free(img);
+            return false;
+        }
+        std::vector<uint8_t> px(img, img + (size_t)w * h * 4);
+        stbi_image_free(img);
+        std::lock_guard<std::mutex> lock(m_Mu);
+        auto& e = m_Entries[key];
+        CpuThumb& cpu = hi ? e.hi : e.lo;
+        cpu.w = w; cpu.h = h; cpu.rgba = std::move(px);
+        return true;
+    };
+
     auto trySidecar = [&](bool hi) -> bool {
         if (path.empty()) return false;
         std::string tp = ThumbPathFor(path, hi);
@@ -192,7 +224,8 @@ ID3D11ShaderResourceView* AssetThumbCache::GetSrv(ID3D11Device* device, const st
         return true;
     };
 
-    if (trySidecar(highQuality) || trySidecar(false)) {
+    if (tryPackageThumb(highQuality) || tryPackageThumb(false) ||
+        trySidecar(highQuality) || trySidecar(false)) {
         return GetSrv(device, key, highQuality);
     }
 

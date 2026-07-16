@@ -68,6 +68,7 @@ namespace UI {
         bool showToolbar = true;
         bool showColors = true;
         bool showToolSettings = true;
+        bool showContextDebug = false; // AppContext live dump (footer Context button)
         bool showRulers = true;
         bool showPreview3D = false;    // optional detachable 3D viewport (N-panel)
         bool showModSetup = false;     // INI/dump/semantics launcher (separate from Properties)

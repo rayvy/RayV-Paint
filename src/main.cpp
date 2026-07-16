@@ -36,6 +36,8 @@
 #include "Canvas.h"
 #include "core/MemoryStats.h"
 #include "core/KeymapManager.h"
+#include "core/ops/AppContext.h"
+#include "core/ops/ActionCatalog.h"
 #include "core/ClipboardHelper.h"
 #include "core/BrushLibrary.h"
 #include "core/PathUtil.h"
@@ -708,7 +710,7 @@ int main(int argc, char* argv[]) {
     else if (cfgLevel == "error") Logger::Get().SetMinLevel(LogLevel::LogLevel_Error);
     else Logger::Get().SetMinLevel(LogLevel::LogLevel_Info);
 
-    // Brush presets: builtins instantly; custom *.rvbrush scan on background thread
+    // Brush presets: builtins instantly; custom *.rvpbf scan on background thread
     BrushLibrary::Get().LoadBuiltins();
     BrushLibrary::Get().StartAsyncDiskLoad();
     if (testBrushes) {
@@ -1147,6 +1149,7 @@ int main(int argc, char* argv[]) {
             }
         }
         ImGui::NewFrame();
+        core::ops::AppContext::BeginFrame();
         g_IsViewportHovered = false;
         g_IsLayersHovered = false;
 
@@ -1159,42 +1162,64 @@ int main(int argc, char* argv[]) {
         // Render all UI Panels and Modals (Toolbar, Properties, Layers, Brush settings, Console logs, Colors)
         UI::RenderAll(uiState, ActiveCanvas(), g_Brush, g_ActiveTool, g_pd3dDevice, g_pd3dDeviceContext, window);
 
-        // Keyboard Shortcuts Handler (Layout-Independent via KeymapManager)
-        ImGuiIO& io = ImGui::GetIO();
-        if (!io.WantTextInput) {
-            if (KeymapManager::Get().ConsumeActionTrigger("Undo")) {
+        // AppContext after UI so File Explorer / modals / slider text capture are visible.
+        {
+            const char* toolLabel = "Tool";
+            switch (g_ActiveTool) {
+                case ActiveTool::Brush: toolLabel = "Brush"; break;
+                case ActiveTool::Eraser: toolLabel = "Eraser"; break;
+                case ActiveTool::Pan: toolLabel = "Hand"; break;
+                case ActiveTool::Smudge: toolLabel = "Smudge"; break;
+                case ActiveTool::BlurTool: toolLabel = "Blur"; break;
+                case ActiveTool::Stamp: toolLabel = "Stamp"; break;
+                default: toolLabel = "Other"; break;
+            }
+            core::ops::AppContext::UpdateFromFrame(
+                ImGui::GetIO(), uiState,
+                g_IsViewportHovered, g_IsLayersHovered,
+                ActiveCanvas().GetWidth() > 0 && ActiveCanvas().GetHeight() > 0,
+                ActiveCanvas().GetWidth(), ActiveCanvas().GetHeight(),
+                ActiveCanvas().GetActiveLayerIndex(),
+                ActiveCanvas().HasSelection(),
+                toolLabel);
+        }
+
+        // Hotkeys: ALWAYS TryConsume (drains triggers). AppContext poll blocks execute
+        // while text / File Explorer / settings / modals own input — do NOT gate only on WantTextInput.
+        {
+            if (core::ops::TryConsumeAction("Undo")) {
                 ActiveCanvas().Undo();
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("Redo")) {
+            if (core::ops::TryConsumeAction("Redo")) {
                 ActiveCanvas().Redo();
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("SaveProject")) {
+            if (core::ops::TryConsumeAction("SaveProject")) {
                 UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::SaveProject);
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("OpenProject")) {
+            if (core::ops::TryConsumeAction("OpenProject")) {
                 UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::OpenProject);
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("NewProject")) {
+            if (core::ops::TryConsumeAction("NewProject")) {
                 uiState.openNewProjectWizard = true;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("BrushTool")) {
+            if (core::ops::TryConsumeAction("BrushTool")) {
                 g_ActiveTool = ActiveTool::Brush;
                 g_Brush.erase = false;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("EraserTool")) {
+            if (core::ops::TryConsumeAction("EraserTool")) {
                 g_ActiveTool = ActiveTool::Eraser;
                 g_Brush.erase = true;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("BucketFillTool")) {
+            if (core::ops::TryConsumeAction("BucketFillTool")) {
                 g_ActiveTool = ActiveTool::BucketFill;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("GradientTool")) {
+            if (core::ops::TryConsumeAction("GradientTool")) {
                 g_ActiveTool = ActiveTool::Gradient;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("PipetteTool")) {
+            if (core::ops::TryConsumeAction("PipetteTool")) {
                 g_ActiveTool = ActiveTool::Pipette;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("SelectToolGroup")) {
+            if (core::ops::TryConsumeAction("SelectToolGroup")) {
                 if (UI::IsSelectTool(g_ActiveTool)) {
                     g_ActiveTool = UI::CycleSelectTool(g_ActiveTool);
                 } else {
@@ -1202,7 +1227,7 @@ int main(int argc, char* argv[]) {
                 }
                 g_LastSelectTool = g_ActiveTool;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("LassoToolGroup")) {
+            if (core::ops::TryConsumeAction("LassoToolGroup")) {
                 if (UI::IsLassoTool(g_ActiveTool)) {
                     g_ActiveTool = UI::CycleLassoTool(g_ActiveTool);
                 } else {
@@ -1210,7 +1235,7 @@ int main(int argc, char* argv[]) {
                 }
                 g_LastLassoTool = g_ActiveTool;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("WandToolGroup")) {
+            if (core::ops::TryConsumeAction("WandToolGroup")) {
                 if (UI::IsWandTool(g_ActiveTool)) {
                     g_ActiveTool = UI::CycleWandTool(g_ActiveTool);
                 } else {
@@ -1218,13 +1243,21 @@ int main(int argc, char* argv[]) {
                 }
                 g_LastWandTool = g_ActiveTool;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("PanTool")) {
+            // Direct binds for group members (optional; default unbound → "via L/S/W")
+            if (core::ops::TryConsumeAction("RectSelectTool"))    g_ActiveTool = ActiveTool::RectSelect;
+            if (core::ops::TryConsumeAction("EllipseSelectTool")) g_ActiveTool = ActiveTool::EllipseSelect;
+            if (core::ops::TryConsumeAction("LassoSelectTool"))   { g_ActiveTool = ActiveTool::LassoSelect; g_LastLassoTool = g_ActiveTool; }
+            if (core::ops::TryConsumeAction("PolygonalLassoTool")){ g_ActiveTool = ActiveTool::PolygonalLasso; g_LastLassoTool = g_ActiveTool; }
+            if (core::ops::TryConsumeAction("MagicWandTool"))     { g_ActiveTool = ActiveTool::MagicWand; g_LastWandTool = g_ActiveTool; }
+            if (core::ops::TryConsumeAction("SmartSelectTool"))   { g_ActiveTool = ActiveTool::SmartSelect; g_LastWandTool = g_ActiveTool; }
+            if (core::ops::TryConsumeAction("QuickSelectTool"))   { g_ActiveTool = ActiveTool::QuickSelect; g_LastWandTool = g_ActiveTool; }
+            if (core::ops::TryConsumeAction("PanTool")) {
                 g_ActiveTool = ActiveTool::Pan;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("RotateTool")) {
+            if (core::ops::TryConsumeAction("RotateTool")) {
                 g_ActiveTool = ActiveTool::Pan;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("TransformTool")) {
+            if (core::ops::TryConsumeAction("TransformTool")) {
                 // V = Move tool (pixels only)
                 g_FreeTransformMode = false;
                 g_ActiveTool = ActiveTool::MovePixels;
@@ -1240,43 +1273,43 @@ int main(int argc, char* argv[]) {
                 if (!ActiveCanvas().IsMovingPixels())
                     ActiveCanvas().StartMovePixels(g_pd3dDevice);
             };
-            if (KeymapManager::Get().ConsumeActionTrigger("FreeTransform") || uiState.requestFreeTransform) {
+            if (core::ops::TryConsumeAction("FreeTransform") || uiState.requestFreeTransform) {
                 uiState.requestFreeTransform = false;
                 enterFreeTransform();
             }
             uiState.freeTransformActive = g_FreeTransformMode;
-            if (KeymapManager::Get().ConsumeActionTrigger("SmudgeTool")) {
+            if (core::ops::TryConsumeAction("SmudgeTool")) {
                 g_ActiveTool = ActiveTool::Smudge;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("BlurTool")) {
+            if (core::ops::TryConsumeAction("BlurTool")) {
                 g_ActiveTool = ActiveTool::BlurTool;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("StampTool")) {
+            if (core::ops::TryConsumeAction("StampTool")) {
                 g_ActiveTool = ActiveTool::Stamp;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("ContentAwareFill") || uiState.requestContentAwareFill) {
+            if (core::ops::TryConsumeAction("ContentAwareFill") || uiState.requestContentAwareFill) {
                 uiState.requestContentAwareFill = false;
                 ActiveCanvas().ApplyContentAwareFill(g_pd3dDevice);
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("RefreshCanvas")) {
+            if (core::ops::TryConsumeAction("RefreshCanvas")) {
                 ActiveCanvas().RefreshCanvas(g_pd3dDevice);
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("PerspectiveWarp") || uiState.requestPerspectiveWarp) {
+            if (core::ops::TryConsumeAction("PerspectiveWarp") || uiState.requestPerspectiveWarp) {
                 uiState.requestPerspectiveWarp = false;
                 g_ToolBeforeWarp = g_ActiveTool;
                 ActiveCanvas().StartWarpOperator(g_pd3dDevice, Canvas::WarpOperatorMode::Perspective);
                 g_WarpDragIndex = -1;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("MeshWarp") || uiState.requestMeshWarp) {
+            if (core::ops::TryConsumeAction("MeshWarp") || uiState.requestMeshWarp) {
                 uiState.requestMeshWarp = false;
                 g_ToolBeforeWarp = g_ActiveTool;
                 ActiveCanvas().StartWarpOperator(g_pd3dDevice, Canvas::WarpOperatorMode::Mesh);
                 g_WarpDragIndex = -1;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("SelectAll")) {
+            if (core::ops::TryConsumeAction("SelectAll")) {
                 ActiveCanvas().SelectAll();
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("DuplicateLayer")) {
+            if (core::ops::TryConsumeAction("DuplicateLayer")) {
                 if (!uiState.selectedLayers.empty()) {
                     ActiveCanvas().DuplicateLayers(g_pd3dDevice, uiState.selectedLayers);
                     // Refresh selection to new clones is best-effort: leave active as set by core
@@ -1289,34 +1322,34 @@ int main(int argc, char* argv[]) {
                     if (neu >= 0) uiState.selectedLayers.push_back(neu);
                 }
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("CropToSelection")) {
+            if (core::ops::TryConsumeAction("CropToSelection")) {
                 if (ActiveCanvas().HasSelection()) {
                     ActiveCanvas().CropCanvasToSelection(g_pd3dDevice);
                 }
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("InvertSelection")) {
+            if (core::ops::TryConsumeAction("InvertSelection")) {
                 ActiveCanvas().InvertSelection();
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("InvertColors")) {
+            if (core::ops::TryConsumeAction("InvertColors")) {
                 ActiveCanvas().InvertColors();
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("InvertAlpha")) {
+            if (core::ops::TryConsumeAction("InvertAlpha")) {
                 ActiveCanvas().InvertAlpha();
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("AdjustHSV")) {
+            if (core::ops::TryConsumeAction("AdjustHSV")) {
                 uiState.showHSVModal = true;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("AdjustCurves")) {
+            if (core::ops::TryConsumeAction("AdjustCurves")) {
                 uiState.showCurvesModal = true;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("AdjustBlur")) {
+            if (core::ops::TryConsumeAction("AdjustBlur")) {
                 uiState.showBlurModal = true;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("AdjustNoise")) {
+            if (core::ops::TryConsumeAction("AdjustNoise")) {
                 uiState.showNoiseModal = true;
             }
             // Ctrl+Shift+E: Advanced → Batch Export folder FE; Simple → Advanced Export FE
-            if (KeymapManager::Get().ConsumeActionTrigger("AdvancedExport")) {
+            if (core::ops::TryConsumeAction("AdvancedExport")) {
                 const bool advanced =
                     ActiveCanvas().GetProjectType() != Canvas::ProjectType::Simple;
                 if (advanced)
@@ -1325,7 +1358,7 @@ int main(int argc, char* argv[]) {
                     UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::AdvancedExport);
             }
 
-            if (KeymapManager::Get().ConsumeActionTrigger("QuickExport") || uiState.openQuickExportTrigger) {
+            if (core::ops::TryConsumeAction("QuickExport") || uiState.openQuickExportTrigger) {
                 uiState.openQuickExportTrigger = false;
                 const bool advanced =
                     ActiveCanvas().GetProjectType() != Canvas::ProjectType::Simple;
@@ -1349,23 +1382,23 @@ int main(int argc, char* argv[]) {
                             (used.empty() ? ActiveCanvas().GetExportPath() : used));
                 }
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("AdvancedExport")) {
+            if (core::ops::TryConsumeAction("AdvancedExport")) {
                 uiState.openExportAdvancedModal = true;
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("FillSecondary")) {
+            if (core::ops::TryConsumeAction("FillSecondary")) {
                 if (ActiveCanvas().HasSelection() || ActiveCanvas().GetActiveLayerIndex() >= 0)
                     ActiveCanvas().FillSelection(g_SecondaryColor);
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("DeleteContent")) {
+            if (core::ops::TryConsumeAction("DeleteContent")) {
                 ActiveCanvas().DeleteSelectionContent();
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("CopyLayers")) {
+            if (core::ops::TryConsumeAction("CopyLayers")) {
                 std::vector<int> idxs = uiState.selectedLayers;
                 if (idxs.empty() && ActiveCanvas().GetActiveLayerIndex() >= 0)
                     idxs.push_back(ActiveCanvas().GetActiveLayerIndex());
                 ActiveCanvas().CopyLayersToClipboard(idxs);
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("Copy")) {
+            if (core::ops::TryConsumeAction("Copy")) {
                 // Selection or active layer content → system + internal content clipboard
                 if (!ActiveCanvas().CopyContentToClipboard()) {
                     // Fallback: merged composite (legacy)
@@ -1373,11 +1406,11 @@ int main(int argc, char* argv[]) {
                     ClipboardHelper::CopyImageToClipboard(composite, ActiveCanvas().GetWidth(), ActiveCanvas().GetHeight());
                 }
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("PasteAsNewLayer")) {
+            if (core::ops::TryConsumeAction("PasteAsNewLayer")) {
                 if (!ActiveCanvas().PasteContentAsNewLayer(g_pd3dDevice, "Pasted Layer"))
                     Logger::Get().Warn("PasteAsNewLayer: no image on clipboard");
             }
-            if (KeymapManager::Get().ConsumeActionTrigger("Paste")) {
+            if (core::ops::TryConsumeAction("Paste")) {
                 // External image (Chrome/Blender/PS PNG) takes priority over internal
                 // layer/content clipboard when the system clipboard was overwritten.
                 const bool externalImage =
@@ -1401,7 +1434,7 @@ int main(int argc, char* argv[]) {
                         Logger::Get().Warn("Paste: clipboard has no pasteable image");
                 }
             }
-        }
+        } // end hotkey dispatch (context-gated via TryConsumeAction)
 
         // Background Auto-Save trigger (disabled during benchmark — I/O noise)
         static bool s_IsAutoSaving = false;
@@ -1498,6 +1531,9 @@ int main(int argc, char* argv[]) {
             // Check if cursor is within active canvas boundary
             bool isInsideCanvas = (canvasX >= 0.0f && canvasX < (float)ActiveCanvas().GetWidth() &&
                                    canvasY >= 0.0f && canvasY < (float)ActiveCanvas().GetHeight());
+
+            // File Explorer / settings / blocking modals own the stage — no canvas paint or marquee.
+            const bool canvasInputBlocked = core::ops::AppContext::Get().BlocksCanvasInteraction();
 
             // Smudge is NOT brush-like: must not paint with brush.color / accent color.
             // Stamp is brush-like for size/hardness, but Alt = set clone source (not pipette).
@@ -1946,7 +1982,7 @@ int main(int argc, char* argv[]) {
                 return b;
             };
 
-            if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging
+            if (!canvasInputBlocked && isHovered && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging
                 && isBrushLikeTool && !isEyedropperMode && !UI::IsFillPipetteArmed()
                 && !(ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt)
                 && !(isStampTool && ImGui::GetIO().KeyAlt)) {
@@ -2120,17 +2156,19 @@ int main(int argc, char* argv[]) {
                 g_FreeTransformMode = false;
             }
 
-            // Keyboard: Ctrl+D = Deselect (safe with empty selection — no null UpdateSubresource)
-            if ((ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) &&
-                !ImGui::GetIO().WantTextInput && !ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyShift) {
+            // Keyboard: Ctrl+D = Deselect — respect AppContext (not only WantTextInput)
+            if (!core::ops::AppContext::Get().blocksDocumentOps &&
+                (ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl)) &&
+                !ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyShift) {
                 if (ImGui::IsKeyPressed(ImGuiKey_D)) {
                     ActiveCanvas().ClearSelection();
                     ActiveCanvas().UpdateSelectionMaskTexture(g_pd3dDevice);
                 }
             }
 
-            // Keyboard shortcut X for swapping primary/secondary colors (not Ctrl+X = crop)
-            if (ImGui::IsKeyPressed(ImGuiKey_X) && !ImGui::GetIO().WantTextInput &&
+            // X = swap primary/secondary — blocked while FE / text / modals own input
+            if (!core::ops::AppContext::Get().blocksDocumentOps &&
+                ImGui::IsKeyPressed(ImGuiKey_X) &&
                 !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt) {
                 std::swap(g_Brush.color[0], g_SecondaryColor[0]);
                 std::swap(g_Brush.color[1], g_SecondaryColor[1]);
@@ -2157,7 +2195,7 @@ int main(int argc, char* argv[]) {
                                         g_ActiveTool == ActiveTool::LassoSelect ||
                                         g_ActiveTool == ActiveTool::SmartSelect);
 
-            if (isHovered && !isPanning && !g_IsCtrlAltRmbDragging) {
+            if (!canvasInputBlocked && isHovered && !isPanning && !g_IsCtrlAltRmbDragging) {
                 // Magic Wand (click sets sticky seed + selection; not a drag tool)
                 if (g_ActiveTool == ActiveTool::MagicWand) {
                     if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && isInsideCanvas) {

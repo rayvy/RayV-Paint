@@ -51,11 +51,18 @@ void AssetLibraryIndex::ScanDirectory(AssetCategory cat, const std::string& root
             std::string ext = p.extension().string();
             for (char& c : ext) c = (char)std::tolower((unsigned char)c);
             AssetKind kind = GuessKindFromPath(p.string());
-            // Index textures (and template hooks if present)
+            // Index package formats + raw textures (import staging)
             if (kind != AssetKind::Texture && kind != AssetKind::ExportTemplate &&
-                kind != AssetKind::Preview3dTemplate && kind != AssetKind::BrushTip &&
+                kind != AssetKind::ShaderPreset && kind != AssetKind::Brush &&
                 kind != AssetKind::SmartSource)
                 continue;
+            // Prefer packages over raw PNG sidecars in Core: skip raw if .rvpaf sibling exists
+            if (IsTextureExtension(ext)) {
+                fs::path rvpaf = p;
+                rvpaf.replace_extension(".rvpaf");
+                if (fs::exists(rvpaf, ec))
+                    continue;
+            }
 
             std::error_code rec;
             fs::path rel = fs::relative(p, fs::u8path(root), rec);

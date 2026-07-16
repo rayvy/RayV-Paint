@@ -1,6 +1,7 @@
 #pragma once
 // Asset Browser — ownership categories, kinds, and shared texture identity.
 // Raster layer pixels are NOT assets until explicitly imported/converted.
+// Package formats: see Documentation.MD (RVPAF / RVPCF / RVPBF).
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -13,16 +14,16 @@ enum class AssetCategory : uint8_t {
     BuiltIn  = 0, // Core — {exe}/assets/...
     User     = 1, // User library — Documents/RayVPaint/assets/...
     Project  = 2, // Session + packed into .rayp
-    External = 3  // Absolute path outside libraries (migration / one-shot)
+    External = 3  // Absolute path outside libraries (one-shot import)
 };
 
 // Consumer type filter. Fill accepts Texture only.
 enum class AssetKind : uint8_t {
-    Texture = 0,
+    Texture = 0,       // .rvpaf (texture) or raw image during import
     SmartSource,
-    BrushTip,
-    ExportTemplate,      // .rayexpt — hook only
-    Preview3dTemplate,   // .ray3dt — hook only
+    Brush,             // .rvpbf
+    ExportTemplate,    // .rvpcf kind=export_template
+    ShaderPreset,      // .rvpcf kind=shader_preset
     Unknown
 };
 
@@ -62,14 +63,11 @@ struct TextureAsset {
     int w = 0;
     int h = 0;
     std::shared_ptr<const TexturePayload> payload; // null until Ready
-    // Legacy alias for callers that still read .rgba directly after Get()
-    // Prefer payload / TryGetPayload.
-    std::vector<uint8_t> rgba;
+    std::vector<uint8_t> rgba; // legacy alias
     int refCount = 0;
     AssetLoadState state = AssetLoadState::Missing;
-    // Original file bytes for project packing (optional; empty → pack from rgba PNG).
-    std::vector<uint8_t> fileBytes;
-    std::string mime; // e.g. "image/png"
+    std::vector<uint8_t> fileBytes; // original package or image bytes for packing
+    std::string mime; // e.g. "image/png" or "application/rvpaf"
 };
 
 struct AssetFilter {
@@ -78,7 +76,7 @@ struct AssetFilter {
     bool includeUser = true;
     bool includeProject = true;
     bool includeExternal = false;
-    std::string search; // case-insensitive substring of displayName/key
+    std::string search;
 };
 
 struct AssetInfo {
@@ -104,11 +102,11 @@ inline const char* CategoryDisplayName(AssetCategory c) {
 
 inline const char* KindName(AssetKind k) {
     switch (k) {
-    case AssetKind::Texture:           return "texture";
-    case AssetKind::SmartSource:       return "smart_source";
-    case AssetKind::BrushTip:          return "brush_tip";
-    case AssetKind::ExportTemplate:    return "export_template";
-    case AssetKind::Preview3dTemplate: return "preview3d_template";
+    case AssetKind::Texture:        return "texture";
+    case AssetKind::SmartSource:    return "smart_source";
+    case AssetKind::Brush:          return "brush";
+    case AssetKind::ExportTemplate: return "export_template";
+    case AssetKind::ShaderPreset:   return "shader_preset";
     default: return "unknown";
     }
 }
@@ -116,20 +114,20 @@ inline const char* KindName(AssetKind k) {
 inline AssetKind KindFromName(const std::string& s) {
     if (s == "texture") return AssetKind::Texture;
     if (s == "smart_source") return AssetKind::SmartSource;
-    if (s == "brush_tip") return AssetKind::BrushTip;
+    if (s == "brush" || s == "brush_tip") return AssetKind::Brush;
     if (s == "export_template") return AssetKind::ExportTemplate;
-    if (s == "preview3d_template") return AssetKind::Preview3dTemplate;
+    if (s == "shader_preset" || s == "preview3d_template") return AssetKind::ShaderPreset;
     return AssetKind::Unknown;
 }
 
-// Key helpers
 bool ParseKey(const std::string& key, AssetCategory& outCat, std::string& outRest);
 std::string MakeKey(AssetCategory cat, const std::string& rest);
 bool IsTextureExtension(const std::string& extLower);
+bool IsPackageExtension(const std::string& extLower);
 AssetKind GuessKindFromPath(const std::string& pathOrName);
 
-// Sidecar thumb paths next to asset file:
-//   asset.ext  →  asset.thumbnail.png (32) / asset.thumbnail_h.png (128)
+// Sidecar thumbs for raw images (legacy import only).
+// RVPAF packages embed thumbnail.png / thumbnail_h.png inside the package.
 std::string ThumbPathFor(const std::string& assetPath, bool highQuality);
 
 } // namespace assets

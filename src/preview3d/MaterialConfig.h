@@ -151,7 +151,7 @@ public:
     static ShaderPresetLibrary& Get();
 
     void LoadBuiltins();
-    // Load *.json from directory (user or install presets/)
+    // Load *.rvpcf (shader_preset) from directory
     int LoadDirectory(const std::string& dirUtf8);
 
     const std::vector<MaterialConfig>& All() const { return m_Presets; }
@@ -160,6 +160,7 @@ public:
     int IndexOf(const std::string& id) const;
     const MaterialConfig& At(int index) const;
 
+    // Save as .rvpcf package (shader_preset)
     bool SavePreset(const MaterialConfig& cfg, const std::string& dirUtf8);
     std::string ToJson(const MaterialConfig& cfg) const;
     bool FromJson(const std::string& json, MaterialConfig& out) const;

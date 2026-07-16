@@ -3,12 +3,15 @@
 #include "../core/ImageManager.h"
 #include "../core/Logger.h"
 #include "../core/ThreadPool.h"
+#include "../package/PackageIO.h"
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <stb_image.h>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -119,14 +122,71 @@ void AssetStore::CommitPayload(TextureAsset& asset, int w, int h, std::vector<ui
     asset.state = AssetLoadState::Ready;
 }
 
+static bool DecodeImageMemory(const uint8_t* data, size_t size, std::vector<uint8_t>& px, int& tw, int& th) {
+    tw = th = 0;
+    px.clear();
+    if (!data || size == 0) return false;
+    int w = 0, h = 0, n = 0;
+    stbi_uc* img = stbi_load_from_memory(data, (int)size, &w, &h, &n, 4);
+    if (!img || w <= 0 || h <= 0) {
+        if (img) stbi_image_free(img);
+        return false;
+    }
+    px.assign(img, img + (size_t)w * h * 4);
+    stbi_image_free(img);
+    tw = w;
+    th = h;
+    return true;
+}
+
+// Decode texture from disk path: raw image OR .rvpaf package (thread-safe, no store).
+static bool DecodeTextureFromPath(const std::string& filepath, std::vector<uint8_t>& px, int& tw, int& th) {
+    tw = th = 0;
+    px.clear();
+    std::string ext;
+    try {
+        ext = fs::path(filepath).extension().string();
+        for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+    } catch (...) {}
+    if (ext == ".rvpaf") {
+        rvp::Package pkg;
+        if (!rvp::ReadPackage(filepath, pkg, nullptr) || pkg.format != rvp::PackageFormat::RVPAF)
+            return false;
+        const std::vector<uint8_t>* img = pkg.Get(rvp::paths::kImagePng);
+        if (!img) img = pkg.Get(rvp::paths::kImageDds);
+        if (!img || img->empty()) return false;
+        if (DecodeImageMemory(img->data(), img->size(), px, tw, th))
+            return true;
+        // Fallback: ImageManager via temp (DDS)
+        try {
+            fs::path tmp = fs::temp_directory_path() / "rayv_rvpaf_decode.bin";
+            {
+                std::ofstream o(tmp, std::ios::binary);
+                o.write(reinterpret_cast<const char*>(img->data()), (std::streamsize)img->size());
+            }
+            bool ok = ImageManager::LoadImageFromFile(tmp.string(), px, tw, th);
+            std::error_code ec; fs::remove(tmp, ec);
+            return ok && tw > 0 && th > 0 && !px.empty();
+        } catch (...) {
+            return false;
+        }
+    }
+    return ImageManager::LoadImageFromFile(filepath, px, tw, th) && tw > 0 && th > 0 && !px.empty();
+}
+
 bool AssetStore::LoadFileInto(TextureAsset& asset, const std::string& filepath) {
     std::vector<uint8_t> px;
     int tw = 0, th = 0;
-    if (!ImageManager::LoadImageFromFile(filepath, px, tw, th) || tw <= 0 || th <= 0 || px.empty()) {
+    std::string ext;
+    try {
+        ext = fs::path(filepath).extension().string();
+        for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+    } catch (...) {}
+
+    if (!DecodeTextureFromPath(filepath, px, tw, th)) {
         asset.state = AssetLoadState::Failed;
         return false;
     }
-    // Keep original file bytes for packing when reasonable size
     try {
         std::ifstream in(fs::u8path(filepath), std::ios::binary);
         if (in) {
@@ -134,12 +194,26 @@ bool AssetStore::LoadFileInto(TextureAsset& asset, const std::string& filepath) 
                                    std::istreambuf_iterator<char>());
         }
     } catch (...) {}
-    asset.sourcePath = NormalizePath(filepath);
-    if (asset.displayName.empty()) {
-        try { asset.displayName = fs::path(filepath).filename().string(); }
-        catch (...) { asset.displayName = filepath; }
+    if (ext == ".rvpaf") {
+        asset.mime = "application/rvpaf";
+        rvp::Package pkg;
+        if (rvp::ReadPackage(filepath, pkg, nullptr)) {
+            try {
+                auto j = nlohmann::json::parse(pkg.manifestJson);
+                if (j.contains("displayName"))
+                    asset.displayName = j["displayName"].get<std::string>();
+            } catch (...) {}
+        }
+    } else {
+        asset.mime = "image/png";
     }
     asset.kind = AssetKind::Texture;
+
+    asset.sourcePath = NormalizePath(filepath);
+    if (asset.displayName.empty()) {
+        try { asset.displayName = fs::path(filepath).stem().string(); }
+        catch (...) { asset.displayName = filepath; }
+    }
     CommitPayload(asset, tw, th, std::move(px));
     return true;
 }
@@ -447,8 +521,7 @@ AssetLoadState AssetStore::RequestLoad(const std::string& key) {
         ThreadPool::Get().Enqueue([job]() {
             std::vector<uint8_t> px;
             int tw = 0, th = 0;
-            bool ok = ImageManager::LoadImageFromFile(job->path, px, tw, th) &&
-                      tw > 0 && th > 0 && !px.empty();
+            bool ok = DecodeTextureFromPath(job->path, px, tw, th);
             job->ok = ok;
             if (ok) {
                 job->w = tw;
@@ -538,8 +611,7 @@ int AssetStore::Poll(double budgetMs) {
                 ThreadPool::Get().Enqueue([job]() {
                     std::vector<uint8_t> px;
                     int tw = 0, th = 0;
-                    bool ok = ImageManager::LoadImageFromFile(job->path, px, tw, th) &&
-                              tw > 0 && th > 0 && !px.empty();
+                    bool ok = DecodeTextureFromPath(job->path, px, tw, th);
                     job->ok = ok;
                     if (ok) {
                         job->w = tw; job->h = th;

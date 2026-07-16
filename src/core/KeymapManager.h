@@ -4,16 +4,22 @@
 #include <vector>
 
 struct KeyCombination {
-    int key = 0;       // GLFW virtual key code (e.g. GLFW_KEY_Z)
+    int key = 0;       // GLFW virtual key code (e.g. GLFW_KEY_Z); 0 or -1 = unbound
     int scancode = -1; // Platform physical scancode (resolved via glfwGetKeyScancode)
     bool ctrl = false;
     bool shift = false;
     bool alt = false;
 
+    // Display / serialize. Unbound → "None" (never "Unknown").
     std::string ToString() const;
     static KeyCombination FromString(const std::string& str);
+    bool IsUnbound() const { return key == 0 || key == -1; }
 };
 
+// KeymapManager stores id → KeyCombination only.
+// Action metadata (label, category, scope) lives in core::ops::ActionCatalog.
+// Dispatch: ProcessKeyEvent sets triggers; main uses core::ops::TryConsumeAction
+// so AppContext poll drains blocked triggers without executing.
 class KeymapManager {
 public:
     static KeymapManager& Get();
@@ -34,11 +40,11 @@ public:
     // Returns if the action is currently held down
     bool IsActionActive(const std::string& actionName) const;
 
-    // Get formatted shortcut label (e.g. "Ctrl+Z")
+    // Formatted shortcut label (e.g. "Ctrl+Z" or "—")
     std::string GetActionShortcutString(const std::string& actionName) const;
 
     const std::unordered_map<std::string, KeyCombination>& GetBindings() const { return m_Bindings; }
-    
+
     // Resolve all bindings' scancodes based on their virtual keys
     void ResolveScancodes();
 

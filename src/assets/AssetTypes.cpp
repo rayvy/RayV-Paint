@@ -29,7 +29,6 @@ bool ParseKey(const std::string& key, AssetCategory& outCat, std::string& outRes
         outRest = key.substr(4);
         return true;
     }
-    // Legacy: "builtin:" accepted as core
     if (key.size() >= 8 && key.compare(0, 8, "builtin:") == 0) {
         outCat = AssetCategory::BuiltIn;
         outRest = key.substr(8);
@@ -53,6 +52,10 @@ bool IsTextureExtension(const std::string& extLower) {
            extLower == ".tga" || extLower == ".bmp" || extLower == ".dds";
 }
 
+bool IsPackageExtension(const std::string& extLower) {
+    return extLower == ".rvpaf" || extLower == ".rvpcf" || extLower == ".rvpbf";
+}
+
 AssetKind GuessKindFromPath(const std::string& pathOrName) {
     std::string ext;
     try {
@@ -61,21 +64,20 @@ AssetKind GuessKindFromPath(const std::string& pathOrName) {
         return AssetKind::Unknown;
     }
     for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+    if (ext == ".rvpaf") return AssetKind::Texture;
+    if (ext == ".rvpbf") return AssetKind::Brush;
+    if (ext == ".rvpcf") {
+        // Sub-kind needs package open; default shader_preset for library listing
+        return AssetKind::ShaderPreset;
+    }
     if (IsTextureExtension(ext)) return AssetKind::Texture;
-    if (ext == ".rayexpt") return AssetKind::ExportTemplate;
-    if (ext == ".ray3dt") return AssetKind::Preview3dTemplate;
-    if (ext == ".rvbrush") return AssetKind::BrushTip;
     if (ext == ".svg") return AssetKind::SmartSource;
     return AssetKind::Unknown;
 }
 
 std::string ThumbPathFor(const std::string& assetPath, bool highQuality) {
     try {
-        fs::path p(assetPath);
-        std::string stem = p.string();
-        // Replace: file.ext → file.thumbnail.png / file.thumbnail_h.png
-        // Use full path without changing directory.
-        std::string s = p.string();
+        std::string s = assetPath;
         auto dot = s.find_last_of('.');
         auto slash = s.find_last_of("/\\");
         if (dot != std::string::npos && (slash == std::string::npos || dot > slash))

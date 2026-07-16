@@ -1,5 +1,7 @@
 #include "EditorPanels.h"
 #include "FileExplorer.h"
+#include "../core/ops/AppContext.h"
+#include "../core/ops/ActionCatalog.h"
 #include "panels/LayersPanel.h"
 #include "panels/AssetBrowserPanel.h"
 #include "panels/ChannelsPanel.h"
@@ -1452,10 +1454,58 @@ namespace UI {
                     canvas.GetZoom() * 100.0f,
                     ThreadPool::Get().GetThreadCount(), toolLabel);
             }
+
+            // Context debug toggle (right side of status bar)
+            float btnW = 72.f;
+            ImGui::SameLine(ImGui::GetWindowWidth() - btnW - 12.f);
+            if (ImGui::SmallButton(state.showContextDebug ? "Context*" : "Context"))
+                state.showContextDebug = !state.showContextDebug;
+            if (ImGui::IsItemHovered())
+                Ui::Tooltip("AppContext live dump — focus, text ownership, blocked ops");
         }
         
         ImGui::End();
         ImGui::PopStyleVar();
+
+        // Context Debug panel (AppContext understandability tool)
+        if (state.showContextDebug) {
+            ImGui::SetNextWindowSize(ImVec2(420, 360), ImGuiCond_FirstUseEver);
+            if (ImGui::Begin("Context", &state.showContextDebug)) {
+                const auto& ctx = core::ops::AppContext::CGet();
+                std::vector<std::string> lines;
+                ctx.AppendDebugLines(lines);
+                for (const auto& ln : lines)
+                    ImGui::TextUnformatted(ln.c_str());
+                ImGui::Separator();
+                ImGui::TextDisabled("Document ops blocked: %s", ctx.blocksDocumentOps ? "YES" : "no");
+                ImGui::TextDisabled("Canvas interaction blocked: %s", ctx.blocksCanvasInteraction ? "YES" : "no");
+                ImGui::Separator();
+                ImGui::TextUnformatted("Poll matrix (sample)");
+                static const char* kSample[] = {
+                    "FillSecondary", "DeleteContent", "Undo", "BrushTool", "AdjustNoise", "LassoToolGroup"
+                };
+                if (ImGui::BeginTable("##poll", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+                    ImGui::TableSetupColumn("Action");
+                    ImGui::TableSetupColumn("Poll");
+                    ImGui::TableSetupColumn("Shortcut");
+                    ImGui::TableHeadersRow();
+                    for (const char* id : kSample) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        const auto* def = core::ops::ActionCatalog::Find(id);
+                        ImGui::TextUnformatted(def && def->label ? def->label : id);
+                        ImGui::TableNextColumn();
+                        bool ok = ctx.PollAction(id);
+                        ImGui::TextColored(ok ? ImVec4(0.3f, 0.9f, 0.4f, 1.f) : ImVec4(0.95f, 0.35f, 0.3f, 1.f),
+                            ok ? "OK" : "BLOCKED");
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(KeymapManager::Get().GetActionShortcutString(id).c_str());
+                    }
+                    ImGui::EndTable();
+                }
+            }
+            ImGui::End();
+        }
 
         // 3. DockSpace Default Layout Setup
         ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, mainViewport);
@@ -1660,75 +1710,118 @@ namespace UI {
 
                 if (ImGui::BeginTabItem("Keybindings")) {
                     ImGui::Spacing();
-                    ImGui::Text("Click 'Rebind' next to an action to assign a new physical hotkey.");
+                    ImGui::TextWrapped(
+                        "Single source of truth: ActionCatalog (src/core/ops). "
+                        "Categories group related actions. Group tools (Lasso L, Select S, Wand W) "
+                        "cycle variants — members show \"via …\" when unbound.");
                     ImGui::Separator();
                     ImGui::Spacing();
 
-                    auto bindings = KeymapManager::Get().GetBindings();
-                    for (const auto& pair : bindings) {
-                        ImGui::PushID(pair.first.c_str());
-                        ImGui::Text("%s:", pair.first.c_str());
-                        ImGui::SameLine(180);
-
-                        if (state.listeningForKey && state.rebindingAction == pair.first) {
-                            ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "[Press any key + Ctrl/Shift/Alt...]");
-                            
+                    // Rebind capture (Escape cancels)
+                    if (state.listeningForKey) {
+                        core::ops::AppContext::NotifyUiKeyboardCapture();
+                        ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.f, 1.f),
+                            "Listening for \"%s\" — press key (+ mods). Esc cancels.",
+                            state.rebindingAction.c_str());
+                        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                            state.listeningForKey = false;
+                            state.rebindingAction.clear();
+                        } else {
                             ImGuiIO& io = ImGui::GetIO();
                             for (int k = 0; k < ImGuiKey_NamedKey_END; ++k) {
                                 ImGuiKey imguiKey = (ImGuiKey)k;
-                                if (ImGui::IsKeyPressed(imguiKey)) {
-                                    int glfwKey = 0;
-                                    if (imguiKey >= ImGuiKey_A && imguiKey <= ImGuiKey_Z) glfwKey = GLFW_KEY_A + (imguiKey - ImGuiKey_A);
-                                    else if (imguiKey >= ImGuiKey_0 && imguiKey <= ImGuiKey_9) glfwKey = GLFW_KEY_0 + (imguiKey - ImGuiKey_0);
-                                    else if (imguiKey >= ImGuiKey_F1 && imguiKey <= ImGuiKey_F12) glfwKey = GLFW_KEY_F1 + (imguiKey - ImGuiKey_F1);
-                                    else if (imguiKey == ImGuiKey_Space) glfwKey = GLFW_KEY_SPACE;
-                                    else if (imguiKey == ImGuiKey_Enter || imguiKey == ImGuiKey_KeypadEnter) glfwKey = GLFW_KEY_ENTER;
-                                    else if (imguiKey == ImGuiKey_Escape) glfwKey = GLFW_KEY_ESCAPE;
-                                    else if (imguiKey == ImGuiKey_Tab) glfwKey = GLFW_KEY_TAB;
-                                    else if (imguiKey == ImGuiKey_Backspace) glfwKey = GLFW_KEY_BACKSPACE;
-                                    else if (imguiKey == ImGuiKey_Insert) glfwKey = GLFW_KEY_INSERT;
-                                    else if (imguiKey == ImGuiKey_Delete) glfwKey = GLFW_KEY_DELETE;
-                                    else if (imguiKey == ImGuiKey_RightArrow) glfwKey = GLFW_KEY_RIGHT;
-                                    else if (imguiKey == ImGuiKey_LeftArrow) glfwKey = GLFW_KEY_LEFT;
-                                    else if (imguiKey == ImGuiKey_DownArrow) glfwKey = GLFW_KEY_DOWN;
-                                    else if (imguiKey == ImGuiKey_UpArrow) glfwKey = GLFW_KEY_UP;
-                                    else if (imguiKey == ImGuiKey_Comma) glfwKey = GLFW_KEY_COMMA;
-                                    else if (imguiKey == ImGuiKey_Period) glfwKey = GLFW_KEY_PERIOD;
-                                    else if (imguiKey == ImGuiKey_Slash) glfwKey = GLFW_KEY_SLASH;
-                                    else if (imguiKey == ImGuiKey_Semicolon) glfwKey = GLFW_KEY_SEMICOLON;
-                                    else if (imguiKey == ImGuiKey_Equal) glfwKey = GLFW_KEY_EQUAL;
-                                    else if (imguiKey == ImGuiKey_Minus) glfwKey = GLFW_KEY_MINUS;
-                                    else if (imguiKey == ImGuiKey_LeftBracket) glfwKey = GLFW_KEY_LEFT_BRACKET;
-                                    else if (imguiKey == ImGuiKey_RightBracket) glfwKey = GLFW_KEY_RIGHT_BRACKET;
-                                    else if (imguiKey == ImGuiKey_Backslash) glfwKey = GLFW_KEY_BACKSLASH;
-                                    else if (imguiKey == ImGuiKey_GraveAccent) glfwKey = GLFW_KEY_GRAVE_ACCENT;
+                                if (!ImGui::IsKeyPressed(imguiKey)) continue;
+                                int glfwKey = 0;
+                                if (imguiKey >= ImGuiKey_A && imguiKey <= ImGuiKey_Z) glfwKey = GLFW_KEY_A + (imguiKey - ImGuiKey_A);
+                                else if (imguiKey >= ImGuiKey_0 && imguiKey <= ImGuiKey_9) glfwKey = GLFW_KEY_0 + (imguiKey - ImGuiKey_0);
+                                else if (imguiKey >= ImGuiKey_F1 && imguiKey <= ImGuiKey_F12) glfwKey = GLFW_KEY_F1 + (imguiKey - ImGuiKey_F1);
+                                else if (imguiKey == ImGuiKey_Space) glfwKey = GLFW_KEY_SPACE;
+                                else if (imguiKey == ImGuiKey_Enter || imguiKey == ImGuiKey_KeypadEnter) glfwKey = GLFW_KEY_ENTER;
+                                else if (imguiKey == ImGuiKey_Tab) glfwKey = GLFW_KEY_TAB;
+                                else if (imguiKey == ImGuiKey_Backspace) glfwKey = GLFW_KEY_BACKSPACE;
+                                else if (imguiKey == ImGuiKey_Insert) glfwKey = GLFW_KEY_INSERT;
+                                else if (imguiKey == ImGuiKey_Delete) glfwKey = GLFW_KEY_DELETE;
+                                else if (imguiKey == ImGuiKey_RightArrow) glfwKey = GLFW_KEY_RIGHT;
+                                else if (imguiKey == ImGuiKey_LeftArrow) glfwKey = GLFW_KEY_LEFT;
+                                else if (imguiKey == ImGuiKey_DownArrow) glfwKey = GLFW_KEY_DOWN;
+                                else if (imguiKey == ImGuiKey_UpArrow) glfwKey = GLFW_KEY_UP;
+                                else if (imguiKey == ImGuiKey_Comma) glfwKey = GLFW_KEY_COMMA;
+                                else if (imguiKey == ImGuiKey_Period) glfwKey = GLFW_KEY_PERIOD;
+                                else if (imguiKey == ImGuiKey_Slash) glfwKey = GLFW_KEY_SLASH;
+                                else if (imguiKey == ImGuiKey_Semicolon) glfwKey = GLFW_KEY_SEMICOLON;
+                                else if (imguiKey == ImGuiKey_Equal) glfwKey = GLFW_KEY_EQUAL;
+                                else if (imguiKey == ImGuiKey_Minus) glfwKey = GLFW_KEY_MINUS;
+                                else if (imguiKey == ImGuiKey_LeftBracket) glfwKey = GLFW_KEY_LEFT_BRACKET;
+                                else if (imguiKey == ImGuiKey_RightBracket) glfwKey = GLFW_KEY_RIGHT_BRACKET;
+                                else if (imguiKey == ImGuiKey_Backslash) glfwKey = GLFW_KEY_BACKSLASH;
+                                else if (imguiKey == ImGuiKey_GraveAccent) glfwKey = GLFW_KEY_GRAVE_ACCENT;
 
-                                    if (imguiKey != ImGuiKey_LeftCtrl && imguiKey != ImGuiKey_RightCtrl &&
-                                        imguiKey != ImGuiKey_LeftShift && imguiKey != ImGuiKey_RightShift &&
-                                        imguiKey != ImGuiKey_LeftAlt && imguiKey != ImGuiKey_RightAlt) {
-                                        
-                                        if (glfwKey != 0) {
-                                            KeyCombination pendingCombo;
-                                            pendingCombo.key = glfwKey;
-                                            pendingCombo.ctrl = io.KeyCtrl;
-                                            pendingCombo.shift = io.KeyShift;
-                                            pendingCombo.alt = io.KeyAlt;
-                                            
-                                            KeymapManager::Get().BindAction(state.rebindingAction, pendingCombo);
-                                            state.listeningForKey = false;
-                                            state.rebindingAction = "";
-                                            break;
-                                        }
-                                    }
+                                if (imguiKey == ImGuiKey_LeftCtrl || imguiKey == ImGuiKey_RightCtrl ||
+                                    imguiKey == ImGuiKey_LeftShift || imguiKey == ImGuiKey_RightShift ||
+                                    imguiKey == ImGuiKey_LeftAlt || imguiKey == ImGuiKey_RightAlt)
+                                    continue;
+
+                                if (glfwKey != 0) {
+                                    KeyCombination pendingCombo;
+                                    pendingCombo.key = glfwKey;
+                                    pendingCombo.ctrl = io.KeyCtrl;
+                                    pendingCombo.shift = io.KeyShift;
+                                    pendingCombo.alt = io.KeyAlt;
+                                    KeymapManager::Get().BindAction(state.rebindingAction, pendingCombo);
+                                    state.listeningForKey = false;
+                                    state.rebindingAction.clear();
+                                    break;
                                 }
                             }
-                        } else {
-                            ImGui::Text("%s", pair.second.ToString().c_str());
-                            ImGui::SameLine(320);
-                            if (ImGui::Button("Rebind")) {
-                                state.rebindingAction = pair.first;
+                        }
+                        ImGui::Separator();
+                    }
+
+                    auto list = core::ops::ActionCatalog::ListForKeybindUi();
+                    core::ops::ActionCategory lastCat = core::ops::ActionCategory::COUNT;
+                    for (const core::ops::ActionDef* def : list) {
+                        if (!def || !def->id) continue;
+                        if (def->category != lastCat) {
+                            lastCat = def->category;
+                            ImGui::Spacing();
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.75f, 1.f, 1.f));
+                            ImGui::TextUnformatted(core::ops::ActionCatalog::CategoryLabel(def->category));
+                            ImGui::PopStyleColor();
+                            ImGui::Separator();
+                        }
+
+                        ImGui::PushID(def->id);
+                        const char* indent = (def->role == core::ops::ActionRole::GroupMember) ? "    " : "";
+                        ImGui::Text("%s%s", indent, def->label ? def->label : def->id);
+                        if (ImGui::IsItemHovered() && def->note)
+                            Ui::Tooltip(def->note);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::BeginTooltip();
+                            ImGui::Text("id: %s", def->id);
+                            if (def->role == core::ops::ActionRole::GroupMember && def->groupId)
+                                ImGui::Text("group: %s", def->groupId);
+                            if (def->note) ImGui::TextWrapped("%s", def->note);
+                            ImGui::EndTooltip();
+                        }
+
+                        ImGui::SameLine(280);
+                        std::string chord = KeymapManager::Get().GetActionShortcutString(def->id);
+                        ImGui::TextDisabled("%s", chord.c_str());
+
+                        ImGui::SameLine(400);
+                        if (def->userRebindable) {
+                            if (ImGui::SmallButton("Rebind")) {
+                                state.rebindingAction = def->id;
                                 state.listeningForKey = true;
                             }
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Clear")) {
+                                KeyCombination none;
+                                none.key = 0;
+                                KeymapManager::Get().BindAction(def->id, none);
+                            }
+                        } else {
+                            ImGui::TextDisabled("fixed");
                         }
                         ImGui::PopID();
                     }

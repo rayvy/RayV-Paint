@@ -1,6 +1,7 @@
 #include "BrushLibrary.h"
 #include "Logger.h"
 #include "ConfigManager.h"
+#include "../package/PackageIO.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <random>
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 #include <thread>
 
 #ifdef _WIN32
@@ -361,14 +363,13 @@ bool BrushLibrary::WriteFile(const Entry& e) const {
     if (e.meta.isBuiltin) return false;
     if (m_Root.empty()) return false;
 
-    json root;
-    root["magic"] = "RVBRUSH";
-    root["version"] = 1;
-    root["id"] = e.meta.id;
-    root["name"] = e.meta.displayName;
-    root["params"] = ParamsToJson(e.params);
-
+    json cfg;
+    cfg["id"] = e.meta.id;
+    cfg["name"] = e.meta.displayName;
+    cfg["params"] = ParamsToJson(e.params);
     json tip;
+    std::vector<uint8_t> tipRaw;
+    int tipSize = 0;
     if (e.params.tipType == BrushPresetParams::TipType::None) {
         tip["type"] = "none";
     } else if (e.params.tipType == BrushPresetParams::TipType::Builtin) {
@@ -378,44 +379,45 @@ bool BrushLibrary::WriteFile(const Entry& e) const {
     } else {
         tip["type"] = "embedded";
         tip["size"] = e.params.tipSize;
-        tip["encoding"] = "raw8_base64";
+        tip["encoding"] = "raw8";
         tip["spacing_mul"] = e.params.tipSpacingMul;
-        tip["data"] = Base64Encode(e.params.tipPixels);
+        tipRaw = e.params.tipPixels;
+        tipSize = e.params.tipSize;
     }
-    root["tip"] = tip;
+    cfg["tip"] = tip;
 
-    std::filesystem::path path = m_Root / (e.meta.id + ".rvbrush");
-#ifdef _WIN32
-    std::ofstream out(path, std::ios::binary);
-#else
-    std::ofstream out(path, std::ios::binary);
-#endif
-    if (!out) {
-        Logger::Get().Error("BrushLibrary: cannot write " + path.string());
+    rvp::Package pkg;
+    if (!rvp::BuildBrushPackage(pkg, e.meta.id, e.meta.displayName, cfg.dump(2), tipRaw, tipSize)) {
+        Logger::Get().Error("BrushLibrary: BuildBrushPackage failed for " + e.meta.id);
         return false;
     }
-    out << root.dump(2);
+    std::filesystem::path path = m_Root / (e.meta.id + ".rvpbf");
+    std::string err;
+    if (!rvp::WritePackage(path.string(), pkg, &err)) {
+        Logger::Get().Error("BrushLibrary: cannot write " + path.string() + " (" + err + ")");
+        return false;
+    }
     Logger::Get().Info("BrushLibrary: saved " + path.string());
     return true;
 }
 
 bool BrushLibrary::LoadFileUnlocked(const std::filesystem::path& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
+    rvp::Package pkg;
+    std::string err;
+    if (!rvp::ReadPackage(path.string(), pkg, &err) || pkg.format != rvp::PackageFormat::RVPBF) {
+        Logger::Get().Warn("BrushLibrary: not a valid RVPBF: " + path.string() + " (" + err + ")");
+        return false;
+    }
+    std::string cfg = pkg.GetText(rvp::paths::kConfigJson);
+    if (cfg.empty()) {
+        Logger::Get().Warn("BrushLibrary: RVPBF missing config.json " + path.string());
+        return false;
+    }
     json root;
     try {
-        in >> root;
+        root = json::parse(cfg);
     } catch (...) {
-        Logger::Get().Warn("BrushLibrary: invalid JSON " + path.string());
-        return false;
-    }
-    if (!root.contains("magic") || root["magic"] != "RVBRUSH") {
-        Logger::Get().Warn("BrushLibrary: bad magic " + path.string());
-        return false;
-    }
-    int ver = root.value("version", 0);
-    if (ver < 1) {
-        Logger::Get().Warn("BrushLibrary: unsupported version " + path.string());
+        Logger::Get().Warn("BrushLibrary: invalid config.json " + path.string());
         return false;
     }
 
@@ -426,7 +428,6 @@ bool BrushLibrary::LoadFileUnlocked(const std::filesystem::path& path) {
     e.meta.isDirty = false;
     e.meta.sourcePath = path.string();
 
-    // Skip if id collides with builtin
     if (e.meta.id.rfind("builtin.", 0) == 0) {
         Logger::Get().Warn("BrushLibrary: skip custom with builtin id " + e.meta.id);
         return false;
@@ -446,9 +447,15 @@ bool BrushLibrary::LoadFileUnlocked(const std::filesystem::path& path) {
             e.params.tipType = BrushPresetParams::TipType::Embedded;
             e.params.tipSize = tip.value("size", 0);
             e.params.tipSpacingMul = tip.value("spacing_mul", 1.f);
-            std::string data = tip.value("data", "");
-            if (!Base64Decode(data, e.params.tipPixels)) {
-                Logger::Get().Warn("BrushLibrary: tip base64 decode failed " + path.string());
+            if (const auto* tipBytes = pkg.Get(rvp::paths::kTipRaw8)) {
+                e.params.tipPixels = *tipBytes;
+                if (e.params.tipSize <= 0) {
+                    // Derive size from raw8 square
+                    int n = (int)tipBytes->size();
+                    int s = (int)std::lround(std::sqrt((double)n));
+                    if (s * s == n) e.params.tipSize = s;
+                }
+            } else {
                 e.params.tipType = BrushPresetParams::TipType::None;
             }
         } else {
@@ -457,7 +464,6 @@ bool BrushLibrary::LoadFileUnlocked(const std::filesystem::path& path) {
     }
     e.RebuildOwnedTip();
 
-    // Replace existing same id
     if (Entry* old = Find(e.meta.id)) {
         *old = std::move(e);
     } else {
@@ -510,15 +516,16 @@ void BrushLibrary::StartAsyncDiskLoad() {
                 if (!ent.is_regular_file()) continue;
                 auto ext = ent.path().extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                if (ext != ".rvbrush") continue;
+                if (ext != ".rvpbf") continue;
 
-                // Parse in isolation (no m_Entries)
-                std::ifstream in(ent.path(), std::ios::binary);
-                if (!in) continue;
+                rvp::Package pkg;
+                if (!rvp::ReadPackage(ent.path().string(), pkg, nullptr) ||
+                    pkg.format != rvp::PackageFormat::RVPBF)
+                    continue;
+                std::string cfg = pkg.GetText(rvp::paths::kConfigJson);
+                if (cfg.empty()) continue;
                 json rootJ;
-                try { in >> rootJ; } catch (...) { continue; }
-                if (!rootJ.contains("magic") || rootJ["magic"] != "RVBRUSH") continue;
-                if (rootJ.value("version", 0) < 1) continue;
+                try { rootJ = json::parse(cfg); } catch (...) { continue; }
 
                 Entry e;
                 e.meta.id = rootJ.value("id", ent.path().stem().string());
@@ -527,12 +534,6 @@ void BrushLibrary::StartAsyncDiskLoad() {
                 e.meta.isDirty = false;
                 e.meta.sourcePath = ent.path().string();
                 if (e.meta.id.rfind("builtin.", 0) == 0) continue;
-                if (rootJ.contains("params")) {
-                    // reuse ParamsFromJson via temp - it's file-local static
-                    // inline minimal: call LoadFileUnlocked under lock is wrong here
-                }
-                // Use a local parse by writing to temp library method:
-                // Re-open via LoadFileUnlocked on main — instead parse fully here:
                 auto& p = e.params;
                 if (rootJ.contains("params")) {
                     const json& j = rootJ["params"];
@@ -566,9 +567,16 @@ void BrushLibrary::StartAsyncDiskLoad() {
                         p.tipType = BrushPresetParams::TipType::Embedded;
                         p.tipSize = tip.value("size", 0);
                         p.tipSpacingMul = tip.value("spacing_mul", 1.f);
-                        std::string data = tip.value("data", "");
-                        if (!Base64Decode(data, p.tipPixels))
+                        if (const auto* tipBytes = pkg.Get(rvp::paths::kTipRaw8)) {
+                            p.tipPixels = *tipBytes;
+                            if (p.tipSize <= 0) {
+                                int n = (int)tipBytes->size();
+                                int s = (int)std::lround(std::sqrt((double)n));
+                                if (s * s == n) p.tipSize = s;
+                            }
+                        } else {
                             p.tipType = BrushPresetParams::TipType::None;
+                        }
                     } else {
                         p.tipType = BrushPresetParams::TipType::None;
                     }
@@ -632,7 +640,7 @@ void BrushLibrary::LoadAll() {
             if (!ent.is_regular_file()) continue;
             auto ext = ent.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            if (ext == ".rvbrush")
+            if (ext == ".rvpbf")
                 LoadFileUnlocked(ent.path());
         }
     }
@@ -741,7 +749,7 @@ bool BrushLibrary::SaveToDisk(const std::string& id) {
     EnsureRootExists();
     if (!WriteFile(*e)) return false;
     e->meta.isDirty = false;
-    e->meta.sourcePath = (m_Root / (e->meta.id + ".rvbrush")).string();
+    e->meta.sourcePath = (m_Root / (e->meta.id + ".rvpbf")).string();
     RebuildMetaList();
     return true;
 }
@@ -781,7 +789,7 @@ bool BrushLibrary::DeleteCustom(const std::string& id) {
         std::filesystem::remove(e->meta.sourcePath, ec);
     } else {
         std::error_code ec;
-        std::filesystem::remove(m_Root / (id + ".rvbrush"), ec);
+        std::filesystem::remove(m_Root / (id + ".rvpbf"), ec);
     }
     m_Entries.erase(std::remove_if(m_Entries.begin(), m_Entries.end(),
         [&](const Entry& x) { return x.meta.id == id; }), m_Entries.end());

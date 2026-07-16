@@ -14,6 +14,12 @@
 4. **UI does not implement core.** Call `Canvas` / `ProjectManager` / AssetStore APIs. Do not re-decode DDS for paint inside a panel.
 5. **Core does not grow ImGui** for new features. New UI lives in `src/ui/`.
 6. **DRY:** one combo, one color field, one modal footer pattern, one path/explorer entry point.
+7. **Input / hotkeys / context (mandatory):**
+   - New bindable action → **`core::ops::ActionCatalog`** first (`src/core/ops/ActionCatalog.*`). Never invent free strings only in `main.cpp`.
+   - Dispatch hotkeys with **`core::ops::TryConsumeAction(id)`** (polls `AppContext`). Do not gate only on `io.WantTextInput`.
+   - UI that owns keyboard (text fields, File Explorer open, settings, adjust modals, slider exact-entry) must be visible to **`AppContext`**. Widgets that eat keys call **`AppContext::NotifyUiKeyboardCapture()`**.
+   - Canvas paint / marquee while FE or blocking modals open → check **`AppContext::BlocksCanvasInteraction()`**.
+8. **Sliders:** new float params use **`Ui::SmartSliderFloat`** (or `Ui::SliderFloat`). Supports double-click / Ctrl+click exact entry, safe parse (reject garbage; round float→int), Backspace default + capture. **No raw `ImGui::SliderFloat` in new panel code.**
 
 ---
 
@@ -25,7 +31,9 @@
 | Ease / press / bounce | `Ui::Motion` (`UiMotion.h`) |
 | Icon buttons / toggles | `UiIconButton`, `UiIconToggle` |
 | Dropdowns (click + hold) | `UiDropdown` |
-| Sliders | `UiVisualSlider` / SmartSlider patterns |
+| Sliders | `Ui::SmartSliderFloat` / `Ui::SmartSliderInt` / `VisualSlider` |
+| Hotkeys / action SSOT | `core::ops::ActionCatalog` + `KeymapManager` |
+| Input ownership | `core::ops::AppContext` + `TryConsumeAction` |
 | Color + optional pipette | `UiColorField` (`ColorFieldFlags_Pipette` / `FullPicker`) |
 | Tooltips (delay) | `UiTooltip` |
 | Dock panels | `UiPanel` |
@@ -108,7 +116,29 @@ UiColorField(label, float rgba[4], UiColorFieldFlags)
 
 ---
 
-## 9. Review checklist (PR)
+## 9. AppContext + ActionCatalog (agent contract)
+
+```
+Frame:
+  AppContext::BeginFrame()
+  UI::RenderAll(...)          // widgets may NotifyUiKeyboardCapture()
+  AppContext::UpdateFromFrame(io, uiState, ...)
+  TryConsumeAction("FillSecondary") → poll scope → execute or drain
+  if (!BlocksCanvasInteraction()) handle paint / selection
+```
+
+| Do | Don't |
+|----|--------|
+| Add action to ActionCatalog with category/label/scope | Add `m_Bindings["Foo"]` only in KeymapManager |
+| `TryConsumeAction("Foo")` in main | `if (!WantTextInput) ConsumeActionTrigger` only |
+| Block document ops via ActionScope + AppContext | Special-case Backspace in three places |
+| SmartSliderFloat for params | New raw SliderFloat without exact entry |
+
+Footer **Context** button opens live dump + poll matrix — use it when debugging “why did Fill run?”.
+
+---
+
+## 10. Review checklist (PR)
 
 - [ ] No new raw Combo/ColorPicker outside widgets  
 - [ ] Colors from tokens / theme  
@@ -116,3 +146,7 @@ UiColorField(label, float rgba[4], UiColorFieldFlags)
 - [ ] Pipette on color fields that paint/fill  
 - [ ] No core algorithms reimplemented in UI  
 - [ ] File flows use File Explorer when applicable  
+- [ ] New hotkeys registered in ActionCatalog + TryConsumeAction  
+- [ ] No new raw ImGui::SliderFloat (use SmartSliderFloat)  
+- [ ] Text/FE/modal paths do not leak document hotkeys (AppContext)  
+

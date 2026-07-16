@@ -103,6 +103,9 @@ set(SOURCES
     src/assets/AssetThumbCache.h
     src/assets/AssetManager.cpp
     src/assets/AssetManager.h
+    src/package/PackageTypes.h
+    src/package/PackageIO.cpp
+    src/package/PackageIO.h
     src/core/TileCache.cpp
     src/core/TileCache.h
     src/core/MaskTiles.cpp
@@ -148,6 +151,10 @@ set(SOURCES
     src/core/AsyncFilterJob.h
     src/core/KeymapManager.cpp
     src/core/KeymapManager.h
+    src/core/ops/ActionCatalog.cpp
+    src/core/ops/ActionCatalog.h
+    src/core/ops/AppContext.cpp
+    src/core/ops/AppContext.h
     src/core/ClipboardHelper.cpp
     src/core/ClipboardHelper.h
     src/core/ProjectManager.cpp

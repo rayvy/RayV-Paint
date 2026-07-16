@@ -12,8 +12,8 @@
 // UI owns popup chrome; core owns identity, I/O, and tip lifetime.
 // See plans/BRUSH_PRESETS.md
 //
-// .rvbrush format: single JSON file, version field mandatory.
-// Custom tip textures: embedded as raw8_base64 inside the file (portable).
+// .rvpbf format (RVPBF): RVPK package with config.json + optional tip.raw8.
+// See Documentation.MD.
 // ---------------------------------------------------------------------------
 
 struct BrushPresetMeta {
@@ -21,7 +21,7 @@ struct BrushPresetMeta {
     std::string displayName;
     bool isBuiltin = false;   // blue, non-deletable
     bool isDirty   = false;   // RAM-only / unsaved edits
-    std::string sourcePath;   // empty for builtins/staging; absolute .rvbrush path for disk customs
+    std::string sourcePath;   // empty for builtins/staging; absolute .rvpbf path for disk customs
 };
 
 // Serializable paint snapshot (FG color intentionally NOT stored — like Photoshop brushes).
@@ -36,7 +36,7 @@ struct BrushPresetParams {
     bool  writeR = true, writeG = true, writeB = true, writeA = false;
     bool  pressureRadius = false, pressureHardness = false, pressureOpacity = false;
 
-    // Placeholders (saved in .rvbrush; engine may ignore until implemented)
+    // Placeholders (saved in .rvpbf; engine may ignore until implemented)
     float rotationDeg = 0.f;
     bool  pressureRotation = false;
     float scatter = 0.f;
@@ -67,7 +67,7 @@ public:
 
     // Instant: register 4 builtins only (startup-safe).
     void LoadBuiltins();
-    // Background: scan disk for *.rvbrush and merge. Non-blocking.
+    // Background: scan disk for *.rvpbf and merge. Non-blocking.
     void StartAsyncDiskLoad();
     // Call once per frame (main thread): apply finished async results if any.
     void PollAsyncDiskLoad();
@@ -91,7 +91,7 @@ public:
     bool UpdateStaging(const std::string& id, const BrushSettings& brush);
     bool Rename(const std::string& id, const std::string& newDisplayName);
 
-    // Persist staging/custom to disk as .rvbrush; clears isDirty. Fails for builtins.
+    // Persist staging/custom to disk as .rvpbf; clears isDirty. Fails for builtins.
     // Embedded tips are base64-encoded inside the file (portable between users).
     bool SaveToDisk(const std::string& id);
     // Drop unsaved staging (or reload disk custom from file). Builtins: no-op false.
