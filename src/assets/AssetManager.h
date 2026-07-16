@@ -67,6 +67,17 @@ public:
                                           bool highQuality = false);
 
     bool IsIndexReady() const { return m_IndexReady.load(); }
+    bool IsIndexScanning() const { return m_IndexScanRunning.load(); }
+    // True while library scan or thumb decode/upload is in flight (footer spinner).
+    bool IsBusy() const;
+    int ThumbPendingCount() const;
+    bool IsThumbPending(const std::string& key) const;
+    bool IsThumbFailed(const std::string& key) const;
+
+    // Non-blocking import: decode/package on ThreadPool. Callback on main via Poll result queue.
+    // Returns true if job started. UI stays free; Asset Browser refreshes when ready.
+    bool ImportFileToUserAsync(const std::string& path);
+    bool ImportFileToProjectAsync(const std::string& path);
 
 private:
     AssetManager() = default;

@@ -1,6 +1,9 @@
 #include "FileExplorer.h"
 #include "../core/ProjectManager.h"
 #include "../core/Logger.h"
+#include "../core/Notifications.h"
+#include "../core/JobManager.h"
+#include "../core/ThreadPool.h"
 #include "../core/PathUtil.h"
 #include "../core/ImageManager.h"
 #include "../core/DdsHelper.h"
@@ -13,14 +16,18 @@
 
 #include <imgui.h>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <ctime>
 #include <cstring>
 #include <cstdio>
+#include <deque>
 #include <filesystem>
+#include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -281,20 +288,183 @@ static void BuildBookmarks(std::vector<Bookmark>& out) {
 }
 
 // ---------------------------------------------------------------------------
-// Thumbnail cache (lazy, capped)
+// Busy spinner (main-thread draw only — never blocks)
+// ---------------------------------------------------------------------------
+
+static void DrawBusySpinner(ImDrawList* dl, ImVec2 center, float radius, ImU32 col) {
+    if (!dl) return;
+    const float t = (float)ImGui::GetTime() * 7.5f;
+    const int n = 10;
+    for (int i = 0; i < n; ++i) {
+        const float a = t + (float)i * 6.2831853f / (float)n;
+        const float fade = 0.15f + 0.85f * ((float)i / (float)n);
+        const ImU32 c = (col & 0x00FFFFFFu) | ((ImU32)(fade * 255.f) << 24);
+        const ImVec2 p(center.x + std::cos(a) * radius, center.y + std::sin(a) * radius);
+        dl->AddCircleFilled(p, radius * 0.22f, c, 8);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async directory index (worker threads — UI never freezes on 1000 files)
+// ---------------------------------------------------------------------------
+
+struct DirListResult {
+    uint64_t gen = 0;
+    std::string dir;
+    bool showHidden = false;
+    std::vector<FsEntry> entries;
+    double ms = 0.0;
+};
+
+static std::mutex g_DirMu;
+static std::atomic<uint64_t> g_DirGen{0};
+static std::atomic<bool> g_DirBusy{false};
+static bool g_DirReady = false;
+static DirListResult g_DirPending;
+static std::vector<FsEntry> g_CachedEntries;
+static std::string g_CachedDir;
+static bool g_CachedShowHidden = false;
+static uint64_t g_DirJobId = 0;
+
+static void RequestDirListAsync(const std::string& dir, bool showHidden) {
+    const uint64_t gen = g_DirGen.fetch_add(1) + 1;
+    g_DirBusy.store(true);
+
+    // Footer job (not document-locking — user can still paint / use UI).
+    if (g_DirJobId != 0) {
+        core::JobManager::Get().Complete(g_DirJobId, true, "superseded", /*notify=*/false);
+        g_DirJobId = 0;
+    }
+    g_DirJobId = core::JobManager::Get().Begin("Index folder", false, false);
+    core::JobManager::Get().SetProgress(g_DirJobId, -1.f, dir);
+
+    try {
+        ThreadPool::Get().Enqueue([gen, dir, showHidden]() {
+            DirListResult r;
+            r.gen = gen;
+            r.dir = dir;
+            r.showHidden = showHidden;
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            try {
+                ListDirectory(dir, showHidden, r.entries);
+            } catch (...) {
+                r.entries.clear();
+            }
+            r.ms = std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - t0).count();
+
+            {
+                std::lock_guard<std::mutex> lock(g_DirMu);
+                // Only publish if still the latest request.
+                if (gen == g_DirGen.load()) {
+                    g_DirPending = std::move(r);
+                    g_DirReady = true;
+                }
+            }
+            // Clear busy only if we are still the latest gen (else newer job owns busy).
+            if (gen == g_DirGen.load())
+                g_DirBusy.store(false);
+        });
+    } catch (...) {
+        g_DirBusy.store(false);
+        if (g_DirJobId) {
+            core::JobManager::Get().Complete(g_DirJobId, false, "ThreadPool unavailable");
+            g_DirJobId = 0;
+        }
+    }
+}
+
+static void PollDirList(FileExplorerState& st) {
+    DirListResult ready;
+    bool has = false;
+    {
+        std::lock_guard<std::mutex> lock(g_DirMu);
+        if (g_DirReady) {
+            ready = std::move(g_DirPending);
+            g_DirReady = false;
+            has = true;
+        }
+    }
+    if (!has) {
+        st.dirListingBusy = g_DirBusy.load();
+        return;
+    }
+
+    // Stale result (user navigated away while worker ran).
+    if (ready.gen != g_DirGen.load() ||
+        ready.dir != st.currentDir ||
+        ready.showHidden != st.showHidden) {
+        st.dirListingBusy = g_DirBusy.load();
+        return;
+    }
+
+    g_CachedEntries = std::move(ready.entries);
+    g_CachedDir = ready.dir;
+    g_CachedShowHidden = ready.showHidden;
+    st.lastListMs = ready.ms;
+    st.lastListCount = (int)g_CachedEntries.size();
+    st.dirListingBusy = g_DirBusy.load();
+
+    Logger::Get().InfoTag("perf",
+        "FileExplorer.ListDirectory(async) dir=" + ready.dir +
+        " entries=" + std::to_string(st.lastListCount) +
+        " took " + std::to_string(ready.ms) + " ms (worker; UI not blocked)");
+    // Soft notify only when slow (large folders).
+    if (ready.ms > 200.0) {
+        core::Notifications::Get().Push(
+            "Indexed " + std::to_string(st.lastListCount) + " items",
+            core::NotifyLevel::Info);
+    }
+    if (g_DirJobId) {
+        // Silent success (no toast spam on every folder); slow folders already notify above.
+        core::JobManager::Get().Complete(g_DirJobId, true,
+            std::to_string(st.lastListCount) + " items · " +
+            std::to_string((int)ready.ms) + " ms",
+            /*notify=*/false);
+        g_DirJobId = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async thumbnail cache — decode on pool, GPU upload on main (budgeted)
 // ---------------------------------------------------------------------------
 
 struct Thumb {
     ID3D11ShaderResourceView* srv = nullptr;
     ID3D11Texture2D* tex = nullptr;
     bool failed = false;
+    bool loading = false;
     uint64_t lastUse = 0;
+};
+
+struct ThumbDecoded {
+    std::string path;
+    std::vector<uint8_t> rgba;
+    int w = 0, h = 0;
+    bool failed = false;
 };
 
 static std::unordered_map<std::string, Thumb> g_Thumbs;
 static uint64_t g_ThumbClock = 1;
-static constexpr size_t kMaxThumbs = 64;
+static constexpr size_t kMaxThumbs = 384;           // large folders: keep a few screens of icons
 static constexpr int kThumbMaxPx = 128;
+static constexpr int kMaxGpuUploadsPerFrame = 12;  // progressive: a few new previews every frame
+static constexpr uint64_t kAutoThumbMaxBytes = 16ull * 1024ull * 1024ull;
+static constexpr int kMaxThumbDecodeDim = 4096;
+
+static int MaxDecodeInFlight() {
+    // Parallel progressive decode — do not serialize on one mutex.
+    const size_t n = ThreadPool::Get().GetThreadCount();
+    if (n == 0) return 4;
+    return (int)std::min<size_t>(std::max<size_t>(n, 4), 16);
+}
+
+static std::mutex g_ThumbMu;
+static std::deque<ThumbDecoded> g_ThumbReady;
+static std::deque<std::string> g_ThumbWant; // request queue (never drop — drain as slots free)
+static std::unordered_set<std::string> g_ThumbInFlight;
+static std::unordered_set<std::string> g_ThumbQueued; // paths in g_ThumbWant
+static std::atomic<int> g_ThumbInFlightCount{0};
 
 static void ReleaseThumb(Thumb& t) {
     if (t.srv) { t.srv->Release(); t.srv = nullptr; }
@@ -304,6 +474,12 @@ static void ReleaseThumb(Thumb& t) {
 static void ClearAllThumbs() {
     for (auto& kv : g_Thumbs) ReleaseThumb(kv.second);
     g_Thumbs.clear();
+    std::lock_guard<std::mutex> lock(g_ThumbMu);
+    g_ThumbReady.clear();
+    g_ThumbWant.clear();
+    g_ThumbQueued.clear();
+    g_ThumbInFlight.clear();
+    g_ThumbInFlightCount.store(0);
 }
 
 static void EvictThumbsIfNeeded() {
@@ -311,6 +487,7 @@ static void EvictThumbsIfNeeded() {
         auto oldest = g_Thumbs.end();
         uint64_t best = UINT64_MAX;
         for (auto it = g_Thumbs.begin(); it != g_Thumbs.end(); ++it) {
+            if (it->second.loading) continue;
             if (it->second.lastUse < best) { best = it->second.lastUse; oldest = it; }
         }
         if (oldest == g_Thumbs.end()) break;
@@ -357,56 +534,208 @@ static bool CreateThumbSrv(ID3D11Device* device, const uint8_t* rgba, int w, int
     return true;
 }
 
-static ID3D11ShaderResourceView* GetThumb(ID3D11Device* device, const std::string& path, bool wantLoad) {
-    if (!device || path.empty()) return nullptr;
-    auto it = g_Thumbs.find(path);
-    if (it != g_Thumbs.end()) {
-        it->second.lastUse = ++g_ThumbClock;
-        return it->second.failed ? nullptr : it->second.srv;
-    }
-    if (!wantLoad) return nullptr;
-
-    Thumb t;
-    t.lastUse = ++g_ThumbClock;
+// Decode on workers in parallel (each job owns its buffers). Progressive: first
+// finished → first GPU upload next frame — not "all-or-nothing".
+static ThumbDecoded DecodeThumbOnWorker(const std::string& path) {
+    ThumbDecoded d;
+    d.path = path;
+    const auto t0 = std::chrono::high_resolution_clock::now();
 
     std::string ext;
     try { ext = fs::path(PathUtil::Utf8ToWide(path)).extension().string(); } catch (...) {}
     ext = ToLower(ext);
 
-    std::vector<uint8_t> rgba;
-    int w = 0, h = 0;
-    bool ok = false;
-
-    if (ext == ".dds") {
-        DdsImage img;
-        if (DdsHelper::LoadDDS(path, img) && img.width > 0 && img.height > 0 && !img.pixels.empty()) {
-            std::vector<uint8_t> full((size_t)img.width * img.height * 4);
-            for (int i = 0, n = img.width * img.height; i < n; ++i) {
-                full[i*4+0] = (uint8_t)std::clamp(img.pixels[i*4+0] * 255.f, 0.f, 255.f);
-                full[i*4+1] = (uint8_t)std::clamp(img.pixels[i*4+1] * 255.f, 0.f, 255.f);
-                full[i*4+2] = (uint8_t)std::clamp(img.pixels[i*4+2] * 255.f, 0.f, 255.f);
-                full[i*4+3] = (uint8_t)std::clamp(img.pixels[i*4+3] * 255.f, 0.f, 255.f);
+    try {
+        if (ext == ".dds") {
+            DdsImage img;
+            if (DdsHelper::LoadDDS(path, img) && img.width > 0 && img.height > 0 && !img.pixels.empty()) {
+                if (img.width > kMaxThumbDecodeDim || img.height > kMaxThumbDecodeDim) {
+                    d.failed = true;
+                } else {
+                    std::vector<uint8_t> full((size_t)img.width * img.height * 4);
+                    for (int i = 0, n = img.width * img.height; i < n; ++i) {
+                        full[i*4+0] = (uint8_t)std::clamp(img.pixels[i*4+0] * 255.f, 0.f, 255.f);
+                        full[i*4+1] = (uint8_t)std::clamp(img.pixels[i*4+1] * 255.f, 0.f, 255.f);
+                        full[i*4+2] = (uint8_t)std::clamp(img.pixels[i*4+2] * 255.f, 0.f, 255.f);
+                        full[i*4+3] = (uint8_t)std::clamp(img.pixels[i*4+3] * 255.f, 0.f, 255.f);
+                    }
+                    DownscaleRGBA(full.data(), img.width, img.height, d.rgba, d.w, d.h, kThumbMaxPx);
+                }
+            } else {
+                d.failed = true;
             }
-            DownscaleRGBA(full.data(), img.width, img.height, rgba, w, h, kThumbMaxPx);
-            ok = true;
+        } else {
+            std::vector<uint8_t> full;
+            int fw = 0, fh = 0;
+            if (ImageManager::LoadImageFromFile(path, full, fw, fh) && fw > 0 && fh > 0) {
+                if (fw > kMaxThumbDecodeDim || fh > kMaxThumbDecodeDim)
+                    d.failed = true;
+                else
+                    DownscaleRGBA(full.data(), fw, fh, d.rgba, d.w, d.h, kThumbMaxPx);
+            } else {
+                d.failed = true;
+            }
         }
-    } else {
-        std::vector<uint8_t> full;
-        int fw = 0, fh = 0;
-        if (ImageManager::LoadImageFromFile(path, full, fw, fh) && fw > 0 && fh > 0) {
-            DownscaleRGBA(full.data(), fw, fh, rgba, w, h, kThumbMaxPx);
-            ok = true;
-        }
+    } catch (...) {
+        d.failed = true;
     }
 
-    if (ok && CreateThumbSrv(device, rgba.data(), w, h, t)) {
-        EvictThumbsIfNeeded();
-        g_Thumbs[path] = t;
-        return g_Thumbs[path].srv;
+    if (!d.failed && (d.rgba.empty() || d.w <= 0 || d.h <= 0))
+        d.failed = true;
+
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - t0).count();
+    if (ms > 150.0)
+        Logger::Get().InfoTag("perf",
+            "FileExplorer.ThumbDecode " + path + " took " + std::to_string(ms) + " ms");
+
+    return d;
+}
+
+// Request a decode (may queue if workers busy). Never marks failed just for queueing.
+static void RequestThumbDecode(const std::string& path, bool priority) {
+    std::lock_guard<std::mutex> lock(g_ThumbMu);
+    if (g_ThumbInFlight.count(path) || g_ThumbQueued.count(path))
+        return;
+    // Already have a ready/failed entry — don't re-request.
+    auto it = g_Thumbs.find(path);
+    if (it != g_Thumbs.end() && !it->second.loading && (it->second.srv || it->second.failed))
+        return;
+
+    if (priority)
+        g_ThumbWant.push_front(path);
+    else
+        g_ThumbWant.push_back(path);
+    g_ThumbQueued.insert(path);
+
+    // Ensure map entry exists so UI can show spinner while queued.
+    Thumb& t = g_Thumbs[path];
+    t.loading = true;
+    t.failed = false;
+    t.lastUse = ++g_ThumbClock;
+}
+
+// Start worker jobs from the request queue (slots free → pump). Parallel workers.
+static void PumpThumbRequests() {
+    const int maxIn = MaxDecodeInFlight();
+    for (;;) {
+        std::string path;
+        {
+            std::lock_guard<std::mutex> lock(g_ThumbMu);
+            if (g_ThumbWant.empty()) return;
+            if ((int)g_ThumbInFlight.size() >= maxIn) return;
+            path = std::move(g_ThumbWant.front());
+            g_ThumbWant.pop_front();
+            g_ThumbQueued.erase(path);
+            if (g_ThumbInFlight.count(path)) continue;
+            // Skip if already has GPU (race with upload)
+            auto it = g_Thumbs.find(path);
+            if (it != g_Thumbs.end() && it->second.srv && !it->second.failed)
+                continue;
+            g_ThumbInFlight.insert(path);
+            g_ThumbInFlightCount.store((int)g_ThumbInFlight.size());
+            Thumb& t = g_Thumbs[path];
+            t.loading = true;
+            t.failed = false;
+        }
+
+        try {
+            ThreadPool::Get().Enqueue([path]() {
+                ThumbDecoded d = DecodeThumbOnWorker(path);
+                {
+                    std::lock_guard<std::mutex> lock(g_ThumbMu);
+                    g_ThumbInFlight.erase(path);
+                    g_ThumbInFlightCount.store((int)g_ThumbInFlight.size());
+                    // Progressive: each finished job is visible after next Poll upload.
+                    g_ThumbReady.push_back(std::move(d));
+                }
+            });
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(g_ThumbMu);
+            g_ThumbInFlight.erase(path);
+            g_ThumbInFlightCount.store((int)g_ThumbInFlight.size());
+            ThumbDecoded d;
+            d.path = path;
+            d.failed = true;
+            g_ThumbReady.push_back(std::move(d));
+        }
     }
-    t.failed = true;
-    g_Thumbs[path] = t;
+}
+
+// Main thread: GPU upload only (cheap). Decode already done on workers.
+static void PollThumbUploads(ID3D11Device* device) {
+    PumpThumbRequests();
+    if (!device) return;
+    int uploads = 0;
+    while (uploads < kMaxGpuUploadsPerFrame) {
+        ThumbDecoded d;
+        {
+            std::lock_guard<std::mutex> lock(g_ThumbMu);
+            if (g_ThumbReady.empty()) break;
+            d = std::move(g_ThumbReady.front());
+            g_ThumbReady.pop_front();
+        }
+
+        Thumb& t = g_Thumbs[d.path];
+        t.loading = false;
+        t.lastUse = ++g_ThumbClock;
+        if (d.failed || d.rgba.empty()) {
+            t.failed = true;
+            ReleaseThumb(t);
+            ++uploads; // count attempts so we don't spin forever on failures
+            continue;
+        }
+        ReleaseThumb(t);
+        if (CreateThumbSrv(device, d.rgba.data(), d.w, d.h, t)) {
+            t.failed = false;
+            t.loading = false;
+            EvictThumbsIfNeeded();
+        } else {
+            t.failed = true;
+            t.loading = false;
+        }
+        ++uploads;
+    }
+    // After uploads free slots — start more decodes.
+    PumpThumbRequests();
+}
+
+// Never decodes on main thread. Missing preview is fine; freeze is not.
+static ID3D11ShaderResourceView* GetThumb(ID3D11Device* device, const std::string& path,
+                                          bool wantLoad, bool priority = false,
+                                          uint64_t fileSizeHint = 0) {
+    if (!device || path.empty()) return nullptr;
+    auto it = g_Thumbs.find(path);
+    if (it != g_Thumbs.end()) {
+        it->second.lastUse = ++g_ThumbClock;
+        if (it->second.srv && !it->second.failed)
+            return it->second.srv;
+        if (it->second.failed)
+            return nullptr;
+        if (it->second.loading)
+            return nullptr; // still queued/decoding — spinner
+        // Entry exists without srv/loading/failed — re-request
+    }
+    if (!wantLoad) return nullptr;
+
+    uint64_t fsize = fileSizeHint;
+    if (fsize == 0) {
+        std::error_code ec;
+        auto sz = fs::file_size(PathUtil::FromUtf8(path), ec);
+        if (!ec) fsize = (uint64_t)sz;
+    }
+    if (!priority && fsize > kAutoThumbMaxBytes)
+        return nullptr;
+
+    RequestThumbDecode(path, priority);
     return nullptr;
+}
+
+bool FileExplorerIsBusy() {
+    if (g_DirBusy.load()) return true;
+    if (g_ThumbInFlightCount.load() > 0) return true;
+    std::lock_guard<std::mutex> lock(g_ThumbMu);
+    return !g_ThumbReady.empty() || !g_ThumbInFlight.empty() || !g_ThumbWant.empty();
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +749,7 @@ static void NavigateTo(FileExplorerState& st, const std::string& dir) {
     st.forwardStack.clear();
     st.currentDir = dir;
     st.selectedPath.clear();
+    st.dirCacheDirty = true;
 }
 
 static void NavigateUp(FileExplorerState& st) {
@@ -432,6 +762,7 @@ static void NavigateBack(FileExplorerState& st) {
     st.currentDir = st.backStack.back();
     st.backStack.pop_back();
     st.selectedPath.clear();
+    st.dirCacheDirty = true;
 }
 
 static void NavigateForward(FileExplorerState& st) {
@@ -440,6 +771,7 @@ static void NavigateForward(FileExplorerState& st) {
     st.currentDir = st.forwardStack.back();
     st.forwardStack.pop_back();
     st.selectedPath.clear();
+    st.dirCacheDirty = true;
 }
 
 // Multi-select helpers
@@ -496,6 +828,7 @@ static ImportBatchItem* FindBatch(FileExplorerState& st, const std::string& path
 // ---------------------------------------------------------------------------
 
 void FileExplorerOpen(FileExplorerState& st, FileExplorerMode mode, const std::string& startDir) {
+    const auto t0 = std::chrono::high_resolution_clock::now();
     st.open = true;
     st.mode = mode;
     st.status.clear();
@@ -504,6 +837,7 @@ void FileExplorerOpen(FileExplorerState& st, FileExplorerMode mode, const std::s
     st.importBatch.clear();
     st.backStack.clear();
     st.forwardStack.clear();
+    st.dirCacheDirty = true; // force first-frame ListDirectory (bench-critical)
     if (!startDir.empty())
         st.currentDir = startDir;
     else if (st.currentDir.empty())
@@ -531,7 +865,16 @@ void FileExplorerOpen(FileExplorerState& st, FileExplorerMode mode, const std::s
         // Prefer existing export path basename; default from container
         if (!st.saveFileName[0])
             std::snprintf(st.saveFileName, sizeof(st.saveFileName), "export.dds");
+        // Details = no icon decode storm; icons still available via toolbar.
+        st.viewMode = ExplorerViewMode::Details;
     }
+    const double openMs = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - t0).count();
+    // FileExplorerOpen itself is cheap (state only). Real cost is first ListDirectory in Draw.
+    Logger::Get().InfoTag("perf",
+        "FileExplorerOpen mode=" + std::to_string((int)mode) +
+        " dir=" + st.currentDir + " setup=" + std::to_string(openMs) + " ms"
+        " (listing deferred to first Draw)");
 }
 
 bool FileExplorerApplyAdvancedExport(FileExplorerState& st, Canvas& canvas) {
@@ -559,11 +902,17 @@ bool FileExplorerApplyAdvancedExport(FileExplorerState& st, Canvas& canvas) {
         full = JoinPath(st.currentDir, full);
     canvas.SetExportPath(full);
 
-    std::string used;
-    bool ok = canvas.ExportWithProjectSettings(&used);
-    st.status = ok ? ("Exported " + (used.empty() ? full : used)) : "Export failed";
-    st.selectedPath = used.empty() ? full : used;
-    return ok;
+    // Async export: composite on main, encode/write on worker; document locked until done.
+    // Progress / result go through JobManager + footer notification bar (not FE status).
+    const bool started = canvas.ExportWithProjectSettingsAsync();
+    if (!started) {
+        st.status = "Export already in progress";
+        return false;
+    }
+    st.status = "Exporting…";
+    st.selectedPath = full;
+    FileExplorerClose(st); // free UI; progress lives in footer job bar
+    return true;
 }
 
 void FileExplorerClose(FileExplorerState& st) {
@@ -871,10 +1220,19 @@ bool FileExplorerApplySaveProject(FileExplorerState& st, Project* project, Canva
     if (name.find('.') == std::string::npos) name += ".rayp";
     std::string full = JoinPath(st.currentDir, name);
     if (project) project->InjectTextureSetsIntoCanvas();
-    bool ok = canvas.SaveCanvasRayp(full);
-    st.status = ok ? ("Saved " + full) : "Save failed";
+
+    // Snapshot + write on workers (SaveCanvasRaypAsync); document locked via job.
+    const uint64_t jobId = core::JobManager::Get().Begin(
+        "Save project", /*locksDocument=*/true, /*cancellable=*/false);
+    core::JobManager::Get().SetProgress(jobId, -1.f, full);
+    st.status = "Saving…";
     st.selectedPath = full;
-    return ok;
+    canvas.SaveCanvasRaypAsync(full, [jobId, full](bool ok) {
+        core::JobManager::Get().Complete(jobId, ok,
+            ok ? ("Saved " + full) : ("Save failed: " + full));
+    });
+    FileExplorerClose(st); // free UI immediately
+    return true;
 }
 
 bool FileExplorerApplyOpenProject(FileExplorerState& st, ID3D11Device* device) {
@@ -1032,6 +1390,9 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                       ID3D11Device* device) {
     if (!st.open) return false;
 
+    static std::string s_firstDrawKey;
+    const auto tDraw0 = std::chrono::high_resolution_clock::now();
+
     const char* title = "File Explorer";
     switch (st.mode) {
     case FileExplorerMode::ProjectCreate: title = "New Project"; break;
@@ -1117,6 +1478,11 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
         ImGui::SameLine(0, 4);
         if (ImGui::SmallButton(st.sortAsc ? "A-Z##az" : "Z-A##az"))
             st.sortAsc = !st.sortAsc;
+        ImGui::SameLine(0, 4);
+        if (ImGui::SmallButton("↻##refresh"))
+            st.dirCacheDirty = true;
+        if (ImGui::IsItemHovered())
+            Ui::Tooltip("Refresh folder listing");
     }
 
     ImGui::Separator();
@@ -1186,9 +1552,51 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
     ImGui::BeginChild("##browser", ImVec2(browserW, bodyH), true,
                       0);
 
-    std::vector<FsEntry> entries;
-    ListDirectory(st.currentDir, st.showHidden, entries);
+    // ---- Async directory listing (worker; UI never blocks on index) ----
+    PollDirList(st);
+    PollThumbUploads(device);
+    st.thumbsPending = g_ThumbInFlightCount.load();
+
+    {
+        static std::string s_requestedDir;
+        static bool s_requestedHidden = false;
+        const bool dirMismatch =
+            g_CachedDir != st.currentDir || g_CachedShowHidden != st.showHidden;
+        const bool needRequest =
+            st.dirCacheDirty ||
+            s_requestedDir != st.currentDir ||
+            s_requestedHidden != st.showHidden;
+        if (needRequest) {
+            if (dirMismatch || st.dirCacheDirty)
+                g_CachedEntries.clear(); // show spinner, not stale other-folder
+            RequestDirListAsync(st.currentDir, st.showHidden);
+            s_requestedDir = st.currentDir;
+            s_requestedHidden = st.showHidden;
+            st.dirCacheDirty = false;
+        }
+        st.dirListingBusy =
+            g_DirBusy.load() ||
+            g_CachedDir != st.currentDir ||
+            g_CachedShowHidden != st.showHidden;
+    }
+
+    std::vector<FsEntry> entries = g_CachedEntries;
     SortEntries(entries, st.sortBy, st.sortAsc);
+
+    // Busy overlay: folder index on worker — UI stays interactive, show spinner.
+    if (st.dirListingBusy) {
+        ImDrawList* dlBusy = ImGui::GetWindowDrawList();
+        ImVec2 rmin = ImGui::GetCursorScreenPos();
+        ImVec2 rmax(rmin.x + ImGui::GetContentRegionAvail().x,
+                    rmin.y + ImGui::GetContentRegionAvail().y);
+        const ImVec2 center((rmin.x + rmax.x) * 0.5f, (rmin.y + rmax.y) * 0.5f);
+        dlBusy->AddRectFilled(rmin, rmax, IM_COL32(12, 14, 18, 140));
+        DrawBusySpinner(dlBusy, center, 14.f, IM_COL32(120, 170, 255, 255));
+        const char* msg = "Indexing folder…";
+        ImVec2 ts = ImGui::CalcTextSize(msg);
+        dlBusy->AddText(ImVec2(center.x - ts.x * 0.5f, center.y + 22.f),
+                        IM_COL32(210, 215, 230, 255), msg);
+    }
 
     // Filters by mode
     if (filterImages) {
@@ -1313,13 +1721,16 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             ImGui::EndTable();
         }
     } else {
-        // Icon grid
+        // Icon grid — progressive thumbs: only request visible (+1 screen prefetch).
+        // Never enqueue all 500 at once (that felt like "wait then all appear").
         float avail = ImGui::GetContentRegionAvail().x;
         float spacing = 10.f;
         float cellW = cell + 8.f;
         int cols = std::max(1, (int)((avail + spacing) / (cellW + spacing)));
         int col = 0;
         ImDrawList* dl = ImGui::GetWindowDrawList();
+        const float rowH = cell + 28.f + spacing;
+        const float prefetchPx = rowH * 2.f; // ~2 rows above/below viewport
 
         for (int i = 0; i < (int)entries.size(); ++i) {
             const FsEntry& e = entries[i];
@@ -1330,10 +1741,16 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             ImVec2 p0 = ImGui::GetCursorScreenPos();
             ImVec2 box(cellW, cell + 28.f);
 
+            // Visibility before item (prefetch margin) — progressive load target.
+            const bool inPrefetch = ImGui::IsRectVisible(
+                ImVec2(p0.x, p0.y - prefetchPx),
+                ImVec2(p0.x + box.x, p0.y + box.y + prefetchPx));
+
             ImGui::InvisibleButton("##cell", box);
             bool hovered = ImGui::IsItemHovered();
             bool clicked = ImGui::IsItemClicked();
             bool dbl = hovered && ImGui::IsMouseDoubleClicked(0);
+            const bool visible = ImGui::IsItemVisible();
 
             ImU32 bg = sel ? IM_COL32(60, 100, 180, 90)
                            : (hovered ? IM_COL32(255, 255, 255, 18) : 0);
@@ -1348,14 +1765,26 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
             if (e.isDir) {
                 DrawFolderGlyph(dl, ip0, ip1, IM_COL32(230, 190, 80, 220));
             } else if (e.isImage) {
-                ID3D11ShaderResourceView* srv = GetThumb(device, e.fullPath, hovered || sel ||
-                    st.viewMode == ExplorerViewMode::LargeIcons ||
-                    st.viewMode == ExplorerViewMode::MediumIcons);
+                // Progressive: decode only near-viewport items; hover/sel first.
+                const bool priority = hovered || sel;
+                const bool want = priority || ((visible || inPrefetch) &&
+                    (st.viewMode == ExplorerViewMode::LargeIcons ||
+                     st.viewMode == ExplorerViewMode::MediumIcons ||
+                     st.viewMode == ExplorerViewMode::SmallIcons));
+                ID3D11ShaderResourceView* srv =
+                    GetThumb(device, e.fullPath, want, priority, e.size);
                 if (srv) {
                     dl->AddImage((ImTextureID)srv, ip0, ip1);
                     dl->AddRect(ip0, ip1, IM_COL32(0, 0, 0, 80), 2.f);
                 } else {
                     DrawFileGlyph(dl, ip0, ip1, IM_COL32(50, 55, 65, 255), e.typeLabel.c_str());
+                    // Spinner only while queued/decoding — not forever after fail.
+                    auto tit = g_Thumbs.find(e.fullPath);
+                    if (tit != g_Thumbs.end() && tit->second.loading && !tit->second.failed) {
+                        ImVec2 c((ip0.x + ip1.x) * 0.5f, (ip0.y + ip1.y) * 0.5f);
+                        DrawBusySpinner(dl, c, std::max(6.f, (ip1.x - ip0.x) * 0.18f),
+                                        IM_COL32(140, 180, 255, 255));
+                    }
                 }
             } else {
                 DrawFileGlyph(dl, ip0, ip1, IM_COL32(55, 58, 68, 255), e.typeLabel.c_str());
@@ -1883,6 +2312,27 @@ bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
     if (!canOk) ImGui::EndDisabled();
 
     ImGui::End();
+
+    {
+        // Once per open session (dir+mode key).
+        const std::string key = st.currentDir + "|" + std::to_string((int)st.mode);
+        if (s_firstDrawKey != key) {
+            s_firstDrawKey = key;
+            const double drawMs = std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - tDraw0).count();
+            Logger::Get().InfoTag("perf",
+                "FileExplorer.firstDraw took " + std::to_string(drawMs) +
+                " ms (listMs_worker=" + std::to_string(st.lastListMs) +
+                " entries=" + std::to_string(st.lastListCount) +
+                " listingBusy=" + std::string(st.dirListingBusy ? "1" : "0") +
+                " thumbsPending=" + std::to_string(st.thumbsPending) +
+                ") — UI frame cost; index/thumbs run on ThreadPool");
+            core::Notifications::Get().Push(
+                "FE open " + std::to_string((int)drawMs) + "ms",
+                core::NotifyLevel::Info);
+        }
+    }
+
     return confirmed;
 }
 

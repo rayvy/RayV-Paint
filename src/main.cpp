@@ -29,7 +29,10 @@
 
 // Project Core
 #include "Logger.h"
+#include "core/JobManager.h"
+#include "core/Notifications.h"
 #include "ThreadPool.h"
+#include "ui/FileExplorer.h"
 #include "assets/AssetManager.h"
 #include "ConfigManager.h"
 #include "ScriptingEngine.h"
@@ -620,6 +623,9 @@ int main(int argc, char* argv[]) {
     std::string testAdvancedImportFolder = "";
     std::string testAdvancedBase = "";
     std::string testAdvancedOut = "";
+    std::string exportToPath = "";
+    std::string probeFileExplorerDir = "";
+    bool probeFileExplorer = false;
     int processExitCode = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -668,6 +674,18 @@ int main(int argc, char* argv[]) {
             testAdvancedBase = argv[++i];
         } else if (arg == "--test-advanced-out" && i + 1 < argc) {
             testAdvancedOut = argv[++i];
+        } else if (arg == "--export-to" && i + 1 < argc) {
+            // Agent / bench: open document (positional path) then sync export & exit.
+            exportToPath = argv[++i];
+            forceConsole = true;
+            allowMultiInstance = true;
+        } else if (arg == "--probe-file-explorer") {
+            // Agent / bench: open FE once, measure ListDirectory on first Draw, exit.
+            probeFileExplorer = true;
+            forceConsole = true;
+            allowMultiInstance = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-')
+                probeFileExplorerDir = argv[++i];
         } else if (arg == "--version") {
             SetupConsole(true);
             std::cout << "RayV Paint - Version " << kRayVPaintVersion << std::endl;
@@ -682,10 +700,14 @@ int main(int argc, char* argv[]) {
     }
 
     // Force console if in test mode or headless mode
-    if (testMode || headlessMode || benchmarkMode) {
+    if (testMode || headlessMode || benchmarkMode || !exportToPath.empty() || probeFileExplorer) {
         forceConsole = true;
         // Tests/headless may run parallel processes — allow multi unless user wants single.
         allowMultiInstance = true;
+    }
+    // One-shot agent commands: exit after first rendered frame (FE list runs during Draw).
+    if (probeFileExplorer || !exportToPath.empty()) {
+        testMode = true;
     }
 
     SetupConsole(forceConsole);
@@ -869,15 +891,42 @@ int main(int argc, char* argv[]) {
 
     // Load startup document if specified on CLI (image or .rayp project) → new/reuse project tab
     if (!startupImagePath.empty()) {
-        if (!scriptPath.empty()) {
-            // Headless/automation: synchronous open into prepared project tab
+        // Sync open for scripts / agent export / headless; async for interactive GUI.
+        if (!scriptPath.empty() || !exportToPath.empty() || headlessMode || testMode) {
             ProjectManager::Get().ActivateOrPrepareOpen(startupImagePath);
             if (!ActiveCanvas().OpenDocument(g_pd3dDevice, startupImagePath)) {
                 Logger::Get().Error("Failed to open startup document: " + startupImagePath);
+                if (!exportToPath.empty()) processExitCode = 2;
+            } else {
+                Logger::Get().InfoTag("cli", "Opened document: " + startupImagePath);
             }
         } else {
             OpenPathAsNewProject(startupImagePath);
         }
+    }
+
+    // Agent CLI: advanced-export path without File Explorer UI
+    if (!exportToPath.empty()) {
+        auto t0 = std::chrono::high_resolution_clock::now();
+        ActiveCanvas().SetExportPath(exportToPath);
+        // Infer container from extension
+        std::string low = exportToPath;
+        std::transform(low.begin(), low.end(), low.begin(),
+            [](unsigned char c) { return (char)std::tolower(c); });
+        if (low.size() >= 4 && low.substr(low.size() - 4) == ".dds")
+            ActiveCanvas().SetExportContainer(Canvas::ExportContainer::DDS);
+        else
+            ActiveCanvas().SetExportContainer(Canvas::ExportContainer::PNG);
+        std::string used;
+        const uint64_t jobId = core::JobManager::Get().Begin("CLI Export", true, false);
+        bool ok = ActiveCanvas().ExportWithProjectSettings(&used);
+        core::JobManager::Get().Complete(jobId, ok, ok ? ("Exported " + used) : "Export failed");
+        double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0).count();
+        Logger::Get().InfoTag("perf",
+            std::string("CLI ExportWithProjectSettings took ") + std::to_string(ms) + " ms → " +
+            (used.empty() ? exportToPath : used) + (ok ? " OK" : " FAIL"));
+        processExitCode = ok ? 0 : 1;
     }
 
     // ---- CLI proof: Advanced multi-map import + batch export ----
@@ -1080,6 +1129,24 @@ int main(int argc, char* argv[]) {
     uiState.backupPath = backupPath;
     uiState.showRecoveryModal = showRecoveryModal;
 
+    // Agent/bench: open File Explorer once so first-frame ListDirectory is timed ([perf] tags).
+    if (probeFileExplorer) {
+        std::string dir = probeFileExplorerDir;
+        if (dir.empty() && !startupImagePath.empty()) {
+            try {
+                auto p = std::filesystem::path(PathUtil::FromUtf8(startupImagePath)).parent_path();
+                dir = PathUtil::WideToUtf8(p.wstring());
+            } catch (...) {}
+        }
+        if (dir.empty()) {
+            try { dir = PathUtil::WideToUtf8(std::filesystem::current_path().wstring()); }
+            catch (...) { dir = "."; }
+        }
+        UI::FileExplorerOpen(uiState.fileExplorer, UI::FileExplorerMode::AdvancedExport, dir);
+        Logger::Get().InfoTag("cli", "Probe File Explorer → " + dir +
+            " (ListDirectory cost logged on first Draw as [perf] FileExplorer.ListDirectory)");
+    }
+
     // OperatorRegistry — single execute path for catalog actions (hotkeys / menus / Python).
     {
         core::ops::OperatorHost host;
@@ -1140,7 +1207,8 @@ int main(int argc, char* argv[]) {
 
         // Merge async brush disk scan (non-blocking)
         BrushLibrary::Get().PollAsyncDiskLoad();
-        assets::AssetManager::Get().Poll(g_pd3dDevice, 4.0);
+        // Budget for asset store + thumb GPU uploads (thumbs decode on workers).
+        assets::AssetManager::Get().Poll(g_pd3dDevice, 8.0);
 
         // Paths from second instance (WM_COPYDATA) → new project tabs
         ProjectManager::Get().DrainPendingOpens(
@@ -2563,19 +2631,34 @@ int main(int argc, char* argv[]) {
                 dl->AddText(ImVec2(c0.x + 16.f, c0.y + 4.f + lineH * 2.f), tSec, line2);
             }
 
-            // Draw Smart Select background process progress & cancel option UI
-            if (ActiveCanvas().IsSmartSelectInProgress()) {
-                ImGui::SetCursorScreenPos(ImVec2(imageMin.x + 20.0f, imageMin.y + 20.0f));
-                ImGui::BeginChild("SmartSelectProgress", ImVec2(320.0f, 90.0f), true, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
-                ImGui::Text("Smart Select (GrabCut) is running...");
-                float t = (float)fmod(ImGui::GetTime() * 2.0, 100.0) / 100.0f;
-                char buf[32];
-                sprintf(buf, "Processing...");
-                ImGui::ProgressBar(t, ImVec2(-1.0f, 0.0f), buf);
-                if (ImGui::Button("Cancel")) {
-                    ActiveCanvas().CancelSmartSelect();
+            // Smart Select job tracking (footer) + on-canvas progress/cancel
+            {
+                static uint64_t s_smartJobId = 0;
+                const bool smartBusy = ActiveCanvas().IsSmartSelectInProgress();
+                if (smartBusy && s_smartJobId == 0) {
+                    s_smartJobId = core::JobManager::Get().Begin(
+                        "Smart Select", /*locksDocument=*/false, /*cancellable=*/true,
+                        []() { ActiveCanvas().CancelSmartSelect(); });
+                    core::JobManager::Get().SetProgress(s_smartJobId, -1.f, "GrabCut…");
+                } else if (!smartBusy && s_smartJobId != 0) {
+                    core::JobManager::Get().Complete(s_smartJobId, true, "Smart Select done");
+                    s_smartJobId = 0;
                 }
-                ImGui::EndChild();
+                if (smartBusy) {
+                    ImGui::SetCursorScreenPos(ImVec2(imageMin.x + 20.0f, imageMin.y + 20.0f));
+                    ImGui::BeginChild("SmartSelectProgress", ImVec2(320.0f, 90.0f), true, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+                    ImGui::Text("Smart Select (GrabCut) is running...");
+                    float t = (float)fmod(ImGui::GetTime() * 2.0, 100.0) / 100.0f;
+                    char buf[32];
+                    sprintf(buf, "Processing...");
+                    ImGui::ProgressBar(t, ImVec2(-1.0f, 0.0f), buf);
+                    if (ImGui::Button("Cancel")) {
+                        ActiveCanvas().CancelSmartSelect();
+                        if (s_smartJobId)
+                            core::JobManager::Get().RequestCancel(s_smartJobId);
+                    }
+                    ImGui::EndChild();
+                }
             }
 
             ActiveCanvas().Update(viewportWidth, viewportHeight, isHovered, localMouseX, localMouseY, isPanning, dragDx, dragDy, wheelDelta);
@@ -2604,19 +2687,49 @@ int main(int argc, char* argv[]) {
             ImGui::End();
         }
 
-        // Handle Test Mode Execution: Perform 1 Frame and Exit
+        // Handle Test Mode Execution: exit after work settles (async FE index needs a few frames).
         if (testMode) {
-            Logger::Get().Info("[TEST] Render completed. Saving config and exiting successfully.");
-            ImGui::Render();
-            g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-            float clearColor[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
-            g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColor);
-            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-            
-            if (!headlessMode) {
-                g_pSwapChain->Present(1, 0);
+            static int s_testFrames = 0;
+            static auto s_testStart = std::chrono::high_resolution_clock::now();
+            ++s_testFrames;
+
+            bool readyToExit = true;
+            if (probeFileExplorer) {
+                // Wait until folder index (and early thumb queue) finishes — UI stayed free.
+                readyToExit = !UI::FileExplorerIsBusy() && !uiState.fileExplorer.dirListingBusy;
+                const double waitedMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::high_resolution_clock::now() - s_testStart).count();
+                // Safety: don't hang agent runs forever.
+                if (waitedMs > 15000.0) readyToExit = true;
+                // Always run at least 2 frames so async request can start + poll once.
+                if (s_testFrames < 2) readyToExit = false;
+            } else if (!exportToPath.empty()) {
+                readyToExit = (s_testFrames >= 1);
+            } else {
+                readyToExit = (s_testFrames >= 1);
             }
-            break;
+
+            if (readyToExit) {
+                if (probeFileExplorer) {
+                    const double waitedMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - s_testStart).count();
+                    Logger::Get().InfoTag("perf",
+                        "probe-file-explorer settled frames=" + std::to_string(s_testFrames) +
+                        " wall=" + std::to_string(waitedMs) + " ms" +
+                        " listMs_worker=" + std::to_string(uiState.fileExplorer.lastListMs) +
+                        " entries=" + std::to_string(uiState.fileExplorer.lastListCount) +
+                        " (UI was non-blocking during index)");
+                }
+                Logger::Get().Info("[TEST] Render completed. Saving config and exiting successfully.");
+                ImGui::Render();
+                g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+                float clearColor[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
+                g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColor);
+                ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+                if (!headlessMode)
+                    g_pSwapChain->Present(1, 0);
+                break;
+            }
         }
 
         // Work timing (excludes VSync wait when Present blocks)

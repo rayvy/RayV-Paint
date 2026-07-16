@@ -44,7 +44,8 @@ void DrawAssetBrowserPanel(UIState& state, Canvas& canvas, ID3D11Device* device)
         if (Ui::ShowOpenFile(
                 path, sizeof(path),
                 "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds\0All\0*.*\0")) {
-            assets::AssetManager::Get().ImportFileToUser(path);
+            // Decode/package on ThreadPool — UI stays free.
+            assets::AssetManager::Get().ImportFileToUserAsync(path);
         }
     }
     ImGui::SameLine();
@@ -53,13 +54,16 @@ void DrawAssetBrowserPanel(UIState& state, Canvas& canvas, ID3D11Device* device)
         if (Ui::ShowOpenFile(
                 path, sizeof(path),
                 "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds\0All\0*.*\0")) {
-            std::string key = assets::AssetManager::Get().ImportFileToProject(path);
-            if (!key.empty()) grid.selectedKey = key;
+            assets::AssetManager::Get().ImportFileToProjectAsync(path);
         }
     }
     ImGui::SameLine();
     if (ImGui::Button("Refresh")) {
         assets::AssetManager::Get().RefreshAllLibrariesAsync();
+    }
+    if (assets::AssetManager::Get().IsBusy()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("Working… (thumbs/index on workers)");
     }
 
     int ai = canvas.GetActiveLayerIndex();

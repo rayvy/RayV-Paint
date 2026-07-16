@@ -3,13 +3,17 @@
 #include "AssetStore.h"
 #include "AssetThumbCache.h"
 #include "../core/ImageManager.h"
+#include "../core/JobManager.h"
 #include "../core/Logger.h"
+#include "../core/Notifications.h"
 #include "../core/ThreadPool.h"
 #include "../package/PackageIO.h"
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <random>
 #include <algorithm>
 
@@ -17,6 +21,17 @@ namespace fs = std::filesystem;
 
 namespace assets {
 namespace {
+
+struct ImportResult {
+    bool userLib = true;
+    bool ok = false;
+    std::string key;
+    std::string path;
+    std::string err;
+};
+std::mutex g_ImportMu;
+std::vector<ImportResult> g_ImportReady;
+std::atomic<int> g_ImportInFlight{0};
 
 std::string UserTempDir() {
     try {
@@ -101,8 +116,47 @@ void AssetManager::Shutdown() {
 }
 
 void AssetManager::Poll(ID3D11Device* device, double budgetMs) {
-    AssetStore::Get().Poll(budgetMs * 0.6);
-    AssetThumbCache::Get().Poll(device, budgetMs * 0.4);
+    AssetStore::Get().Poll(budgetMs * 0.55);
+    AssetThumbCache::Get().Poll(device, budgetMs * 0.45);
+
+    // Drain async import results on main thread.
+    std::vector<ImportResult> ready;
+    {
+        std::lock_guard<std::mutex> lock(g_ImportMu);
+        ready.swap(g_ImportReady);
+    }
+    for (auto& r : ready) {
+        if (r.ok) {
+            Logger::Get().Info("Asset import ready: " + r.key);
+            core::Notifications::Get().Push(
+                std::string("Imported ") + (r.userLib ? "to User" : "to Project"),
+                core::NotifyLevel::Info);
+            if (r.userLib)
+                AssetLibraryIndex::Get().ScanCategory(AssetCategory::User);
+        } else {
+            Logger::Get().Error("Asset import failed: " + r.path +
+                (r.err.empty() ? "" : (" — " + r.err)));
+            core::Notifications::Get().Push("Import failed", core::NotifyLevel::Error);
+        }
+    }
+}
+
+bool AssetManager::IsBusy() const {
+    return m_IndexScanRunning.load() ||
+           AssetThumbCache::Get().IsBusy() ||
+           g_ImportInFlight.load() > 0;
+}
+
+int AssetManager::ThumbPendingCount() const {
+    return AssetThumbCache::Get().PendingCount();
+}
+
+bool AssetManager::IsThumbPending(const std::string& key) const {
+    return AssetThumbCache::Get().IsPending(key);
+}
+
+bool AssetManager::IsThumbFailed(const std::string& key) const {
+    return AssetThumbCache::Get().IsFailed(key);
 }
 
 void AssetManager::RefreshLibrary(AssetCategory cat) {
@@ -112,15 +166,20 @@ void AssetManager::RefreshLibrary(AssetCategory cat) {
 void AssetManager::RefreshAllLibrariesAsync() {
     if (m_IndexScanRunning.exchange(true)) return;
     m_IndexReady = false;
-    ThreadPool::Get().Enqueue([]() {
+    uint64_t jobId = core::JobManager::Get().Begin("Index assets", false, false);
+    core::JobManager::Get().SetProgress(jobId, -1.f, "Scanning libraries…");
+    ThreadPool::Get().Enqueue([jobId]() {
         try {
             AssetLibraryIndex::Get().ScanCategory(AssetCategory::BuiltIn);
             AssetLibraryIndex::Get().ScanCategory(AssetCategory::User);
         } catch (...) {}
         AssetManager::Get().m_IndexReady = true;
         AssetManager::Get().m_IndexScanRunning = false;
+        const int n = AssetLibraryIndex::Get().Count();
         Logger::Get().Info("AssetManager: library index ready (" +
-            std::to_string(AssetLibraryIndex::Get().Count()) + " entries)");
+            std::to_string(n) + " entries)");
+        core::JobManager::Get().Complete(jobId, true,
+            std::to_string(n) + " assets", /*notify=*/false);
     });
 }
 
@@ -530,6 +589,83 @@ std::string AssetManager::DisplayName(const std::string& key) const {
 ID3D11ShaderResourceView* AssetManager::GetThumbSrv(ID3D11Device* device, const std::string& key,
                                                     bool highQuality) {
     return AssetThumbCache::Get().GetSrv(device, key, highQuality);
+}
+
+bool AssetManager::ImportFileToUserAsync(const std::string& path) {
+    if (path.empty()) return false;
+    g_ImportInFlight.fetch_add(1);
+    const uint64_t jobId = core::JobManager::Get().Begin("Import asset", false, false);
+    core::JobManager::Get().SetProgress(jobId, -1.f, path);
+    try {
+        ThreadPool::Get().Enqueue([path, jobId]() {
+            ImportResult r;
+            r.userLib = true;
+            r.path = path;
+            try {
+                // Heavy decode/package on worker; index upsert is mostly path ops.
+                r.key = AssetManager::Get().ImportFileToUser(path);
+                r.ok = !r.key.empty();
+                if (!r.ok) r.err = "decode or package failed";
+            } catch (const std::exception& e) {
+                r.ok = false;
+                r.err = e.what();
+            } catch (...) {
+                r.ok = false;
+                r.err = "unknown";
+            }
+            const bool ok = r.ok;
+            {
+                std::lock_guard<std::mutex> lock(g_ImportMu);
+                g_ImportReady.push_back(std::move(r));
+            }
+            g_ImportInFlight.fetch_sub(1);
+            core::JobManager::Get().Complete(jobId, ok,
+                ok ? "Imported" : "Import failed", /*notify=*/false);
+        });
+        return true;
+    } catch (...) {
+        g_ImportInFlight.fetch_sub(1);
+        core::JobManager::Get().Complete(jobId, false, "ThreadPool unavailable", false);
+        return false;
+    }
+}
+
+bool AssetManager::ImportFileToProjectAsync(const std::string& path) {
+    if (path.empty()) return false;
+    g_ImportInFlight.fetch_add(1);
+    const uint64_t jobId = core::JobManager::Get().Begin("Import project asset", false, false);
+    core::JobManager::Get().SetProgress(jobId, -1.f, path);
+    try {
+        ThreadPool::Get().Enqueue([path, jobId]() {
+            ImportResult r;
+            r.userLib = false;
+            r.path = path;
+            try {
+                r.key = AssetManager::Get().ImportFileToProject(path);
+                r.ok = !r.key.empty();
+                if (!r.ok) r.err = "decode failed";
+            } catch (const std::exception& e) {
+                r.ok = false;
+                r.err = e.what();
+            } catch (...) {
+                r.ok = false;
+                r.err = "unknown";
+            }
+            const bool ok = r.ok;
+            {
+                std::lock_guard<std::mutex> lock(g_ImportMu);
+                g_ImportReady.push_back(std::move(r));
+            }
+            g_ImportInFlight.fetch_sub(1);
+            core::JobManager::Get().Complete(jobId, ok,
+                ok ? "Imported" : "Import failed", /*notify=*/false);
+        });
+        return true;
+    } catch (...) {
+        g_ImportInFlight.fetch_sub(1);
+        core::JobManager::Get().Complete(jobId, false, "ThreadPool unavailable", false);
+        return false;
+    }
 }
 
 } // namespace assets

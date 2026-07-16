@@ -5,6 +5,7 @@
 #include "core/TileCache.h"
 #include "core/HalfFloat.h"
 #include "core/Logger.h"
+#include "core/JobManager.h"
 #include "core/MemoryStats.h"
 #include "core/ImageManager.h"
 #include "core/IccProfiles.h"
@@ -4294,6 +4295,138 @@ bool Canvas::ExportWithProjectSettings(std::string* outPathUsed) {
         else Logger::Get().Error("Export PNG failed: " + path);
     }
     return ok;
+}
+
+bool Canvas::ExportWithProjectSettingsAsync(std::function<void(bool, const std::string&)> onDone) {
+    static std::atomic<bool> s_exportBusy{false};
+    if (s_exportBusy.exchange(true)) {
+        Logger::Get().Warn("Export already in progress");
+        return false;
+    }
+
+    SyncExportPathExtension();
+    std::string path = m_ExportPath;
+    if (path.empty()) {
+        path = (m_ExportContainer == ExportContainer::DDS) ? "export.dds" : "export.png";
+        m_ExportPath = path;
+    }
+
+    auto& jobs = core::JobManager::Get();
+    const uint64_t jobId = jobs.Begin("Export", /*locksDocument=*/true, /*cancellable=*/false);
+    jobs.SetProgress(jobId, 0.05f, "Compositing…");
+
+    ScopedTimer exportTimer("ExportWithProjectSettingsAsync " + path);
+
+    // --- Main thread: rebuild FX + snapshot composite (document stays locked via job) ---
+    for (int i = 0; i < (int)m_Layers.size(); ++i) {
+        auto& layer = m_Layers[i];
+        if (layer.isGroup) {
+            layer.presentationDirty = true;
+            RebuildGroupPresentation(i, /*fullQuality=*/true);
+            continue;
+        }
+        if (!layer.filters.empty()) {
+            layer.filtersDirty = true;
+            RebuildFilteredPixels(layer);
+        }
+        if (layer.HasEnabledStyles()) {
+            layer.presentationDirty = true;
+            RebuildLayerPresentation(layer, /*fullQuality=*/true);
+        }
+    }
+
+    const bool asDds = (m_ExportContainer == ExportContainer::DDS);
+    const int w = m_Width, h = m_Height;
+    std::string format = m_ExportFormat;
+    bool genMips = m_ExportGenerateMipMaps;
+    std::string mipFilter = m_ExportMipFilter;
+    std::string speed = m_ExportCompressionSpeed;
+    IccPreset iccPreset = GetExportIccPreset();
+
+    std::vector<uint8_t> rgba8;
+    std::vector<float> rgbaF;
+    bool wantFloat = false;
+    DXGI_FORMAT dxgi = DXGI_FORMAT_BC7_UNORM_SRGB;
+
+    auto failComposite = [&]() {
+        jobs.Complete(jobId, false, "Composite failed");
+        s_exportBusy = false;
+        if (onDone) onDone(false, path);
+        return false;
+    };
+
+    if (asDds) {
+        DdsCodec::UiLabelToDxgi(format, dxgi);
+        wantFloat =
+            DdsCodec::IsFloatFormat(dxgi) ||
+            m_DocumentBitDepth == DocumentBitDepth::F16 ||
+            m_DocumentBitDepth == DocumentBitDepth::F32;
+        if (wantFloat && (DdsCodec::IsFloatFormat(dxgi) ||
+                          dxgi == DXGI_FORMAT_BC6H_UF16 || dxgi == DXGI_FORMAT_BC6H_SF16)) {
+            rgbaF = GetCompositePixels();
+            if (rgbaF.empty()) return failComposite();
+        } else {
+            wantFloat = false;
+            if (!ComposeVisibleLayersRGBA8(m_Layers, w, h, rgba8) || rgba8.empty())
+                return failComposite();
+        }
+    } else {
+        if (!ComposeVisibleLayersRGBA8(m_Layers, w, h, rgba8) || rgba8.empty())
+            return failComposite();
+    }
+
+    // ICC bytes must be copied for the worker (static presets are OK, but copy is safer).
+    std::vector<uint8_t> iccBytes;
+    std::string iccName;
+    if (!asDds && iccPreset != IccPreset::None) {
+        iccBytes = GetIccPresetBytes(iccPreset);
+        iccName = IccPresetName(iccPreset);
+    }
+
+    jobs.SetProgress(jobId, 0.35f, "Writing…");
+
+    std::thread([path, asDds, w, h, format, genMips, mipFilter, speed, wantFloat, dxgi,
+                 rgba8 = std::move(rgba8), rgbaF = std::move(rgbaF),
+                 iccBytes = std::move(iccBytes), iccName = std::move(iccName),
+                 jobId, onDone]() mutable {
+        bool ok = false;
+        try {
+            core::JobManager::Get().SetProgress(jobId, 0.45f,
+                asDds ? "Encoding DDS…" : "Writing PNG…");
+            if (asDds) {
+                DdsCodec::SaveOptions opt;
+                opt.format = dxgi;
+                opt.generateMips = genMips;
+                opt.mipFilter = mipFilter;
+                opt.compressionSpeed = speed;
+                if (wantFloat)
+                    ok = DdsCodec::SaveRgba32F(path, rgbaF.data(), w, h, opt);
+                else
+                    ok = DdsCodec::SaveRgba8(path, rgba8.data(), w, h, opt);
+            } else if (iccBytes.empty()) {
+                ok = ImageManager::SaveRGBA8ToFile(
+                    path, rgba8.data(), w, h, w * 4, std::string());
+            } else {
+                ok = ImageManager::SaveRGBA8ToFile(
+                    path, rgba8.data(), w, h, w * 4,
+                    iccBytes.data(), iccBytes.size(), iccName.c_str());
+            }
+        } catch (...) {
+            ok = false;
+        }
+
+        if (ok)
+            Logger::Get().Info(std::string("Async export OK: ") + path);
+        else
+            Logger::Get().Error(std::string("Async export failed: ") + path);
+
+        core::JobManager::Get().Complete(jobId, ok,
+            ok ? ("Exported " + path) : ("Export failed: " + path));
+        s_exportBusy = false;
+        if (onDone) onDone(ok, path);
+    }).detach();
+
+    return true;
 }
 
 std::vector<float> Canvas::GetCompositePixels() const {

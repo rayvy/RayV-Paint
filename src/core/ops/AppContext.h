@@ -50,6 +50,7 @@ struct AppContext {
     bool settingsOpen = false;
     bool blockingModalOpen = false;   // adjust ops, about, recovery, wizard…
     bool layerEffectsOpen = false;
+    bool documentJobLocked = false;   // JobManager export/open locks document edits
 
     // --- Focus / hover (best-effort) ---
     FocusRegion focusRegion = FocusRegion::Other;

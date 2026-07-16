@@ -13,7 +13,10 @@
 #include "widgets/UiAssetPicker.h"
 #include "../core/ConfigManager.h"
 #include "../core/Logger.h"
+#include "../core/JobManager.h"
+#include "../core/Notifications.h"
 #include "../core/KeymapManager.h"
+#include "../assets/AssetManager.h"
 #include "../core/ImageManager.h"
 #include "../scripting/ScriptingEngine.h"
 #include "../scripting/ScriptPluginHost.h"
@@ -101,17 +104,25 @@ namespace UI {
             g_LoadingState.stage = "Initializing";
         }
 
-        std::thread([pathUtf8, device, &canvas]() {
+        // Document-locking job: UI chrome stays free, edits blocked via AppContext.
+        const uint64_t jobId = core::JobManager::Get().Begin(
+            "Open document", /*locksDocument=*/true, /*cancellable=*/false);
+        core::JobManager::Get().SetProgress(jobId, 0.f, pathUtf8);
+
+        std::thread([pathUtf8, device, &canvas, jobId]() {
             Logger::Get().Info("Starting background load of: " + pathUtf8);
-            bool ok = canvas.OpenDocument(device, pathUtf8, [](float progress, const char* stage) {
+            bool ok = canvas.OpenDocument(device, pathUtf8, [jobId](float progress, const char* stage) {
                 g_LoadingState.progress = progress;
                 if (stage) {
                     std::lock_guard<std::mutex> lock(g_LoadingState.mutex);
                     g_LoadingState.stage = stage;
                 }
+                core::JobManager::Get().SetProgress(jobId, progress, stage ? stage : "");
             });
             g_LoadingState.success = ok;
             g_LoadingState.completed = true;
+            core::JobManager::Get().Complete(jobId, ok,
+                ok ? ("Opened " + pathUtf8) : ("Open failed: " + pathUtf8));
         }).detach();
     }
 
@@ -1424,9 +1435,23 @@ namespace UI {
             endOperatorModal();
         }
 
-        // 2. Persistent Footer (Status Bar)
+        // 2. Persistent Footer (Status Bar + jobs + notification bar)
+        core::JobManager::Get().PruneFinished(2500.0);
+        const auto jobs = core::JobManager::Get().Snapshot();
+        bool hasActiveJob = false;
+        for (const auto& j : jobs) {
+            if (j.state == core::JobState::Running || j.state == core::JobState::Cancelling) {
+                hasActiveJob = true;
+                break;
+            }
+        }
+        const bool feBusy = UI::FileExplorerIsBusy();
+        const bool assetsBusy = assets::AssetManager::Get().IsBusy();
+        const bool showBusyChrome = hasActiveJob || feBusy || assetsBusy || g_LoadingState.isLoading;
+        const float statusBarH = showBusyChrome ? 48.0f : 28.0f;
+
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
-        ImGui::BeginViewportSideBar("##StatusBar", mainViewport, ImGuiDir_Down, 28.0f, 
+        ImGui::BeginViewportSideBar("##StatusBar", mainViewport, ImGuiDir_Down, statusBarH,
             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings);
         
         const char* toolLabel = "Hand";
@@ -1455,6 +1480,14 @@ namespace UI {
                 (canvas.GetDocumentBitDepth() == Canvas::DocumentBitDepth::F16) ? "F16" : "U8";
             const int bpp = BytesPerPixel(Canvas::FormatForBitDepth(canvas.GetDocumentBitDepth()));
             const bool floatDoc = (canvas.GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8);
+
+            // Reserve right side: Context + notification chip
+            const float contextBtnW = 72.f;
+            const float notifyChipW = 160.f;
+            const float rightReserve = contextBtnW + notifyChipW + 28.f;
+
+            // Left metrics (clipped by available width)
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - rightReserve);
             if (floatDoc) {
                 ImGui::Text("Startup: %.1f ms | Frame: %.2f ms | FPS: %.1f | Canvas: %d x %d | %s (%dB/px) | Brush RGBA %.4f %.4f %.4f %.4f | Zoom: %.0f%% | Tool: %s",
                     state.startupTimeMs, state.frameTimeMs, state.fps,
@@ -1473,10 +1506,119 @@ namespace UI {
                     canvas.GetZoom() * 100.0f,
                     ThreadPool::Get().GetThreadCount(), toolLabel);
             }
+            ImGui::PopTextWrapPos();
+
+            // Busy row: spinner + job / FE background work (input stays free)
+            if (showBusyChrome) {
+                // Animated spinner glyph (app is alive — never freeze UI for IO)
+                {
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    ImVec2 p = ImGui::GetCursorScreenPos();
+                    const float r = 6.f;
+                    const ImVec2 c(p.x + r + 2.f, p.y + ImGui::GetTextLineHeight() * 0.5f);
+                    const float t = (float)ImGui::GetTime() * 7.5f;
+                    for (int i = 0; i < 8; ++i) {
+                        const float a = t + (float)i * 6.2831853f / 8.f;
+                        const float fade = 0.2f + 0.8f * ((float)i / 8.f);
+                        dl->AddCircleFilled(
+                            ImVec2(c.x + std::cos(a) * r, c.y + std::sin(a) * r),
+                            2.0f,
+                            IM_COL32(130, 175, 255, (int)(fade * 255.f)), 6);
+                    }
+                    ImGui::Dummy(ImVec2(r * 2.f + 8.f, ImGui::GetTextLineHeight()));
+                    ImGui::SameLine();
+                }
+
+                bool drewJob = false;
+                for (const auto& j : jobs) {
+                    if (j.state != core::JobState::Running && j.state != core::JobState::Cancelling)
+                        continue;
+                    ImGui::Text("%s", j.name.c_str());
+                    ImGui::SameLine();
+                    if (j.progress >= 0.f) {
+                        char pbuf[32];
+                        std::snprintf(pbuf, sizeof(pbuf), "%d%%", (int)std::lround(j.progress * 100.f));
+                        ImGui::ProgressBar(j.progress, ImVec2(120.f, 0.f), pbuf);
+                    } else {
+                        ImGui::ProgressBar(-1.0f * (float)ImGui::GetTime(), ImVec2(120.f, 0.f), j.status.c_str());
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("%s", j.status.c_str());
+                    if (j.cancellable) {
+                        ImGui::SameLine();
+                        char cid[48];
+                        std::snprintf(cid, sizeof(cid), "Cancel##job%llu", (unsigned long long)j.id);
+                        if (ImGui::SmallButton(cid))
+                            core::JobManager::Get().RequestCancel(j.id);
+                    }
+                    drewJob = true;
+                    break; // show primary active job
+                }
+                if (!drewJob && (feBusy || assetsBusy || g_LoadingState.isLoading)) {
+                    if (g_LoadingState.isLoading)
+                        ImGui::TextUnformatted("Opening document…");
+                    else if (state.fileExplorer.dirListingBusy)
+                        ImGui::TextUnformatted("Indexing folder…");
+                    else if (state.fileExplorer.thumbsPending > 0)
+                        ImGui::Text("FE previews… (%d)", state.fileExplorer.thumbsPending);
+                    else if (assets::AssetManager::Get().IsIndexScanning())
+                        ImGui::TextUnformatted("Indexing asset libraries…");
+                    else if (assets::AssetManager::Get().ThumbPendingCount() > 0)
+                        ImGui::Text("Asset thumbs… (%d)",
+                            assets::AssetManager::Get().ThumbPendingCount());
+                    else
+                        ImGui::TextUnformatted("Background work…");
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("UI stays responsive · Threads: %d",
+                        (int)ThreadPool::Get().GetThreadCount());
+                }
+            }
+
+            // Notification chip (32-char preview) — click opens history
+            {
+                std::string preview = core::Notifications::Get().LatestPreview(32);
+                if (preview.empty()) preview = "No notifications";
+                ImVec4 col(0.75f, 0.78f, 0.85f, 1.f);
+                switch (core::Notifications::Get().LatestLevel()) {
+                case core::NotifyLevel::Warning: col = ImVec4(1.f, 0.82f, 0.4f, 1.f); break;
+                case core::NotifyLevel::Error:   col = ImVec4(1.f, 0.45f, 0.45f, 1.f); break;
+                default: break;
+                }
+                ImGui::SameLine(ImGui::GetWindowWidth() - rightReserve + 4.f);
+                ImGui::PushStyleColor(ImGuiCol_Text, col);
+                if (ImGui::SmallButton((preview + "##notify").c_str()))
+                    ImGui::OpenPopup("##NotifyHistory");
+                ImGui::PopStyleColor();
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("Notifications — click for history");
+
+                if (ImGui::BeginPopup("##NotifyHistory")) {
+                    ImGui::TextUnformatted("Notification history");
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Clear##nh"))
+                        core::Notifications::Get().Clear();
+                    ImGui::Separator();
+                    auto hist = core::Notifications::Get().History();
+                    ImGui::BeginChild("##nhscroll", ImVec2(420, 220), true);
+                    for (int i = (int)hist.size() - 1; i >= 0; --i) {
+                        const auto& n = hist[(size_t)i];
+                        ImVec4 c(0.85f, 0.85f, 0.9f, 1.f);
+                        if (n.level == core::NotifyLevel::Warning) c = ImVec4(1.f, 0.82f, 0.4f, 1.f);
+                        if (n.level == core::NotifyLevel::Error)   c = ImVec4(1.f, 0.45f, 0.45f, 1.f);
+                        ImGui::PushStyleColor(ImGuiCol_Text, c);
+                        if (ImGui::Selectable(n.message.c_str(), false))
+                            ImGui::SetClipboardText(n.message.c_str());
+                        ImGui::PopStyleColor();
+                        if (ImGui::IsItemHovered())
+                            Ui::Tooltip("Click to copy");
+                    }
+                    ImGui::EndChild();
+                    ImGui::EndPopup();
+                }
+            }
 
             // Context debug toggle (right side of status bar)
-            float btnW = 72.f;
-            ImGui::SameLine(ImGui::GetWindowWidth() - btnW - 12.f);
+            ImGui::SameLine(ImGui::GetWindowWidth() - contextBtnW - 12.f);
             if (ImGui::SmallButton(state.showContextDebug ? "Context*" : "Context"))
                 state.showContextDebug = !state.showContextDebug;
             if (ImGui::IsItemHovered())
@@ -2429,27 +2571,110 @@ namespace UI {
         // 8. Tool Settings strip (extracted)
         UI::DrawToolSettingsPanel(state, canvas, brush, activeTool, device);
 
-        // 9. Draw Logging Console Panel
+        // 9. Draw Logging Console Panel (selectable / copyable)
         if (state.showConsole) {
             Ui::BeginDockPanel("Console Logs", &state.showConsole);
+            auto logs = Logger::Get().GetRecentLogs();
             if (ImGui::Button("Clear")) {
                 Logger::Get().ClearRecentLogs();
             }
+            ImGui::SameLine();
+            if (ImGui::Button("Copy All")) {
+                std::string joined;
+                joined.reserve(logs.size() * 80);
+                for (size_t i = 0; i < logs.size(); ++i) {
+                    if (i) joined.push_back('\n');
+                    joined += logs[i];
+                }
+                ImGui::SetClipboardText(joined.c_str());
+            }
+            if (ImGui::IsItemHovered())
+                Ui::Tooltip("Copy entire console to clipboard");
+            ImGui::SameLine();
+            ImGui::TextDisabled("Click line = copy · multi-select with Ctrl");
             ImGui::Separator();
             ImGui::BeginChild("LogScrollRegion", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
-            auto logs = Logger::Get().GetRecentLogs();
-            for (const auto& log : logs) {
-                if (log.find("[ERROR]") != std::string::npos) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), log.c_str());
-                } else if (log.find("[WARN ]") != std::string::npos) {
-                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.4f, 1.0f), log.c_str());
-                } else if (log.find("[DEBUG]") != std::string::npos) {
-                    ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.8f, 1.0f), log.c_str());
-                } else {
-                    ImGui::TextUnformatted(log.c_str());
+            static std::vector<int> s_logSelected;
+            // prune selection indices if log shrank
+            s_logSelected.erase(
+                std::remove_if(s_logSelected.begin(), s_logSelected.end(),
+                    [&](int i) { return i < 0 || i >= (int)logs.size(); }),
+                s_logSelected.end());
+
+            ImGuiListClipper clipper;
+            clipper.Begin((int)logs.size());
+            while (clipper.Step()) {
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                    const auto& log = logs[(size_t)i];
+                    ImVec4 col(0.9f, 0.9f, 0.92f, 1.f);
+                    if (log.find("[ERROR]") != std::string::npos)
+                        col = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);
+                    else if (log.find("[WARN ]") != std::string::npos)
+                        col = ImVec4(1.0f, 0.8f, 0.4f, 1.0f);
+                    else if (log.find("[DEBUG]") != std::string::npos)
+                        col = ImVec4(0.6f, 0.6f, 0.8f, 1.0f);
+
+                    bool selected = std::find(s_logSelected.begin(), s_logSelected.end(), i) != s_logSelected.end();
+                    ImGui::PushStyleColor(ImGuiCol_Text, col);
+                    ImGui::PushID(i);
+                    if (ImGui::Selectable(log.c_str(), selected,
+                            ImGuiSelectableFlags_AllowDoubleClick)) {
+                        const bool ctrl = ImGui::GetIO().KeyCtrl;
+                        if (!ctrl)
+                            s_logSelected.clear();
+                        if (selected && ctrl) {
+                            s_logSelected.erase(
+                                std::remove(s_logSelected.begin(), s_logSelected.end(), i),
+                                s_logSelected.end());
+                        } else if (!selected) {
+                            s_logSelected.push_back(i);
+                        }
+                        // Always copy current selection (or just this line)
+                        std::string clip;
+                        if (s_logSelected.empty()) {
+                            clip = log;
+                        } else {
+                            std::vector<int> sorted = s_logSelected;
+                            std::sort(sorted.begin(), sorted.end());
+                            for (size_t k = 0; k < sorted.size(); ++k) {
+                                if (k) clip.push_back('\n');
+                                int idx = sorted[k];
+                                if (idx >= 0 && idx < (int)logs.size())
+                                    clip += logs[(size_t)idx];
+                            }
+                        }
+                        ImGui::SetClipboardText(clip.c_str());
+                    }
+                    if (ImGui::BeginPopupContextItem("##logctx")) {
+                        if (ImGui::MenuItem("Copy line"))
+                            ImGui::SetClipboardText(log.c_str());
+                        if (ImGui::MenuItem("Copy selection") && !s_logSelected.empty()) {
+                            std::vector<int> sorted = s_logSelected;
+                            std::sort(sorted.begin(), sorted.end());
+                            std::string clip;
+                            for (size_t k = 0; k < sorted.size(); ++k) {
+                                if (k) clip.push_back('\n');
+                                int idx = sorted[k];
+                                if (idx >= 0 && idx < (int)logs.size())
+                                    clip += logs[(size_t)idx];
+                            }
+                            ImGui::SetClipboardText(clip.c_str());
+                        }
+                        if (ImGui::MenuItem("Copy all")) {
+                            std::string joined;
+                            for (size_t k = 0; k < logs.size(); ++k) {
+                                if (k) joined.push_back('\n');
+                                joined += logs[k];
+                            }
+                            ImGui::SetClipboardText(joined.c_str());
+                        }
+                        ImGui::EndPopup();
+                    }
+                    ImGui::PopID();
+                    ImGui::PopStyleColor();
                 }
             }
-            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) {
+            if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4.f) {
                 ImGui::SetScrollHereY(1.0f);
             }
             ImGui::EndChild();
@@ -3067,25 +3292,51 @@ namespace UI {
 
         Ui::TooltipEndFrame();
 
-        // Draw loading progress modal
+        // Non-modal open progress — never freeze the whole UI with a modal.
+        // Document is locked via JobManager; chrome (panels, FE, console) stays interactive.
         if (g_LoadingState.isLoading) {
-            ImGui::OpenPopup("Loading Document...");
             ImGuiViewport* mainViewport = ImGui::GetMainViewport();
-            ImGui::SetNextWindowPos(mainViewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-            
-            if (ImGui::BeginPopupModal("Loading Document...", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
-                ImGui::Text("Loading: %s", g_LoadingState.filepath.substr(g_LoadingState.filepath.find_last_of("\\/") + 1).c_str());
-                
+            ImGui::SetNextWindowPos(
+                ImVec2(mainViewport->WorkPos.x + mainViewport->WorkSize.x * 0.5f,
+                       mainViewport->WorkPos.y + 48.f),
+                ImGuiCond_Always, ImVec2(0.5f, 0.f));
+            ImGui::SetNextWindowBgAlpha(0.92f);
+            ImGuiWindowFlags lf =
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                ImGuiWindowFlags_NoNav;
+            if (ImGui::Begin("##OpenDocBanner", nullptr, lf)) {
+                const std::string name = g_LoadingState.filepath.substr(
+                    g_LoadingState.filepath.find_last_of("\\/") + 1);
+                // Spinner
+                {
+                    ImDrawList* dl = ImGui::GetWindowDrawList();
+                    ImVec2 p = ImGui::GetCursorScreenPos();
+                    const float r = 7.f;
+                    const ImVec2 c(p.x + r + 2.f, p.y + ImGui::GetTextLineHeight() * 0.5f);
+                    const float t = (float)ImGui::GetTime() * 7.5f;
+                    for (int i = 0; i < 8; ++i) {
+                        const float a = t + (float)i * 6.2831853f / 8.f;
+                        const float fade = 0.2f + 0.8f * ((float)i / 8.f);
+                        dl->AddCircleFilled(
+                            ImVec2(c.x + std::cos(a) * r, c.y + std::sin(a) * r),
+                            2.2f, IM_COL32(130, 175, 255, (int)(fade * 255.f)), 6);
+                    }
+                    ImGui::Dummy(ImVec2(r * 2.f + 10.f, ImGui::GetTextLineHeight()));
+                    ImGui::SameLine();
+                }
+                ImGui::Text("Opening %s", name.c_str());
                 float progress = g_LoadingState.progress;
                 std::string stage;
                 {
                     std::lock_guard<std::mutex> lock(g_LoadingState.mutex);
                     stage = g_LoadingState.stage;
                 }
-                
-                ImGui::ProgressBar(progress, ImVec2(300, 20), stage.c_str());
-                ImGui::EndPopup();
+                ImGui::ProgressBar(progress > 0.f ? progress : -1.f * (float)ImGui::GetTime(),
+                                   ImVec2(280, 0), stage.c_str());
+                ImGui::TextDisabled("UI stays responsive · document locked until done");
             }
+            ImGui::End();
         }
 
         // Python plugins (built-in + Documents/RayVPaint/scripts) draw ImGui here

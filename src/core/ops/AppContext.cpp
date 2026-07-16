@@ -1,4 +1,5 @@
 #include "AppContext.h"
+#include "../JobManager.h"
 #include "../KeymapManager.h"
 #include "../../ui/EditorPanels.h"
 #include <imgui.h>
@@ -56,8 +57,8 @@ void AppContext::UpdateFromFrame(const ImGuiIO& io,
         ImGui::IsPopupOpen("About RayV-Paint##about") ||
         ImGui::IsPopupOpen("Export DDS") ||
         ImGui::IsPopupOpen("Export Standard Image") ||
-        ImGui::IsPopupOpen("Close Project?##dirty") ||
-        ImGui::IsPopupOpen("Loading Document...");
+        ImGui::IsPopupOpen("Close Project?##dirty");
+        // Open document is a background job (document lock) — not a blocking modal.
 
     c.viewportHovered = viewportHovered;
     c.layersHovered = layersHovered;
@@ -70,22 +71,29 @@ void AppContext::UpdateFromFrame(const ImGuiIO& io,
 
     c.keyboardOwnedByText = c.wantTextInput || c.uiKeyboardCapture;
 
-    // Document ops: blocked when typing, FE open, settings, adjust modals, rebind listen.
+    // Document-locking background jobs (export, etc.) — UI stays responsive.
+    c.documentJobLocked = core::JobManager::Get().IsDocumentLocked();
+
+    // Document ops: blocked when typing, FE open, settings, adjust modals, rebind listen,
+    // or a document-locking job is in progress.
     c.blocksDocumentOps =
         c.keyboardOwnedByText ||
         c.fileExplorerOpen ||
         c.settingsOpen ||
         c.blockingModalOpen ||
-        c.rebindingHotkey;
+        c.rebindingHotkey ||
+        c.documentJobLocked;
 
     // Canvas pointer interaction: FE / settings / blocking modal own the stage.
     // Layer Effects is a dock panel — does NOT block paint (only text fields inside
     // will set WantTextInput / uiKeyboardCapture).
+    // Document job lock: block paint so export composite stays stable.
     c.blocksCanvasInteraction =
         c.fileExplorerOpen ||
         c.settingsOpen ||
         c.blockingModalOpen ||
-        c.rebindingHotkey;
+        c.rebindingHotkey ||
+        c.documentJobLocked;
 
     if (c.fileExplorerOpen)
         c.focusRegion = FocusRegion::FileExplorer;
@@ -162,6 +170,7 @@ void AppContext::AppendDebugLines(std::vector<std::string>& out) const {
     out.push_back(std::string("FileExplorer: ") + yn(fileExplorerOpen) +
                   "  Settings: " + yn(settingsOpen) +
                   "  BlockingModal: " + yn(blockingModalOpen));
+    out.push_back(std::string("documentJobLocked: ") + yn(documentJobLocked));
     out.push_back(std::string("blocksDocumentOps: ") + yn(blocksDocumentOps) +
                   "  blocksCanvas: " + yn(blocksCanvasInteraction));
     out.push_back("Tool: " + activeToolLabel +

@@ -2,6 +2,7 @@
 #include "../core/ConfigManager.h"
 #include "../core/ImageManager.h"
 #include "../core/Logger.h"
+#include "../core/PathUtil.h"
 #include "../core/ThreadPool.h"
 #include "../package/PackageIO.h"
 #include <nlohmann/json.hpp>
@@ -35,14 +36,16 @@ std::string AssetStore::BuiltInRoot() {
     DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) return "assets";
     fs::path p(buf);
-    return (p.parent_path() / "assets").string();
+    // UTF-8 for ImageManager / package IO (not ACP .string()).
+    return PathUtil::WideToUtf8((p.parent_path() / L"assets").wstring());
 #else
     return "assets";
 #endif
 }
 
 std::string AssetStore::UserRoot() {
-    return (fs::path(ConfigManager::GetUserDirectory()) / "assets").string();
+    return PathUtil::WideToUtf8(
+        (fs::u8path(ConfigManager::GetUserDirectory()) / "assets").wstring());
 }
 
 std::string AssetStore::NormalizePath(const std::string& path) {
@@ -92,9 +95,11 @@ std::string AssetStore::ResolvePath(const std::string& key) {
     try {
         switch (cat) {
         case AssetCategory::BuiltIn:
-            return (fs::path(BuiltInRoot()) / fs::u8path(rest)).lexically_normal().string();
+            return PathUtil::WideToUtf8(
+                (fs::u8path(BuiltInRoot()) / fs::u8path(rest)).lexically_normal().wstring());
         case AssetCategory::User:
-            return (fs::path(UserRoot()) / fs::u8path(rest)).lexically_normal().string();
+            return PathUtil::WideToUtf8(
+                (fs::u8path(UserRoot()) / fs::u8path(rest)).lexically_normal().wstring());
         case AssetCategory::External:
             return rest;
         case AssetCategory::Project:

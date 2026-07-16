@@ -134,12 +134,9 @@ void RegisterEditorOperators(OperatorHost host) {
                     Logger::Get().Error("Batch export: no maps written");
             }
         } else {
-            std::string used;
-            if (H().canvas->ExportWithProjectSettings(&used))
-                Logger::Get().Info("Quick exported: " + used);
-            else
-                Logger::Get().Error("Quick export failed: " +
-                    (used.empty() ? H().canvas->GetExportPath() : used));
+            // Background encode/write; document locked via JobManager while running.
+            if (!H().canvas->ExportWithProjectSettingsAsync())
+                Logger::Get().Error("Quick export failed to start (busy or empty?)");
         }
         return Ok();
     });

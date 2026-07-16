@@ -112,6 +112,10 @@ set(SOURCES
     src/core/MaskTiles.h
     src/core/Logger.cpp
     src/core/Logger.h
+    src/core/JobManager.cpp
+    src/core/JobManager.h
+    src/core/Notifications.cpp
+    src/core/Notifications.h
     src/core/MemoryStats.cpp
     src/core/MemoryStats.h
     src/core/ThreadPool.cpp

@@ -567,7 +567,13 @@ public:
     std::string SyncExportPathExtension();
     // Write using container: DDS → SaveCanvasCompressed, PNG → SaveCanvasStandard(ICC).
     // Empty path → uses GetExportPath() or default export.dds / export.png.
+    // Blocks calling thread (composite + encode/write). Prefer ExportWithProjectSettingsAsync for UI.
     bool ExportWithProjectSettings(std::string* outPathUsed = nullptr);
+
+    // Main-thread: rebuild FX + composite, lock document via JobManager, then encode/write on a
+    // worker thread so the UI stays responsive. Document edits blocked until complete.
+    // Returns false if another export is already running or composite failed.
+    bool ExportWithProjectSettingsAsync(std::function<void(bool ok, const std::string& pathUsed)> onDone = nullptr);
 
     std::string GetExportPath() const { return m_ExportPath; }
     void SetExportPath(const std::string& path) { m_ExportPath = path; }

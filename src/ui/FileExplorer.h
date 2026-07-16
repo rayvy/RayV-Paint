@@ -108,10 +108,22 @@ struct FileExplorerState {
     char filterExt[32] = ".rayp"; // filter for save/open modes
 
     std::string status;
+
+    // Directory listing: dirty → async worker; main thread never blocks on index.
+    // Agents / benchmarks: lastListMs is worker-side cost (not UI freeze).
+    bool dirCacheDirty = true;
+    bool dirListingBusy = false;   // true while worker indexes current folder
+    double lastListMs = 0.0;
+    int lastListCount = 0;
+    int thumbsPending = 0;         // in-flight async thumb decodes
 };
 
 void FileExplorerOpen(FileExplorerState& st, FileExplorerMode mode, const std::string& startDir = {});
 void FileExplorerClose(FileExplorerState& st);
+
+// True while FE is indexing a folder or decoding thumbs on worker threads.
+// UI stays interactive; use for footer spinner ("app is not dead").
+bool FileExplorerIsBusy();
 
 bool DrawFileExplorer(FileExplorerState& st, Project* project, Canvas& canvas,
                       ID3D11Device* device);

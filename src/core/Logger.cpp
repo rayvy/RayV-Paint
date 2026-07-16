@@ -1,4 +1,5 @@
 #include "Logger.h"
+#include "Notifications.h"
 #include <iostream>
 #include <chrono>
 #include <iomanip>
@@ -82,6 +83,17 @@ void Logger::Log(LogLevel level, const std::string& message) {
         m_RecentLogs.erase(m_RecentLogs.begin());
     }
     m_RecentLogs.push_back(fullLogLine);
+
+    // Feed footer notification bar for warn/error (not every info — too noisy).
+    if (level >= LogLevel::LogLevel_Warning) {
+        core::NotifyLevel nl = (level == LogLevel::LogLevel_Error)
+            ? core::NotifyLevel::Error
+            : core::NotifyLevel::Warning;
+        // Unlock before Push — Notifications has its own mutex.
+        // We're already holding m_Mutex; call after unlock path via deferred:
+        // safe: Notifications does not call Logger.
+        core::Notifications::Get().Push(message, nl);
+    }
 }
 
 void Logger::Flush() {

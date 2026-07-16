@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -56,6 +57,7 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
     float avail = ImGui::GetContentRegionAvail().x;
     int cols = std::max(1, (int)((avail + pad) / (cell + pad)));
     int i = 0;
+    const float prefetch = (cell + 18.f + pad) * 2.f;
     for (const assets::AssetInfo* e : view) {
         ImGui::PushID(e->key.c_str());
         if (i % cols != 0) ImGui::SameLine(0, pad);
@@ -66,9 +68,14 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
         ImU32 bg = ImGui::GetColorU32(selected ? T.accent : T.bgElevated);
         dl->AddRectFilled(p0, ImVec2(p0.x + cell, p0.y + cell + 18.f), bg, T.rSm);
 
-        // Thumb
+        // Progressive: only kick decode for near-visible cells (not whole library).
+        const bool nearView = ImGui::IsRectVisible(
+            ImVec2(p0.x, p0.y - prefetch),
+            ImVec2(p0.x + cell, p0.y + cell + 18.f + prefetch));
+
         ID3D11ShaderResourceView* srv = nullptr;
-        if (device)
+        // GetThumbSrv enqueues work — call only for near-viewport (cached hits are instant).
+        if (device && nearView)
             srv = assets::AssetManager::Get().GetThumbSrv(device, e->key, false);
         // Kick async full load only if needed for dims later — thumbs self-load
         ImVec2 imgMin(p0.x + 4, p0.y + 4);
@@ -77,13 +84,28 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
             dl->AddImage((ImTextureID)srv, imgMin, imgMax);
         } else {
             dl->AddRectFilled(imgMin, imgMax, ImGui::GetColorU32(T.bgWindow), T.rSm);
-            const char* mark = "?";
-            if (e->loadState == assets::AssetLoadState::Pending) mark = "…";
-            else if (e->loadState == assets::AssetLoadState::Failed) mark = "!";
-            ImVec2 ts = ImGui::CalcTextSize(mark);
-            dl->AddText(ImVec2((imgMin.x + imgMax.x - ts.x) * 0.5f,
-                               (imgMin.y + imgMax.y - ts.y) * 0.5f),
-                        ImGui::GetColorU32(T.textSecondary), mark);
+            const bool pending = assets::AssetManager::Get().IsThumbPending(e->key);
+            const bool failed = assets::AssetManager::Get().IsThumbFailed(e->key);
+            const ImVec2 c((imgMin.x + imgMax.x) * 0.5f, (imgMin.y + imgMax.y) * 0.5f);
+            if (pending) {
+                // Async in flight — spinner until Poll uploads GPU thumb.
+                const float rad = (imgMax.x - imgMin.x) * 0.14f;
+                const float t = (float)ImGui::GetTime() * 7.5f;
+                for (int s = 0; s < 8; ++s) {
+                    const float a = t + (float)s * 6.2831853f / 8.f;
+                    const float fade = 0.2f + 0.8f * ((float)s / 8.f);
+                    dl->AddCircleFilled(
+                        ImVec2(c.x + cosf(a) * rad, c.y + sinf(a) * rad),
+                        rad * 0.28f,
+                        IM_COL32(130, 175, 255, (int)(fade * 220.f)), 6);
+                }
+            } else {
+                // Failed / not yet kicked — static mark (GetThumbSrv kicks load).
+                const char* mark = failed ? "!" : "…";
+                ImVec2 ts = ImGui::CalcTextSize(mark);
+                dl->AddText(ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
+                            ImGui::GetColorU32(T.textSecondary), mark);
+            }
         }
 
         // Label

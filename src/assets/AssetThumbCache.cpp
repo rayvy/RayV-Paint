@@ -14,6 +14,9 @@ namespace fs = std::filesystem;
 
 namespace assets {
 
+// Parallel progressive thumbs: each worker owns its buffers.
+// (stbi_load_from_memory / ReadFileBytes are fine concurrent with separate outputs.)
+
 AssetThumbCache& AssetThumbCache::Get() {
     static AssetThumbCache s;
     return s;
@@ -91,6 +94,7 @@ void AssetThumbCache::EvictIfNeeded() {
 }
 
 bool AssetThumbCache::EnsureThumbsOnDisk(const std::string& assetFilePath, bool writeHi, bool allowWrite) {
+    // May be called from workers (import). Not from UI paint path.
     if (assetFilePath.empty()) return false;
     std::vector<uint8_t> px;
     int w = 0, h = 0;
@@ -112,10 +116,9 @@ bool AssetThumbCache::EnsureThumbsOnDisk(const std::string& assetFilePath, bool 
     }
 
     std::string key;
-    // Best-effort key from path via store helpers
     key = AssetStore::Get().AcquireFile(assetFilePath);
     if (!key.empty())
-        AssetStore::Get().Release(key); // just for key resolution; don't hold ref
+        AssetStore::Get().Release(key);
     if (key.empty())
         key = AssetStore::MakeExternalId(AssetStore::NormalizePath(assetFilePath)).key;
 
@@ -147,6 +150,135 @@ bool AssetThumbCache::EnsureThumbsFromRgba(const std::string& key, int w, int h,
     return true;
 }
 
+// Worker-side: load package / sidecar / full image. Never call from main UI path.
+static bool LoadPackageThumb(const std::string& path, bool hi,
+                             std::vector<uint8_t>& out, int& w, int& h) {
+    std::string ext;
+    try {
+        ext = fs::path(path).extension().string();
+        for (char& c : ext) c = (char)std::tolower((unsigned char)c);
+    } catch (...) {}
+    if (ext != ".rvpaf") return false;
+
+    rvp::Package pkg;
+    if (!rvp::ReadPackage(path, pkg, nullptr)) return false;
+    const char* resName = hi ? rvp::paths::kThumbHPng : rvp::paths::kThumbPng;
+    const std::vector<uint8_t>* blob = pkg.Get(resName);
+    if (!blob && hi) blob = pkg.Get(rvp::paths::kThumbPng);
+    if (!blob || blob->empty()) return false;
+
+    int n = 0;
+    stbi_uc* img = stbi_load_from_memory(blob->data(), (int)blob->size(), &w, &h, &n, 4);
+    if (!img || w <= 0 || h <= 0) {
+        if (img) stbi_image_free(img);
+        return false;
+    }
+    out.assign(img, img + (size_t)w * h * 4);
+    stbi_image_free(img);
+    return true;
+}
+
+void AssetThumbCache::EnqueueDecode(const std::string& key, const std::string& path,
+                                    bool wantHi, bool writeUserSidecar) {
+    auto job = std::make_shared<Pending>();
+    job->key = key;
+    job->hi = wantHi;
+    job->sourcePath = path;
+    job->writeUserSidecar = writeUserSidecar;
+    {
+        std::lock_guard<std::mutex> lock(m_Mu);
+        for (const auto& p : m_Pending)
+            if (p && p->key == key) return; // already in flight
+        m_Pending.push_back(job);
+        m_InFlight.store((int)m_Pending.size());
+    }
+
+    try {
+        // Capture cache pointer for mutex on complete (must not race Poll/GetSrv).
+        AssetThumbCache* self = this;
+        ThreadPool::Get().Enqueue([job, self]() {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<uint8_t> loPx, hiPx, full;
+            int lw = 0, lh = 0, hw = 0, hh = 0, fw = 0, fh = 0;
+            bool ok = false;
+
+            try {
+                const std::string& path = job->sourcePath;
+
+                // 1) Package embedded thumbs (.rvpaf)
+                if (!path.empty()) {
+                    if (LoadPackageThumb(path, false, loPx, lw, lh)) {
+                        ok = true;
+                        LoadPackageThumb(path, true, hiPx, hw, hh);
+                    }
+                }
+
+                // 2) Disk sidecars (*.thumbnail.png) — cheap, prefer these
+                if (!ok && !path.empty()) {
+                    if (ImageManager::LoadImageFromFile(
+                            ThumbPathFor(path, false), loPx, lw, lh) && lw > 0) {
+                        ok = true;
+                        ImageManager::LoadImageFromFile(
+                            ThumbPathFor(path, true), hiPx, hw, hh);
+                    }
+                }
+
+                // 3) Full decode + downscale (parallel across workers)
+                if (!ok && !path.empty()) {
+                    if (ImageManager::LoadImageFromFile(path, full, fw, fh) &&
+                        fw > 0 && fh > 0) {
+                        if (fw > 8192 || fh > 8192) {
+                            ok = false;
+                            Logger::Get().InfoTag("perf",
+                                "AssetThumb skip huge " + path + " " +
+                                std::to_string(fw) + "x" + std::to_string(fh));
+                        } else {
+                            AssetThumbCache::Downscale(full.data(), fw, fh, loPx, lw, lh, kThumbLo);
+                            AssetThumbCache::Downscale(full.data(), fw, fh, hiPx, hw, hh, kThumbHi);
+                            ok = !loPx.empty();
+
+                            if (ok && job->writeUserSidecar) {
+                                try {
+                                    ImageManager::SaveRGBA8ToFile(
+                                        ThumbPathFor(path, false), loPx.data(), lw, lh);
+                                    if (!hiPx.empty())
+                                        ImageManager::SaveRGBA8ToFile(
+                                            ThumbPathFor(path, true), hiPx.data(), hw, hh);
+                                } catch (...) {}
+                            }
+                        }
+                    }
+                }
+            } catch (...) {
+                ok = false;
+            }
+
+            // Publish under cache mutex — Poll must not observe half-written job.
+            {
+                std::lock_guard<std::mutex> lock(self->m_Mu);
+                job->ok = ok && !loPx.empty();
+                if (job->ok) {
+                    job->loRgba = std::move(loPx);
+                    job->loW = lw; job->loH = lh;
+                    job->hiRgba = std::move(hiPx);
+                    job->hiW = hw; job->hiH = hh;
+                }
+                job->done = true;
+            }
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (ms > 80.0)
+                Logger::Get().InfoTag("perf",
+                    "AssetThumb.async " + job->key + " took " + std::to_string(ms) + " ms ok=" +
+                    (ok ? "1" : "0"));
+        });
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(m_Mu);
+        job->ok = false;
+        job->done = true;
+    }
+}
+
 ID3D11ShaderResourceView* AssetThumbCache::GetSrv(ID3D11Device* device, const std::string& key,
                                                    bool highQuality) {
     if (!device || key.empty()) return nullptr;
@@ -158,11 +290,10 @@ ID3D11ShaderResourceView* AssetThumbCache::GetSrv(ID3D11Device* device, const st
             if (it->second.failed) return nullptr;
             CpuThumb& cpu = highQuality ? it->second.hi : it->second.lo;
             GpuThumb& gpu = highQuality ? it->second.gpuHi : it->second.gpuLo;
-            // Fall back to lo if hi missing
-            if (highQuality && cpu.rgba.empty()) {
-                cpu = it->second.lo;
-            }
+            if (highQuality && cpu.rgba.empty())
+                cpu = it->second.lo; // fall back to lo CPU for upload
             if (!cpu.rgba.empty()) {
+                // GPU upload only on main — cheap.
                 if (!gpu.srv)
                     CreateSrv(device, cpu.rgba.data(), cpu.w, cpu.h, gpu);
                 if (gpu.srv) {
@@ -171,100 +302,82 @@ ID3D11ShaderResourceView* AssetThumbCache::GetSrv(ID3D11Device* device, const st
                     return gpu.srv;
                 }
             }
+            // CPU not ready yet — may already be in flight
+            for (const auto& p : m_Pending)
+                if (p && p->key == key) return nullptr;
+        } else {
+            for (const auto& p : m_Pending)
+                if (p && p->key == key) return nullptr;
         }
     }
 
-    // Try load sidecar from disk path
+    // Resolve path / payload without disk decode on main.
     std::string path = AssetStore::ResolvePath(key);
     if (path.empty()) {
         if (const TextureAsset* a = AssetStore::Get().Get(key))
             path = a->sourcePath;
     }
 
-    auto tryPackageThumb = [&](bool hi) -> bool {
-        if (path.empty()) return false;
-        std::string ext;
-        try {
-            ext = fs::path(path).extension().string();
-            for (char& c : ext) c = (char)std::tolower((unsigned char)c);
-        } catch (...) {}
-        if (ext != ".rvpaf") return false;
-        rvp::Package pkg;
-        if (!rvp::ReadPackage(path, pkg, nullptr)) return false;
-        const char* resName = hi ? rvp::paths::kThumbHPng : rvp::paths::kThumbPng;
-        const std::vector<uint8_t>* blob = pkg.Get(resName);
-        if (!blob && hi) blob = pkg.Get(rvp::paths::kThumbPng);
-        if (!blob || blob->empty()) return false;
-        int w = 0, h = 0, n = 0;
-        stbi_uc* img = stbi_load_from_memory(blob->data(), (int)blob->size(), &w, &h, &n, 4);
-        if (!img || w <= 0 || h <= 0) {
-            if (img) stbi_image_free(img);
-            return false;
-        }
-        std::vector<uint8_t> px(img, img + (size_t)w * h * 4);
-        stbi_image_free(img);
-        std::lock_guard<std::mutex> lock(m_Mu);
-        auto& e = m_Entries[key];
-        CpuThumb& cpu = hi ? e.hi : e.lo;
-        cpu.w = w; cpu.h = h; cpu.rgba = std::move(px);
-        return true;
-    };
-
-    auto trySidecar = [&](bool hi) -> bool {
-        if (path.empty()) return false;
-        std::string tp = ThumbPathFor(path, hi);
-        std::vector<uint8_t> px;
-        int w = 0, h = 0;
-        if (!ImageManager::LoadImageFromFile(tp, px, w, h) || w <= 0 || h <= 0)
-            return false;
-        std::lock_guard<std::mutex> lock(m_Mu);
-        auto& e = m_Entries[key];
-        CpuThumb& cpu = hi ? e.hi : e.lo;
-        cpu.w = w; cpu.h = h; cpu.rgba = std::move(px);
-        return true;
-    };
-
-    if (tryPackageThumb(highQuality) || tryPackageThumb(false) ||
-        trySidecar(highQuality) || trySidecar(false)) {
-        return GetSrv(device, key, highQuality);
-    }
-
-    // Kick async full-image downscale (once)
-    {
-        std::lock_guard<std::mutex> lock(m_Mu);
-        for (const auto& p : m_Pending)
-            if (p && p->key == key) return nullptr;
-
-        // Project: use payload if ready
-        auto payload = AssetStore::Get().GetPayload(key);
-        if (payload && !payload->rgba.empty()) {
+    // In-memory project payload: downscale can still be heavy — do on worker if large.
+    auto payload = AssetStore::Get().GetPayload(key);
+    if (payload && !payload->rgba.empty()) {
+        const int pxCount = payload->w * payload->h;
+        if (pxCount <= 512 * 512) {
+            // Tiny: sync downscale OK
             EnsureThumbsFromRgba(key, payload->w, payload->h, payload->rgba.data(), true);
             return GetSrv(device, key, highQuality);
         }
-
-        if (path.empty()) return nullptr;
-
+        // Large project texture: copy for worker
         auto job = std::make_shared<Pending>();
         job->key = key;
-        job->hi = highQuality;
-        job->sourcePath = path;
-        m_Pending.push_back(job);
-        ThreadPool::Get().Enqueue([job]() {
-            std::vector<uint8_t> px;
-            int w = 0, h = 0;
-            if (!ImageManager::LoadImageFromFile(job->sourcePath, px, w, h) || w <= 0 || h <= 0) {
-                job->ok = false;
+        job->hi = true;
+        job->fromRgba = true;
+        job->rgba = payload->rgba; // copy for worker
+        job->w = payload->w;
+        job->h = payload->h;
+        {
+            std::lock_guard<std::mutex> lock(m_Mu);
+            for (const auto& p : m_Pending)
+                if (p && p->key == key) return nullptr;
+            m_Pending.push_back(job);
+            m_InFlight.store((int)m_Pending.size());
+        }
+        try {
+            AssetThumbCache* self = this;
+            ThreadPool::Get().Enqueue([job, self]() {
+                std::vector<uint8_t> lo, hi;
+                int lw = 0, lh = 0, hw = 0, hh = 0;
+                AssetThumbCache::Downscale(job->rgba.data(), job->w, job->h, lo, lw, lh, kThumbLo);
+                AssetThumbCache::Downscale(job->rgba.data(), job->w, job->h, hi, hw, hh, kThumbHi);
+                std::lock_guard<std::mutex> lock(self->m_Mu);
+                job->loRgba = std::move(lo); job->loW = lw; job->loH = lh;
+                job->hiRgba = std::move(hi); job->hiW = hw; job->hiH = hh;
+                job->rgba.clear(); job->rgba.shrink_to_fit();
+                job->ok = !job->loRgba.empty();
                 job->done = true;
-                return;
-            }
-            // Produce both sizes
-            job->ok = true;
-            // Store full in rgba temporarily; Poll will downscale both
-            job->w = w; job->h = h;
-            job->rgba = std::move(px);
+            });
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(m_Mu);
+            job->ok = false;
             job->done = true;
-        });
+        }
+        return nullptr;
     }
+
+    if (path.empty()) {
+        // No path and no payload — mark failed so UI stops spinning.
+        std::lock_guard<std::mutex> lock(m_Mu);
+        m_Entries[key].failed = true;
+        return nullptr;
+    }
+
+    bool writeSidecar = false;
+    AssetCategory cat;
+    std::string rest;
+    if (ParseKey(key, cat, rest) && cat == AssetCategory::User)
+        writeSidecar = true;
+
+    EnqueueDecode(key, path, highQuality, writeSidecar);
     return nullptr;
 }
 
@@ -281,36 +394,94 @@ int AssetThumbCache::Poll(ID3D11Device* device, double budgetMs) {
                 it = m_Pending.erase(it);
             } else ++it;
         }
+        m_InFlight.store((int)m_Pending.size());
     }
-    for (auto& job : done) {
-        if (budgetMs > 0) {
+
+    std::vector<std::shared_ptr<Pending>> defer;
+    for (size_t i = 0; i < done.size(); ++i) {
+        auto& job = done[i];
+        if (budgetMs > 0 && n > 0) {
             double elapsed = std::chrono::duration<double, std::milli>(clock::now() - t0).count();
-            if (elapsed > budgetMs && n > 0) break;
+            if (elapsed > budgetMs) {
+                // Leave remaining completed jobs for next frame (still done=true).
+                for (size_t j = i; j < done.size(); ++j)
+                    defer.push_back(done[j]);
+                break;
+            }
         }
-        if (!job->ok || job->rgba.empty()) {
+
+        if (!job->ok || (job->loRgba.empty() && job->rgba.empty())) {
             std::lock_guard<std::mutex> lock(m_Mu);
             m_Entries[job->key].failed = true;
             continue;
         }
-        EnsureThumbsFromRgba(job->key, job->w, job->h, job->rgba.data(), true);
-        // Write sidecars for User library only
-        AssetCategory cat;
-        std::string rest;
-        if (ParseKey(job->key, cat, rest) && cat == AssetCategory::User && !job->sourcePath.empty()) {
-            try {
+
+        {
+            std::lock_guard<std::mutex> lock(m_Mu);
+            auto& e = m_Entries[job->key];
+            if (!job->loRgba.empty()) {
+                e.lo.w = job->loW; e.lo.h = job->loH;
+                e.lo.rgba = std::move(job->loRgba);
+            }
+            if (!job->hiRgba.empty()) {
+                e.hi.w = job->hiW; e.hi.h = job->hiH;
+                e.hi.rgba = std::move(job->hiRgba);
+            }
+            if (e.lo.rgba.empty() && !job->rgba.empty()) {
                 std::vector<uint8_t> lo, hi;
-                int lw, lh, hw, hh;
+                int lw = 0, lh = 0, hw = 0, hh = 0;
                 Downscale(job->rgba.data(), job->w, job->h, lo, lw, lh, kThumbLo);
                 Downscale(job->rgba.data(), job->w, job->h, hi, hw, hh, kThumbHi);
-                ImageManager::SaveRGBA8ToFile(ThumbPathFor(job->sourcePath, false), lo.data(), lw, lh);
-                ImageManager::SaveRGBA8ToFile(ThumbPathFor(job->sourcePath, true), hi.data(), hw, hh);
-            } catch (...) {}
+                e.lo.w = lw; e.lo.h = lh; e.lo.rgba = std::move(lo);
+                e.hi.w = hw; e.hi.h = hh; e.hi.rgba = std::move(hi);
+            }
+            e.failed = e.lo.rgba.empty();
         }
-        if (device)
-            GetSrv(device, job->key, false);
+
+        if (device) {
+            std::lock_guard<std::mutex> lock(m_Mu);
+            auto it = m_Entries.find(job->key);
+            if (it != m_Entries.end() && !it->second.failed && !it->second.lo.rgba.empty()) {
+                if (!it->second.gpuLo.srv)
+                    CreateSrv(device, it->second.lo.rgba.data(), it->second.lo.w, it->second.lo.h,
+                              it->second.gpuLo);
+                if (it->second.gpuLo.srv)
+                    it->second.gpuLo.lastUse = ++m_Clock;
+                EvictIfNeeded();
+            }
+        }
         n++;
     }
+
+    if (!defer.empty()) {
+        std::lock_guard<std::mutex> lock(m_Mu);
+        m_Pending.insert(m_Pending.end(), defer.begin(), defer.end());
+        m_InFlight.store((int)m_Pending.size());
+    }
     return n;
+}
+
+bool AssetThumbCache::IsBusy() const {
+    return m_InFlight.load() > 0;
+}
+
+int AssetThumbCache::PendingCount() const {
+    return m_InFlight.load();
+}
+
+bool AssetThumbCache::IsPending(const std::string& key) const {
+    if (key.empty()) return false;
+    std::lock_guard<std::mutex> lock(m_Mu);
+    for (const auto& p : m_Pending)
+        if (p && p->key == key) return true;
+    return false;
+}
+
+bool AssetThumbCache::IsFailed(const std::string& key) const {
+    if (key.empty()) return false;
+    std::lock_guard<std::mutex> lock(m_Mu);
+    auto it = m_Entries.find(key);
+    return it != m_Entries.end() && it->second.failed;
 }
 
 void AssetThumbCache::Clear() {
@@ -321,6 +492,7 @@ void AssetThumbCache::Clear() {
     }
     m_Entries.clear();
     m_Pending.clear();
+    m_InFlight.store(0);
 }
 
 void AssetThumbCache::EvictGpu() {
