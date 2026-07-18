@@ -1,5 +1,7 @@
 #include "UndoRedoManager.h"
 #include "../Canvas.h"
+#include "../vector/PathMath.h"
+#include "../vector/VectorRasterizer.h"
 #include "Logger.h"
 #include "ConfigManager.h"
 #include "MemoryStats.h"
@@ -336,6 +338,13 @@ void LayerStackCommand::InsertSnap(Canvas* canvas) {
     L.smartSourcePath = m_Snap.smartPath;
     L.smartSourceBytes = m_Snap.smartBytes;
     L.smartScale = m_Snap.smartScale;
+    if (!m_Snap.vectorJson.empty()) {
+        L.vectorDoc = std::make_unique<vec::Document>();
+        if (!vec::DocumentFromJson(m_Snap.vectorJson, *L.vectorDoc))
+            L.vectorDoc.reset();
+        else if (L.vectorDoc)
+            L.vectorDoc->MarkAllDirty(canvas->m_Width, canvas->m_Height);
+    }
     L.workSpace = m_Snap.workSpace;
     L.filtersDirty = !L.filters.empty();
     L.stylesDirty = !L.styles.empty();
@@ -410,6 +419,43 @@ void LayerStackCommand::CollectTileData(std::unordered_set<const TileData*>& see
     auto add = [&](const TileSnapshot& s) { if (s.data) seen.insert(s.data.get()); };
     for (const auto& d : m_Snap.tiles) { add(d.oldState); add(d.newState); }
     for (const auto& d : m_Snap.nativeTiles) { add(d.oldState); add(d.newState); }
+}
+
+// ---------------------------------------------------------------------------
+// VectorEditCommand
+// ---------------------------------------------------------------------------
+
+VectorEditCommand::VectorEditCommand(const std::string& name, int layerIdx,
+                                     std::string beforeJson, std::string afterJson)
+    : m_Name(name), m_LayerIdx(layerIdx),
+      m_Before(std::move(beforeJson)), m_After(std::move(afterJson)) {}
+
+void VectorEditCommand::Apply(Canvas* canvas, const std::string& json) {
+    if (!canvas || m_LayerIdx < 0 || m_LayerIdx >= (int)canvas->m_Layers.size()) return;
+    auto& L = canvas->m_Layers[m_LayerIdx];
+    if (!L.vectorDoc)
+        L.vectorDoc = std::make_unique<vec::Document>();
+    if (!vec::DocumentFromJson(json, *L.vectorDoc))
+        return;
+    L.vectorDoc->MarkAllDirty(canvas->m_Width, canvas->m_Height);
+    L.type = Layer::Type::VectorSvg;
+    if (!L.tileCache) {
+        L.tileCache = std::make_unique<TileCache>();
+        L.tileCache->Init(canvas->m_Width, canvas->m_Height, canvas->m_CanvasFormat);
+    }
+    vec::RasterizeDocumentFull(*L.vectorDoc, *L.tileCache, canvas->m_Width, canvas->m_Height, false);
+    L.vectorDoc->rasterGen = L.vectorDoc->generation;
+    L.vectorDoc->ClearDirty();
+    L.needsUpload = true;
+    canvas->m_CompositeDirty = true;
+    canvas->m_IsDocumentModified = true;
+}
+
+void VectorEditCommand::Undo(Canvas* canvas) { Apply(canvas, m_Before); }
+void VectorEditCommand::Redo(Canvas* canvas) { Apply(canvas, m_After); }
+
+size_t VectorEditCommand::GetOverheadBytes() const {
+    return sizeof(VectorEditCommand) + m_Name.capacity() + m_Before.capacity() + m_After.capacity();
 }
 
 // ---------------------------------------------------------------------------

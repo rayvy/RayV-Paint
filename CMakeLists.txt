@@ -214,6 +214,15 @@ set(SOURCES
     src/scripting/ScriptUiPreview.h
     src/scripting/ScriptViewApi.cpp
     src/scripting/ScriptViewApi.h
+    src/vector/PathTypes.h
+    src/vector/PathMath.cpp
+    src/vector/PathMath.h
+    src/vector/VectorRasterizer.cpp
+    src/vector/VectorRasterizer.h
+    src/vector/SvgIo.cpp
+    src/vector/SvgIo.h
+    src/vector/VectorToolSession.cpp
+    src/vector/VectorToolSession.h
     src/ui/EditorPanels.cpp
     src/ui/EditorPanels.h
     src/ui/FileExplorer.cpp

@@ -14,6 +14,9 @@
 #include "assets/AssetStore.h"
 #include "assets/AssetManager.h"
 #include "utilities/ContentAwareFill.h"
+#include "vector/PathMath.h"
+#include "vector/VectorRasterizer.h"
+#include "vector/SvgIo.h"
 // Prefer PathUtil for all disk paths (UTF-8 / wide on Windows).
 #include <opencv2/imgproc.hpp>
 #include "core/ConfigManager.h"
@@ -1789,6 +1792,8 @@ LayerStackCommand::Snap Canvas::CaptureLayerSnap(const Layer& L, int index, int 
     s.smartPath = L.smartSourcePath;
     s.smartBytes = L.smartSourceBytes;
     s.smartScale = L.smartScale;
+    if (L.vectorDoc)
+        s.vectorJson = vec::DocumentToJson(*L.vectorDoc);
     s.workSpace = L.workSpace;
     s.hasMask = L.hasMask;
     s.maskW = docW; s.maskH = docH;
@@ -4790,7 +4795,7 @@ static const char* LayerTypeToString(Layer::Type t) {
     switch (t) {
     case Layer::Type::Group: return "group";
     case Layer::Type::SmartObject: return "smart_object";
-    case Layer::Type::VectorSvg: return "vector_svg";
+    case Layer::Type::VectorSvg: return "vector"; // prefer "vector"; load still accepts vector_svg
     case Layer::Type::Fill: return "fill";
     default: return "raster";
     }
@@ -4798,7 +4803,7 @@ static const char* LayerTypeToString(Layer::Type t) {
 static Layer::Type LayerTypeFromString(const std::string& s) {
     if (s == "group") return Layer::Type::Group;
     if (s == "smart_object") return Layer::Type::SmartObject;
-    if (s == "vector_svg") return Layer::Type::VectorSvg;
+    if (s == "vector_svg" || s == "vector") return Layer::Type::VectorSvg;
     if (s == "fill") return Layer::Type::Fill;
     return Layer::Type::Raster;
 }
@@ -4876,6 +4881,14 @@ static json LayerToJson(const Layer& layer) {
     if (!layer.smartAssetKey.empty())
         j["smart_asset_key"] = layer.smartAssetKey;
     j["has_mask"] = layer.hasMask && !layer.mask.empty();
+
+    if (layer.vectorDoc) {
+        try {
+            j["vector"] = json::parse(vec::DocumentToJson(*layer.vectorDoc));
+        } catch (...) {
+            j["vector_json"] = vec::DocumentToJson(*layer.vectorDoc);
+        }
+    }
 
     if (layer.type == Layer::Type::Fill || layer.IsFill()) {
         json fj;
@@ -4999,6 +5012,19 @@ static void LayerFromJson(Layer& layer, const json& j) {
         }
     }
     if (j.contains("has_mask")) layer.hasMask = j["has_mask"].get<bool>();
+
+    if (j.contains("vector") || j.contains("vector_json")) {
+        layer.vectorDoc = std::make_unique<vec::Document>();
+        std::string raw;
+        if (j.contains("vector_json") && j["vector_json"].is_string())
+            raw = j["vector_json"].get<std::string>();
+        else if (j.contains("vector"))
+            raw = j["vector"].dump();
+        if (!raw.empty() && !vec::DocumentFromJson(raw, *layer.vectorDoc))
+            layer.vectorDoc.reset();
+        if (layer.vectorDoc)
+            layer.type = Layer::Type::VectorSvg;
+    }
 
     if (j.contains("fill") && j["fill"].is_object()) {
         const auto& fj = j["fill"];
@@ -5703,7 +5729,16 @@ bool Canvas::LoadCanvasRayp(const std::string& filepath, ID3D11Device* device, L
 
                     layer.tileCache = std::make_unique<TileCache>();
                     layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
-                    layer.tileCache->ImportRGBA32F(layerPixels.data(), m_Width, m_Height);
+                    // Vector layers: prefer re-raster from geometry (sharp, editable).
+                    if (layer.IsVector() && layer.vectorDoc) {
+                        layer.vectorDoc->MarkAllDirty(m_Width, m_Height);
+                        vec::RasterizeDocumentFull(*layer.vectorDoc, *layer.tileCache,
+                                                   m_Width, m_Height, false);
+                        layer.vectorDoc->rasterGen = layer.vectorDoc->generation;
+                        layer.vectorDoc->ClearDirty();
+                    } else {
+                        layer.tileCache->ImportRGBA32F(layerPixels.data(), m_Width, m_Height);
+                    }
                     layer.tileCache->MarkAllDirty();
                     layer.needsUpload = true;
                     layer.presentationDirty = true;
@@ -7282,6 +7317,107 @@ void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColo
     }
 }
 
+bool Canvas::ComputeLayerContentBounds(int layerIdx, int& outMinX, int& outMinY,
+                                       int& outMaxX, int& outMaxY,
+                                       float alphaThreshold, bool respectSelection) const {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    if (m_Width <= 0 || m_Height <= 0) return false;
+    const Layer& layer = m_Layers[layerIdx];
+    if (!layer.tileCache || layer.tileCache->IsEmpty()) return false;
+
+    const bool useSel = respectSelection && m_HasSelection &&
+                        m_SelectionMask.size() == (size_t)m_Width * (size_t)m_Height;
+    const float thr = std::max(0.f, alphaThreshold);
+
+    // Seed scan region: selection AABB or union of existing tiles
+    int scanMinX = m_Width, scanMinY = m_Height, scanMaxX = -1, scanMaxY = -1;
+    if (useSel) {
+        int bx = 0, by = 0, bw = 0, bh = 0;
+        if (!GetSelectionBounds(bx, by, bw, bh) || bw <= 0 || bh <= 0)
+            return false;
+        scanMinX = bx; scanMinY = by;
+        scanMaxX = bx + bw - 1; scanMaxY = by + bh - 1;
+    } else {
+        const int ntx = layer.tileCache->GetTilesX();
+        const int nty = layer.tileCache->GetTilesY();
+        for (int ty = 0; ty < nty; ++ty) {
+            for (int tx = 0; tx < ntx; ++tx) {
+                if (!layer.tileCache->HasTile(tx, ty)) continue;
+                int x0 = tx * TILE_SIZE, y0 = ty * TILE_SIZE;
+                int x1 = std::min(m_Width - 1, x0 + TILE_SIZE - 1);
+                int y1 = std::min(m_Height - 1, y0 + TILE_SIZE - 1);
+                scanMinX = std::min(scanMinX, x0);
+                scanMinY = std::min(scanMinY, y0);
+                scanMaxX = std::max(scanMaxX, x1);
+                scanMaxY = std::max(scanMaxY, y1);
+            }
+        }
+        if (scanMaxX < scanMinX) return false;
+    }
+
+    // Alpha (× selection) scan — only tiles that intersect seed region
+    int minX = m_Width, minY = m_Height, maxX = -1, maxY = -1;
+    const auto fmt = layer.tileCache->GetFormat();
+    const int bpp = layer.tileCache->GetBytesPerPixel();
+    const int t0x = scanMinX / TILE_SIZE, t0y = scanMinY / TILE_SIZE;
+    const int t1x = scanMaxX / TILE_SIZE, t1y = scanMaxY / TILE_SIZE;
+    const int ntx = layer.tileCache->GetTilesX();
+    const int nty = layer.tileCache->GetTilesY();
+
+    for (int ty = t0y; ty <= t1y && ty < nty; ++ty) {
+        for (int tx = t0x; tx <= t1x && tx < ntx; ++tx) {
+            if (!layer.tileCache->HasTile(tx, ty)) continue;
+            const uint8_t* raw = layer.tileCache->GetTileData(tx, ty);
+            if (!raw) continue;
+            const int tileX0 = tx * TILE_SIZE, tileY0 = ty * TILE_SIZE;
+            const int px0 = std::max(scanMinX, tileX0);
+            const int py0 = std::max(scanMinY, tileY0);
+            const int px1 = std::min(scanMaxX, tileX0 + TILE_SIZE - 1);
+            const int py1 = std::min(scanMaxY, tileY0 + TILE_SIZE - 1);
+            if (px1 < px0 || py1 < py0) continue;
+
+            for (int y = py0; y <= py1; ++y) {
+                const int lyT = y - tileY0;
+                const uint8_t* row = raw + ((size_t)lyT * TILE_SIZE) * bpp;
+                for (int x = px0; x <= px1; ++x) {
+                    if (useSel) {
+                        uint8_t sw = m_SelectionMask[(size_t)y * (size_t)m_Width + (size_t)x];
+                        if (sw == 0) continue;
+                    }
+                    const int lxT = x - tileX0;
+                    const uint8_t* p = row + (size_t)lxT * bpp;
+                    float a = 0.f;
+                    if (fmt == CanvasPixelFormat::RGBA8) {
+                        a = p[3] / 255.f;
+                    } else if (fmt == CanvasPixelFormat::RGBA16F) {
+                        float rgba[4];
+                        HalfFloat::LoadRGBA16F(p, rgba);
+                        a = rgba[3];
+                    } else {
+                        a = reinterpret_cast<const float*>(p)[3];
+                    }
+                    if (useSel) {
+                        float w = m_SelectionMask[(size_t)y * (size_t)m_Width + (size_t)x] / 255.f;
+                        a *= w;
+                    }
+                    if (a <= thr) continue;
+                    minX = std::min(minX, x);
+                    minY = std::min(minY, y);
+                    maxX = std::max(maxX, x);
+                    maxY = std::max(maxY, y);
+                }
+            }
+        }
+    }
+
+    if (maxX < minX) return false;
+    outMinX = minX;
+    outMinY = minY;
+    outMaxX = maxX;
+    outMaxY = maxY;
+    return true;
+}
+
 void Canvas::StartMovePixels(ID3D11Device* device) {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
     if (m_Width <= 0 || m_Height <= 0) return;
@@ -7301,39 +7437,41 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
     Layer& layer = m_Layers[m_ActiveLayerIdx];
     EnsureLayerTileCache(layer, m_Width, m_Height, m_CanvasFormat);
 
-    // ---- Tight selection AABB (document space) ----
+    // ---- Content AABB via alpha (not full canvas / not whole tiles) ----
+    // If selection exists: pixels with selection>0 AND alpha high enough.
+    // Else: any non-transparent content on the active layer.
     int minX = 0, minY = 0, maxX = m_Width - 1, maxY = m_Height - 1;
-    if (m_HasSelection && !m_SelectionMask.empty()) {
-        int bx = 0, by = 0, bw = 0, bh = 0;
-        if (GetSelectionBounds(bx, by, bw, bh) && bw > 0 && bh > 0) {
-            minX = bx; minY = by; maxX = bx + bw - 1; maxY = by + bh - 1;
+    {
+        int cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;
+        const bool respectSel = m_HasSelection && !m_SelectionMask.empty();
+        if (!ComputeLayerContentBounds(m_ActiveLayerIdx, cx0, cy0, cx1, cy1,
+                                       /*alphaThreshold=*/0.02f, respectSel)) {
+            // Fallback: selection AABB only (may be empty of pixels)
+            if (respectSel) {
+                int bx = 0, by = 0, bw = 0, bh = 0;
+                if (GetSelectionBounds(bx, by, bw, bh) && bw > 0 && bh > 0) {
+                    minX = bx; minY = by; maxX = bx + bw - 1; maxY = by + bh - 1;
+                    Logger::Get().InfoTag("transform",
+                        "StartMovePixels: no opaque content in selection — using selection AABB");
+                } else {
+                    m_IsMovingPixels = false;
+                    return;
+                }
+            } else {
+                Logger::Get().InfoTag("transform",
+                    "StartMovePixels: no opaque content on layer — abort");
+                m_IsMovingPixels = false;
+                return;
+            }
         } else {
-            // Empty selection mask — nothing to float
-            m_IsMovingPixels = false;
-            return;
+            minX = cx0; minY = cy0; maxX = cx1; maxY = cy1;
+            Logger::Get().InfoTag("transform",
+                "StartMovePixels: alpha bounds " + std::to_string(minX) + "," + std::to_string(minY) +
+                " " + std::to_string(maxX - minX + 1) + "x" + std::to_string(maxY - minY + 1));
         }
         // pad for soft edges / bilinear
         minX = std::max(0, minX - 2); minY = std::max(0, minY - 2);
         maxX = std::min(m_Width - 1, maxX + 2); maxY = std::min(m_Height - 1, maxY + 2);
-    } else if (layer.tileCache && !layer.tileCache->IsEmpty()) {
-        // No selection: tight AABB of existing tiles (avoids full-canvas float on 8K)
-        minX = m_Width; minY = m_Height; maxX = -1; maxY = -1;
-        const int ntx = layer.tileCache->GetTilesX();
-        const int nty = layer.tileCache->GetTilesY();
-        for (int ty = 0; ty < nty; ++ty) {
-            for (int tx = 0; tx < ntx; ++tx) {
-                if (!layer.tileCache->HasTile(tx, ty)) continue;
-                int x0 = tx * TILE_SIZE, y0 = ty * TILE_SIZE;
-                int x1 = std::min(m_Width - 1, x0 + TILE_SIZE - 1);
-                int y1 = std::min(m_Height - 1, y0 + TILE_SIZE - 1);
-                minX = std::min(minX, x0); minY = std::min(minY, y0);
-                maxX = std::max(maxX, x1); maxY = std::max(maxY, y1);
-            }
-        }
-        if (maxX < minX) {
-            m_IsMovingPixels = false;
-            return;
-        }
     }
 
     m_FloatingBBoxX = minX;
@@ -11166,18 +11304,169 @@ ID3D11ShaderResourceView* Canvas::GetLayerThumbSRV(ID3D11Device* device, int lay
 }
 
 // ---------------------------------------------------------------------------
-// SVG Smart Object (minimal rasterizer: OpenCV-free; parse via simple image fallback)
+// SVG → editable Vector layer (nanosvg parse + path model + tile raster)
 // ---------------------------------------------------------------------------
+bool Canvas::ImportSvgAsVectorLayer(ID3D11Device* device, const std::string& filepath) {
+    if (m_Width <= 0 || m_Height <= 0) {
+        Logger::Get().Error("ImportSvgAsVectorLayer: no document size");
+        return false;
+    }
+    vec::Document doc;
+    std::string err;
+    if (!vec::LoadSvgFile(filepath, doc, &err)) {
+        Logger::Get().Error("ImportSvgAsVectorLayer: " + err);
+        return false;
+    }
+    Layer layer;
+    size_t slash = filepath.find_last_of("/\\");
+    layer.name = (slash == std::string::npos) ? filepath : filepath.substr(slash + 1);
+    layer.type = Layer::Type::VectorSvg;
+    layer.visible = true;
+    layer.opacity = 1.f;
+    layer.vectorDoc = std::make_unique<vec::Document>(std::move(doc));
+    layer.vectorDoc->MarkAllDirty(m_Width, m_Height);
+    {
+#ifdef _WIN32
+        std::ifstream in(PathUtil::Utf8ToWide(filepath), std::ios::binary);
+#else
+        std::ifstream in(filepath, std::ios::binary);
+#endif
+        if (in) {
+            std::ostringstream ss; ss << in.rdbuf();
+            std::string s = ss.str();
+            layer.smartSourceBytes.assign(s.begin(), s.end());
+            layer.smartSourcePath = filepath;
+            layer.vectorDoc->sourceSvg = std::move(s);
+        }
+    }
+    layer.tileCache = std::make_unique<TileCache>();
+    layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+    vec::RasterizeDocumentFull(*layer.vectorDoc, *layer.tileCache, m_Width, m_Height, false);
+    layer.vectorDoc->rasterGen = layer.vectorDoc->generation;
+    layer.vectorDoc->ClearDirty();
+    layer.needsUpload = true;
+
+    if (device && m_Width > 0 && m_Height > 0) {
+        if (!m_CompositeTexture) CreateCompositeResources(device);
+        RecreateLayerTexture(device, layer);
+    }
+
+    int insertAt = (int)m_Layers.size();
+    m_Layers.push_back(std::move(layer));
+    m_ActiveLayerIdx = insertAt;
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    auto snap = CaptureLayerSnap(m_Layers[insertAt], insertAt, m_Width, m_Height, m_CanvasFormat);
+    m_UndoRedoManager.PushCommand(std::make_shared<LayerStackCommand>(
+        "Import SVG Vector", LayerStackCommand::Kind::Insert, std::move(snap)));
+    Logger::Get().Info("Imported SVG as vector layer: " + filepath);
+    return true;
+}
+
 bool Canvas::ImportSvgAsSmartObject(ID3D11Device* device, const std::string& filepath) {
-    // SVG import was a placeholder (checkerboard only, no real rasterizer).
-    // Disabled until a proper vector pipeline (e.g. nanosvg) lands — do not
-    // create fake SmartObject layers that look broken and confuse users.
-    (void)device;
-    Logger::Get().Error(
-        "SVG import is not supported yet: \"" + filepath +
-        "\". Convert SVG to PNG/DDS and open as a raster layer. "
-        "(VectorSvg type remains for future implementation.)");
-    return false;
+    return ImportSvgAsVectorLayer(device, filepath);
+}
+
+void Canvas::CreateVectorLayer(ID3D11Device* device, const std::string& name) {
+    Layer layer;
+    layer.name = name.empty() ? "Vector" : name;
+    layer.type = Layer::Type::VectorSvg;
+    layer.visible = true;
+    layer.opacity = 1.f;
+    layer.vectorDoc = std::make_unique<vec::Document>();
+    layer.vectorDoc->antialias = true;
+    layer.tileCache = std::make_unique<TileCache>();
+    if (m_Width > 0 && m_Height > 0)
+        layer.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+
+    if (device && m_Width > 0 && m_Height > 0) {
+        if (!m_CompositeTexture) CreateCompositeResources(device);
+        RecreateLayerTexture(device, layer);
+    }
+
+    int insertAt = (int)m_Layers.size();
+    m_Layers.push_back(std::move(layer));
+    m_ActiveLayerIdx = insertAt;
+    m_CompositeDirty = true;
+    m_IsDocumentModified = true;
+    auto snap = CaptureLayerSnap(m_Layers[insertAt], insertAt, m_Width, m_Height, m_CanvasFormat);
+    m_UndoRedoManager.PushCommand(std::make_shared<LayerStackCommand>(
+        "New Vector Layer", LayerStackCommand::Kind::Insert, std::move(snap)));
+    Logger::Get().Info("Created vector layer: " + layer.name);
+}
+
+int Canvas::EnsureActiveVectorLayer(ID3D11Device* device) {
+    if (m_ActiveLayerIdx >= 0 && m_ActiveLayerIdx < (int)m_Layers.size()) {
+        auto& L = m_Layers[m_ActiveLayerIdx];
+        if (L.IsVector()) {
+            if (!L.vectorDoc)
+                L.vectorDoc = std::make_unique<vec::Document>();
+            return m_ActiveLayerIdx;
+        }
+    }
+    CreateVectorLayer(device, "Vector");
+    return m_ActiveLayerIdx;
+}
+
+bool Canvas::EnsureVectorRaster(int layerIdx, bool coarse, bool forceFull) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return false;
+    auto& L = m_Layers[layerIdx];
+    if (!L.IsVector() || !L.vectorDoc) return false;
+    if (!L.tileCache) {
+        L.tileCache = std::make_unique<TileCache>();
+        L.tileCache->Init(m_Width, m_Height, m_CanvasFormat);
+    }
+    bool wrote = false;
+    if (forceFull) {
+        wrote = vec::RasterizeDocumentFull(*L.vectorDoc, *L.tileCache, m_Width, m_Height, coarse);
+        L.vectorDoc->rasterGen = L.vectorDoc->generation;
+        L.vectorDoc->ClearDirty();
+        L.needsUpload = true;
+        m_CompositeDirty = true;
+        return wrote;
+    }
+    if (L.vectorDoc->HasDirty() || L.vectorDoc->rasterGen != L.vectorDoc->generation ||
+        L.tileCache->IsEmpty()) {
+        if (!L.vectorDoc->HasDirty())
+            L.vectorDoc->MarkAllDirty(m_Width, m_Height);
+        wrote = vec::RasterizeDocument(*L.vectorDoc, *L.tileCache, m_Width, m_Height, coarse);
+        L.vectorDoc->rasterGen = L.vectorDoc->generation;
+        L.vectorDoc->ClearDirty();
+        if (wrote) {
+            L.needsUpload = true;
+            m_CompositeDirty = true;
+        }
+    }
+    return wrote;
+}
+
+void Canvas::CommitVectorEdit(int layerIdx, const std::string& beforeJson,
+                              const std::string& afterJson, const char* actionName) {
+    if (beforeJson == afterJson) return;
+    m_UndoRedoManager.PushCommand(std::make_shared<VectorEditCommand>(
+        actionName ? actionName : "Vector Edit", layerIdx, beforeJson, afterJson));
+    m_IsDocumentModified = true;
+    EnsureVectorRaster(layerIdx, false);
+}
+
+vec::Document* Canvas::GetVectorDocument(int layerIdx) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return nullptr;
+    return m_Layers[layerIdx].vectorDoc.get();
+}
+const vec::Document* Canvas::GetVectorDocument(int layerIdx) const {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return nullptr;
+    return m_Layers[layerIdx].vectorDoc.get();
+}
+
+bool Canvas::ExportVectorLayerSvg(int layerIdx, const std::string& path) {
+    auto* doc = GetVectorDocument(layerIdx);
+    if (!doc) return false;
+    std::string err;
+    if (!vec::SaveSvgFile(path, *doc, m_Width, m_Height, &err)) {
+        Logger::Get().Error("ExportVectorLayerSvg: " + err);
+        return false;
+    }
+    return true;
 }
 
 bool Canvas::ConvertLayerToSmartObject(ID3D11Device* device, int layerIdx) {
@@ -11379,6 +11668,7 @@ bool Canvas::RasterizeLayer(ID3D11Device* device, int layerIdx) {
     layer.isGroup = false;
     layer.smartSourceBytes.clear();
     layer.smartSourcePath.clear();
+    layer.vectorDoc.reset(); // live geometry discarded after bake
     layer.fill = FillLayerParams{};
     layer.filters.clear();
     layer.styles.clear();

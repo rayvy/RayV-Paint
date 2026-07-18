@@ -24,6 +24,7 @@
 #include "layer/LayerTypes.h"
 #include "texset/TextureSetTypes.h"
 #include "texset/TextureSet.h"
+#include "vector/PathTypes.h"
 
 // What the brush/smudge tools write into for the active layer (Photoshop-like).
 enum class PaintTarget : uint8_t {
@@ -125,11 +126,15 @@ struct Layer {
     std::string smartAssetKey;
     float smartScale = 1.0f;
 
+    // Live vector geometry (Layer::Type::VectorSvg). tileCache = disposable raster cache.
+    std::unique_ptr<vec::Document> vectorDoc;
+
     // Texture-set participation (Plan 0): which maps/roles this layer writes.
     // Default = Diffuse only (Simple-compatible). Fill layers update this from fill.target.
     texset::LayerWorkSpace workSpace;
 
     bool IsFill() const { return type == Type::Fill; }
+    bool IsVector() const { return type == Type::VectorSvg; }
     // SmartObject / VectorSvg: content paint locked until Rasterize (mask still OK).
     bool CanPaintContent() const {
         return !isGroup && type != Type::Fill && type != Type::Group
@@ -165,6 +170,7 @@ public:
     friend class LayerStackCommand;
     friend class LayerPropsCommand;
     friend class PaintStrokeCommand;
+    friend class VectorEditCommand;
 
     bool Initialize(ID3D11Device* device);
     void Shutdown();
@@ -218,7 +224,9 @@ public:
     bool GetCustomBrushTip(int& outSize, std::vector<uint8_t>& outPixels) const;
 
     // Layer types / smart objects (Layer::Type)
+    // Import SVG as editable Vector layer (parsed paths + tile raster cache).
     bool ImportSvgAsSmartObject(ID3D11Device* device, const std::string& filepath);
+    bool ImportSvgAsVectorLayer(ID3D11Device* device, const std::string& filepath);
     // Convert raster (or baked display) layer into SmartObject; registers project asset.
     bool ConvertLayerToSmartObject(ID3D11Device* device, int layerIdx);
     // Replace SO source from an asset key (Texture kind). Re-uploads display from asset.
@@ -226,6 +234,22 @@ public:
     // Bake filters/styles/fill into raster tiles. Groups: flatten children into one raster.
     bool RasterizeLayer(ID3D11Device* device, int layerIdx);
     bool RasterizeGroup(ID3D11Device* device, int groupIdx);
+
+    // ---- Vector layers (first-class) ----
+    void CreateVectorLayer(ID3D11Device* device, const std::string& name = "Vector");
+    // Ensure active layer is vector (create if needed). Returns layer index or -1.
+    int EnsureActiveVectorLayer(ID3D11Device* device);
+    // Re-raster dirty region of vector layer into tileCache. coarse = interactive drag.
+    // forceFull: clear tile cache and re-raster entire document (use after cancel/delete to kill ghosts).
+    bool EnsureVectorRaster(int layerIdx, bool coarse = false, bool forceFull = false);
+    // Commit geometry edit with undo (before/after JSON snapshots of vectorDoc).
+    void CommitVectorEdit(int layerIdx, const std::string& beforeJson, const std::string& afterJson,
+                          const char* actionName);
+    // Access vector document of layer (null if not vector).
+    vec::Document* GetVectorDocument(int layerIdx);
+    const vec::Document* GetVectorDocument(int layerIdx) const;
+    // Export active vector layer as SVG file.
+    bool ExportVectorLayerSvg(int layerIdx, const std::string& path);
 
     // Layer Management
     void CreateNewLayer(ID3D11Device* device, const std::string& name);
@@ -683,6 +707,13 @@ private:
     void RunMagicWand(ID3D11Device* device, int startX, int startY, float tolerance,
                       bool add, bool subtract, bool contiguous, bool pushUndo);
     bool GetSelectionBounds(int& outX, int& outY, int& outW, int& outH) const;
+
+    // Tight content AABB on a layer (alpha threshold). Optional mask by selection.
+    // Scans only tiles that exist — safe on large docs. Returns false if nothing opaque.
+    bool ComputeLayerContentBounds(int layerIdx, int& outMinX, int& outMinY,
+                                   int& outMaxX, int& outMaxY,
+                                   float alphaThreshold = 0.02f,
+                                   bool respectSelection = true) const;
     void EnsureWandSourceCache();
     void InvalidateWandSourceCache();
 

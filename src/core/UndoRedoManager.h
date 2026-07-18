@@ -173,6 +173,8 @@ public:
         std::string smartPath;
         std::vector<uint8_t> smartBytes;
         float smartScale = 1.f;
+        // Vector geometry JSON (empty if not a vector layer)
+        std::string vectorJson;
         texset::LayerWorkSpace workSpace{};
         // Content tiles (newState = content; old empty for insert capture)
         std::vector<TileDelta> tiles;
@@ -228,6 +230,24 @@ private:
     std::string m_Name;
     DocSnap m_Old;
     DocSnap m_New;
+};
+
+// Vector geometry edit (before/after JSON of vec::Document).
+class VectorEditCommand : public UndoCommand {
+public:
+    VectorEditCommand(const std::string& name, int layerIdx,
+                      std::string beforeJson, std::string afterJson);
+    std::string GetName() const override { return m_Name; }
+    void Undo(Canvas* canvas) override;
+    void Redo(Canvas* canvas) override;
+    size_t GetOverheadBytes() const override;
+
+private:
+    void Apply(Canvas* canvas, const std::string& json);
+    std::string m_Name;
+    int m_LayerIdx = -1;
+    std::string m_Before;
+    std::string m_After;
 };
 
 // Rasterize bake undo: restores layer type/filters/styles/fill + tile pixels.

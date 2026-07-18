@@ -223,10 +223,29 @@ Unchanged at high level: `RAYP` magic + JSON metadata + zlib blobs.
 | `assets::AssetThumbCache` | 32/128 thumbs (from package or generate) |
 | `BrushLibrary` | Builtins + `*.rvpbf` disk presets |
 | `preview3d::ShaderPresetLibrary` | Builtins + `*.rvpcf` shader presets |
+| **`vec::` vector module** | Path geometry, SVG I/O (nanosvg), dirty-rect tile raster |
 
 **Async contract:** UI never blocks on full decode. Missing/pending assets → solid fallback (Fill) or skip sample (Outline bake).
 
 **Fill texture GPU path:** pattern uploaded at source resolution; composite samples with wrap UV (no full-document CPU bake unless FX requires it).
+
+### 4.1 Vector layers (first-class)
+
+Krita-like **shape layers**: editable paths/rects/ellipses; display is a **tile raster cache**.
+
+| Concept | Detail |
+|---------|--------|
+| Layer type | `Layer::Type::VectorSvg` — UI **Vector**; `.rayp` `"vector"` (legacy `"vector_svg"` loads) |
+| Truth | `vec::Document` shapes (nodes, handles, style) |
+| Display | `tileCache` via `vec::RasterizeDocument` (dirty AABB only) |
+| Tools | Vector Select / Edit / Pen / Rect / Ellipse / Line |
+| Import | Open/drop `.svg` → parsed shapes + optional source bytes |
+| Rasterize | Bakes tiles → `Raster`, drops geometry |
+| Undo | `VectorEditCommand` (geometry JSON before/after) |
+
+**Optimization:** never allocate full-doc float on edit; coarse flatten while dragging; re-raster only dirty region (+ intersecting shape bounds).
+
+Full checklist: `plans/VECTOR_LAYERS.md`.
 
 ---
 

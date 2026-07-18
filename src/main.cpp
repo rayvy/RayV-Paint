@@ -48,6 +48,7 @@
 #include "scripting/ScriptViewApi.h"
 #include "scripting/ScriptMainThread.h"
 #include "scripting/ScriptUiPreview.h"
+#include "vector/VectorToolSession.h"
 #include "core/ClipboardHelper.h"
 #include "core/CrashGuard.h"
 #include "core/BrushLibrary.h"
@@ -1479,10 +1480,22 @@ int main(int argc, char* argv[]) {
             // File Explorer / settings / blocking modals own the stage — no canvas paint or marquee.
             const bool canvasInputBlocked = core::ops::AppContext::Get().BlocksCanvasInteraction();
 
+            // ---- Vector tools (shape layer) — session + canvas HUD ----
+            const bool vectorConsumed = vec::UpdateVectorTools(
+                ActiveCanvas(), g_pd3dDevice, g_ActiveTool,
+                isHovered, canvasInputBlocked,
+                canvasX, canvasY,
+                (float)viewportWidth, (float)viewportHeight,
+                imageMin.x, imageMin.y);
+            (void)vectorConsumed;
+            // Vector tools own LMB/keys — do not also paint or marquee-select.
+            const bool vectorToolActive = UI::IsVectorTool(g_ActiveTool);
+
             // Smudge is NOT brush-like: must not paint with brush.color / accent color.
             // Stamp is brush-like for size/hardness, but Alt = set clone source (not pipette).
             bool isStampTool = (g_ActiveTool == ActiveTool::Stamp);
-            bool isBrushLikeTool = (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser || isStampTool);
+            bool isBrushLikeTool = !vectorToolActive &&
+                (g_ActiveTool == ActiveTool::Brush || g_ActiveTool == ActiveTool::Eraser || isStampTool);
             bool isSmudgeTool = (g_ActiveTool == ActiveTool::Smudge || g_ActiveTool == ActiveTool::BlurTool);
             bool isPipetteTool = (g_ActiveTool == ActiveTool::Pipette);
             // Alt-sample blocked when Ctrl held (future: Ctrl+Alt+LMB = brush rotation)

@@ -198,6 +198,38 @@ void RegisterEditorOperators(OperatorHost host) {
     });
     R.Register("StampTool", [H] {
         if (H().activeTool) *H().activeTool = ActiveTool::Stamp;
+        return OperatorResult::Finished;
+    });
+    R.Register("VectorSelectTool", [H] {
+        if (H().activeTool) *H().activeTool = ActiveTool::VectorSelect;
+        return OperatorResult::Finished;
+    });
+    R.Register("VectorEditTool", [H] {
+        if (H().activeTool) *H().activeTool = ActiveTool::VectorEdit;
+        return OperatorResult::Finished;
+    });
+    R.Register("VectorPenTool", [H] {
+        if (H().activeTool) *H().activeTool = ActiveTool::VectorPen;
+        return OperatorResult::Finished;
+    });
+    R.Register("VectorRectTool", [H] {
+        if (H().activeTool) *H().activeTool = ActiveTool::VectorRect;
+        return OperatorResult::Finished;
+    });
+    R.Register("VectorEllipseTool", [H] {
+        if (H().activeTool) *H().activeTool = ActiveTool::VectorEllipse;
+        return OperatorResult::Finished;
+    });
+    R.Register("VectorLineTool", [H] {
+        if (H().activeTool) *H().activeTool = ActiveTool::VectorLine;
+        return Ok();
+    });
+    R.Register("VectorFreehandTool", [H] {
+        if (H().activeTool) *H().activeTool = ActiveTool::VectorFreehand;
+        return Ok();
+    });
+    R.Register("VectorPolygonTool", [H] {
+        if (H().activeTool) *H().activeTool = ActiveTool::VectorPolygon;
         return Ok();
     });
 

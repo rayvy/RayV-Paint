@@ -635,7 +635,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 const char* mb = mapBadge();
                 if (layer.isGroup) std::snprintf(label, sizeof(label), "[G] %s", layer.name.c_str());
                 else if (layer.IsFill()) std::snprintf(label, sizeof(label), "[F%s%s] %s", mb[0]?" ":"", mb, layer.name.c_str());
-                else if (layer.type == Layer::Type::VectorSvg) std::snprintf(label, sizeof(label), "[SVG] %s", layer.name.c_str());
+                else if (layer.type == Layer::Type::VectorSvg) std::snprintf(label, sizeof(label), "[Vector] %s", layer.name.c_str());
                 else if (layer.type == Layer::Type::SmartObject) std::snprintf(label, sizeof(label), "[SO] %s", layer.name.c_str());
                 else if (mb[0]) std::snprintf(label, sizeof(label), "[%s] %s", mb, layer.name.c_str());
                 else std::snprintf(label, sizeof(label), "%s", layer.name.c_str());
@@ -826,6 +826,10 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 canvas.CreateFillLayer(device, "Fill " + std::to_string(layers.size() + 1));
                 setSoleSelection(canvas.GetActiveLayerIndex());
             };
+            auto doAddVector = [&]() {
+                canvas.CreateVectorLayer(device, "Vector " + std::to_string(layers.size() + 1));
+                setSoleSelection(canvas.GetActiveLayerIndex());
+            };
             auto doGroup = [&]() {
                 canvas.CreateLayerGroup(device, "Group " + std::to_string(layers.size() + 1));
                 setSoleSelection(canvas.GetActiveLayerIndex());
@@ -854,8 +858,8 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     setSoleSelection(canvas.GetActiveLayerIndex());
             };
 
-            float gap = 6.f;
-            float total = iconSz * 6 + gap * 5;
+            float gap = 4.f;
+            float total = iconSz * 7 + gap * 6;
             float startX = std::max(0.f, (ImGui::GetContentRegionAvail().x - total) * 0.5f);
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + startX);
 
@@ -865,6 +869,12 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
             if (ImGui::Button("Fil##addF", ImVec2(iconSz, iconSz)))
                 doAddFill();
             if (ImGui::IsItemHovered()) Ui::Tooltip("Add Fill Layer");
+            ImGui::SameLine(0, gap);
+            if (ImGui::Button("Vec##addV", ImVec2(iconSz, iconSz)))
+                doAddVector();
+            if (ImGui::IsItemHovered())
+                Ui::Tooltip("Add Vector Layer — editable shapes (Rect/Ellipse/Pen).\n"
+                            "Then use vector tools in the Toolbar.");
             ImGui::SameLine(0, gap);
             if (Ui::IconButton("##addG", "layer_group_add", ImVec2(iconSz, iconSz), "Add Group").clicked)
                 doGroup();

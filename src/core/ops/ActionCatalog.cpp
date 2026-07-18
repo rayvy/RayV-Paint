@@ -73,6 +73,24 @@ static const ActionDef kActions[] = {
     { "StampTool", "Clone Stamp", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::Direct,
       nullptr, 0, false, false, false, true, nullptr },
 
+    // --- Vector tools ---
+    { "VectorSelectTool", "Vector Select", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::Direct,
+      nullptr, GLFW_KEY_A, false, false, false, true, "Select / move vector shapes" },
+    { "VectorEditTool", "Vector Edit", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::Direct,
+      nullptr, 0, false, false, false, true, "Edit path nodes" },
+    { "VectorPenTool", "Vector Pen", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::Direct,
+      nullptr, GLFW_KEY_P, false, false, false, true, "Bezier pen" },
+    { "VectorRectTool", "Vector Rectangle", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::Direct,
+      nullptr, 0, false, false, false, true, nullptr },
+    { "VectorEllipseTool", "Vector Ellipse", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::Direct,
+      nullptr, 0, false, false, false, true, nullptr },
+    { "VectorLineTool", "Vector Line", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::Direct,
+      nullptr, 0, false, false, false, true, nullptr },
+    { "VectorFreehandTool", "Vector Freehand", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::Direct,
+      nullptr, 0, false, false, false, true, "Draw freehand path (smoothed)" },
+    { "VectorPolygonTool", "Vector Polygon", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::Direct,
+      nullptr, 0, false, false, false, true, "Click vertices · Enter finish" },
+
     // --- Tool groups ---
     { "SelectToolGroup", "Select Tools (cycle)", ActionCategory::Tool, ActionScope::ToolSwitch, ActionRole::ToolGroup,
       nullptr, GLFW_KEY_S, false, false, false, true, "Cycles Rect / Ellipse" },

@@ -24,6 +24,7 @@
 #include "../scripting/ScriptPluginHost.h"
 #include "../scripting/ScriptDockRegistry.h"
 #include "../scripting/ScriptMainThread.h"
+#include "../vector/VectorToolSession.h"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -84,6 +85,7 @@ static bool ShowSaveFileWin32(char* outPath, size_t maxLen, const char* filter =
 
 namespace UI {
 
+    VectorToolStyle g_VectorToolStyle{};
     DocumentLoadingState g_LoadingState;
     ProjectTabCloseRequest g_ProjectTabCloseRequest;
 
@@ -588,6 +590,15 @@ namespace UI {
         if (strcmp(actionName, "QuickSelectTool") == 0) return "tool_quick_select";
         if (strcmp(actionName, "SmartSelectTool") == 0) return "tool_smart_select";
         if (strcmp(actionName, "Reset") == 0) return "tool_reset";
+        // Vector tools re-use closest existing icons
+        if (strcmp(actionName, "VectorRectTool") == 0) return "tool_select_rect";
+        if (strcmp(actionName, "VectorEllipseTool") == 0) return "tool_select_ellipse";
+        if (strcmp(actionName, "VectorLineTool") == 0) return "tool_pan";
+        if (strcmp(actionName, "VectorPenTool") == 0) return "tool_lasso_poly";
+        if (strcmp(actionName, "VectorFreehandTool") == 0) return "tool_lasso";
+        if (strcmp(actionName, "VectorPolygonTool") == 0) return "tool_lasso_poly";
+        if (strcmp(actionName, "VectorSelectTool") == 0) return "tool_transform";
+        if (strcmp(actionName, "VectorEditTool") == 0) return "tool_wand";
         return "placeholder";
     }
 
@@ -935,6 +946,21 @@ namespace UI {
                 ImGui::EndMenu();
             }
             // ---- Image Menu (catalog operators) ----
+            if (ImGui::BeginMenu("Layer")) {
+                int ai = canvas.GetActiveLayerIndex();
+                bool isVec = ai >= 0 && ai < (int)canvas.GetLayers().size() &&
+                             canvas.GetLayers()[ai].IsVector();
+                if (ImGui::MenuItem("New Vector Layer")) {
+                    canvas.CreateVectorLayer(device, "Vector");
+                }
+                if (ImGui::MenuItem("Export Vector Layer as SVG…", nullptr, false, isVec)) {
+                    vec::VectorActionExportSvg(canvas);
+                }
+                if (ImGui::MenuItem("Rasterize Layer", nullptr, false, ai >= 0)) {
+                    canvas.RasterizeLayer(device, ai);
+                }
+                ImGui::EndMenu();
+            }
             if (ImGui::BeginMenu("Image")) {
                 bool hasLayer = canvas.GetActiveLayerIndex() != -1;
                 core::ops::MenuAction("FreeTransform", hasLayer);
@@ -1508,6 +1534,14 @@ namespace UI {
             case ActiveTool::Smudge: toolLabel = "Smudge"; break;
             case ActiveTool::BlurTool: toolLabel = "Blur"; break;
             case ActiveTool::Stamp: toolLabel = "Stamp"; break;
+            case ActiveTool::VectorSelect: toolLabel = "Select shapes"; break;
+            case ActiveTool::VectorEdit: toolLabel = "Edit nodes"; break;
+            case ActiveTool::VectorPen: toolLabel = "Pen"; break;
+            case ActiveTool::VectorRect: toolLabel = "Rectangle"; break;
+            case ActiveTool::VectorEllipse: toolLabel = "Ellipse"; break;
+            case ActiveTool::VectorLine: toolLabel = "Line"; break;
+            case ActiveTool::VectorFreehand: toolLabel = "Freehand"; break;
+            case ActiveTool::VectorPolygon: toolLabel = "Polygon"; break;
         }
         {
             const char* bdLabel =
@@ -2320,6 +2354,15 @@ namespace UI {
                 { "SmartSelectTool", "Smart Select", ActiveTool::SmartSelect, false },
                 { "TransformTool", "Move", ActiveTool::MovePixels, false },
                 { "PanTool", "Hand", ActiveTool::Pan, false },
+                // Vector group (clear names — workflow: draw shape → Select → Edit)
+                { "VectorRectTool", "Rectangle", ActiveTool::VectorRect, false },
+                { "VectorEllipseTool", "Ellipse", ActiveTool::VectorEllipse, false },
+                { "VectorLineTool", "Line", ActiveTool::VectorLine, false },
+                { "VectorPenTool", "Pen", ActiveTool::VectorPen, false },
+                { "VectorFreehandTool", "Freehand", ActiveTool::VectorFreehand, false },
+                { "VectorPolygonTool", "Polygon", ActiveTool::VectorPolygon, false },
+                { "VectorSelectTool", "Select shapes", ActiveTool::VectorSelect, false },
+                { "VectorEditTool", "Edit nodes", ActiveTool::VectorEdit, false },
             };
 
             struct KeySig {

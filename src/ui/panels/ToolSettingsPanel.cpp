@@ -1,5 +1,6 @@
 #include "ToolSettingsPanel.h"
 #include "../EditorPanels.h"
+#include "../../vector/VectorToolSession.h"
 #include "../dialogs/Win32FileDialogs.h"
 #include "../widgets/UiPanel.h"
 #include "../widgets/UiDropdown.h"
@@ -11,6 +12,7 @@
 #include "../../core/ConfigManager.h"
 #include "../../core/ImageManager.h"
 #include "../../core/PaintEngine.h"
+#include "../../core/ops/OperatorRegistry.h"
 #include "../../layer/LayerTypes.h"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -46,6 +48,182 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
 
     bool isBrushLike = (activeTool == ActiveTool::Brush || activeTool == ActiveTool::Eraser ||
                         activeTool == ActiveTool::Stamp);
+    bool isVector = UI::IsVectorTool(activeTool);
+
+    if (isVector) {
+        // ---- Clear workflow panel (vectors are confusing without this) ----
+        ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.f, 1.f), "%s",
+            vec::VectorToolTitle(activeTool));
+        ImGui::SameLine();
+        {
+            std::string live = vec::VectorToolLiveStatus(canvas, activeTool);
+            ImGui::TextDisabled("· %s", live.c_str());
+        }
+
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", vec::VectorToolHowTo(activeTool));
+
+        ImGui::Spacing();
+        ImGui::TextUnformatted("Style for new shapes:");
+        ImGui::Checkbox("Fill##vfill", &g_VectorToolStyle.fillEnabled);
+        ImGui::SameLine();
+        ImGui::ColorEdit4("##vfillc", g_VectorToolStyle.fillRgba,
+            ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+        ImGui::SameLine();
+        ImGui::Checkbox("Stroke##vstr", &g_VectorToolStyle.strokeEnabled);
+        ImGui::SameLine();
+        ImGui::ColorEdit4("##vstrc", g_VectorToolStyle.strokeRgba,
+            ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+        ImGui::SameLine();
+        MiniSlider("##vsw", &g_VectorToolStyle.strokeWidth, 0.5f, 64.f, "Stroke width (document px)", 90.f);
+        ImGui::SameLine();
+        ImGui::Checkbox("Scale styles##vss", &g_VectorToolStyle.scaleStyles);
+        if (ImGui::IsItemHovered())
+            Ui::Tooltip("When resizing, also scale stroke width");
+        if (activeTool == ActiveTool::VectorFreehand) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Close path##vfh", &g_VectorToolStyle.freehandClosed);
+        }
+        if (activeTool == ActiveTool::VectorPolygon) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Closed##vpg", &g_VectorToolStyle.polygonClosed);
+            if (ImGui::IsItemHovered())
+                Ui::Tooltip("On = polygon (closed), Off = polyline (open)");
+        }
+        if (activeTool == ActiveTool::VectorRect) {
+            ImGui::SameLine();
+            MiniSlider("##vrx", &g_VectorToolStyle.rectCornerRx, 0.f, 256.f, "Default corner radius X", 70.f);
+            ImGui::SameLine();
+            MiniSlider("##vry", &g_VectorToolStyle.rectCornerRy, 0.f, 256.f, "Default corner radius Y", 70.f);
+        }
+
+        // Advanced paint
+        ImGui::Checkbox("Linear gradient fill##vlg", &g_VectorToolStyle.fillLinearGrad);
+        if (g_VectorToolStyle.fillLinearGrad) {
+            ImGui::SameLine();
+            ImGui::ColorEdit4("##vg1", g_VectorToolStyle.gradRgba1,
+                ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar);
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Gradient end color (start = Fill color)");
+        }
+        ImGui::SameLine();
+        MiniSlider("##vdash", &g_VectorToolStyle.dashLen, 0.f, 64.f, "Dash length (0 = solid)", 70.f);
+        ImGui::SameLine();
+        MiniSlider("##vgap", &g_VectorToolStyle.gapLen, 0.f, 64.f, "Gap length", 70.f);
+
+        // Numeric transform for selected shape
+        const bool hasSel = vec::VectorSelectedShapeId() != 0;
+        const int selN = vec::VectorSelectionCount();
+        float bx = 0, by = 0, bw = 0, bh = 0;
+        if (selN > 1) {
+            ImGui::TextDisabled("%d shapes selected (Shift+click). Align / Join below.", selN);
+        }
+        if (hasSel && selN == 1 && vec::VectorGetSelectionBounds(canvas, bx, by, bw, bh)) {
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextDisabled("Selection transform (document px)");
+            ImGui::SetNextItemWidth(60.f);
+            bool ch = false;
+            ch |= ImGui::DragFloat("X##vsx", &bx, 1.f);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60.f);
+            ch |= ImGui::DragFloat("Y##vsy", &by, 1.f);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60.f);
+            ch |= ImGui::DragFloat("W##vsw2", &bw, 1.f, 1.f, 100000.f);
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60.f);
+            ch |= ImGui::DragFloat("H##vsh", &bh, 1.f, 1.f, 100000.f);
+            if (ch)
+                vec::VectorSetSelectionBounds(canvas, bx, by, bw, bh, g_VectorToolStyle.scaleStyles);
+            float rx = 0, ry = 0;
+            if (vec::VectorGetSelectionRound(canvas, rx, ry)) {
+                ImGui::SetNextItemWidth(70.f);
+                bool cr = false;
+                cr |= ImGui::DragFloat("Round X##vrx2", &rx, 0.5f, 0.f, bw * 0.5f);
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(70.f);
+                cr |= ImGui::DragFloat("Round Y##vry2", &ry, 0.5f, 0.f, bh * 0.5f);
+                if (cr)
+                    vec::VectorSetSelectionRound(canvas, rx, ry);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("Quick tools");
+        if (ImGui::SmallButton("Select##v2s"))
+            core::ops::Invoke("VectorSelectTool");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Edit##v2e"))
+            core::ops::Invoke("VectorEditTool");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Rect##v2r"))
+            core::ops::Invoke("VectorRectTool");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Pen##v2p"))
+            core::ops::Invoke("VectorPenTool");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Freehand##v2f"))
+            core::ops::Invoke("VectorFreehandTool");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Polygon##v2g"))
+            core::ops::Invoke("VectorPolygonTool");
+
+        ImGui::Spacing();
+        ImGui::BeginDisabled(!hasSel);
+        if (ImGui::SmallButton("Apply style##v2as"))
+            vec::VectorActionApplyStyle(canvas);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            Ui::Tooltip("Apply Fill/Stroke/Gradient/Dash to selection");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("To path##v2cp"))
+            vec::VectorActionConvertToPath(canvas);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Break##v2br"))
+            vec::VectorActionBreakAtNode(canvas);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            Ui::Tooltip("Edit: select middle node, Break splits path");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Join##v2jn"))
+            vec::VectorActionJoinPaths(canvas);
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            Ui::Tooltip("Select 2 open paths (Shift+click) with nearby ends → Join");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Front##v2f2"))
+            vec::VectorActionBringFront(canvas);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Back##v2b"))
+            vec::VectorActionSendBack(canvas);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Dup##v2d"))
+            vec::VectorActionDuplicate(canvas);
+        ImGui::EndDisabled();
+
+        // Align (2+)
+        ImGui::BeginDisabled(selN < 2);
+        ImGui::TextDisabled("Align");
+        if (ImGui::SmallButton("L##val")) vec::VectorActionAlign(canvas, 0);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("HC##vah")) vec::VectorActionAlign(canvas, 1);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("R##var")) vec::VectorActionAlign(canvas, 2);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("T##vat")) vec::VectorActionAlign(canvas, 3);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("VC##vav")) vec::VectorActionAlign(canvas, 4);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("B##vab")) vec::VectorActionAlign(canvas, 5);
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            Ui::Tooltip("Align needs 2+ shapes (Shift+click)");
+
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Export SVG##v2ex"))
+            vec::VectorActionExportSvg(canvas);
+
+        Ui::EndDockPanel();
+        return;
+    }
 
     if (isBrushLike) {
         if (activeTool == ActiveTool::Stamp) {

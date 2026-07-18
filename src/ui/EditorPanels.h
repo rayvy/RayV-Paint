@@ -10,12 +10,46 @@
 #include "../core/PaintEngine.h"
 #include "FileExplorer.h"
 
-enum class ActiveTool { Brush, Eraser, Pan, RectSelect, EllipseSelect, LassoSelect, PolygonalLasso, QuickSelect, MagicWand, SmartSelect, MovePixels, Pipette, BucketFill, Gradient, Smudge, BlurTool, Stamp };
-
+enum class ActiveTool {
+    Brush, Eraser, Pan,
+    RectSelect, EllipseSelect, LassoSelect, PolygonalLasso,
+    QuickSelect, MagicWand, SmartSelect,
+    MovePixels, Pipette, BucketFill, Gradient, Smudge, BlurTool, Stamp,
+    // Vector (Krita-like shape layer tools)
+    VectorSelect, VectorEdit, VectorPen, VectorRect, VectorEllipse, VectorLine,
+    VectorFreehand, VectorPolygon
+};
 
 #include <GLFW/glfw3.h>
 
 namespace UI {
+
+    // Shared style for vector creation tools (UI / main.cpp).
+    struct VectorToolStyle {
+        float fillRgba[4] = {0.25f, 0.55f, 0.95f, 1.f};
+        float strokeRgba[4] = {0.08f, 0.08f, 0.1f, 1.f};
+        float strokeWidth = 2.f;
+        bool fillEnabled = true;
+        bool strokeEnabled = true;
+        bool freehandClosed = false; // freehand closes path on release
+        bool scaleStyles = true;     // scale stroke when resizing selection
+        float rectCornerRx = 0.f;    // default rounded-rect radii for new rects
+        float rectCornerRy = 0.f;
+        bool polygonClosed = true;   // polygon vs polyline for polygon tool
+        // Advanced style defaults for new shapes / Apply style
+        bool fillLinearGrad = false;
+        float gradRgba1[4] = {0.95f, 0.35f, 0.55f, 1.f};
+        float dashLen = 0.f;
+        float gapLen = 0.f;
+    };
+    extern VectorToolStyle g_VectorToolStyle;
+
+    inline bool IsVectorTool(ActiveTool t) {
+        return t == ActiveTool::VectorSelect || t == ActiveTool::VectorEdit ||
+               t == ActiveTool::VectorPen || t == ActiveTool::VectorRect ||
+               t == ActiveTool::VectorEllipse || t == ActiveTool::VectorLine ||
+               t == ActiveTool::VectorFreehand || t == ActiveTool::VectorPolygon;
+    }
 
     struct DocumentLoadingState {
         std::atomic<bool> isLoading{false};

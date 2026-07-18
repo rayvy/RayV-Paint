@@ -34,6 +34,9 @@ static void ResolveSharedKeyToolCycles() {
         "LassoSelectTool", "PolygonalLassoTool", "LassoToolGroup",
         "MagicWandTool", "QuickSelectTool", "SmartSelectTool", "WandToolGroup",
         "TransformTool", "PanTool", "RotateTool",
+        "VectorSelectTool", "VectorEditTool", "VectorPenTool",
+        "VectorRectTool", "VectorEllipseTool", "VectorLineTool",
+        "VectorFreehandTool", "VectorPolygonTool",
     };
     auto cycleRank = [&](const std::string& id) -> int {
         for (int i = 0; i < (int)(sizeof(kCycleOrder) / sizeof(kCycleOrder[0])); ++i)
