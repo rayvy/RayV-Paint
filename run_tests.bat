@@ -22,10 +22,11 @@ set "SUITE=%~1"
 if "%SUITE%"=="" set "SUITE=smoke"
 
 if /I "%SUITE%"=="smoke" goto :smoke
+if /I "%SUITE%"=="unusual" goto :unusual
 if /I "%SUITE%"=="16k" goto :16k
 if /I "%SUITE%"=="all" goto :all
 
-echo Unknown suite "%SUITE%". Use: smoke ^| 16k ^| all
+echo Unknown suite "%SUITE%". Use: smoke ^| unusual ^| 16k ^| all
 exit /b 1
 
 :smoke
@@ -49,6 +50,17 @@ if %TEST_RESULT% neq 0 (
 echo Smoke tests completed successfully!
 exit /b 0
 
+:unusual
+echo --- Suite: unusual (edge cases / exotic formats) ---
+"!EXE_PATH!" --headless --script test_unusual_scenarios.py
+set "TEST_RESULT=%ERRORLEVEL%"
+if %TEST_RESULT% neq 0 (
+    echo Unusual suite failed with code %TEST_RESULT%
+    exit /b %TEST_RESULT%
+)
+echo Unusual suite completed successfully!
+exit /b 0
+
 :16k
 echo --- Suite: 16k (heavy) ---
 "!EXE_PATH!" --test-16k
@@ -62,6 +74,8 @@ exit /b 0
 
 :all
 call "%~f0" smoke
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+call "%~f0" unusual
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 call "%~f0" 16k
 exit /b %ERRORLEVEL%

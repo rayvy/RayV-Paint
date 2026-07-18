@@ -61,7 +61,7 @@ build.bat
 
 Для проверки работоспособности без ручного запуска интерфейса приложение поддерживает тестовый режим:
 ```cmd
-build/bin/Release/RayVPaint.exe --test
+build/Release/RayVPaint.exe --test
 ```
 В этом режиме программа:
 - Создаст окно приложения.
@@ -70,4 +70,19 @@ build/bin/Release/RayVPaint.exe --test
 - Выполнит один кадр отрисовки.
 - Завершится с кодом `0` в случае успеха или с кодом `1` при ошибке.
 
-Скрипт `run_tests.bat` автоматически собирает проект в конфигурации отладки и прогоняет этот тест.
+Скрипт `run_tests.bat` собирает проект и прогоняет выбранный suite:
+
+```cmd
+run_tests.bat              :: smoke (default): --test + test_script.py
+run_tests.bat smoke
+run_tests.bat unusual      :: edge cases / exotic DDS / unicode / OOB (test_unusual_scenarios.py)
+run_tests.bat 16k          :: heavy 16K open (test_16k.py)
+run_tests.bat all          :: smoke → unusual → 16k
+```
+
+Headless Python scripts:
+```cmd
+build\Release\RayVPaint.exe --headless --script test_script.py
+build\Release\RayVPaint.exe --headless --script test_unusual_scenarios.py
+build\Release\RayVPaint.exe --test-16k
+```
