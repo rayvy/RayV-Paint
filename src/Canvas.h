@@ -523,6 +523,19 @@ public:
 
     ID3D11ShaderResourceView* GetCompositeSRV() const { return m_CompositeSRV; }
 
+    // --- Multi-tab GPU dormancy (CPU tiles kept; GPU freed until awake) ---
+    // Inactive projects can SuspendGpuResources() to free VRAM/SRV. Active tab
+    // calls EnsureGpuAwake() on switch — brief RESTORING upload from TileCache.
+    bool IsGpuSuspended() const { return m_GpuSuspended; }
+    bool IsDiskHibernated() const { return m_DiskHibernated; }
+    void SuspendGpuResources(); // free composite / layer GPU / selection GPU; keep pixels
+    // After .rayp snapshot saved: drop CPU tiles/masks/undo (document shell remains).
+    void StripHeavyMemoryAfterHibernate();
+    // Returns true if a restore actually ran (was suspended).
+    bool EnsureGpuAwake(ID3D11Device* device);
+    // Full reload from hibernate snapshot path (sets m_DiskHibernated=false).
+    bool RestoreFromHibernateFile(ID3D11Device* device, const std::string& raypPath);
+
     // --- ImGui / mid-frame GPU safety ---
     // Never Release() a D3D SRV/tex that may still be in ImGui's draw list for this frame
     // (Layers thumbs use layer.srv / thumbSRV as ImTextureID). Queue for end-of-frame flush
@@ -940,6 +953,9 @@ private:
     // GPU resources freed after ImGui::Render (see DeferRelease* / FlushDeferredGpuReleases).
     std::vector<ID3D11ShaderResourceView*> m_DeferredSrvRelease;
     std::vector<ID3D11Texture2D*> m_DeferredTexRelease;
+
+    bool m_GpuSuspended = false;
+    bool m_DiskHibernated = false; // pixels stripped; reload from Project.dormantScratchPath
 
     // Smudge / blur-tool state
     float m_SmudgePickup[4] = { 0.f, 0.f, 0.f, 0.f };

@@ -4,6 +4,8 @@
 #include "../texset/TextureSet.h"
 
 #include <d3d11.h>
+#include <algorithm>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <memory>
@@ -21,6 +23,17 @@ struct Project {
 
     // Cross-texture workspace (Simple: 1 Diffuse set; Advanced+: N sets)
     texset::TextureSetLibrary textureSets;
+
+    // Multi-tab memory: last time this tab was active (for GPU dormancy).
+    std::chrono::steady_clock::time_point lastActiveTime{};
+    // UI: one-shot flag — set when EnsureGpuAwake restores a suspended tab.
+    bool restoringGpu = false;
+    // L2 disk hibernate: scratch .rayp + stripped CPU tiles.
+    bool diskHibernated = false;
+    std::string dormantScratchPath;   // temp or original .rayp used for reload
+    std::string pathBeforeHibernate;  // restore as "current file" after wake
+    bool dirtyBeforeHibernate = false;
+    bool ownsDormantScratch = false;  // delete scratch file after successful wake
 
     std::string GetTabTitle() const;
     bool IsBlank() const; // no path, not modified, no useful content
@@ -89,11 +102,25 @@ public:
         std::string title;
         bool dirty = false;
         bool active = false;
+        bool gpuSuspended = false;
+        bool diskHibernated = false;
+        bool restoring = false;
     };
     std::vector<ProjectTabInfo> ListTabs() const;
 
     void EnqueueOpenPath(const std::string& path);
     void DrainPendingOpens(const std::function<void(const std::string& path, Canvas& canvas)>& openFn);
+
+    // Call once per frame: GPU-sleep inactive tabs after idle timeout; keep CPU tiles.
+    // Under extreme pressure, may L2-hibernate (disk) already GPU-slept tabs.
+    // Returns number of projects newly suspended/hibernated this tick.
+    int TickDormancy(ID3D11Device* device);
+    // Flush deferred D3D Release queues on every open canvas (active + dormant).
+    void FlushAllDeferredGpuReleases();
+    // Seconds of inactivity before GPU suspend (default 60).
+    void SetGpuDormancyIdleSeconds(int sec) { m_GpuDormancyIdleSec = std::max(5, sec); }
+    int  GetGpuDormancyIdleSeconds() const { return m_GpuDormancyIdleSec; }
+    bool ConsumeRestoringFlag(); // true if active tab just finished RESTORING
 
     ID3D11Device* GetDevice() const { return m_Device; }
 
@@ -105,10 +132,14 @@ private:
     int m_ActiveId = -1;
     int m_NextId = 1;
     int m_NextUntitled = 1;
+    int m_GpuDormancyIdleSec = 60;
+    bool m_ConsumeRestoring = false;
 
     std::mutex m_PendingMutex;
     std::deque<std::string> m_PendingPaths;
 
     Project* FindMutable(int id);
     int IndexOf(int id) const;
+    bool TryDiskHibernate(Project& p);
+    bool WakeProject(Project& p, ID3D11Device* device);
 };

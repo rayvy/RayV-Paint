@@ -7566,6 +7566,19 @@ bool Canvas::ComputeLayerContentBounds(int layerIdx, int& outMinX, int& outMinY,
         if (scanMaxX < scanMinX) return false;
     }
 
+    const int64_t scanArea = (int64_t)(scanMaxX - scanMinX + 1) * (int64_t)(scanMaxY - scanMinY + 1);
+    // Fast path: no selection + large occupied region → tile AABB only.
+    // Full per-pixel alpha on dense 16K was ~6s (Ctrl+T "smart border"). Tile AABB is
+    // slightly loose (up to TILE_SIZE) but O(tiles) not O(pixels).
+    constexpr int64_t kPixelScanBudget = 2048ll * 2048ll; // ~4M px max fine scan
+    if (!useSel && scanArea > kPixelScanBudget) {
+        outMinX = scanMinX;
+        outMinY = scanMinY;
+        outMaxX = scanMaxX;
+        outMaxY = scanMaxY;
+        return true;
+    }
+
     // Alpha (× selection) scan — only tiles that intersect seed region
     int minX = m_Width, minY = m_Height, maxX = -1, maxY = -1;
     const auto fmt = layer.tileCache->GetFormat();
@@ -7574,6 +7587,9 @@ bool Canvas::ComputeLayerContentBounds(int layerIdx, int& outMinX, int& outMinY,
     const int t1x = scanMaxX / TILE_SIZE, t1y = scanMaxY / TILE_SIZE;
     const int ntx = layer.tileCache->GetTilesX();
     const int nty = layer.tileCache->GetTilesY();
+
+    // Coarse step for medium areas (selection 2K–4K): still tight, much faster
+    const int step = (scanArea > 512ll * 512ll) ? 4 : 1;
 
     for (int ty = t0y; ty <= t1y && ty < nty; ++ty) {
         for (int tx = t0x; tx <= t1x && tx < ntx; ++tx) {
@@ -7587,10 +7603,10 @@ bool Canvas::ComputeLayerContentBounds(int layerIdx, int& outMinX, int& outMinY,
             const int py1 = std::min(scanMaxY, tileY0 + TILE_SIZE - 1);
             if (px1 < px0 || py1 < py0) continue;
 
-            for (int y = py0; y <= py1; ++y) {
+            for (int y = py0; y <= py1; y += step) {
                 const int lyT = y - tileY0;
                 const uint8_t* row = raw + ((size_t)lyT * TILE_SIZE) * bpp;
-                for (int x = px0; x <= px1; ++x) {
+                for (int x = px0; x <= px1; x += step) {
                     if (useSel) {
                         uint8_t sw = m_SelectionMask[(size_t)y * (size_t)m_Width + (size_t)x];
                         if (sw == 0) continue;
@@ -7622,6 +7638,13 @@ bool Canvas::ComputeLayerContentBounds(int layerIdx, int& outMinX, int& outMinY,
     }
 
     if (maxX < minX) return false;
+    // Expand coarse hits so soft edges are not clipped
+    if (step > 1) {
+        minX = std::max(scanMinX, minX - step);
+        minY = std::max(scanMinY, minY - step);
+        maxX = std::min(scanMaxX, maxX + step);
+        maxY = std::min(scanMaxY, maxY + step);
+    }
     outMinX = minX;
     outMinY = minY;
     outMaxX = maxX;
@@ -7696,15 +7719,21 @@ void Canvas::StartMovePixels(ID3D11Device* device) {
 
     const size_t pixCount = (size_t)m_FloatingBufW * (size_t)m_FloatingBufH;
     const size_t estBytes = pixCount * 16ull; // RGBA32F
-    if (MemoryStats::ExceedsRamBudget(estBytes, 0.35)) {
+    // Soft: refuse absurd full-doc float lift (16K = 4 GiB) — use selection or crop first.
+    constexpr size_t kMaxFloatLiftBytes = 512ull * 1024ull * 1024ull; // 512 MiB ≈ 4K×4K RGBA32F
+    if (estBytes > kMaxFloatLiftBytes || MemoryStats::ExceedsHardRamCeiling(estBytes)) {
         Logger::Get().ErrorTag("mem",
             "StartMovePixels: floating buffer " + MemoryStats::FormatBytes(estBytes) +
-            " exceeds RAM budget — aborting move.");
+            " too large — abort. Select a smaller region (marquee) before transform.");
         m_IsMovingPixels = false;
         m_FloatingPixels.clear();
         m_OriginalSelectionMask.clear();
         m_FloatingBufW = m_FloatingBufH = 0;
+        m_FloatingBBoxW = m_FloatingBBoxH = 0;
         return;
+    }
+    if (MemoryStats::ExceedsRamBudget(estBytes, 0.35)) {
+        MemoryStats::LogSoftBudget("StartMovePixels floating", estBytes, 0.35);
     }
 
     // Local-only buffers (not full document)
@@ -9824,6 +9853,150 @@ ID3D11BlendState* Canvas::GetFillWriteBlend(ID3D11Device* device, uint8_t channe
     if (FAILED(device->CreateBlendState(&bd, slot)) || !*slot)
         return replace ? m_LayerBlendStateReplace : m_LayerBlendState;
     return *slot;
+}
+
+void Canvas::SuspendGpuResources() {
+    if (m_GpuSuspended) return;
+    // Do not leave interactive transform mid-flight on a tab we are freezing.
+    if (m_IsMovingPixels) {
+        m_IsMovingPixels = false;
+        m_FloatingPixels.clear();
+        m_OriginalSelectionMask.clear();
+        m_FloatingBufW = m_FloatingBufH = 0;
+    }
+    if (m_IsStrokeActive) {
+        m_IsStrokeActive = false;
+        m_ActiveStrokeDeltas.clear();
+    }
+
+    ReleaseCompositeResources();
+
+    for (auto& L : m_Layers) {
+        ReleaseFillPatternGpu(L);
+        if (L.gpuSurfaceId) {
+            m_GpuTiles.DestroySurface(L.gpuSurfaceId);
+            L.gpuSurfaceId = 0;
+        }
+        if (L.texture) { DeferReleaseTex(L.texture); L.texture = nullptr; }
+        if (L.srv) { DeferReleaseSRV(L.srv); L.srv = nullptr; }
+        if (L.maskTexture) { DeferReleaseTex(L.maskTexture); L.maskTexture = nullptr; }
+        if (L.maskSRV) { DeferReleaseSRV(L.maskSRV); L.maskSRV = nullptr; }
+        if (L.thumbSRV) { DeferReleaseSRV(L.thumbSRV); L.thumbSRV = nullptr; }
+        if (L.thumbTex) { DeferReleaseTex(L.thumbTex); L.thumbTex = nullptr; }
+        L.needsUpload = true;
+        L.thumbDirty = true;
+        L.maskNeedsUpload = L.hasMask;
+    }
+
+    if (m_SelectionMaskTexture) {
+        DeferReleaseTex(m_SelectionMaskTexture);
+        m_SelectionMaskTexture = nullptr;
+    }
+    if (m_SelectionMaskSRV) {
+        DeferReleaseSRV(m_SelectionMaskSRV);
+        m_SelectionMaskSRV = nullptr;
+    }
+    m_SelectionMaskNeedsUpload = m_HasSelection;
+    m_SelectionGpuDirtyValid = false;
+
+    // Drop rebuildable CPU caches (filters/styles presentation) — save RAM while idle.
+    // TileCache pixel data is kept (source of truth for RESTORING).
+    for (auto& L : m_Layers) {
+        L.filteredCache.reset();
+        L.presentationCache.reset();
+        L.filtersDirty = !L.filters.empty();
+        L.stylesDirty = L.HasEnabledStyles();
+        L.presentationDirty = true;
+    }
+
+    m_CompositeDirty = true;
+    m_CompositeDirtyFull = true;
+    m_GpuSuspended = true;
+    // Inactive tab is not in ImGui draw list — free deferred GPU now (avoid leak until switch).
+    FlushDeferredGpuReleases();
+    Logger::Get().InfoTag("mem",
+        "GPU dormancy: suspended canvas " + std::to_string(m_Width) + "x" +
+        std::to_string(m_Height) + " layers=" + std::to_string(m_Layers.size()) +
+        " (CPU tiles retained, FX caches dropped)");
+}
+
+bool Canvas::EnsureGpuAwake(ID3D11Device* device) {
+    if (m_DiskHibernated) return false; // must RestoreFromHibernateFile first
+    if (!m_GpuSuspended) return false;
+    if (!device || m_Width <= 0 || m_Height <= 0) {
+        m_GpuSuspended = false;
+        return false;
+    }
+
+    auto t0 = std::chrono::steady_clock::now();
+    Logger::Get().InfoTag("mem", "GPU dormancy: RESTORING …");
+
+    CreateCompositeResources(device);
+    for (auto& L : m_Layers) {
+        if (L.isGroup) continue;
+        L.needsUpload = true;
+        if (L.IsFill()) {
+            EnsureFillLayerGpu(device, L);
+        } else if (L.tileCache && !L.tileCache->IsEmpty()) {
+            RecreateLayerTexture(device, L);
+        }
+        if (L.hasMask)
+            L.maskNeedsUpload = true;
+    }
+    if (m_HasSelection)
+        UpdateSelectionMaskTexture(device);
+
+    m_CompositeDirty = true;
+    m_CompositeDirtyFull = true;
+    m_GpuSuspended = false;
+
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    Logger::Get().InfoTag("mem",
+        "GPU dormancy: RESTORING done in " + std::to_string(ms) + " ms");
+    return true;
+}
+
+void Canvas::StripHeavyMemoryAfterHibernate() {
+    SuspendGpuResources();
+    ClearUndoHistory();
+    for (auto& L : m_Layers) {
+        L.tileCache.reset();
+        L.filteredCache.reset();
+        L.presentationCache.reset();
+        L.nativeMapCache.reset();
+        L.mask.clear();
+        L.maskTiles.reset();
+        L.hasMask = false;
+        L.fill.textureRgba.clear();
+        L.fill.textureW = L.fill.textureH = 0;
+        L.smartSourceBytes.clear();
+        L.needsUpload = true;
+    }
+    m_SelectionMask.clear();
+    m_HasSelection = false;
+    m_SelectionBoundsValid = false;
+    m_WandSourceRGBA.clear();
+    m_WandSourceW = m_WandSourceH = 0;
+    m_FloatingPixels.clear();
+    m_OriginalSelectionMask.clear();
+    m_DiskHibernated = true;
+    m_GpuSuspended = true; // still need GPU rebuild after load
+    Logger::Get().InfoTag("mem",
+        "Disk hibernate: stripped CPU tiles/masks/undo (shell kept, reload from snapshot)");
+}
+
+bool Canvas::RestoreFromHibernateFile(ID3D11Device* device, const std::string& raypPath) {
+    if (!device || raypPath.empty()) return false;
+    Logger::Get().InfoTag("mem", "Disk hibernate: RESTORING from " + raypPath);
+    const bool ok = LoadCanvasRayp(raypPath, device);
+    m_DiskHibernated = false;
+    m_GpuSuspended = false;
+    if (ok) {
+        m_CompositeDirty = true;
+        m_CompositeDirtyFull = true;
+    }
+    return ok;
 }
 
 void Canvas::DeferReleaseSRV(ID3D11ShaderResourceView* srv) {

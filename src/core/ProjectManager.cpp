@@ -3,6 +3,7 @@
 #include "PathUtil.h"
 #include "ImageManager.h"
 #include "ConfigManager.h"
+#include "MemoryStats.h"
 #include "../texset/TextureSetIO.h"
 
 #include <algorithm>
@@ -522,6 +523,7 @@ int ProjectManager::CreateEmptyProject() {
                                    : std::vector<texset::MapSlot>{});
 
     const int id = proj->id;
+    proj->lastActiveTime = std::chrono::steady_clock::now();
     m_Projects.push_back(std::move(proj));
     m_ActiveId = id;
     Logger::Get().Info("Project created id=" + std::to_string(id) + " blank canvas ready");
@@ -583,11 +585,204 @@ int ProjectManager::ActivateOrPrepareOpen(const std::string& filepath) {
     return PrepareOpenAsNewProject(path);
 }
 
+bool ProjectManager::WakeProject(Project& p, ID3D11Device* device) {
+    if (!p.canvas || !device) return false;
+    p.restoringGpu = true;
+    bool did = false;
+    if (p.diskHibernated || (p.canvas->IsDiskHibernated() && !p.dormantScratchPath.empty())) {
+        const std::string snap = p.dormantScratchPath;
+        if (snap.empty() || !p.canvas->RestoreFromHibernateFile(device, snap)) {
+            Logger::Get().ErrorTag("mem",
+                "Disk hibernate RESTORE failed id=" + std::to_string(p.id) + " path=" + snap);
+            p.restoringGpu = false;
+            return false;
+        }
+        if (!p.pathBeforeHibernate.empty())
+            p.canvas->SetCurrentProjectFilePath(p.pathBeforeHibernate);
+        p.canvas->SetDocumentModified(p.dirtyBeforeHibernate);
+        p.ApplyTextureSetsFromCanvas();
+        if (p.ownsDormantScratch && !p.dormantScratchPath.empty() &&
+            p.dormantScratchPath != p.pathBeforeHibernate) {
+            try { std::filesystem::remove(PathUtil::FromUtf8(p.dormantScratchPath)); }
+            catch (...) {}
+        }
+        p.diskHibernated = false;
+        p.dormantScratchPath.clear();
+        p.ownsDormantScratch = false;
+        p.pathBeforeHibernate.clear();
+        p.dirtyBeforeHibernate = false;
+        did = true;
+        m_ConsumeRestoring = true;
+    } else if (p.canvas->IsGpuSuspended()) {
+        p.canvas->EnsureGpuAwake(device);
+        did = true;
+        m_ConsumeRestoring = true;
+    }
+    p.restoringGpu = false;
+    return did;
+}
+
+bool ProjectManager::TryDiskHibernate(Project& p) {
+    if (!p.canvas || p.diskHibernated || p.canvas->IsDiskHibernated()) return false;
+    // Skip empty blanks
+    if (p.IsBlank()) return false;
+
+    // Prefer already GPU-slept; else sleep first
+    if (!p.canvas->IsGpuSuspended())
+        p.canvas->SuspendGpuResources();
+
+    p.pathBeforeHibernate = p.canvas->GetCurrentProjectFilePath();
+    p.dirtyBeforeHibernate = p.canvas->IsDocumentModified();
+
+    std::string snapPath;
+    bool owns = false;
+    const std::string& cur = p.pathBeforeHibernate;
+    auto endsWithRayp = [](const std::string& s) {
+        if (s.size() < 5) return false;
+        std::string e = s.substr(s.size() - 5);
+        for (char& c : e) c = (char)std::tolower((unsigned char)c);
+        return e == ".rayp";
+    };
+
+    // Clean .rayp on disk and not dirty → reload from original, no extra write
+    if (!p.dirtyBeforeHibernate && endsWithRayp(cur)) {
+        snapPath = cur;
+        owns = false;
+    } else {
+        // Snapshot to dormant/ (works for dirty, DDS-only opens, untitled)
+        std::string dir = ConfigManager::GetUserSubdirectory("dormant");
+        try {
+            std::filesystem::create_directories(PathUtil::FromUtf8(dir));
+        } catch (...) {}
+        snapPath = dir + "/proj_" + std::to_string(p.id) + ".rayp";
+        p.InjectTextureSetsIntoCanvas();
+        if (!p.canvas->SaveCanvasRayp(snapPath)) {
+            Logger::Get().ErrorTag("mem",
+                "Disk hibernate save failed id=" + std::to_string(p.id));
+            return false;
+        }
+        // SaveCanvasRayp updates current path to scratch — keep user-facing path/title.
+        if (!p.pathBeforeHibernate.empty())
+            p.canvas->SetCurrentProjectFilePath(p.pathBeforeHibernate);
+        else
+            p.canvas->SetCurrentProjectFilePath({});
+        p.canvas->SetDocumentModified(p.dirtyBeforeHibernate);
+        owns = true;
+    }
+
+    p.canvas->StripHeavyMemoryAfterHibernate();
+    p.dormantScratchPath = snapPath;
+    p.ownsDormantScratch = owns;
+    p.diskHibernated = true;
+    Logger::Get().InfoTag("mem",
+        "Disk hibernate: project id=" + std::to_string(p.id) +
+        " \"" + p.GetTabTitle() + "\" → " + snapPath +
+        (owns ? " [scratch]" : " [original rayp]"));
+    return true;
+}
+
 bool ProjectManager::SwitchTo(int id) {
     if (!FindMutable(id)) return false;
     if (m_ActiveId == id) return true;
+    const auto now = std::chrono::steady_clock::now();
+    if (Project* old = FindMutable(m_ActiveId))
+        old->lastActiveTime = now;
+
     m_ActiveId = id;
+    if (Project* p = FindMutable(id)) {
+        p->lastActiveTime = now;
+        if (m_Device)
+            WakeProject(*p, m_Device);
+    }
     Logger::Get().Debug("Switched to project id=" + std::to_string(id));
+    return true;
+}
+
+int ProjectManager::TickDormancy(ID3D11Device* device) {
+    if (!device || m_Projects.empty()) return 0;
+    const auto now = std::chrono::steady_clock::now();
+
+    // Under memory pressure, sleep inactive tabs much sooner (boss-fight / many 4K).
+    int idleSec = m_GpuDormancyIdleSec;
+    bool pressure = false;
+    bool extreme = false;
+    {
+        auto mem = MemoryStats::QueryProcess();
+        if (mem.totalPhysBytes > 0) {
+            const double usedFrac = (double)mem.workingSetBytes / (double)mem.totalPhysBytes;
+            const double availFrac = (double)mem.availPhysBytes / (double)mem.totalPhysBytes;
+            if (usedFrac > 0.35 || availFrac < 0.20 || m_Projects.size() >= 6) {
+                pressure = true;
+                idleSec = std::min(idleSec, 8);
+            }
+            if (usedFrac > 0.50 || availFrac < 0.12 || m_Projects.size() >= 12) {
+                idleSec = 3;
+                extreme = true;
+            }
+            if (usedFrac > 0.60 || availFrac < 0.08 || m_Projects.size() >= 16)
+                extreme = true;
+        }
+    }
+    const auto idleLimit = std::chrono::seconds(std::max(3, idleSec));
+    int changed = 0;
+
+    // Keep active tab awake and timestamped
+    if (Project* active = ActiveProject()) {
+        active->lastActiveTime = now;
+        WakeProject(*active, device);
+    }
+
+    for (auto& p : m_Projects) {
+        if (!p || !p->canvas || p->id == m_ActiveId) continue;
+        if (p->IsBlank() && m_Projects.size() <= 2) continue;
+        if (p->lastActiveTime.time_since_epoch().count() == 0) {
+            p->lastActiveTime = now;
+            continue;
+        }
+        if (now - p->lastActiveTime < idleLimit) continue;
+
+        // L2: already GPU-slept + extreme pressure → disk hibernate
+        if (extreme && (p->canvas->IsGpuSuspended() || p->diskHibernated) && !p->diskHibernated) {
+            if (TryDiskHibernate(*p)) {
+                ++changed;
+                continue;
+            }
+        }
+        if (p->canvas->IsGpuSuspended() || p->diskHibernated) continue;
+
+        p->canvas->SuspendGpuResources();
+        ++changed;
+        Logger::Get().InfoTag("mem",
+            std::string("GPU dormancy: project id=") + std::to_string(p->id) +
+            " \"" + p->GetTabTitle() + "\" slept after idle" +
+            (pressure ? " [pressure]" : "") +
+            " (CPU tiles kept, FX caches dropped)");
+    }
+
+    // Second pass under extreme pressure: hibernate GPU-slept tabs even if just slept
+    if (extreme) {
+        for (auto& p : m_Projects) {
+            if (!p || !p->canvas || p->id == m_ActiveId) continue;
+            if (p->diskHibernated) continue;
+            if (!p->canvas->IsGpuSuspended()) continue;
+            if (now - p->lastActiveTime < idleLimit) continue;
+            if (TryDiskHibernate(*p))
+                ++changed;
+        }
+    }
+    return changed;
+}
+
+void ProjectManager::FlushAllDeferredGpuReleases() {
+    for (auto& p : m_Projects) {
+        if (p && p->canvas)
+            p->canvas->FlushDeferredGpuReleases();
+    }
+}
+
+bool ProjectManager::ConsumeRestoringFlag() {
+    if (!m_ConsumeRestoring) return false;
+    m_ConsumeRestoring = false;
     return true;
 }
 
@@ -595,8 +790,21 @@ bool ProjectManager::CloseProject(int id, bool force) {
     Project* p = FindMutable(id);
     if (!p) return false;
 
-    if (!force && p->canvas && p->canvas->IsDocumentModified()) {
+    // Hibernated tabs may have stripped canvas dirty flag — trust snapshot meta.
+    const bool dirty = p->diskHibernated
+        ? p->dirtyBeforeHibernate
+        : (p->canvas && p->canvas->IsDocumentModified());
+    if (!force && dirty) {
         return false; // UI must confirm
+    }
+
+    // Drop owned L2 scratch so dormant/ does not accumulate closed tabs.
+    if (p->ownsDormantScratch && !p->dormantScratchPath.empty() &&
+        p->dormantScratchPath != p->pathBeforeHibernate) {
+        try { std::filesystem::remove(PathUtil::FromUtf8(p->dormantScratchPath)); }
+        catch (...) {}
+        p->ownsDormantScratch = false;
+        p->dormantScratchPath.clear();
     }
 
     if (p->canvas)
@@ -612,9 +820,14 @@ bool ProjectManager::CloseProject(int id, bool force) {
     }
 
     if (m_ActiveId == id) {
-        // Prefer neighbor tab
+        // Prefer neighbor tab and wake it (may be L1/L2 dormant).
         const int newIdx = std::min(idx, (int)m_Projects.size() - 1);
         m_ActiveId = m_Projects[newIdx]->id;
+        if (Project* next = FindMutable(m_ActiveId)) {
+            next->lastActiveTime = std::chrono::steady_clock::now();
+            if (m_Device)
+                WakeProject(*next, m_Device);
+        }
     }
     Logger::Get().Info("Closed project id=" + std::to_string(id) +
                        " active=" + std::to_string(m_ActiveId));
@@ -668,8 +881,14 @@ std::vector<ProjectManager::ProjectTabInfo> ProjectManager::ListTabs() const {
         ProjectTabInfo t;
         t.id = p->id;
         t.title = p->GetTabTitle();
-        t.dirty = p->canvas && p->canvas->IsDocumentModified();
+        // While L2-hibernated, canvas dirty bit may not reflect pre-hibernate state.
+        t.dirty = p->diskHibernated
+            ? p->dirtyBeforeHibernate
+            : (p->canvas && p->canvas->IsDocumentModified());
         t.active = (p->id == m_ActiveId);
+        t.gpuSuspended = p->canvas && p->canvas->IsGpuSuspended() && !p->diskHibernated;
+        t.diskHibernated = p->diskHibernated || (p->canvas && p->canvas->IsDiskHibernated());
+        t.restoring = p->restoringGpu;
         out.push_back(std::move(t));
     }
     return out;

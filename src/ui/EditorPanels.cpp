@@ -770,17 +770,36 @@ namespace UI {
                 for (const auto& tab : tabs) {
                     std::string label = tab.title;
                     if (tab.dirty) label += " *";
+                    // Dormancy badges (ASCII-safe for title font)
+                    if (tab.restoring) label += " ...";
+                    else if (tab.diskHibernated) label += " [disk]";
+                    else if (tab.gpuSuspended) label += " [z]";
                     ImVec2 ts = ImGui::CalcTextSize(label.c_str());
                     float tw = ts.x + 28.f;
                     ImVec2 a(tabX, tabY);
                     ImVec2 b(tabX + tw, tabY + titleH - 8.f);
                     ImU32 bg = tab.active ? IM_COL32(50, 70, 110, 220) : IM_COL32(35, 35, 42, 180);
+                    if (!tab.active && tab.diskHibernated)
+                        bg = IM_COL32(28, 32, 40, 160);
+                    else if (!tab.active && tab.gpuSuspended)
+                        bg = IM_COL32(30, 34, 48, 170);
                     dl->AddRectFilled(a, b, bg, 4.f);
-                    dl->AddText(ImVec2(a.x + 8.f, a.y + 4.f), tok.ColU32(tok.textPrimary), label.c_str());
+                    ImU32 tc = tok.ColU32(tok.textPrimary);
+                    if (!tab.active && (tab.gpuSuspended || tab.diskHibernated))
+                        tc = tok.ColU32(tok.textSecondary);
+                    dl->AddText(ImVec2(a.x + 8.f, a.y + 4.f), tc, label.c_str());
                     // Hit: select tab
                     if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(0) &&
                         !ImGui::IsMouseDragging(0)) {
                         if (!tab.active) ProjectManager::Get().SwitchTo(tab.id);
+                    }
+                    if (ImGui::IsMouseHoveringRect(a, b) && !ImGui::IsMouseDragging(0)) {
+                        if (tab.diskHibernated)
+                            Ui::Tooltip("Disk hibernate — click to RESTORE (pixels on disk)");
+                        else if (tab.gpuSuspended)
+                            Ui::Tooltip("GPU sleep — click to wake (pixels in RAM)");
+                        else if (tab.restoring)
+                            Ui::Tooltip("RESTORING…");
                     }
                     // Close x
                     ImVec2 xa(b.x - 16.f, a.y + 4.f);

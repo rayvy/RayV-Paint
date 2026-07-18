@@ -1330,6 +1330,15 @@ int main(int argc, char* argv[]) {
         g_IsViewportHovered = false;
         g_IsLayersHovered = false;
 
+        // Multi-tab GPU dormancy: idle inactive tabs free VRAM; switch = RESTORING from CPU tiles.
+        // Skip in stress/test — those suites thrash a single document.
+        if (!stress16kMode && !testMode && !benchmarkMode && !headlessMode) {
+            ProjectManager::Get().TickDormancy(g_pd3dDevice);
+            if (ProjectManager::Get().ConsumeRestoringFlag()) {
+                core::Notifications::Get().Push("RESTORING document…", core::NotifyLevel::Info);
+            }
+        }
+
         // Layer preview double-refresh (paint/edit may leave thumbs one frame stale)
         if (g_LayerPreviewRefreshFrames > 0) {
             ActiveCanvas().MarkCompositeDirty();
@@ -2814,7 +2823,7 @@ int main(int argc, char* argv[]) {
                 float clearColor[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
                 g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColor);
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-                ActiveCanvas().FlushDeferredGpuReleases();
+                ProjectManager::Get().FlushAllDeferredGpuReleases();
                 if (!headlessMode)
                     g_pSwapChain->Present(1, 0);
                 break;
@@ -2842,7 +2851,8 @@ int main(int argc, char* argv[]) {
 
         // Free D3D resources that were ImTextureIDs this frame (undo/delete mid-UI).
         // Must run AFTER ImGui_ImplDX11_RenderDrawData — never Release SRV while draw list holds it.
-        ActiveCanvas().FlushDeferredGpuReleases();
+        // Flush ALL tabs: dormant projects also queue deferred releases on suspend.
+        ProjectManager::Get().FlushAllDeferredGpuReleases();
 
         // Present: VSync when focused; uncapped when unfocused or --perf (Phase A).
         {

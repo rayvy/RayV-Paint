@@ -107,7 +107,28 @@ Compositor
   └─ pulls only tiles in dirty/viewport AABB; never requires full 16K RGBA8 resident
 ```
 
-**Not in Wave 0.** Stress suite will expose current crash/hang points without full OOC.
+### 3.1 Multi-document dormancy (boss-fight → many 4K tabs)
+
+**Product framing:** 16K is the **boss** (if stress passes, 10–20×4K is expected to carry).  
+**Reality (pre-dormancy):** every tab held a full `Canvas` with GPU + CPU tiles forever.
+
+| Level | When | What is freed | Restore |
+|-------|------|---------------|---------|
+| **L0 Active** | focused tab | everything resident | — |
+| **L1 GPU sleep** | inactive ≥ **60s** (faster under pressure) | composite + layer/fill/selection GPU, thumbs; drop rebuildable FX caches | `EnsureGpuAwake` from CPU tiles → toast **RESTORING** |
+| **L2 Disk hibernate** | L1 + **extreme** pressure / many tabs | snapshot `.rayp` (scratch under `%APPDATA%/…/dormant/` or original clean file), strip TileCache / masks / undo | `RestoreFromHibernateFile` → full `.rayp` load |
+
+**L1 landed:** `Canvas::SuspendGpuResources` / `EnsureGpuAwake`, `ProjectManager::TickDormancy` (idle 60s, configurable).  
+CPU pixels + undo stacks stay in RAM (safe for dirty unsaved work).  
+On suspend: drop `filteredCache` / `presentationCache` (rebuildable); flush deferred GPU immediately.  
+**Pressure mode:** if process WS >35% RAM or free <20% or ≥6 tabs → idle 8s; harsher → 3s.  
+**Flush:** `FlushAllDeferredGpuReleases` every frame (all tabs — fixes leak when only active flushed).  
+
+**L2 landed:** `ProjectManager::TryDiskHibernate` / `WakeProject`, `Canvas::StripHeavyMemoryAfterHibernate` / `RestoreFromHibernateFile`.  
+- Extreme: WS >50% or free <12% or ≥12 tabs (also ≥16 tabs forces extreme).  
+- Dirty / non-`.rayp` / DDS opens → write `dormant/proj_<id>.rayp` then strip; clean saved `.rayp` reloads original (no extra write).  
+- Tab UI: active normal; L1 badge `[z]`; L2 badge `[disk]`; restore flash `...` + toast **RESTORING document…**.  
+- Close tab deletes owned scratch; dirty confirmation uses `dirtyBeforeHibernate` while L2.
 
 ---
 
