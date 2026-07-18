@@ -56,6 +56,7 @@
 #include "core/ProjectManager.h"
 #include "core/SingleInstance.h"
 #include "core/BenchmarkRunner.h"
+#include "core/StressRunner.h"
 #include "shell/DdsThumbRegister.h"
 #include "modio/VertexLayout.h"
 #include "preview3d/MeshGpu.h"
@@ -617,6 +618,7 @@ int main(int argc, char* argv[]) {
     bool forceConsole = false;
     bool test16kMode = false;
     bool benchmarkMode = false;
+    bool stress16kMode = false; // hellish 16K reliability suite — see plans/EMERGENCY_SAFE_PLAN.MD
     bool perfMode = false; // uncapped Present(0) — prefer for FPS testing / heavy docs
     bool allowMultiInstance = false;
     std::string scriptPath = "";
@@ -650,6 +652,13 @@ int main(int argc, char* argv[]) {
             forceConsole = true;
             allowMultiInstance = true;
             BenchmarkRunner::Get().Enable(true);
+        } else if (arg == "--stress-16k") {
+            // Hellish 16K reliability: real 16K DDS + fill + undo thrash. Hang gate 2s.
+            stress16kMode = true;
+            forceConsole = true;
+            allowMultiInstance = true;
+            perfMode = true; // uncapped Present — measure work, not vsync
+            StressRunner::Get().Enable(true);
         } else if (arg == "--perf") {
             // Uncapped swap chain present (no VSync). Also used when window unfocused.
             perfMode = true;
@@ -703,7 +712,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Force console if in test mode or headless mode
-    if (testMode || headlessMode || benchmarkMode || !exportToPath.empty() || probeFileExplorer) {
+    if (testMode || headlessMode || benchmarkMode || stress16kMode ||
+        !exportToPath.empty() || probeFileExplorer) {
         forceConsole = true;
         // Tests/headless may run parallel processes — allow multi unless user wants single.
         allowMultiInstance = true;
@@ -912,7 +922,7 @@ int main(int argc, char* argv[]) {
     std::string backupDir = ConfigManager::Get().GetBackupDir();
     std::string backupPath = backupDir + "/autosave_backup.rayp"; // legacy single-file
     const bool coldStartNoDoc =
-        startupImagePath.empty() && scriptPath.empty() && !benchmarkMode &&
+        startupImagePath.empty() && scriptPath.empty() && !benchmarkMode && !stress16kMode &&
         exportToPath.empty() && !probeFileExplorer && !headlessMode && !testMode;
     bool showRecentAutosaves = coldStartNoDoc;
     // Legacy crash recovery only if no multi-autosave recents UI (or file still present)
@@ -1232,6 +1242,10 @@ int main(int argc, char* argv[]) {
         Logger::Get().InfoTag("bench", "Starting interactive 8K benchmark mode");
         BenchmarkRunner::Get().Start(ActiveCanvas(), g_pd3dDevice);
     }
+    if (stress16kMode) {
+        Logger::Get().InfoTag("stress", "Starting hellish 16K stress mode (EMERGENCY_SAFE_PLAN)");
+        StressRunner::Get().Start(ActiveCanvas(), g_pd3dDevice);
+    }
 
     // 9. Main loop
     while (!glfwWindowShouldClose(window)) {
@@ -1380,8 +1394,9 @@ int main(int argc, char* argv[]) {
             uiState.freeTransformActive = g_FreeTransformMode;
         }
 
-        // Periodic autosave (rotation + previews). Disabled in benchmark / agent one-shots.
-        if (!benchmarkMode && !testMode) {
+        // Periodic autosave (rotation + previews). Disabled in benchmark / stress / agent one-shots.
+        // Stress: autosave of 16K+Fill was measured as multi-second "hang frames".
+        if (!benchmarkMode && !stress16kMode && !testMode) {
             if (Project* proj = ProjectManager::Get().ActiveProject())
                 core::AutoSaveManager::Get().TryPeriodicSave(proj, ActiveCanvas());
         }
@@ -1405,6 +1420,15 @@ int main(int argc, char* argv[]) {
                 processExitCode = BenchmarkRunner::Get().ExitCode();
                 Logger::Get().InfoTag("bench",
                     "Benchmark finished mid-frame, will exit after present. code=" +
+                    std::to_string(processExitCode));
+            }
+        }
+        if (stress16kMode && StressRunner::Get().IsActive()) {
+            const float metricMs = s_benchPrevWorkMs > 0.5f ? s_benchPrevWorkMs : 16.0f;
+            if (!StressRunner::Get().Tick(ActiveCanvas(), g_pd3dDevice, metricMs)) {
+                processExitCode = StressRunner::Get().ExitCode();
+                Logger::Get().InfoTag("stress",
+                    "Stress finished mid-frame, will exit after present. code=" +
                     std::to_string(processExitCode));
             }
         }
@@ -2736,6 +2760,20 @@ int main(int argc, char* argv[]) {
             }
             ImGui::End();
         }
+        if (stress16kMode && StressRunner::Get().IsActive()) {
+            ImGui::SetNextWindowPos(ImVec2(14.f, 14.f), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.82f);
+            ImGuiWindowFlags hudFlags =
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoNav |
+                ImGuiWindowFlags_NoFocusOnAppearing;
+            if (ImGui::Begin("##stress_hud", nullptr, hudFlags)) {
+                ImGui::TextUnformatted(StressRunner::Get().StatusLine());
+                ImGui::Text("UI FPS: %.1f   last frame: %.1f ms", uiState.fps, uiState.frameTimeMs);
+                ImGui::TextDisabled("16K HELL — hang budget 2s — auto-exits");
+            }
+            ImGui::End();
+        }
 
         // Handle Test Mode Execution: exit after work settles (async FE index needs a few frames).
         if (testMode) {
@@ -2776,6 +2814,7 @@ int main(int argc, char* argv[]) {
                 float clearColor[4] = { 0.1f, 0.1f, 0.1f, 1.0f };
                 g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColor);
                 ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+                ActiveCanvas().FlushDeferredGpuReleases();
                 if (!headlessMode)
                     g_pSwapChain->Present(1, 0);
                 break;
@@ -2801,6 +2840,10 @@ int main(int argc, char* argv[]) {
             ImGui::RenderPlatformWindowsDefault();
         }
 
+        // Free D3D resources that were ImTextureIDs this frame (undo/delete mid-UI).
+        // Must run AFTER ImGui_ImplDX11_RenderDrawData — never Release SRV while draw list holds it.
+        ActiveCanvas().FlushDeferredGpuReleases();
+
         // Present: VSync when focused; uncapped when unfocused or --perf (Phase A).
         {
             const bool focused = glfwGetWindowAttrib(window, GLFW_FOCUSED) == GLFW_TRUE;
@@ -2822,8 +2865,10 @@ int main(int argc, char* argv[]) {
             frameCount = 0;
         }
 
-        if (benchmarkMode) {
+        if (benchmarkMode || stress16kMode) {
             s_benchPrevWorkMs = frameWorkMs > 0.5f ? frameWorkMs : uiState.frameTimeMs;
+        }
+        if (benchmarkMode) {
             if (BenchmarkRunner::Get().IsFinished()) {
                 processExitCode = BenchmarkRunner::Get().ExitCode();
                 Logger::Get().InfoTag("bench",
@@ -2831,10 +2876,18 @@ int main(int argc, char* argv[]) {
                 break;
             }
         }
+        if (stress16kMode) {
+            if (StressRunner::Get().IsFinished()) {
+                processExitCode = StressRunner::Get().ExitCode();
+                Logger::Get().InfoTag("stress",
+                    "Exiting after stress-16k, code=" + std::to_string(processExitCode));
+                break;
+            }
+        }
     }
 
     // Quit autosave — keep a timestamped copy (not deleted on clean exit).
-    if (!benchmarkMode && !testMode && !headlessMode) {
+    if (!benchmarkMode && !stress16kMode && !testMode && !headlessMode) {
         try {
             if (Project* proj = ProjectManager::Get().ActiveProject()) {
                 // Sync quit save (wait briefly for async job): snapshot starts immediately.

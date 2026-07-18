@@ -2,6 +2,7 @@
 #include "../Canvas.h"
 #include "../vector/PathMath.h"
 #include "../vector/VectorRasterizer.h"
+#include "../assets/AssetStore.h"
 #include "Logger.h"
 #include "ConfigManager.h"
 #include "MemoryStats.h"
@@ -250,8 +251,19 @@ void LayerPropsCommand::Apply(Canvas* canvas, const Props& p) {
     L.alphaRewrite = p.alphaRewrite;
     L.filters = p.filters;
     L.styles = p.styles;
-    if (p.isFill || L.IsFill())
+    if (p.isFill || L.IsFill()) {
+        // Prefer keep 1×1 fill GPU alive and just re-upload color (needsUpload).
+        // Only drop pattern GPU when the bound asset changes. Never immediate Release —
+        // ImGui may still hold layer.srv in this frame's draw list (Layers panel thumbs).
+        const bool assetChanged =
+            L.fill.textureAssetKey != p.fill.textureAssetKey ||
+            L.fill.useTexture != p.fill.useTexture;
+        if (assetChanged)
+            canvas->ReleaseFillPatternGpu(L);
         L.fill = p.fill;
+        // Keep texture/srv; EnsureFillLayerGpu will UpdateSubresource on next compose.
+        // If someone had full-doc texture on fill, next Ensure will replace safely (deferred).
+    }
     L.filtersDirty = !L.filters.empty();
     L.stylesDirty = !L.styles.empty();
     L.presentationDirty = true;
@@ -297,16 +309,39 @@ LayerStackCommand::LayerStackCommand(const std::string& name, Kind kind, Snap sn
 void LayerStackCommand::RemoveAt(Canvas* canvas, int index) {
     if (!canvas || index < 0 || index >= (int)canvas->m_Layers.size()) return;
     auto& L = canvas->m_Layers[index];
+    // Match DeleteLayer GPU/asset teardown — missing fillPattern release caused
+    // ACCESS_VIOLATION after undo of Fill layers on large docs (stress-16k).
+    if (!L.fill.textureAssetKey.empty()) {
+        assets::AssetStore::Get().Release(L.fill.textureAssetKey);
+        L.fill.textureAssetKey.clear();
+    }
+    if (!L.smartAssetKey.empty()) {
+        assets::AssetStore::Get().Release(L.smartAssetKey);
+        L.smartAssetKey.clear();
+    }
+    for (auto& st : L.styles) {
+        if (!st.outlineTextureAssetKey.empty()) {
+            assets::AssetStore::Get().Release(st.outlineTextureAssetKey);
+            st.outlineTextureAssetKey.clear();
+        }
+    }
+    canvas->ReleaseFillPatternGpu(L);
     if (L.gpuSurfaceId) {
         canvas->m_GpuTiles.DestroySurface(L.gpuSurfaceId);
         L.gpuSurfaceId = 0;
     }
-    if (L.texture) { L.texture->Release(); L.texture = nullptr; }
-    if (L.srv) { L.srv->Release(); L.srv = nullptr; }
-    if (L.maskTexture) { L.maskTexture->Release(); L.maskTexture = nullptr; }
-    if (L.maskSRV) { L.maskSRV->Release(); L.maskSRV = nullptr; }
-    if (L.thumbSRV) { L.thumbSRV->Release(); L.thumbSRV = nullptr; }
-    if (L.thumbTex) { L.thumbTex->Release(); L.thumbTex = nullptr; }
+    // Deferred Release — ImGui may still reference these as ImTextureID this frame.
+    if (L.texture) { canvas->DeferReleaseTex(L.texture); L.texture = nullptr; }
+    if (L.srv) { canvas->DeferReleaseSRV(L.srv); L.srv = nullptr; }
+    if (L.maskTexture) { canvas->DeferReleaseTex(L.maskTexture); L.maskTexture = nullptr; }
+    if (L.maskSRV) { canvas->DeferReleaseSRV(L.maskSRV); L.maskSRV = nullptr; }
+    if (L.thumbSRV) { canvas->DeferReleaseSRV(L.thumbSRV); L.thumbSRV = nullptr; }
+    if (L.thumbTex) { canvas->DeferReleaseTex(L.thumbTex); L.thumbTex = nullptr; }
+    L.filteredCache.reset();
+    L.presentationCache.reset();
+    L.tileCache.reset();
+    L.nativeMapCache.reset();
+    L.maskTiles.reset();
     for (auto& l : canvas->m_Layers) {
         if (l.parentGroupId == index) l.parentGroupId = -1;
         else if (l.parentGroupId > index) l.parentGroupId--;

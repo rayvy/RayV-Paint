@@ -68,6 +68,31 @@ bool MemoryStats::ExceedsRamBudget(size_t estimatedBytes, double fractionOfTotal
     return estimatedBytes > budget;
 }
 
+void MemoryStats::LogSoftBudget(const std::string& context, size_t estimatedBytes,
+                                double fractionOfTotal) {
+    auto info = QueryProcess();
+    const size_t budget = info.totalPhysBytes
+        ? static_cast<size_t>(static_cast<double>(info.totalPhysBytes) * fractionOfTotal)
+        : 0;
+    Logger::Get().WarnTag("mem",
+        "soft_budget " + context +
+        " est=" + FormatBytes(estimatedBytes) +
+        " soft=" + FormatBytes(budget) +
+        " (" + std::to_string((int)(fractionOfTotal * 100.0)) + "% RAM)" +
+        " avail=" + FormatBytes(info.availPhysBytes) +
+        " — proceeding (soft limit, not refuse)");
+}
+
+bool MemoryStats::ExceedsHardRamCeiling(size_t estimatedBytes) {
+    // Absolute absurdity guard (overflow / corrupt dims), not everyday soft budget.
+    constexpr size_t kAbsMax = 64ull * 1024ull * 1024ull * 1024ull; // 64 GiB single estimate
+    if (estimatedBytes > kAbsMax) return true;
+    auto info = QueryProcess();
+    if (info.totalPhysBytes == 0) return false;
+    const size_t hard = static_cast<size_t>(static_cast<double>(info.totalPhysBytes) * 0.95);
+    return estimatedBytes > hard;
+}
+
 void MemoryStats::LogSnapshot(const std::string& label) {
     auto info = QueryProcess();
     std::ostringstream oss;

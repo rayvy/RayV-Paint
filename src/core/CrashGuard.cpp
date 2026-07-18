@@ -26,6 +26,8 @@ namespace {
 std::mutex g_Mutex;
 std::wstring g_CrashDirW;
 std::string g_CrashDirUtf8;
+std::string g_ExtraCrashLogUtf8;
+bool g_SilentMode = false;
 volatile long g_Handling = 0;
 char g_LastCheckpoint[256] = "early_startup";
 
@@ -182,9 +184,36 @@ void WriteCrashReport(const char* kind, const char* detail, EXCEPTION_POINTERS* 
     AppendAppLog(std::string("FATAL ") + kind + " | " + (detail ? detail : "") +
                  " | checkpoint=" + g_LastCheckpoint);
 
-    // MessageBox so user sees something if log wasn't checked
-    std::string box = report + "\nWritten to:\n" + g_CrashDirUtf8 + "\\crash_last.log";
-    MessageBoxA(nullptr, box.c_str(), "RayV Paint — Crash", MB_OK | MB_ICONERROR | MB_TOPMOST);
+    // Stress journal / agent log: append full report so session file ends with CRASH
+    if (!g_ExtraCrashLogUtf8.empty()) {
+        try {
+            HANDLE h = CreateFileW(Utf8ToWide(g_ExtraCrashLogUtf8).c_str(),
+                                  FILE_APPEND_DATA,
+                                  FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h != INVALID_HANDLE_VALUE) {
+                std::string block = "\n########## CRASH (CrashGuard) ##########\n";
+                block += report;
+                block += "########## END CRASH ##########\n";
+                DWORD written = 0;
+                WriteFile(h, block.data(), (DWORD)block.size(), &written, nullptr);
+                FlushFileBuffers(h);
+                CloseHandle(h);
+            }
+        } catch (...) {
+        }
+    }
+
+    // Interactive: MessageBox so user notices. Stress/CI/headless: silent exit
+    // (blocking dialog made agents/users wait minutes thinking the suite was "working").
+    if (!g_SilentMode) {
+        std::string box = report + "\nWritten to:\n" + g_CrashDirUtf8 + "\\crash_last.log";
+        if (!g_ExtraCrashLogUtf8.empty()) {
+            box += "\n";
+            box += g_ExtraCrashLogUtf8;
+        }
+        MessageBoxA(nullptr, box.c_str(), "RayV Paint — Crash", MB_OK | MB_ICONERROR | MB_TOPMOST);
+    }
 }
 
 LONG WINAPI UnhandledFilter(EXCEPTION_POINTERS* ep) {
@@ -261,6 +290,12 @@ void Install(const std::string& crashDirUtf8) {
 
     NoteCheckpoint("CrashGuard::Install");
 }
+
+void SetSilentMode(bool silent) { g_SilentMode = silent; }
+bool IsSilentMode() { return g_SilentMode; }
+
+void SetExtraCrashLogPath(const std::string& utf8Path) { g_ExtraCrashLogUtf8 = utf8Path; }
+std::string ExtraCrashLogPath() { return g_ExtraCrashLogUtf8; }
 
 void NoteCheckpoint(const char* where) {
     if (!where) return;

@@ -523,6 +523,14 @@ public:
 
     ID3D11ShaderResourceView* GetCompositeSRV() const { return m_CompositeSRV; }
 
+    // --- ImGui / mid-frame GPU safety ---
+    // Never Release() a D3D SRV/tex that may still be in ImGui's draw list for this frame
+    // (Layers thumbs use layer.srv / thumbSRV as ImTextureID). Queue for end-of-frame flush
+    // after ImGui::Render. See EMERGENCY_SAFE_PLAN / stress-16k AV after Undo+Fill.
+    void DeferReleaseSRV(ID3D11ShaderResourceView* srv);
+    void DeferReleaseTex(ID3D11Texture2D* tex);
+    void FlushDeferredGpuReleases();
+
     // Channel preview thumbs (R/G/B/A as grayscale). Built from *layer tile data*
     // (not composite), so RGB is visible even when A=0 (buffer semantics).
     // Returns nullptr if unavailable. Caller does not own the SRV.
@@ -696,6 +704,14 @@ public:
     }
 
 private:
+    // Ensure m_SelectionMask is W*H (soft RAM check for u8, not float composite).
+    bool EnsureSelectionMaskAllocated();
+    void ExpandSelectionBounds(int x0, int y0, int x1, int y1);
+    void ExpandSelectionGpuDirty(int x0, int y0, int x1, int y1);
+    void RecomputeSelectionBoundsFromMask();
+    // ROI write without full-document OpenCV mats (critical for 16K).
+    void CombineSelectionRoi(int x0, int y0, int x1, int y1, bool add, bool subtract,
+                             const std::function<uint8_t(int x, int y)>& sampleNew);
     void BackupTile(int tileX, int tileY);
     // Snapshot every tile in the active layer grid (empty tiles get empty oldState).
     // Required before full-layer Import so undo covers all tiles (fixes partial-tile undo).
@@ -891,7 +907,8 @@ private:
     void EnsureFillLayerGpu(ID3D11Device* device, Layer& layer);
     // Upload fill pattern asset to layer.fillPattern* (source resolution, once per key).
     bool EnsureFillPatternGpu(ID3D11Device* device, Layer& layer);
-    static void ReleaseFillPatternGpu(Layer& layer);
+    // Drop fill pattern GPU (deferred release — safe mid-frame with ImGui).
+    void ReleaseFillPatternGpu(Layer& layer);
     // True if layer should be drawn as top-level (parentGroupId < 0 or parent missing).
     static bool IsTopLevelLayer(const Layer& layer);
     // True if layerIdx is under groupIdx (any depth).
@@ -919,6 +936,10 @@ private:
     // Debounce style/presentation rebuild while dragging FX sliders (~80ms).
     std::chrono::steady_clock::time_point m_PresentationRebuildNotBefore{};
     bool m_PresentationRebuildDeferred = false;
+
+    // GPU resources freed after ImGui::Render (see DeferRelease* / FlushDeferredGpuReleases).
+    std::vector<ID3D11ShaderResourceView*> m_DeferredSrvRelease;
+    std::vector<ID3D11Texture2D*> m_DeferredTexRelease;
 
     // Smudge / blur-tool state
     float m_SmudgePickup[4] = { 0.f, 0.f, 0.f, 0.f };
@@ -994,6 +1015,14 @@ private:
     ID3D11ShaderResourceView* m_SelectionMaskSRV = nullptr;
     float m_SelectionOutlineTime = 0.0f;
     bool m_SelectionMaskNeedsUpload = false;
+    // Cached selection AABB — never O(W*H) scan on 16K for move/bounds queries.
+    bool m_SelectionBoundsValid = false;
+    int  m_SelectionBoundsX = 0, m_SelectionBoundsY = 0;
+    int  m_SelectionBoundsW = 0, m_SelectionBoundsH = 0;
+    // GPU upload dirty box (inclusive). Invalid ⇒ full upload.
+    bool m_SelectionGpuDirtyValid = false;
+    int  m_SelectionGpuDirtyX0 = 0, m_SelectionGpuDirtyY0 = 0;
+    int  m_SelectionGpuDirtyX1 = 0, m_SelectionGpuDirtyY1 = 0;
     std::atomic<bool> m_SmartSelectInProgress{false};
     std::atomic<bool> m_SmartSelectCancelled{false};
 

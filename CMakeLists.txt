@@ -145,6 +145,8 @@ set(SOURCES
     src/core/UndoRedoManager.h
     src/core/BenchmarkRunner.cpp
     src/core/BenchmarkRunner.h
+    src/core/StressRunner.cpp
+    src/core/StressRunner.h
     src/core/GpuStagingUpload.cpp
     src/core/GpuStagingUpload.h
     src/core/GpuTileStore.cpp

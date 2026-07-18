@@ -22,4 +22,15 @@ void ReportHandledException(const char* where, const char* detail);
 // fn must not require C++ unwinding across the SEH boundary (keep it thin).
 bool RunUnderSeh(void (*fn)(void* ctx), void* ctx, const char* whereLabel);
 
+// Stress / CI / headless: no blocking MessageBox — process exits so scripts continue.
+// Default false (interactive crash dialog for humans).
+void SetSilentMode(bool silent);
+bool IsSilentMode();
+
+// Extra UTF-8 path: on crash, append the same report here (flushed).
+// Used by --stress-16k journal so the session file ends with CRASH even if
+// the user never opens crash_last.log.
+void SetExtraCrashLogPath(const std::string& utf8Path);
+std::string ExtraCrashLogPath();
+
 } // namespace CrashGuard

@@ -77,12 +77,24 @@ run_tests.bat              :: smoke (default): --test + test_script.py
 run_tests.bat smoke
 run_tests.bat unusual      :: edge cases / exotic DDS / unicode / OOB (test_unusual_scenarios.py)
 run_tests.bat 16k          :: heavy 16K open (test_16k.py)
-run_tests.bat all          :: smoke → unusual → 16k
+run_tests.bat stress       :: hellish 16K reliability (fill + undo thrash, hang gate 2s)
+run_tests.bat all          :: smoke → unusual → 16k → stress
 ```
 
-Headless Python scripts:
+Headless Python scripts / stress:
 ```cmd
 build\Release\RayVPaint.exe --headless --script test_script.py
 build\Release\RayVPaint.exe --headless --script test_unusual_scenarios.py
 build\Release\RayVPaint.exe --test-16k
+build\Release\RayVPaint.exe --stress-16k
 ```
+
+Emergency reliability plan: `plans/EMERGENCY_SAFE_PLAN.MD`  
+Stress exit codes: `0` ok · `1` hang >2s · `2` undo leak · `3` missing asset · `4` load fail  
+
+**Stress live journal** (flushed after every action; crash appends here too):
+- `testfield/stress_journal.txt` (cwd)
+- `Documents/RayVPaint/user/stress_last.txt` (stable copy)
+
+In stress mode **CrashGuard is silent** (no blocking MessageBox). If the process dies, open the journal — the last lines are the crash report.
+

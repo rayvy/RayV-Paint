@@ -24,9 +24,10 @@ if "%SUITE%"=="" set "SUITE=smoke"
 if /I "%SUITE%"=="smoke" goto :smoke
 if /I "%SUITE%"=="unusual" goto :unusual
 if /I "%SUITE%"=="16k" goto :16k
+if /I "%SUITE%"=="stress" goto :stress
 if /I "%SUITE%"=="all" goto :all
 
-echo Unknown suite "%SUITE%". Use: smoke ^| unusual ^| 16k ^| all
+echo Unknown suite "%SUITE%". Use: smoke ^| unusual ^| 16k ^| stress ^| all
 exit /b 1
 
 :smoke
@@ -72,10 +73,28 @@ if %TEST_RESULT% neq 0 (
 echo 16K suite completed successfully!
 exit /b 0
 
+:stress
+echo --- Suite: stress-16k (hellish reliability — EMERGENCY_SAFE_PLAN) ---
+if not exist "testfield\16Ktest.dds" (
+    echo Error: missing testfield\16Ktest.dds
+    exit /b 3
+)
+"!EXE_PATH!" --stress-16k
+set "TEST_RESULT=%ERRORLEVEL%"
+if %TEST_RESULT% neq 0 (
+    echo Stress-16k FAILED with code %TEST_RESULT%
+    echo   0=ok 1=hang^>2s 2=undo-leak 3=no-asset 4=load-fail
+    exit /b %TEST_RESULT%
+)
+echo Stress-16k suite completed successfully!
+exit /b 0
+
 :all
 call "%~f0" smoke
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 call "%~f0" unusual
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 call "%~f0" 16k
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
+call "%~f0" stress
 exit /b %ERRORLEVEL%

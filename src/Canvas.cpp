@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
+#include <new>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -109,10 +110,14 @@ static bool CanAllocateFlatComposite(int w, int h, const char* context) {
         return false;
     }
     const size_t est = MemoryStats::EstimateImageBytes(w, h, 16);
+    // Soft budget (EMERGENCY_SAFE_PLAN): warn but proceed — hard refuse only absurd ceiling.
     if (MemoryStats::ExceedsRamBudget(est, 0.40)) {
+        MemoryStats::LogSoftBudget(std::string(context) + " flat_float_composite", est, 0.40);
+    }
+    if (MemoryStats::ExceedsHardRamCeiling(est)) {
         Logger::Get().ErrorTag("mem",
-            std::string(context) + ": estimated " + MemoryStats::FormatBytes(est) +
-            " exceeds 40% of system RAM budget.");
+            std::string(context) + ": hard ceiling — estimated " +
+            MemoryStats::FormatBytes(est) + " (>95% RAM or >64GiB). Refusing.");
         return false;
     }
     return true;
@@ -285,10 +290,13 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
         out.clear();
         return true;
     }
+    // Soft budget: try allocation even when over soft %. Hard ceiling still refuses.
     if (MemoryStats::ExceedsRamBudget(bytes, 0.50)) {
+        MemoryStats::LogSoftBudget("ComposeVisibleLayersRGBA8", bytes, 0.50);
+    }
+    if (MemoryStats::ExceedsHardRamCeiling(bytes)) {
         Logger::Get().ErrorTag("mem",
-            "ComposeVisibleLayersRGBA8: " + MemoryStats::FormatBytes(bytes) +
-            " exceeds 50% RAM budget.");
+            "ComposeVisibleLayersRGBA8: hard ceiling " + MemoryStats::FormatBytes(bytes));
         return false;
     }
 
@@ -297,7 +305,15 @@ static bool ComposeVisibleLayersRGBA8(const std::vector<Layer>& layers, int w, i
         " est=" + MemoryStats::FormatBytes(bytes) + " (filters+blend modes)");
     MemoryStats::LogSnapshot("export_rgba8_alloc");
 
-    out.assign(bytes, 0);
+    try {
+        out.assign(bytes, 0);
+    } catch (const std::bad_alloc&) {
+        Logger::Get().ErrorTag("mem",
+            "ComposeVisibleLayersRGBA8: bad_alloc for " + MemoryStats::FormatBytes(bytes) +
+            " — clean refuse (no crash)");
+        out.clear();
+        return false;
+    }
 
     // Build export list: top-level only. Groups must already have presentationCache (export prep).
     // IMPORTANT: export composes ALL visible layers (viewport map/role filter is display-only).
@@ -1284,8 +1300,13 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
             "CreateLayerMask: full mask is " + MemoryStats::FormatBytes(maskBytes) +
             " — large-document masks are still flat; consider tiled masks later.");
     }
+    // Soft limit: do not refuse mask creation on budget alone (EMERGENCY_SAFE_PLAN).
     if (MemoryStats::ExceedsRamBudget(maskBytes, 0.25)) {
-        Logger::Get().ErrorTag("mem", "CreateLayerMask refused: would exceed RAM budget.");
+        MemoryStats::LogSoftBudget("CreateLayerMask", maskBytes, 0.25);
+    }
+    if (MemoryStats::ExceedsHardRamCeiling(maskBytes)) {
+        Logger::Get().ErrorTag("mem",
+            "CreateLayerMask hard ceiling " + MemoryStats::FormatBytes(maskBytes) + " — refuse");
         return;
     }
 
@@ -1294,9 +1315,19 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
     if (oldHas && layer.maskTiles && layer.maskTiles->Valid())
         oldTiles = layer.maskTiles->SnapshotAll();
     // Photoshop default: white mask = fully reveal (sparse tiles = empty = default 255)
-    layer.maskTiles = std::make_unique<MaskTiles>();
-    layer.maskTiles->Init(m_Width, m_Height, 255);
-    layer.mask.assign((size_t)m_Width * m_Height, 255);
+    try {
+        layer.maskTiles = std::make_unique<MaskTiles>();
+        layer.maskTiles->Init(m_Width, m_Height, 255);
+        layer.mask.assign((size_t)m_Width * m_Height, 255);
+    } catch (const std::bad_alloc&) {
+        Logger::Get().ErrorTag("mem",
+            "CreateLayerMask bad_alloc for " + MemoryStats::FormatBytes(maskBytes) +
+            " — clean refuse (no crash)");
+        layer.maskTiles.reset();
+        layer.mask.clear();
+        layer.hasMask = false;
+        return;
+    }
     layer.hasMask = true;
     layer.maskNeedsUpload = true;
     layer.maskDirtyX0 = 0; layer.maskDirtyY0 = 0;
@@ -2088,16 +2119,34 @@ void Canvas::DeleteLayer(int index) {
         }
     }
     ReleaseFillPatternGpu(m_Layers[index]);
-    if (m_Layers[index].texture) m_Layers[index].texture->Release();
-    if (m_Layers[index].srv) m_Layers[index].srv->Release();
+    if (m_Layers[index].texture) {
+        DeferReleaseTex(m_Layers[index].texture);
+        m_Layers[index].texture = nullptr;
+    }
+    if (m_Layers[index].srv) {
+        DeferReleaseSRV(m_Layers[index].srv);
+        m_Layers[index].srv = nullptr;
+    }
     if (m_Layers[index].gpuSurfaceId) {
         m_GpuTiles.DestroySurface(m_Layers[index].gpuSurfaceId);
         m_Layers[index].gpuSurfaceId = 0;
     }
-    if (m_Layers[index].maskTexture) m_Layers[index].maskTexture->Release();
-    if (m_Layers[index].maskSRV) m_Layers[index].maskSRV->Release();
-    if (m_Layers[index].thumbSRV) { m_Layers[index].thumbSRV->Release(); m_Layers[index].thumbSRV = nullptr; }
-    if (m_Layers[index].thumbTex) { m_Layers[index].thumbTex->Release(); m_Layers[index].thumbTex = nullptr; }
+    if (m_Layers[index].maskTexture) {
+        DeferReleaseTex(m_Layers[index].maskTexture);
+        m_Layers[index].maskTexture = nullptr;
+    }
+    if (m_Layers[index].maskSRV) {
+        DeferReleaseSRV(m_Layers[index].maskSRV);
+        m_Layers[index].maskSRV = nullptr;
+    }
+    if (m_Layers[index].thumbSRV) {
+        DeferReleaseSRV(m_Layers[index].thumbSRV);
+        m_Layers[index].thumbSRV = nullptr;
+    }
+    if (m_Layers[index].thumbTex) {
+        DeferReleaseTex(m_Layers[index].thumbTex);
+        m_Layers[index].thumbTex = nullptr;
+    }
 
     for (auto& l : m_Layers) {
         if (l.parentGroupId == index) {
@@ -6312,8 +6361,17 @@ void Canvas::ClearSelection() {
     std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
+    if (m_SelectionBoundsValid)
+        ExpandSelectionGpuDirty(m_SelectionBoundsX, m_SelectionBoundsY,
+            m_SelectionBoundsX + m_SelectionBoundsW - 1,
+            m_SelectionBoundsY + m_SelectionBoundsH - 1);
+    else
+        m_SelectionGpuDirtyValid = false; // full clear upload
+
     m_SelectionMask.clear();
     m_HasSelection = false;
+    m_SelectionBoundsValid = false;
+    m_SelectionBoundsW = m_SelectionBoundsH = 0;
     m_SelectionMaskNeedsUpload = true;
 
     m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Deselect", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
@@ -6649,15 +6707,189 @@ bool Canvas::PasteContentAsNewLayer(ID3D11Device* device, const std::string& nam
 void Canvas::SetSelectionMask(const std::vector<uint8_t>& mask) {
     if (mask.size() == (size_t)m_Width * m_Height) {
         m_SelectionMask = mask;
-        m_HasSelection = false;
-        for (uint8_t val : m_SelectionMask) {
-            if (val > 0) {
-                m_HasSelection = true;
-                break;
-            }
-        }
+        m_SelectionGpuDirtyValid = false; // full mask replaced
+        RecomputeSelectionBoundsFromMask();
         m_SelectionMaskNeedsUpload = true;
     }
+}
+
+bool Canvas::EnsureSelectionMaskAllocated() {
+    if (m_Width <= 0 || m_Height <= 0) return false;
+    const size_t need = (size_t)m_Width * (size_t)m_Height;
+    if (m_SelectionMask.size() == need) return true;
+    // u8 mask: 16K = 256 MiB — soft budget only (not float composite refuse)
+    const size_t est = need; // 1 byte/px
+    if (MemoryStats::ExceedsRamBudget(est, 0.30))
+        MemoryStats::LogSoftBudget("EnsureSelectionMaskAllocated", est, 0.30);
+    if (MemoryStats::ExceedsHardRamCeiling(est)) {
+        Logger::Get().ErrorTag("mem",
+            "EnsureSelectionMaskAllocated hard ceiling " + MemoryStats::FormatBytes(est));
+        return false;
+    }
+    try {
+        m_SelectionMask.assign(need, 0);
+    } catch (const std::bad_alloc&) {
+        Logger::Get().ErrorTag("mem", "EnsureSelectionMaskAllocated bad_alloc");
+        m_SelectionMask.clear();
+        return false;
+    }
+    return true;
+}
+
+void Canvas::ExpandSelectionBounds(int x0, int y0, int x1, int y1) {
+    if (x1 < x0) std::swap(x0, x1);
+    if (y1 < y0) std::swap(y0, y1);
+    x0 = std::max(0, x0); y0 = std::max(0, y0);
+    x1 = std::min(m_Width - 1, x1); y1 = std::min(m_Height - 1, y1);
+    if (x1 < x0 || y1 < y0) return;
+    if (!m_SelectionBoundsValid) {
+        m_SelectionBoundsX = x0; m_SelectionBoundsY = y0;
+        m_SelectionBoundsW = x1 - x0 + 1; m_SelectionBoundsH = y1 - y0 + 1;
+        m_SelectionBoundsValid = true;
+        return;
+    }
+    int bx0 = m_SelectionBoundsX, by0 = m_SelectionBoundsY;
+    int bx1 = bx0 + m_SelectionBoundsW - 1, by1 = by0 + m_SelectionBoundsH - 1;
+    bx0 = std::min(bx0, x0); by0 = std::min(by0, y0);
+    bx1 = std::max(bx1, x1); by1 = std::max(by1, y1);
+    m_SelectionBoundsX = bx0; m_SelectionBoundsY = by0;
+    m_SelectionBoundsW = bx1 - bx0 + 1; m_SelectionBoundsH = by1 - by0 + 1;
+}
+
+void Canvas::ExpandSelectionGpuDirty(int x0, int y0, int x1, int y1) {
+    if (x1 < x0) std::swap(x0, x1);
+    if (y1 < y0) std::swap(y0, y1);
+    x0 = std::max(0, x0); y0 = std::max(0, y0);
+    x1 = std::min(m_Width - 1, x1); y1 = std::min(m_Height - 1, y1);
+    if (x1 < x0 || y1 < y0) return;
+    if (!m_SelectionGpuDirtyValid) {
+        m_SelectionGpuDirtyX0 = x0; m_SelectionGpuDirtyY0 = y0;
+        m_SelectionGpuDirtyX1 = x1; m_SelectionGpuDirtyY1 = y1;
+        m_SelectionGpuDirtyValid = true;
+        return;
+    }
+    m_SelectionGpuDirtyX0 = std::min(m_SelectionGpuDirtyX0, x0);
+    m_SelectionGpuDirtyY0 = std::min(m_SelectionGpuDirtyY0, y0);
+    m_SelectionGpuDirtyX1 = std::max(m_SelectionGpuDirtyX1, x1);
+    m_SelectionGpuDirtyY1 = std::max(m_SelectionGpuDirtyY1, y1);
+}
+
+void Canvas::RecomputeSelectionBoundsFromMask() {
+    m_SelectionBoundsValid = false;
+    m_HasSelection = false;
+    if (m_SelectionMask.size() != (size_t)m_Width * (size_t)m_Height) {
+        m_SelectionBoundsX = m_SelectionBoundsY = 0;
+        m_SelectionBoundsW = m_SelectionBoundsH = 0;
+        return;
+    }
+    int minX = m_Width, minY = m_Height, maxX = -1, maxY = -1;
+    // Prefer previous AABB + pad as seed if valid; else full scan.
+    int sx0 = 0, sy0 = 0, sx1 = m_Width - 1, sy1 = m_Height - 1;
+    if (m_SelectionBoundsValid && m_SelectionBoundsW > 0 && m_SelectionBoundsH > 0) {
+        sx0 = std::max(0, m_SelectionBoundsX - 2);
+        sy0 = std::max(0, m_SelectionBoundsY - 2);
+        sx1 = std::min(m_Width - 1, m_SelectionBoundsX + m_SelectionBoundsW + 1);
+        sy1 = std::min(m_Height - 1, m_SelectionBoundsY + m_SelectionBoundsH + 1);
+    }
+    for (int y = sy0; y <= sy1; ++y) {
+        const size_t row = (size_t)y * (size_t)m_Width;
+        for (int x = sx0; x <= sx1; ++x) {
+            if (m_SelectionMask[row + (size_t)x] == 0) continue;
+            m_HasSelection = true;
+            minX = std::min(minX, x); maxX = std::max(maxX, x);
+            minY = std::min(minY, y); maxY = std::max(maxY, y);
+        }
+    }
+    // Subtract may leave pixels outside seed — if empty seed found nothing but mask may still have bits
+    if (!m_HasSelection && (sx0 > 0 || sy0 > 0 || sx1 < m_Width - 1 || sy1 < m_Height - 1)) {
+        for (int y = 0; y < m_Height; ++y) {
+            const size_t row = (size_t)y * (size_t)m_Width;
+            for (int x = 0; x < m_Width; ++x) {
+                if (m_SelectionMask[row + (size_t)x] == 0) continue;
+                m_HasSelection = true;
+                minX = std::min(minX, x); maxX = std::max(maxX, x);
+                minY = std::min(minY, y); maxY = std::max(maxY, y);
+            }
+        }
+    }
+    if (!m_HasSelection) {
+        m_SelectionBoundsX = m_SelectionBoundsY = 0;
+        m_SelectionBoundsW = m_SelectionBoundsH = 0;
+        m_SelectionBoundsValid = false;
+        return;
+    }
+    m_SelectionBoundsX = minX; m_SelectionBoundsY = minY;
+    m_SelectionBoundsW = maxX - minX + 1; m_SelectionBoundsH = maxY - minY + 1;
+    m_SelectionBoundsValid = true;
+}
+
+void Canvas::CombineSelectionRoi(int x0, int y0, int x1, int y1, bool add, bool subtract,
+                                 const std::function<uint8_t(int x, int y)>& sampleNew) {
+    if (x1 < x0) std::swap(x0, x1);
+    if (y1 < y0) std::swap(y0, y1);
+    x0 = std::max(0, x0); y0 = std::max(0, y0);
+    x1 = std::min(m_Width - 1, x1); y1 = std::min(m_Height - 1, y1);
+    if (x1 < x0 || y1 < y0) return;
+    if (!EnsureSelectionMaskAllocated()) return;
+
+    if (!add && !subtract) {
+        // Replace: clear previous selection (only need previous AABB if we had one)
+        if (m_SelectionBoundsValid && m_SelectionBoundsW > 0 && m_SelectionBoundsH > 0) {
+            const int ox0 = m_SelectionBoundsX, oy0 = m_SelectionBoundsY;
+            const int ox1 = ox0 + m_SelectionBoundsW - 1, oy1 = oy0 + m_SelectionBoundsH - 1;
+            for (int y = oy0; y <= oy1; ++y) {
+                uint8_t* row = m_SelectionMask.data() + (size_t)y * (size_t)m_Width;
+                std::memset(row + ox0, 0, (size_t)(ox1 - ox0 + 1));
+            }
+            ExpandSelectionGpuDirty(ox0, oy0, ox1, oy1);
+        } else if (m_HasSelection) {
+            std::memset(m_SelectionMask.data(), 0, m_SelectionMask.size());
+            m_SelectionGpuDirtyValid = false; // full upload
+        }
+        m_SelectionBoundsValid = false;
+        m_HasSelection = false;
+    }
+
+    bool any = false;
+    int bminX = m_Width, bminY = m_Height, bmaxX = -1, bmaxY = -1;
+    for (int y = y0; y <= y1; ++y) {
+        uint8_t* row = m_SelectionMask.data() + (size_t)y * (size_t)m_Width;
+        for (int x = x0; x <= x1; ++x) {
+            const uint8_t n = sampleNew(x, y);
+            if (n == 0 && !subtract) continue;
+            uint8_t& d = row[x];
+            if (add) {
+                d = (uint8_t)std::max(d, n);
+            } else if (subtract) {
+                if (n) d = 0;
+            } else {
+                d = n;
+            }
+            if (d > 0) {
+                any = true;
+                bminX = std::min(bminX, x); bmaxX = std::max(bmaxX, x);
+                bminY = std::min(bminY, y); bmaxY = std::max(bmaxY, y);
+            }
+        }
+    }
+    ExpandSelectionGpuDirty(x0, y0, x1, y1);
+    if (subtract) {
+        RecomputeSelectionBoundsFromMask();
+    } else if (any) {
+        m_HasSelection = true;
+        if (add && m_SelectionBoundsValid)
+            ExpandSelectionBounds(bminX, bminY, bmaxX, bmaxY);
+        else {
+            m_SelectionBoundsX = bminX; m_SelectionBoundsY = bminY;
+            m_SelectionBoundsW = bmaxX - bminX + 1;
+            m_SelectionBoundsH = bmaxY - bminY + 1;
+            m_SelectionBoundsValid = true;
+        }
+    } else if (!add) {
+        m_HasSelection = false;
+        m_SelectionBoundsValid = false;
+    }
+    m_SelectionMaskNeedsUpload = true;
 }
 
 void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
@@ -6667,10 +6899,10 @@ void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
         D3D11_TEXTURE2D_DESC desc = {};
         m_SelectionMaskTexture->GetDesc(&desc);
         if (desc.Width != (UINT)m_Width || desc.Height != (UINT)m_Height || desc.Format != DXGI_FORMAT_R8_UNORM) {
-            m_SelectionMaskTexture->Release();
+            DeferReleaseTex(m_SelectionMaskTexture);
             m_SelectionMaskTexture = nullptr;
             if (m_SelectionMaskSRV) {
-                m_SelectionMaskSRV->Release();
+                DeferReleaseSRV(m_SelectionMaskSRV);
                 m_SelectionMaskSRV = nullptr;
             }
         }
@@ -6692,153 +6924,132 @@ void Canvas::UpdateSelectionMaskTexture(ID3D11Device* device) {
         if (SUCCEEDED(hr) && m_SelectionMaskTexture) {
             device->CreateShaderResourceView(m_SelectionMaskTexture, nullptr, &m_SelectionMaskSRV);
         }
+        m_SelectionGpuDirtyValid = false; // force full upload into new texture
     }
 
     if (!m_SelectionMaskTexture) return;
 
-    // Never pass empty-vector .data() (nullptr) into UpdateSubresource — Ctrl+D / Deselect crash.
     const size_t need = (size_t)m_Width * (size_t)m_Height;
-    const uint8_t* src = nullptr;
-    std::vector<uint8_t> zeros;
-    if (m_HasSelection && m_SelectionMask.size() == need) {
-        src = m_SelectionMask.data();
-    } else {
-        zeros.assign(need, 0);
-        src = zeros.data();
-    }
-
     ID3D11DeviceContext* context = nullptr;
     device->GetImmediateContext(&context);
-    if (context) {
-        context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, src,
-            (UINT)(m_Width * sizeof(uint8_t)), 0);
-        context->Release();
+    if (!context) return;
+
+    if (m_HasSelection && m_SelectionMask.size() == need) {
+        if (m_SelectionGpuDirtyValid) {
+            const int x0 = std::max(0, m_SelectionGpuDirtyX0);
+            const int y0 = std::max(0, m_SelectionGpuDirtyY0);
+            const int x1 = std::min(m_Width - 1, m_SelectionGpuDirtyX1);
+            const int y1 = std::min(m_Height - 1, m_SelectionGpuDirtyY1);
+            if (x1 >= x0 && y1 >= y0) {
+                D3D11_BOX box = {};
+                box.left = (UINT)x0; box.top = (UINT)y0; box.front = 0;
+                box.right = (UINT)(x1 + 1); box.bottom = (UINT)(y1 + 1); box.back = 1;
+                const uint8_t* src = m_SelectionMask.data() + (size_t)y0 * (size_t)m_Width + (size_t)x0;
+                context->UpdateSubresource(m_SelectionMaskTexture, 0, &box, src,
+                    (UINT)(m_Width * sizeof(uint8_t)), 0);
+            }
+        } else {
+            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, m_SelectionMask.data(),
+                (UINT)(m_Width * sizeof(uint8_t)), 0);
+        }
+    } else {
+        // Deselect / empty: clear dirty region or whole texture
+        if (m_SelectionGpuDirtyValid) {
+            const int x0 = std::max(0, m_SelectionGpuDirtyX0);
+            const int y0 = std::max(0, m_SelectionGpuDirtyY0);
+            const int x1 = std::min(m_Width - 1, m_SelectionGpuDirtyX1);
+            const int y1 = std::min(m_Height - 1, m_SelectionGpuDirtyY1);
+            if (x1 >= x0 && y1 >= y0) {
+                const int rw = x1 - x0 + 1, rh = y1 - y0 + 1;
+                std::vector<uint8_t> zeros((size_t)rw * (size_t)rh, 0);
+                D3D11_BOX box = {};
+                box.left = (UINT)x0; box.top = (UINT)y0; box.front = 0;
+                box.right = (UINT)(x1 + 1); box.bottom = (UINT)(y1 + 1); box.back = 1;
+                context->UpdateSubresource(m_SelectionMaskTexture, 0, &box, zeros.data(),
+                    (UINT)(rw * sizeof(uint8_t)), 0);
+            }
+        } else {
+            std::vector<uint8_t> zeros(need, 0);
+            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr, zeros.data(),
+                (UINT)(m_Width * sizeof(uint8_t)), 0);
+        }
     }
+    context->Release();
     m_SelectionMaskNeedsUpload = false;
+    m_SelectionGpuDirtyValid = false;
 }
 
 void Canvas::ApplyRectSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
-    if (!CanAllocateFlatComposite(m_Width, m_Height, "ApplyRectSelection")) {
-        // Reuse composite guard threshold; selection is also full-frame today.
-        Logger::Get().ErrorTag("mem", "Selection tools require flat masks; disabled for huge documents.");
-        return;
-    }
+    if (m_Width <= 0 || m_Height <= 0) return;
     std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
-    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-    cv::rectangle(temp, cv::Point(x1, y1), cv::Point(x2, y2), cv::Scalar(255), -1);
+    int xa = std::min(x1, x2), xb = std::max(x1, x2);
+    int ya = std::min(y1, y2), yb = std::max(y1, y2);
+    CombineSelectionRoi(xa, ya, xb, yb, add, subtract,
+        [](int /*x*/, int /*y*/) -> uint8_t { return 255; });
 
-    cv::Mat current(m_Height, m_Width, CV_8UC1);
-    if (!m_SelectionMask.empty()) {
-        std::memcpy(current.data, m_SelectionMask.data(), m_SelectionMask.size());
-    } else {
-        current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-    }
-    cv::Mat combined;
-    if (add) {
-        cv::bitwise_or(current, temp, combined);
-    } else if (subtract) {
-        cv::bitwise_and(current, ~temp, combined);
-    } else {
-        combined = temp.clone();
-    }
-
-    m_SelectionMask.resize((size_t)m_Width * m_Height);
-    std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
-    m_HasSelection = false;
-    for (uint8_t val : m_SelectionMask) {
-        if (val > 0) {
-            m_HasSelection = true;
-            break;
-        }
-    }
-    m_SelectionMaskNeedsUpload = true;
-
-    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
+    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
+        "Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
 }
 
 void Canvas::ApplyEllipseSelection(int x1, int y1, int x2, int y2, bool add, bool subtract) {
+    if (m_Width <= 0 || m_Height <= 0) return;
     std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
-    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-    cv::Point center((x1 + x2) / 2, (y1 + y2) / 2);
-    cv::Size axes(std::abs(x2 - x1) / 2, std::abs(y2 - y1) / 2);
-    if (axes.width > 0 && axes.height > 0) {
-        cv::ellipse(temp, center, axes, 0.0, 0.0, 360.0, cv::Scalar(255), -1);
-    }
+    int xa = std::min(x1, x2), xb = std::max(x1, x2);
+    int ya = std::min(y1, y2), yb = std::max(y1, y2);
+    const float cx = (xa + xb) * 0.5f;
+    const float cy = (ya + yb) * 0.5f;
+    const float rx = std::max(0.5f, (xb - xa) * 0.5f);
+    const float ry = std::max(0.5f, (yb - ya) * 0.5f);
+    const float invRx2 = 1.f / (rx * rx);
+    const float invRy2 = 1.f / (ry * ry);
 
-    cv::Mat current(m_Height, m_Width, CV_8UC1);
-    if (!m_SelectionMask.empty()) {
-        std::memcpy(current.data, m_SelectionMask.data(), m_SelectionMask.size());
-    } else {
-        current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-    }
-    cv::Mat combined;
-    if (add) {
-        cv::bitwise_or(current, temp, combined);
-    } else if (subtract) {
-        cv::bitwise_and(current, ~temp, combined);
-    } else {
-        combined = temp.clone();
-    }
+    CombineSelectionRoi(xa, ya, xb, yb, add, subtract,
+        [&](int x, int y) -> uint8_t {
+            const float dx = (float)x + 0.5f - cx;
+            const float dy = (float)y + 0.5f - cy;
+            return (dx * dx * invRx2 + dy * dy * invRy2) <= 1.f ? (uint8_t)255 : (uint8_t)0;
+        });
 
-    m_SelectionMask.resize((size_t)m_Width * m_Height);
-    std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
-    m_HasSelection = false;
-    for (uint8_t val : m_SelectionMask) {
-        if (val > 0) {
-            m_HasSelection = true;
-            break;
-        }
-    }
-    m_SelectionMaskNeedsUpload = true;
-
-    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
+    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
+        "Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
 }
 
 void Canvas::ApplyLassoSelection(const std::vector<std::pair<int, int>>& points, bool add, bool subtract) {
+    if (m_Width <= 0 || m_Height <= 0 || points.size() < 3) return;
     std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHasSelection = m_HasSelection;
 
-    cv::Mat temp = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-    if (points.size() >= 3) {
-        std::vector<cv::Point> cvPoints;
-        for (const auto& p : points) {
-            cvPoints.push_back(cv::Point(p.first, p.second));
-        }
-        std::vector<std::vector<cv::Point>> polys = { cvPoints };
-        cv::fillPoly(temp, polys, cv::Scalar(255));
+    int minX = m_Width, minY = m_Height, maxX = -1, maxY = -1;
+    std::vector<cv::Point> cvPoints;
+    cvPoints.reserve(points.size());
+    for (const auto& p : points) {
+        int x = std::clamp(p.first, 0, m_Width - 1);
+        int y = std::clamp(p.second, 0, m_Height - 1);
+        cvPoints.emplace_back(x, y);
+        minX = std::min(minX, x); maxX = std::max(maxX, x);
+        minY = std::min(minY, y); maxY = std::max(maxY, y);
     }
+    if (maxX < minX) return;
 
-    cv::Mat current(m_Height, m_Width, CV_8UC1);
-    if (!m_SelectionMask.empty()) {
-        std::memcpy(current.data, m_SelectionMask.data(), m_SelectionMask.size());
-    } else {
-        current = cv::Mat::zeros(m_Height, m_Width, CV_8UC1);
-    }
-    cv::Mat combined;
-    if (add) {
-        cv::bitwise_or(current, temp, combined);
-    } else if (subtract) {
-        cv::bitwise_and(current, ~temp, combined);
-    } else {
-        combined = temp.clone();
-    }
+    // ROI-only OpenCV mat (not full 16K canvas)
+    const int rw = maxX - minX + 1, rh = maxY - minY + 1;
+    cv::Mat temp = cv::Mat::zeros(rh, rw, CV_8UC1);
+    std::vector<cv::Point> local = cvPoints;
+    for (auto& pt : local) { pt.x -= minX; pt.y -= minY; }
+    std::vector<std::vector<cv::Point>> polys = { local };
+    cv::fillPoly(temp, polys, cv::Scalar(255));
 
-    m_SelectionMask.resize((size_t)m_Width * m_Height);
-    std::memcpy(m_SelectionMask.data(), combined.data, m_SelectionMask.size());
-    m_HasSelection = false;
-    for (uint8_t val : m_SelectionMask) {
-        if (val > 0) {
-            m_HasSelection = true;
-            break;
-        }
-    }
-    m_SelectionMaskNeedsUpload = true;
+    CombineSelectionRoi(minX, minY, maxX, maxY, add, subtract,
+        [&](int x, int y) -> uint8_t {
+            return temp.at<uint8_t>(y - minY, x - minX);
+        });
 
-    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>("Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
+    m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
+        "Select", std::move(oldMask), oldHasSelection, m_SelectionMask, m_HasSelection));
 }
 
 void Canvas::InvalidateWandSourceCache() {
@@ -9615,9 +9826,35 @@ ID3D11BlendState* Canvas::GetFillWriteBlend(ID3D11Device* device, uint8_t channe
     return *slot;
 }
 
+void Canvas::DeferReleaseSRV(ID3D11ShaderResourceView* srv) {
+    if (srv) m_DeferredSrvRelease.push_back(srv);
+}
+
+void Canvas::DeferReleaseTex(ID3D11Texture2D* tex) {
+    if (tex) m_DeferredTexRelease.push_back(tex);
+}
+
+void Canvas::FlushDeferredGpuReleases() {
+    for (ID3D11ShaderResourceView* s : m_DeferredSrvRelease) {
+        if (s) s->Release();
+    }
+    m_DeferredSrvRelease.clear();
+    for (ID3D11Texture2D* t : m_DeferredTexRelease) {
+        if (t) t->Release();
+    }
+    m_DeferredTexRelease.clear();
+}
+
 void Canvas::ReleaseFillPatternGpu(Layer& layer) {
-    if (layer.fillPatternSRV) { layer.fillPatternSRV->Release(); layer.fillPatternSRV = nullptr; }
-    if (layer.fillPatternTex) { layer.fillPatternTex->Release(); layer.fillPatternTex = nullptr; }
+    // Deferred: ImGui may still reference fillPatternSRV as ImTextureID this frame.
+    if (layer.fillPatternSRV) {
+        DeferReleaseSRV(layer.fillPatternSRV);
+        layer.fillPatternSRV = nullptr;
+    }
+    if (layer.fillPatternTex) {
+        DeferReleaseTex(layer.fillPatternTex);
+        layer.fillPatternTex = nullptr;
+    }
     layer.fillPatternUploadedKey.clear();
 }
 
@@ -9712,8 +9949,8 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
         D3D11_TEXTURE2D_DESC desc{};
         layer.texture->GetDesc(&desc);
         if (desc.Width != 1 || desc.Height != 1) {
-            layer.texture->Release(); layer.texture = nullptr;
-            if (layer.srv) { layer.srv->Release(); layer.srv = nullptr; }
+            DeferReleaseTex(layer.texture); layer.texture = nullptr;
+            if (layer.srv) { DeferReleaseSRV(layer.srv); layer.srv = nullptr; }
         }
     }
     if (!layer.texture) {
@@ -9723,12 +9960,19 @@ void Canvas::EnsureFillLayerGpu(ID3D11Device* device, Layer& layer) {
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        if (FAILED(device->CreateTexture2D(&desc, nullptr, &layer.texture))) return;
-        device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
+        if (FAILED(device->CreateTexture2D(&desc, nullptr, &layer.texture)) || !layer.texture)
+            return;
+        if (FAILED(device->CreateShaderResourceView(layer.texture, nullptr, &layer.srv)) ||
+            !layer.srv) {
+            DeferReleaseTex(layer.texture);
+            layer.texture = nullptr;
+            layer.srv = nullptr;
+            return;
+        }
     }
     ID3D11DeviceContext* ctx = nullptr;
     device->GetImmediateContext(&ctx);
-    if (ctx) {
+    if (ctx && layer.texture) {
         if (m_CanvasFormat == CanvasPixelFormat::RGBA8) {
             uint8_t px[4] = {
                 (uint8_t)(std::clamp(c[0],0.f,1.f)*255.f+0.5f),
@@ -10590,15 +10834,19 @@ void Canvas::EndQuickSelectStroke(ID3D11Device* device, bool subtract) {
 // ---------------------------------------------------------------------------
 bool Canvas::GetSelectionBounds(int& outX, int& outY, int& outW, int& outH) const {
     if (!m_HasSelection || m_SelectionMask.empty()) return false;
+    if (m_SelectionBoundsValid && m_SelectionBoundsW > 0 && m_SelectionBoundsH > 0) {
+        outX = m_SelectionBoundsX; outY = m_SelectionBoundsY;
+        outW = m_SelectionBoundsW; outH = m_SelectionBoundsH;
+        return true;
+    }
+    // Slow path (const): scan full mask — avoid in hot paths by keeping cache valid.
     int minX = m_Width, minY = m_Height, maxX = -1, maxY = -1;
     for (int y = 0; y < m_Height; ++y) {
+        const size_t row = (size_t)y * (size_t)m_Width;
         for (int x = 0; x < m_Width; ++x) {
-            if (m_SelectionMask[(size_t)y * m_Width + x] > 0) {
-                minX = std::min(minX, x);
-                maxX = std::max(maxX, x);
-                minY = std::min(minY, y);
-                maxY = std::max(maxY, y);
-            }
+            if (m_SelectionMask[row + (size_t)x] == 0) continue;
+            minX = std::min(minX, x); maxX = std::max(maxX, x);
+            minY = std::min(minY, y); maxY = std::max(maxY, y);
         }
     }
     if (maxX < minX || maxY < minY) return false;
@@ -11259,9 +11507,9 @@ ID3D11ShaderResourceView* Canvas::GetLayerThumbSRV(ID3D11Device* device, int lay
     // Stale thumb while idle: rebuild sync (scheduler path deferred — keep hot path simple).
     // ScheduleThumbJob remains available for future batching.
 
-    // Rebuild thumb (sync).
-    if (layer.thumbSRV) { layer.thumbSRV->Release(); layer.thumbSRV = nullptr; }
-    if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
+    // Rebuild thumb (sync). Deferred free — old thumb may still be in ImGui draw list.
+    if (layer.thumbSRV) { DeferReleaseSRV(layer.thumbSRV); layer.thumbSRV = nullptr; }
+    if (layer.thumbTex) { DeferReleaseTex(layer.thumbTex); layer.thumbTex = nullptr; }
 
     const TileCache* cache = LayerExportCache(layer);
     if (!cache) return nullptr;

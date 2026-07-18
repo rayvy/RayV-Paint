@@ -460,14 +460,32 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 ImGui::SameLine(0, rowPad);
             }
 
-            // Thumb (fixed size) — use opaque RGB thumb so A=0 buffers stay visible
+            // Thumb (fixed size) — use opaque RGB thumb so A=0 buffers stay visible.
+            // Fill layers: never fall back to raw layer.srv (freed mid-frame on undo while
+            // ImGui still holds ImTextureID). Solid color swatch instead.
             alignMid(thumb);
             ID3D11ShaderResourceView* thumbSrv = nullptr;
-            if (!layer.isGroup)
+            const bool isFillLayer = layer.IsFill();
+            if (!layer.isGroup && !isFillLayer)
                 thumbSrv = canvas.GetLayerThumbSRV(device, (int)i, (int)thumb);
-            if (!thumbSrv && !layer.isGroup)
-                thumbSrv = layer.srv;
-            if (!layer.isGroup && thumbSrv) {
+            if (!layer.isGroup && isFillLayer) {
+                float fc[4] = {0.5f, 0.5f, 0.5f, 1.f};
+                layer.fill.ResolveRgba(fc);
+                ImU32 col = IM_COL32(
+                    (int)(std::clamp(fc[0], 0.f, 1.f) * 255.f + 0.5f),
+                    (int)(std::clamp(fc[1], 0.f, 1.f) * 255.f + 0.5f),
+                    (int)(std::clamp(fc[2], 0.f, 1.f) * 255.f + 0.5f),
+                    255);
+                ImVec2 p0 = ImGui::GetCursorScreenPos();
+                ImVec2 p1(p0.x + thumb, p0.y + thumb);
+                ImGui::InvisibleButton("##fillthumb", ImVec2(thumb, thumb));
+                ImGui::GetWindowDrawList()->AddRectFilled(p0, p1, col, 2.f);
+                ImGui::GetWindowDrawList()->AddRect(p0, p1, IM_COL32(80, 80, 80, 255), 2.f);
+                if (ImGui::IsItemClicked()) {
+                    canvas.SetActiveLayerIndex((int)i);
+                    canvas.SetPaintTarget(PaintTarget::LayerContent);
+                }
+            } else if (!layer.isGroup && thumbSrv) {
                 bool isActiveContent = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerContent);
                 if (isActiveContent) {
                     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.2f, 0.6f, 1.0f, 1.0f));
