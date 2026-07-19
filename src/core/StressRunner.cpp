@@ -4,6 +4,7 @@
 #include "Logger.h"
 #include "MemoryStats.h"
 #include "PathUtil.h"
+#include "ProjectManager.h"
 #include "../Canvas.h"
 #include "../layer/LayerTypes.h"
 
@@ -238,6 +239,7 @@ void StressRunner::BeginPhase(Canvas& canvas, Phase phase) {
     case Phase::LayerSpam:       m_PhaseName = "LayerSpam"; break;
     case Phase::SelectTransform: m_PhaseName = "SelectTransform"; break;
     case Phase::Chaos:           m_PhaseName = "Chaos"; break;
+    case Phase::MultiTab:        m_PhaseName = "MultiTab"; break;
     case Phase::Report:          m_PhaseName = "Report"; break;
     case Phase::Done:            m_PhaseName = "Done"; break;
     }
@@ -729,6 +731,146 @@ bool StressRunner::TickSelectTransform(Canvas& canvas, ID3D11Device* device, flo
     }
 }
 
+bool StressRunner::TickMultiTab(Canvas& canvas, ID3D11Device* device, float dtSec) {
+    if (Waiting(dtSec)) return true;
+    auto& pm = ProjectManager::Get();
+
+    auto dabOnActive = [&](Canvas& c) {
+        BrushSettings b{};
+        b.radius = 48.f;
+        b.opacity = 1.f;
+        b.hardness = 0.8f;
+        b.color[0] = 0.2f; b.color[1] = 0.7f; b.color[2] = 1.f; b.color[3] = 1.f;
+        for (int i = 0; i < (int)c.GetLayers().size(); ++i) {
+            if (c.CanPaintLayerContent(i)) {
+                c.SetActiveLayerIndex(i);
+                break;
+            }
+        }
+        const float x = (float)std::max(32, c.GetWidth() / 2);
+        const float y = (float)std::max(32, c.GetHeight() / 2);
+        c.PaintOnActiveLayer(x, y, StrokePhase::Begin, b);
+        c.PaintOnActiveLayer(x + 40.f, y + 20.f, StrokePhase::Update, b);
+        c.PaintOnActiveLayer(0.f, 0.f, StrokePhase::End, b);
+    };
+
+    switch (m_SubStep) {
+    case 0: {
+        m_MainProjectId = pm.ActiveProjectId();
+        Journalf("ACTION multitab_main id=%d tabs=%zu", m_MainProjectId, pm.ProjectCount());
+        m_SideProjectA = pm.CreateEmptyProject();
+        m_SideProjectB = pm.CreateEmptyProject();
+        Journalf("ACTION multitab_spawn A=%d B=%d", m_SideProjectA, m_SideProjectB);
+        if (m_SideProjectA < 0 || m_SideProjectB < 0) {
+            Journal("WARN multitab spawn failed — skip phase");
+            return false;
+        }
+        // Shrink side docs so L2 .rayp save stays under hang budget (default may be 4K).
+        if (device) {
+            for (int id : { m_SideProjectA, m_SideProjectB }) {
+                if (Project* p = pm.FindProject(id); p && p->canvas)
+                    p->canvas->ResizeCanvas(device, 512, 512);
+            }
+        }
+        Journal("ACTION multitab_resize_sides 512x512");
+        m_SubStep = 1;
+        ScheduleWait(20.f, 40.f);
+        return true;
+    }
+    case 1: {
+        if (!pm.SwitchTo(m_SideProjectA)) {
+            Journal("WARN multitab switch A failed");
+            return false;
+        }
+        dabOnActive(pm.ActiveCanvas());
+        Journal("ACTION multitab_paint A");
+        m_SubStep = 2;
+        ScheduleWait(20.f, 40.f);
+        return true;
+    }
+    case 2: {
+        if (!pm.SwitchTo(m_SideProjectB)) {
+            Journal("WARN multitab switch B failed");
+            return false;
+        }
+        dabOnActive(pm.ActiveCanvas());
+        Journal("ACTION multitab_paint B");
+        m_SubStep = 3;
+        ScheduleWait(20.f, 40.f);
+        return true;
+    }
+    case 3: {
+        // Back to main 16K boss doc — inactive sides eligible for dormancy.
+        if (m_MainProjectId >= 0)
+            pm.SwitchTo(m_MainProjectId);
+        m_MultiTabSlept = pm.SuspendInactiveNow();
+        Journalf("ACTION multitab_suspend_inactive slept=%d", m_MultiTabSlept);
+        m_SubStep = 4;
+        ScheduleWait(30.f, 60.f);
+        return true;
+    }
+    case 4: {
+        // One L2 per step — never batch multi-MB rayp saves in a single frame.
+        const int n = pm.HibernateInactiveNow(1);
+        m_MultiTabHibernated += n;
+        Journalf("ACTION multitab_hibernate_one n=%d total=%d", n, m_MultiTabHibernated);
+        if (n > 0) {
+            ScheduleWait(30.f, 60.f);
+            return true; // stay on step 4 until no more
+        }
+        auto tabs = pm.ListTabs();
+        int disk = 0, z = 0;
+        for (const auto& t : tabs) {
+            if (t.diskHibernated) ++disk;
+            else if (t.gpuSuspended) ++z;
+        }
+        Journalf("ACTION multitab_badges disk=%d z=%d total=%zu", disk, z, tabs.size());
+        m_SubStep = 5;
+        ScheduleWait(30.f, 60.f);
+        return true;
+    }
+    case 5: {
+        // Wake side A (may L2 restore from scratch).
+        if (m_SideProjectA >= 0 && pm.SwitchTo(m_SideProjectA)) {
+            ++m_MultiTabWakes;
+            Canvas& a = pm.ActiveCanvas();
+            Journalf("ACTION multitab_wake A ok layers=%zu disk=%d",
+                     a.GetLayers().size(),
+                     a.IsDiskHibernated() ? 1 : 0);
+        }
+        m_SubStep = 6;
+        ScheduleWait(40.f, 80.f);
+        return true;
+    }
+    case 6: {
+        if (m_SideProjectB >= 0 && pm.SwitchTo(m_SideProjectB)) {
+            ++m_MultiTabWakes;
+            Journalf("ACTION multitab_wake B ok layers=%zu",
+                     pm.ActiveCanvas().GetLayers().size());
+        }
+        m_SubStep = 7;
+        ScheduleWait(20.f, 40.f);
+        return true;
+    }
+    case 7: {
+        // Return to main; force-close side tabs (dirty from dabs).
+        if (m_MainProjectId >= 0)
+            pm.SwitchTo(m_MainProjectId);
+        if (m_SideProjectA >= 0)
+            pm.CloseProject(m_SideProjectA, true);
+        if (m_SideProjectB >= 0)
+            pm.CloseProject(m_SideProjectB, true);
+        Journalf("ACTION multitab_cleanup main=%d tabs=%zu slept=%d hib=%d wakes=%d",
+                 pm.ActiveProjectId(), pm.ProjectCount(),
+                 m_MultiTabSlept, m_MultiTabHibernated, m_MultiTabWakes);
+        m_SubStep = 8;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
 bool StressRunner::TickChaos(Canvas& canvas, ID3D11Device* device, float dtSec) {
     if (Waiting(dtSec)) return true;
     if (m_ChaosOps >= 40)
@@ -811,7 +953,8 @@ void StressRunner::AdvancePhase(Canvas& canvas, ID3D11Device* device) {
     case Phase::MaskAbuse:       next = Phase::LayerSpam; break;
     case Phase::LayerSpam:       next = Phase::SelectTransform; break;
     case Phase::SelectTransform: next = Phase::Chaos; break;
-    case Phase::Chaos:           next = Phase::Report; break;
+    case Phase::Chaos:           next = Phase::MultiTab; break;
+    case Phase::MultiTab:        next = Phase::Report; break;
     case Phase::Report:          next = Phase::Done; break;
     case Phase::Done:            next = Phase::Done; break;
     }
@@ -855,6 +998,9 @@ void StressRunner::EmitReport(Canvas& canvas) {
     }
     oss << "Active tiles: " << canvas.GetActiveLayerTileCount()
         << "  layers: " << canvas.GetLayers().size() << "\n";
+    oss << "MultiTab: slept=" << m_MultiTabSlept
+        << " hibernated=" << m_MultiTabHibernated
+        << " wakes=" << m_MultiTabWakes << "\n";
     oss << "Load OK: " << (m_LoadOk ? "yes" : "no")
         << "  asset missing: " << (m_AssetMissing ? "yes" : "no") << "\n";
 
@@ -904,6 +1050,12 @@ void StressRunner::Start(Canvas& canvas, ID3D11Device* device) {
     m_StrokeStarts = 0;
     m_UndoOpsDone = 0;
     m_RedoOpsDone = 0;
+    m_MainProjectId = -1;
+    m_SideProjectA = -1;
+    m_SideProjectB = -1;
+    m_MultiTabSlept = 0;
+    m_MultiTabHibernated = 0;
+    m_MultiTabWakes = 0;
     {
         size_t priv = 0;
         SnapshotMem(m_MemStartWS, priv);
@@ -1012,6 +1164,11 @@ bool StressRunner::Tick(Canvas& canvas, ID3D11Device* device, float frameWorkMs)
     case Phase::Chaos:
         phaseBusy = TickChaos(canvas, device, dtSec);
         if (m_PhaseElapsed > 12.f) phaseBusy = false;
+        break;
+
+    case Phase::MultiTab:
+        phaseBusy = TickMultiTab(canvas, device, dtSec);
+        if (m_PhaseElapsed > 20.f) phaseBusy = false;
         break;
 
     case Phase::Report:

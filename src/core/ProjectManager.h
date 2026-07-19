@@ -115,6 +115,11 @@ public:
     // Under extreme pressure, may L2-hibernate (disk) already GPU-slept tabs.
     // Returns number of projects newly suspended/hibernated this tick.
     int TickDormancy(ID3D11Device* device);
+    // Immediate L1 suspend of all inactive non-hibernated tabs (stress / emergency free VRAM).
+    int SuspendInactiveNow();
+    // Immediate L2 attempt on inactive tabs (writes scratch if needed).
+    // maxCount defaults to 1 — SaveCanvasRayp is heavy; call repeatedly across frames.
+    int HibernateInactiveNow(int maxCount = 1);
     // Flush deferred D3D Release queues on every open canvas (active + dormant).
     void FlushAllDeferredGpuReleases();
     // Seconds of inactivity before GPU suspend (default 60).

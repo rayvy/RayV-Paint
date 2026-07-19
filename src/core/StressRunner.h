@@ -48,6 +48,7 @@ private:
         LayerSpam,
         SelectTransform,
         Chaos,
+        MultiTab, // L1/L2 dormancy smoke (extra small tabs)
         Report,
         Done
     };
@@ -93,6 +94,7 @@ private:
     bool TickLayerSpam(Canvas& canvas, ID3D11Device* device, float dtSec);
     bool TickSelectTransform(Canvas& canvas, ID3D11Device* device, float dtSec);
     bool TickChaos(Canvas& canvas, ID3D11Device* device, float dtSec);
+    bool TickMultiTab(Canvas& canvas, ID3D11Device* device, float dtSec);
 
     bool m_Enabled = false;
     bool m_Active = false;
@@ -121,6 +123,12 @@ private:
     int m_UndoOpsDone = 0;
     int m_RedoOpsDone = 0;
     int m_StrokeStarts = 0;
+    int m_MainProjectId = -1;
+    int m_SideProjectA = -1;
+    int m_SideProjectB = -1;
+    int m_MultiTabSlept = 0;
+    int m_MultiTabHibernated = 0;
+    int m_MultiTabWakes = 0;
 
     std::mt19937 m_Rng{std::random_device{}()};
     std::chrono::steady_clock::time_point m_StartTime{};

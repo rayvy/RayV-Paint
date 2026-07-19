@@ -955,15 +955,19 @@ void Canvas::EnsureGpuBlur(ID3D11Device* device, ID3D11DeviceContext* ctx) {
 }
 
 void Canvas::DrawTiledLayer(ID3D11DeviceContext* context, Layer& layer,
-                            float opacityMul, bool useMask, bool isFirst) {
+                            float opacityMul, bool useMask, bool isFirst,
+                            ID3D11RenderTargetView* targetRtv) {
     if (!context || !layer.gpuSurfaceId || !m_TileQuadVB || m_Width < 1 || m_Height < 1) return;
     if (m_GpuTiles.TileCount(layer.gpuSurfaceId) == 0) return;
+
+    ID3D11RenderTargetView* rtv = targetRtv ? targetRtv : m_CompositeRTV;
+    if (!rtv) return;
 
     ID3D11BlendState* blend = isFirst ? m_LayerBlendStateReplace
         : ((!layer.alphaRewrite && m_LayerBlendStateAlphaPreserve)
             ? m_LayerBlendStateAlphaPreserve : m_LayerBlendState);
     context->OMSetBlendState(blend, nullptr, 0xFFFFFFFF);
-    context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr);
+    context->OMSetRenderTargets(1, &rtv, nullptr);
 
     UINT stride = sizeof(Vertex);
     UINT offset = 0;
@@ -1338,12 +1342,12 @@ void Canvas::CreateLayerMask(ID3D11Device* device, int index) {
     if (device) {
         UpdateLayerMaskTexture(device, index);
     }
-    m_CompositeDirty = true;
     // White mask = empty tile set (cheap undo)
     m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
         "Add Mask", index, oldHas, std::move(oldTiles),
         true, std::vector<MaskTileSnapshot>{}, m_Width, m_Height));
     m_IsDocumentModified = true;
+    NotifyLayerVisualsChanged(index, /*contentPixelsChanged=*/false, /*markFiltersDirty=*/false);
     Logger::Get().InfoTag("io", "Created layer mask on '" + layer.name + "' (paint target = mask)");
 }
 
@@ -1376,11 +1380,11 @@ void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     if (device) {
         UpdateLayerMaskTexture(device, index);
     }
-    m_CompositeDirty = true;
     m_UndoRedoManager.PushCommand(std::make_shared<LayerMaskCommand>(
         "Add Mask from Selection", index, oldHas, std::move(oldTiles),
         true, std::move(newTiles), m_Width, m_Height));
     m_IsDocumentModified = true;
+    NotifyLayerVisualsChanged(index, /*contentPixelsChanged=*/false, /*markFiltersDirty=*/false);
 
     Logger::Get().Info("Created layer mask from selection for layer: " + layer.name);
 }
@@ -1949,9 +1953,55 @@ void Canvas::CommitLayerPropsEdit(int layerIdx, const LayerPropsCommand::Props& 
         return true;
     };
     if (same()) return;
+    // Opacity/visibility/blend → composite only. Filters/styles/fill asset → rebind tiles.
+    bool rebindGpu = before.filters.size() != after.filters.size()
+                  || before.styles.size() != after.styles.size()
+                  || before.isFill != after.isFill;
+    if (!rebindGpu && before.isFill) {
+        if (before.fill.texturePath != after.fill.texturePath ||
+            before.fill.textureAssetKey != after.fill.textureAssetKey ||
+            before.fill.useTexture != after.fill.useTexture)
+            rebindGpu = true;
+        for (int i = 0; i < 4 && !rebindGpu; ++i)
+            if (before.fill.color[i] != after.fill.color[i]) rebindGpu = true;
+    }
+    if (!rebindGpu) {
+        for (size_t i = 0; i < before.filters.size() && !rebindGpu; ++i) {
+            const auto& a = before.filters[i];
+            const auto& b = after.filters[i];
+            if (a.type != b.type || a.enabled != b.enabled || a.curvesChannels != b.curvesChannels)
+                rebindGpu = true;
+            for (int k = 0; k < 4 && !rebindGpu; ++k)
+                if (a.p[k] != b.p[k]) rebindGpu = true;
+            if (!rebindGpu && (a.lut != b.lut || a.lutR != b.lutR || a.lutG != b.lutG ||
+                               a.lutB != b.lutB || a.lutA != b.lutA))
+                rebindGpu = true;
+        }
+        for (size_t i = 0; i < before.styles.size() && !rebindGpu; ++i) {
+            const auto& a = before.styles[i];
+            const auto& b = after.styles[i];
+            if (a.type != b.type || a.enabled != b.enabled || a.opacity != b.opacity ||
+                a.distance != b.distance || a.angleDeg != b.angleDeg ||
+                a.offsetX != b.offsetX || a.offsetY != b.offsetY ||
+                a.spread != b.spread || a.size != b.size ||
+                a.outlineSize != b.outlineSize || a.outlinePos != b.outlinePos ||
+                a.outlineFill != b.outlineFill || a.outlineGradientMap != b.outlineGradientMap)
+                rebindGpu = true;
+            for (int k = 0; k < 4 && !rebindGpu; ++k) {
+                if (a.shadowColor[k] != b.shadowColor[k]) rebindGpu = true;
+                if (a.outlineColor[k] != b.outlineColor[k]) rebindGpu = true;
+            }
+            if (!rebindGpu && (a.outlineTexturePath != b.outlineTexturePath ||
+                               a.outlineTextureAssetKey != b.outlineTextureAssetKey ||
+                               a.outlineGradient.size() != b.outlineGradient.size()))
+                rebindGpu = true;
+        }
+    }
     m_UndoRedoManager.PushCommand(std::make_shared<LayerPropsCommand>(
         actionName ? actionName : "Layer Edit", layerIdx, before, std::move(after)));
     m_IsDocumentModified = true;
+    NotifyLayerVisualsChanged(layerIdx, /*contentPixelsChanged=*/rebindGpu,
+                              /*markFiltersDirty=*/rebindGpu);
 }
 
 void Canvas::CreateNewLayer(ID3D11Device* device, const std::string& name) {
@@ -2612,12 +2662,13 @@ void Canvas::RestoreActiveLayerMutation() {
         for (const auto& pair : m_ActiveStrokeDeltas) {
             const auto& d = pair.second;
             layer.tileCache->RestoreTile(d.tileX, d.tileY, d.oldState);
+            layer.tileCache->MarkDirty(d.tileX, d.tileY);
         }
-        layer.needsUpload = true;
-        layer.filtersDirty = true;
     }
     m_ActiveStrokeDeltas.clear();
-    m_CompositeDirty = true;
+    // Match stroke-end: filters sparse + styles + parent groups (cancel must not leave bake)
+    NotifyLayerVisualsChanged(m_ActiveLayerIdx, /*contentPixelsChanged=*/true,
+                              /*markFiltersDirty=*/true);
 }
 
 extern float g_PenPressure;
@@ -2832,6 +2883,9 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
             }
             m_MaskStrokeBackupValid = false;
             m_MaskStrokeBackupTiles.clear();
+            // Group FX / isolation must see mask change without waiting for a content stroke.
+            NotifyLayerVisualsChanged(m_ActiveLayerIdx, /*contentPixelsChanged=*/false,
+                                      /*markFiltersDirty=*/false);
         }
         return;
     }
@@ -3311,6 +3365,14 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 layerNeedsUpload = true;
             }
 
+            // needsUpload alone must not no-op: ensure CPU dirt / GPU clear queue exists
+            if (layerNeedsUpload && !src->HasPendingGpuWork()) {
+                if (!src->IsEmpty())
+                    src->MarkAllDirty();
+                else if (layer.gpuSurfaceId)
+                    m_GpuTiles.ClearSurface(layer.gpuSurfaceId);
+            }
+
             bool layerHadUploads = false;
             size_t dirtyUploaded = 0;
             const bool hadPending = src->HasPendingGpuWork() || layerNeedsUpload;
@@ -3574,6 +3636,14 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     !layer.presentationCache || layer.presentationCache->IsEmpty()) {
                     RebuildGroupPresentation((int)i, /*fullQuality=*/false);
                 }
+                // Still dirty after rebuild (e.g. was skipped) → drop stale bake so we never
+                // show pre-membership flatten. Mid-stroke keep last bake (stroke-end rebuilds).
+                if (!m_IsStrokeActive &&
+                    (layer.presentationDirty || layer.stylesDirty || layer.filtersDirty) &&
+                    layer.presentationCache) {
+                    layer.presentationCache.reset();
+                    layer.needsUpload = true;
+                }
                 if (layer.presentationCache && !layer.presentationCache->IsEmpty()) {
                     if (!layer.texture)
                         RecreateLayerTexture(groupDev, layer);
@@ -3633,12 +3703,74 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 // Direct children only for GPU path (nested groups with no FX on parent)
                 if ((int)child.parentGroupId != (int)i || !child.visible || child.isGroup) continue;
                 if (!child.ParticipatesInView(viewMap, roleIso, soloRole)) continue;
-                if (!child.srv) continue;
 
                 const bool childBaked = LayerStylesPreviewActive(child) && !m_IsStrokeActive &&
                     child.presentationCache && !child.presentationCache->IsEmpty();
                 float childOp = childBaked ? 1.f : child.opacity;
                 bool childMask = !childBaked && child.hasMask && child.maskSRV;
+
+                // Large docs: children use sparse GpuTileStore (no classic layer.srv).
+                // Old path skipped them entirely → empty/stale group until a stroke forced rebind.
+                if (child.gpuSurfaceId && !childBaked && !child.HasEnabledStyles()) {
+                    DrawTiledLayer(context, child, childOp, childMask, firstInGroup, m_GroupCompositeRTV);
+                    // Restore full-quad VS buffers after tile quads
+                    UINT stride = sizeof(Vertex);
+                    UINT offset = 0;
+                    context->IASetVertexBuffers(0, 1, &m_VertexBuffer, &stride, &offset);
+                    context->IASetIndexBuffer(m_IndexBuffer, DXGI_FORMAT_R16_UINT, 0);
+                    context->VSSetShader(m_LayerVertexShader, nullptr, 0);
+                    context->PSSetShader(m_LayerBlendPixelShader, nullptr, 0);
+                    firstInGroup = false;
+                    groupHadContent = true;
+                    continue;
+                }
+
+                // GPU fill pattern into group RT (do not use drawLayerSrv — it mutates main firstVisible)
+                if (child.IsFill() && child.fillPatternSRV && !LayerFxPreviewActive(child) &&
+                    child.fill.HasTexture()) {
+                    context->OMSetRenderTargets(1, &m_GroupCompositeRTV, nullptr);
+                    float fillTint[4] = {1.f, 1.f, 1.f, 1.f};
+                    uint8_t fillWrite = 0xF;
+                    if (!child.fill.ResolveForMap(m_ActiveSetMaps, m_ViewMapKind, fillTint, &fillWrite))
+                        continue;
+                    ID3D11Device* fdev = nullptr;
+                    context->GetDevice(&fdev);
+                    ID3D11BlendState* fblend = GetFillWriteBlend(fdev, fillWrite, firstInGroup);
+                    if (fdev) fdev->Release();
+                    context->OMSetBlendState(fblend, nullptr, 0xFFFFFFFF);
+                    D3D11_MAPPED_SUBRESOURCE fmapped;
+                    if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &fmapped))) {
+                        LayerBuffer* lb = (LayerBuffer*)fmapped.pData;
+                        float hasMaskVal = childMask ? 1.f : 0.f;
+                        lb->layerParams = DirectX::XMFLOAT4(childOp, hasMaskVal, 0.f, 0.f);
+                        lb->transformParams = DirectX::XMFLOAT4(1.f, 1.f, 0.f, 2.f); // fill-texture mode
+                        lb->floatRect = DirectX::XMFLOAT4(
+                            child.fill.texScale[0], child.fill.texScale[1],
+                            child.fill.texOffset[0], child.fill.texOffset[1]);
+                        lb->fillColor = DirectX::XMFLOAT4(fillTint[0], fillTint[1], fillTint[2], fillTint[3]);
+                        float flags = (child.alphaRewrite ? 1.f : 0.f) + (firstInGroup ? 2.f : 0.f);
+                        lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)child.blendMode, flags);
+                        context->Unmap(m_LayerConstantBuffer, 0);
+                    }
+                    context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
+                    context->PSSetShaderResources(0, 1, &child.fillPatternSRV);
+                    if (childMask)
+                        context->PSSetShaderResources(1, 1, &child.maskSRV);
+                    else {
+                        ID3D11ShaderResourceView* n = nullptr;
+                        context->PSSetShaderResources(1, 1, &n);
+                    }
+                    {
+                        ID3D11ShaderResourceView* n = nullptr;
+                        context->PSSetShaderResources(2, 1, &n);
+                    }
+                    context->DrawIndexed(6, 0, 0);
+                    firstInGroup = false;
+                    groupHadContent = true;
+                    continue;
+                }
+
+                if (!child.srv) continue;
 
                 context->OMSetRenderTargets(1, &m_GroupCompositeRTV, nullptr);
                 ID3D11BlendState* blend = firstInGroup && m_LayerBlendStateReplace
@@ -4174,9 +4306,10 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
 
     if (progress) progress(0.85f, "gpu_upload");
     RecreateLayerTexture(device, imported);
-    if (!imported.texture) {
+    // Large docs use sparse GpuTileStore (gpuSurfaceId) — classic layer.texture stays null.
+    if (!imported.texture && !imported.gpuSurfaceId) {
         Logger::Get().ErrorTag("gpu",
-            "LoadImageToLayer: layer GPU texture missing after RecreateLayerTexture. "
+            "LoadImageToLayer: no GPU surface after RecreateLayerTexture. "
             "CPU TileCache may still hold pixels, but viewport will be blank.");
         // Still keep CPU data so headless tests can validate tiles.
     }
@@ -4785,6 +4918,14 @@ void Canvas::ClearAllLayersNoUndo() {
 
 void Canvas::ClearUndoHistory() {
     m_UndoRedoManager.Clear();
+}
+
+int Canvas::TrimUndoHistoryForPressure(bool extreme) {
+    return m_UndoRedoManager.TrimForPressure(extreme);
+}
+
+size_t Canvas::GetUndoMemoryBytes() const {
+    return m_UndoRedoManager.GetCurrentMemoryUsage();
 }
 
 // RAYP format:
@@ -10553,6 +10694,60 @@ void Canvas::RequestPresentationRebuild(int layerIdx) {
     m_PresentationRebuildNotBefore =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(80);
     m_PresentationRebuildDeferred = true;
+    // Group FX above this layer must re-flatten after style edits.
+    int p = m_Layers[layerIdx].parentGroupId;
+    while (p >= 0 && p < (int)m_Layers.size()) {
+        if (m_Layers[p].isGroup) {
+            m_Layers[p].presentationDirty = true;
+            m_Layers[p].stylesDirty = true;
+            m_Layers[p].filtersDirty = true;
+        }
+        p = m_Layers[p].parentGroupId;
+    }
+}
+
+void Canvas::NotifyLayerVisualsChanged(int layerIdx, bool contentPixelsChanged,
+                                       bool markFiltersDirty) {
+    if (layerIdx < 0 || layerIdx >= (int)m_Layers.size()) return;
+    Layer& L = m_Layers[layerIdx];
+    L.thumbDirty = true;
+    bool touchedGroupFx = false;
+    if (contentPixelsChanged) {
+        L.gpuDisplayKind = 0xFF; // raw ↔ filtered ↔ presentation re-bind
+        L.needsUpload = true;
+        if (markFiltersDirty && LayerFilterListHasEnabled(L.filters))
+            L.filtersDirty = true;
+        if (L.HasEnabledStyles()) {
+            L.presentationDirty = true;
+            L.stylesDirty = true;
+        }
+        if (L.isGroup) {
+            L.presentationDirty = true;
+            L.stylesDirty = true;
+            L.filtersDirty = true;
+            touchedGroupFx = true;
+        }
+    }
+    // Ancestor groups: always re-compose (no-FX GPU path) or re-bake (FX path).
+    int p = L.parentGroupId;
+    while (p >= 0 && p < (int)m_Layers.size()) {
+        if (m_Layers[p].isGroup) {
+            m_Layers[p].presentationDirty = true;
+            m_Layers[p].stylesDirty = true;
+            m_Layers[p].filtersDirty = true;
+            m_Layers[p].thumbDirty = true;
+            m_Layers[p].needsUpload = true;
+            touchedGroupFx = true;
+        }
+        p = m_Layers[p].parentGroupId;
+    }
+    // Membership / structure must rebuild on the next frame — do not wait slider debounce
+    // (otherwise compose keeps drawing the previous group presentation bake → "layer vanished").
+    if (touchedGroupFx || (contentPixelsChanged && L.isGroup)) {
+        m_PresentationRebuildDeferred = false;
+        m_PresentationRebuildNotBefore = std::chrono::steady_clock::now();
+    }
+    MarkCompositeDirty();
 }
 
 bool Canvas::IsLayerUnderGroup(int layerIdx, int groupIdx) const {
@@ -10698,12 +10893,17 @@ void Canvas::AddLayerToGroup(int layerIdx, int groupLayerIdx) {
     if (!m_Layers[groupLayerIdx].isGroup) return;
     if (layerIdx == groupLayerIdx) return;
     m_Layers[layerIdx].parentGroupId=groupLayerIdx;
-    m_CompositeDirty = true;
+    // Group isolation path + FX bake must see new membership immediately.
+    NotifyLayerVisualsChanged(layerIdx, /*contentPixelsChanged=*/false, /*markFiltersDirty=*/false);
+    NotifyLayerVisualsChanged(groupLayerIdx, /*contentPixelsChanged=*/true, /*markFiltersDirty=*/true);
 }
 void Canvas::RemoveLayerFromGroup(int layerIdx) {
     if (layerIdx>=0&&layerIdx<(int)m_Layers.size()) {
+        const int oldParent = m_Layers[layerIdx].parentGroupId;
         m_Layers[layerIdx].parentGroupId=-1;
-        m_CompositeDirty = true;
+        NotifyLayerVisualsChanged(layerIdx, /*contentPixelsChanged=*/false, /*markFiltersDirty=*/false);
+        if (oldParent >= 0)
+            NotifyLayerVisualsChanged(oldParent, /*contentPixelsChanged=*/true, /*markFiltersDirty=*/true);
     }
 }
 
@@ -10723,6 +10923,10 @@ int Canvas::ReorderLayer(int fromIdx, int toIdx) {
     auto& layers = m_Layers;
     if (fromIdx == toIdx || fromIdx < 0 || fromIdx >= (int)layers.size() ||
         toIdx < 0 || toIdx >= (int)layers.size()) return fromIdx;
+
+    // Capture parents before reorder — groups with FX keep a baked presentationCache.
+    // Without invalidation, old bake is drawn and the moved layer "vanishes" until stroke.
+    const int oldParent = layers[fromIdx].parentGroupId;
 
     const int n = (int)layers.size();
     std::vector<int> identity(n), parentIdent(n, -1);
@@ -10748,7 +10952,15 @@ int Canvas::ReorderLayer(int fromIdx, int toIdx) {
     int newIdx = identToNew[fromIdx];
     if (m_ActiveLayerIdx == fromIdx) m_ActiveLayerIdx = newIdx;
     else m_ActiveLayerIdx = MapLayerIndexAfterReorder(m_ActiveLayerIdx, fromIdx, toIdx);
-    m_CompositeDirty = true;
+
+    const int newParent = layers[newIdx].parentGroupId;
+    const int mappedOldParent = (oldParent >= 0 && oldParent < n) ? identToNew[oldParent] : -1;
+    // Moved layer + both old/new group FX chains
+    NotifyLayerVisualsChanged(newIdx, /*contentPixelsChanged=*/false, /*markFiltersDirty=*/false);
+    if (mappedOldParent >= 0)
+        NotifyLayerVisualsChanged(mappedOldParent, /*contentPixelsChanged=*/true, /*markFiltersDirty=*/true);
+    if (newParent >= 0 && newParent != mappedOldParent)
+        NotifyLayerVisualsChanged(newParent, /*contentPixelsChanged=*/true, /*markFiltersDirty=*/true);
     return newIdx;
 }
 
@@ -10758,6 +10970,8 @@ int Canvas::MoveLayerIntoGroup(int layerIdx, int groupIdx) {
     if (layerIdx == groupIdx || !m_Layers[groupIdx].isGroup) return layerIdx;
     if (m_Layers[layerIdx].isGroup) return layerIdx;
 
+    const int oldParent = m_Layers[layerIdx].parentGroupId;
+
     int targetIdx = (layerIdx > groupIdx) ? groupIdx
                                          : ((groupIdx > 0) ? groupIdx - 1 : 0);
     int newLayerIdx = ReorderLayer(layerIdx, targetIdx);
@@ -10766,7 +10980,16 @@ int Canvas::MoveLayerIntoGroup(int layerIdx, int groupIdx) {
         m_Layers[newLayerIdx].parentGroupId = newGroupIdx;
     else
         m_Layers[newLayerIdx].parentGroupId = -1;
-    m_CompositeDirty = true;
+
+    // Force group FX re-flatten (ReorderLayer may not see the final parent yet).
+    NotifyLayerVisualsChanged(newLayerIdx, /*contentPixelsChanged=*/false, /*markFiltersDirty=*/false);
+    if (newGroupIdx >= 0)
+        NotifyLayerVisualsChanged(newGroupIdx, /*contentPixelsChanged=*/true, /*markFiltersDirty=*/true);
+    if (oldParent >= 0) {
+        const int mappedOld = MapLayerIndexAfterReorder(oldParent, layerIdx, targetIdx);
+        if (mappedOld >= 0 && mappedOld != newGroupIdx)
+            NotifyLayerVisualsChanged(mappedOld, /*contentPixelsChanged=*/true, /*markFiltersDirty=*/true);
+    }
     return newLayerIdx;
 }
 
@@ -11842,8 +12065,8 @@ bool Canvas::EnsureVectorRaster(int layerIdx, bool coarse, bool forceFull) {
         wrote = vec::RasterizeDocumentFull(*L.vectorDoc, *L.tileCache, m_Width, m_Height, coarse);
         L.vectorDoc->rasterGen = L.vectorDoc->generation;
         L.vectorDoc->ClearDirty();
-        L.needsUpload = true;
-        m_CompositeDirty = true;
+        if (L.tileCache) L.tileCache->MarkAllDirty();
+        NotifyLayerVisualsChanged(layerIdx, /*contentPixelsChanged=*/true, /*markFiltersDirty=*/true);
         return wrote;
     }
     if (L.vectorDoc->HasDirty() || L.vectorDoc->rasterGen != L.vectorDoc->generation ||
@@ -11853,10 +12076,8 @@ bool Canvas::EnsureVectorRaster(int layerIdx, bool coarse, bool forceFull) {
         wrote = vec::RasterizeDocument(*L.vectorDoc, *L.tileCache, m_Width, m_Height, coarse);
         L.vectorDoc->rasterGen = L.vectorDoc->generation;
         L.vectorDoc->ClearDirty();
-        if (wrote) {
-            L.needsUpload = true;
-            m_CompositeDirty = true;
-        }
+        if (wrote)
+            NotifyLayerVisualsChanged(layerIdx, /*contentPixelsChanged=*/true, /*markFiltersDirty=*/true);
     }
     return wrote;
 }

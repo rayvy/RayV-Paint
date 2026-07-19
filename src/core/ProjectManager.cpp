@@ -742,15 +742,23 @@ int ProjectManager::TickDormancy(ID3D11Device* device) {
         if (now - p->lastActiveTime < idleLimit) continue;
 
         // L2: already GPU-slept + extreme pressure → disk hibernate
+        // At most ONE L2 per tick (SaveCanvasRayp can take seconds on 4K+).
         if (extreme && (p->canvas->IsGpuSuspended() || p->diskHibernated) && !p->diskHibernated) {
             if (TryDiskHibernate(*p)) {
                 ++changed;
-                continue;
+                return changed; // yield to main loop before next hibernate
             }
         }
-        if (p->canvas->IsGpuSuspended() || p->diskHibernated) continue;
+        if (p->canvas->IsGpuSuspended() || p->diskHibernated) {
+            // Still free undo COW under pressure while L1 (CPU tiles stay).
+            if (pressure && !p->diskHibernated)
+                p->canvas->TrimUndoHistoryForPressure(extreme);
+            continue;
+        }
 
         p->canvas->SuspendGpuResources();
+        if (pressure)
+            p->canvas->TrimUndoHistoryForPressure(extreme);
         ++changed;
         Logger::Get().InfoTag("mem",
             std::string("GPU dormancy: project id=") + std::to_string(p->id) +
@@ -760,17 +768,53 @@ int ProjectManager::TickDormancy(ID3D11Device* device) {
     }
 
     // Second pass under extreme pressure: hibernate GPU-slept tabs even if just slept
+    // Cap at 1 L2 save per frame so UI stays responsive.
     if (extreme) {
         for (auto& p : m_Projects) {
             if (!p || !p->canvas || p->id == m_ActiveId) continue;
             if (p->diskHibernated) continue;
             if (!p->canvas->IsGpuSuspended()) continue;
             if (now - p->lastActiveTime < idleLimit) continue;
-            if (TryDiskHibernate(*p))
+            if (TryDiskHibernate(*p)) {
                 ++changed;
+                break;
+            }
         }
     }
     return changed;
+}
+
+int ProjectManager::SuspendInactiveNow() {
+    int n = 0;
+    for (auto& p : m_Projects) {
+        if (!p || !p->canvas || p->id == m_ActiveId) continue;
+        if (p->diskHibernated || p->canvas->IsDiskHibernated()) continue;
+        if (!p->canvas->IsGpuSuspended()) {
+            p->canvas->SuspendGpuResources();
+            ++n;
+        }
+        p->canvas->TrimUndoHistoryForPressure(true);
+    }
+    if (n > 0)
+        Logger::Get().InfoTag("mem",
+            "GPU dormancy: SuspendInactiveNow slept " + std::to_string(n) + " tab(s)");
+    return n;
+}
+
+int ProjectManager::HibernateInactiveNow(int maxCount) {
+    if (maxCount < 1) maxCount = 1;
+    int n = 0;
+    for (auto& p : m_Projects) {
+        if (n >= maxCount) break;
+        if (!p || !p->canvas || p->id == m_ActiveId) continue;
+        if (p->diskHibernated) continue;
+        if (TryDiskHibernate(*p))
+            ++n;
+    }
+    if (n > 0)
+        Logger::Get().InfoTag("mem",
+            "Disk hibernate: HibernateInactiveNow " + std::to_string(n) + " tab(s)");
+    return n;
 }
 
 void ProjectManager::FlushAllDeferredGpuReleases() {

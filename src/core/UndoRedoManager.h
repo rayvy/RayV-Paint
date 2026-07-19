@@ -331,6 +331,11 @@ public:
     size_t GetUniqueTileBlobCount() const { return m_UniqueTileBlobCount; }
     size_t GetOverheadBytes() const       { return m_OverheadBytes; }
 
+    // Soft-memory ladder for dormant / pressure: drop history rather than crash.
+    // soft: clear redo + enforce half budget. extreme: keep at most last undo step.
+    // Returns number of steps removed.
+    int TrimForPressure(bool extreme);
+
 private:
     void EnforceLimits();
     void RecalcMemory();

@@ -275,11 +275,17 @@ bool RasterizeDocument(const Document& doc, TileCache& tiles, int docW, int docH
 }
 
 bool RasterizeDocumentFull(const Document& doc, TileCache& tiles, int docW, int docH, bool coarse) {
-    // Always wipe GPU-facing sparse store first — prevents residual strokes after cancel/delete.
-    tiles.Clear();
-    tiles.Init(docW, docH, CanvasPixelFormat::RGBA8);
+    // Wipe CPU tiles. Prefer Clear() over Init() when size matches so m_PendingGpuClears
+    // survives (Init would drop them → GPU ghosts after shape delete/full re-raster).
+    const bool sameGeom = tiles.GetWidth() == docW && tiles.GetHeight() == docH
+                       && tiles.GetFormat() == CanvasPixelFormat::RGBA8;
+    if (sameGeom) {
+        tiles.Clear(); // queues zero-uploads for every previous tile
+    } else {
+        tiles.Init(docW, docH, CanvasPixelFormat::RGBA8);
+    }
     if (doc.shapes.empty()) {
-        // Empty vector layer: blank tiles are correct
+        // Empty vector layer: pending clears alone make GPU go blank on next compose
         return true;
     }
     Document tmp = doc;

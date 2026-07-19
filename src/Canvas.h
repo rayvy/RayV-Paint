@@ -288,6 +288,13 @@ public:
     // Debounced style/presentation rebuild (call from UI while dragging FX params).
     void RequestPresentationRebuild(int layerIdx);
 
+    // After content / mask / props / vector / undo change: keep GPU tiles + group FX in sync.
+    // contentPixelsChanged: raw tiles mutated → force GPU re-upload (+ filter/style if present).
+    // markFiltersDirty: full filter re-bake (false = sparse onlyDirty via existing tile dirties).
+    void NotifyLayerVisualsChanged(int layerIdx,
+                                   bool contentPixelsChanged = true,
+                                   bool markFiltersDirty = true);
+
     // Interactive FX preview (styles + filters). OFF = paint raw content, no CPU bake.
     // Does not delete FX; re-enable rebuilds presentation. Export always bakes full FX.
     bool GetEffectsPreviewEnabled() const { return m_EffectsPreviewEnabled; }
@@ -594,6 +601,9 @@ public:
     std::string GetUndoName() const;
     std::string GetRedoName() const;
     void ClearUndoHistory();
+    // Drop redo / old undo under multi-tab pressure (prefer history loss over OOM).
+    int TrimUndoHistoryForPressure(bool extreme);
+    size_t GetUndoMemoryBytes() const;
     // Drop all layers + GPU without undo (project setup / replace base)
     void ClearAllLayersNoUndo();
     bool IsDocumentModified() const { return m_IsDocumentModified; }
@@ -871,8 +881,10 @@ private:
     // Phase C: deferred presentation / thumb jobs via UpdateScheduler.
     void ScheduleDeferredPresentation(int layerIdx);
     void ScheduleThumbJob(int layerIdx, int size);
+    // targetRtv null → main composite RT. Non-null (group RT) draws into that target.
     void DrawTiledLayer(ID3D11DeviceContext* context, Layer& layer,
-                        float opacityMul, bool useMask, bool isFirst);
+                        float opacityMul, bool useMask, bool isFirst,
+                        ID3D11RenderTargetView* targetRtv = nullptr);
     ID3D11BlendState* m_LayerBlendState = nullptr;
     // RGB: SRC_ALPHA/INV_SRC_ALPHA; Alpha: ZERO/ONE — keeps dest A (Alpha Rewrite OFF)
     ID3D11BlendState* m_LayerBlendStateAlphaPreserve = nullptr;

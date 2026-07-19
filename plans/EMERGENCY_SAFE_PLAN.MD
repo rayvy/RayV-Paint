@@ -129,6 +129,9 @@ On suspend: drop `filteredCache` / `presentationCache` (rebuildable); flush defe
 - Dirty / non-`.rayp` / DDS opens → write `dormant/proj_<id>.rayp` then strip; clean saved `.rayp` reloads original (no extra write).  
 - Tab UI: active normal; L1 badge `[z]`; L2 badge `[disk]`; restore flash `...` + toast **RESTORING document…**.  
 - Close tab deletes owned scratch; dirty confirmation uses `dirtyBeforeHibernate` while L2.
+- **Pressure undo:** inactive L1 tabs run `TrimUndoHistoryForPressure` (drop redo + old steps; extreme keeps ≤1). Prefer history loss over OOM.
+- **Emergency APIs:** `SuspendInactiveNow` / `HibernateInactiveNow(maxCount=1)` (stress + future free-memory action).
+- **L2 rate limit:** at most **one** disk hibernate save per `TickDormancy` frame (4K+ `.rayp` write can take seconds).
 
 ---
 
@@ -175,6 +178,7 @@ Watch the journal file in a second editor while the suite runs.
 | LayerSpam | Create/delete raster layers; stack churn |
 | SelectTransform | Mid rect select + move/scale commit |
 | Chaos | Interleaved paint + undo + fill mutate + redo |
+| MultiTab | Spawn 2 side tabs, paint, L1 suspend + L2 hibernate, wake, cleanup |
 | Report | Metrics + exit code |
 
 ### Pass criteria

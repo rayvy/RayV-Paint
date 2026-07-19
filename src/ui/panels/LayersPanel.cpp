@@ -537,8 +537,8 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         if (ok) {
                             DrawLayerDropHighlight(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), true);
                             if (payload->IsDelivery()) {
+                                // MoveLayerIntoGroup invalidates group FX presentation (no stroke needed).
                                 canvas.SetActiveLayerIndex(canvas.MoveLayerIntoGroup(draggedIdx, i));
-                                canvas.MarkCompositeDirty();
                             }
                         }
                     }
@@ -720,8 +720,17 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                                     auto& L = canvas.GetLayers();
                                     if (newParent == newIdx || newParent < 0 || newParent >= (int)L.size()) newParent = -1;
                                     if (newParent >= 0 && !L[newParent].isGroup) newParent = -1;
+                                    const int prevParent = L[newIdx].parentGroupId;
                                     L[newIdx].parentGroupId = newParent;
                                     canvas.SetActiveLayerIndex(newIdx);
+                                    // Group-with-FX keeps a baked flatten — must re-bake on parent change.
+                                    if (prevParent != newParent) {
+                                        canvas.NotifyLayerVisualsChanged(newIdx, false, false);
+                                        if (prevParent >= 0)
+                                            canvas.NotifyLayerVisualsChanged(prevParent, true, true);
+                                        if (newParent >= 0)
+                                            canvas.NotifyLayerVisualsChanged(newParent, true, true);
+                                    }
                                 }
                                 canvas.MarkCompositeDirty();
                             }

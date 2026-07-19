@@ -101,8 +101,11 @@ void TileCache::Init(int width, int height, CanvasPixelFormat format) {
 }
 
 void TileCache::Clear() {
+    // Queue GPU clears for every tile that existed — otherwise sparse GpuTileStore
+    // keeps ghosts after vector full-raster / shape delete (CPU empty, VRAM still painted).
+    for (const auto& [k, t] : m_Tiles)
+        m_PendingGpuClears.insert(k);
     m_Tiles.clear();
-    m_PendingGpuClears.clear();
     m_AccessCounter = 0;
 }
 

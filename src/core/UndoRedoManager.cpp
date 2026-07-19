@@ -48,7 +48,9 @@ void PaintStrokeCommand::Undo(Canvas* canvas) {
         layer.filtersDirty = false; // ComposeLayers will RefreshFilteredCache(onlyDirty)
     layer.presentationDirty = layer.HasEnabledStyles();
     layer.stylesDirty = layer.HasEnabledStyles();
-    canvas->MarkCompositeDirty();
+    // Parents + GPU kind rebind (do not full-filter-dirty — tiles already marked)
+    canvas->NotifyLayerVisualsChanged(m_LayerIdx, /*contentPixelsChanged=*/true,
+                                      /*markFiltersDirty=*/false);
 }
 
 void PaintStrokeCommand::Redo(Canvas* canvas) {
@@ -66,7 +68,8 @@ void PaintStrokeCommand::Redo(Canvas* canvas) {
         layer.filtersDirty = false;
     layer.presentationDirty = layer.HasEnabledStyles();
     layer.stylesDirty = layer.HasEnabledStyles();
-    canvas->MarkCompositeDirty();
+    canvas->NotifyLayerVisualsChanged(m_LayerIdx, /*contentPixelsChanged=*/true,
+                                      /*markFiltersDirty=*/false);
 }
 
 size_t PaintStrokeCommand::GetOverheadBytes() const {
@@ -170,8 +173,9 @@ void LayerMaskCommand::Apply(Canvas* canvas, bool hasMask, const std::vector<uin
         if (canvas->m_PaintTarget == PaintTarget::LayerMask && canvas->m_ActiveLayerIdx == m_LayerIdx)
             canvas->m_PaintTarget = PaintTarget::LayerContent;
     }
-    canvas->MarkCompositeDirty();
     canvas->m_IsDocumentModified = true;
+    canvas->NotifyLayerVisualsChanged(m_LayerIdx, /*contentPixelsChanged=*/false,
+                                      /*markFiltersDirty=*/false);
 }
 
 void LayerMaskCommand::Undo(Canvas* canvas) {
@@ -217,8 +221,9 @@ void LayerMaskPaintCommand::Apply(Canvas* canvas, const std::vector<MaskTileSnap
     L.maskTiles->Flatten(L.mask);
     L.maskTiles->GetDirty(L.maskDirtyX0, L.maskDirtyY0, L.maskDirtyX1, L.maskDirtyY1);
     L.maskNeedsUpload = true;
-    canvas->MarkCompositeDirty();
     canvas->m_IsDocumentModified = true;
+    canvas->NotifyLayerVisualsChanged(m_LayerIdx, /*contentPixelsChanged=*/false,
+                                      /*markFiltersDirty=*/false);
 }
 
 void LayerMaskPaintCommand::Undo(Canvas* canvas) { Apply(canvas, m_OldTiles); }
@@ -273,8 +278,10 @@ void LayerPropsCommand::Apply(Canvas* canvas, const Props& p) {
         L.presentationCache.reset();
     L.needsUpload = true;
     L.thumbDirty = true;
-    canvas->MarkCompositeDirty();
     canvas->m_IsDocumentModified = true;
+    // Full rebind: props may toggle filters/styles; bubble to groups.
+    canvas->NotifyLayerVisualsChanged(m_LayerIdx, /*contentPixelsChanged=*/true,
+                                      /*markFiltersDirty=*/true);
 }
 
 void LayerPropsCommand::Undo(Canvas* canvas) { Apply(canvas, m_Old); }
@@ -481,9 +488,11 @@ void VectorEditCommand::Apply(Canvas* canvas, const std::string& json) {
     vec::RasterizeDocumentFull(*L.vectorDoc, *L.tileCache, canvas->m_Width, canvas->m_Height, false);
     L.vectorDoc->rasterGen = L.vectorDoc->generation;
     L.vectorDoc->ClearDirty();
+    if (L.tileCache) L.tileCache->MarkAllDirty();
     L.needsUpload = true;
-    canvas->m_CompositeDirty = true;
     canvas->m_IsDocumentModified = true;
+    canvas->NotifyLayerVisualsChanged(m_LayerIdx, /*contentPixelsChanged=*/true,
+                                      /*markFiltersDirty=*/true);
 }
 
 void VectorEditCommand::Undo(Canvas* canvas) { Apply(canvas, m_Before); }
@@ -542,7 +551,8 @@ void DocumentGeometryCommand::Apply(Canvas* canvas, const DocSnap& snap) {
         canvas->m_SelectionMaskSRV->Release();
         canvas->m_SelectionMaskSRV = nullptr;
     }
-    canvas->m_CompositeDirty = true;
+    // Full mark — channel preview + full proxy (not a partial dirty rect leftover).
+    canvas->MarkCompositeDirty();
     canvas->m_IsDocumentModified = true;
 }
 
@@ -704,6 +714,39 @@ void UndoRedoManager::EnforceLimits() {
             " total=" + MemoryStats::FormatBytes(m_CurrentMemoryBytes) +
             (budget ? " budget=" + MemoryStats::FormatBytes(budget) : " budget=unlimited"));
     }
+}
+
+int UndoRedoManager::TrimForPressure(bool extreme) {
+    int dropped = 0;
+    // Redo is free to drop under pressure — user is not on this tab.
+    if (!m_RedoStack.empty()) {
+        dropped += (int)m_RedoStack.size();
+        m_RedoStack.clear();
+    }
+    if (extreme) {
+        while (m_UndoStack.size() > 1) {
+            m_UndoStack.erase(m_UndoStack.begin());
+            ++dropped;
+        }
+        RecalcMemory();
+    } else {
+        RecalcMemory();
+        const size_t half = EffectiveBudget() > 0 ? EffectiveBudget() / 2 : 0;
+        if (half > 0) {
+            while (m_CurrentMemoryBytes > half && m_UndoStack.size() > 1) {
+                m_UndoStack.erase(m_UndoStack.begin());
+                ++dropped;
+                RecalcMemory();
+            }
+        }
+    }
+    if (dropped > 0) {
+        Logger::Get().InfoTag("mem",
+            std::string("Undo pressure trim [") + (extreme ? "extreme" : "soft") +
+            "]: dropped " + std::to_string(dropped) +
+            " step(s) total=" + MemoryStats::FormatBytes(m_CurrentMemoryBytes));
+    }
+    return dropped;
 }
 
 // ---------------------------------------------------------------------------
