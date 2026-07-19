@@ -577,8 +577,8 @@ namespace UI {
         if (strcmp(actionName, "BucketFillTool") == 0) return "tool_fill";
         if (strcmp(actionName, "GradientTool") == 0) return "tool_gradient";
         if (strcmp(actionName, "SmudgeTool") == 0) return "tool_smudge";
-        if (strcmp(actionName, "BlurTool") == 0) return "tool_smudge"; // reuse until dedicated icon
-        if (strcmp(actionName, "StampTool") == 0) return "tool_brush"; // clone stamp uses brush base
+        if (strcmp(actionName, "BlurTool") == 0) return "tool_blur";
+        if (strcmp(actionName, "StampTool") == 0) return "tool_stamp";
         if (strcmp(actionName, "PipetteTool") == 0) return "tool_pipette";
         if (strcmp(actionName, "PanTool") == 0) return "tool_pan";
         if (strcmp(actionName, "TransformTool") == 0) return "tool_transform";
@@ -590,15 +590,15 @@ namespace UI {
         if (strcmp(actionName, "QuickSelectTool") == 0) return "tool_quick_select";
         if (strcmp(actionName, "SmartSelectTool") == 0) return "tool_smart_select";
         if (strcmp(actionName, "Reset") == 0) return "tool_reset";
-        // Vector tools re-use closest existing icons
+        // Vector tools — dedicated icons where available
         if (strcmp(actionName, "VectorRectTool") == 0) return "tool_select_rect";
         if (strcmp(actionName, "VectorEllipseTool") == 0) return "tool_select_ellipse";
-        if (strcmp(actionName, "VectorLineTool") == 0) return "tool_pan";
-        if (strcmp(actionName, "VectorPenTool") == 0) return "tool_lasso_poly";
+        if (strcmp(actionName, "VectorLineTool") == 0) return "tool_vector_line";
+        if (strcmp(actionName, "VectorPenTool") == 0) return "tool_vector_pen";
         if (strcmp(actionName, "VectorFreehandTool") == 0) return "tool_lasso";
         if (strcmp(actionName, "VectorPolygonTool") == 0) return "tool_lasso_poly";
         if (strcmp(actionName, "VectorSelectTool") == 0) return "tool_transform";
-        if (strcmp(actionName, "VectorEditTool") == 0) return "tool_wand";
+        if (strcmp(actionName, "VectorEditTool") == 0) return "tool_vector_pen";
         return "placeholder";
     }
 
@@ -628,11 +628,11 @@ namespace UI {
         if (strcmp(actionName, "Reset") == 0) isActive = false;
 
         ToolbarCenterCursor(size);
-        char tip[192];
+        char tip[256];
         if (strcmp(actionName, "Reset") == 0)
-            std::snprintf(tip, sizeof(tip), "Reset View");
+            std::snprintf(tip, sizeof(tip), "Reset View\nHome — fit document");
         else
-            std::snprintf(tip, sizeof(tip), "%s%s%s\nRight-click: rebind",
+            std::snprintf(tip, sizeof(tip), "%s%s%s\nRight-click: rebind hotkey",
                 displayName,
                 keybindString.empty() ? "" : "  (",
                 keybindString.empty() ? "" : (keybindString + ")").c_str());

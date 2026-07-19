@@ -261,14 +261,24 @@ std::string SvgIconCache::ResolvePath(const char* logicalName) const {
         roots.push_back(exeDir + "/../../../../testfield/svg/");
     }
 
+    // Logical name → on-disk file (aliases for older call sites)
     std::string candidates[] = {
         name + ".svg",
         (name == "tool_brush" ? "brush.svg" : ""),
         (name == "tool_eraser" ? "eraser.svg" : ""),
-        (name == "tool_fill" ? "fill_bucket.svg" : ""),
+        (name == "tool_fill" || name == "fill" ? "fill_bucket.svg" : ""),
+        (name == "fill_bucket" ? "fill_bucket.svg" : ""),
+        (name == "layer_fill" || name == "add_fill" ? "layer_fill.svg" : ""),
+        (name == "layer_vector" || name == "add_vector" ? "layer_vector.svg" : ""),
+        (name == "layer_merge" || name == "merge" ? "layer_merge.svg" : ""),
+        (name == "layer_fx" || name == "fx" || name == "effects" ? "layer_fx.svg" : ""),
+        (name == "tool_blur" || name == "blur" ? "tool_blur.svg" : ""),
+        (name == "tool_stamp" || name == "stamp" ? "tool_stamp.svg" : ""),
+        (name == "tool_vector_pen" || name == "vector_pen" ? "tool_vector_pen.svg" : ""),
+        (name == "tool_vector_line" || name == "vector_line" ? "tool_vector_line.svg" : ""),
+        (name == "tool_pipette" || name == "pipette" ? "tool_pipette.svg" : ""),
         (name == "brush" ? "brush.svg" : ""),
         (name == "eraser" ? "eraser.svg" : ""),
-        (name == "fill" || name == "fill_bucket" ? "fill_bucket.svg" : ""),
         "placeholder.svg",
     };
 

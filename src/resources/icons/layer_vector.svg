@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" fill="#000000" viewBox="0 0 24 24" width="24" height="24">
+  <!-- pen body -->
+  <path d="M14.2 2.8 L21.2 9.8 L10.5 20.5 L3.5 20.5 L3.5 13.5 Z"/>
+  <!-- node accents -->
+  <path d="M3 12 L5.5 12 L5.5 14.5 L3 14.5 Z"/>
+  <path d="M12 2.5 L14.5 2.5 L14.5 5 L12 5 Z"/>
+</svg>

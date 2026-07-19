@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" fill="#000000" viewBox="0 0 24 24" width="24" height="24">
+  <!-- filled pen body -->
+  <path d="M14.2 2.8 L21.2 9.8 L10.5 20.5 L3.5 20.5 L3.5 13.5 Z"/>
+  <!-- cut highlight (hole via outer rim style — solid notch) -->
+  <path d="M15.4 5.2 L18.8 8.6 L17.5 9.9 L14.1 6.5 Z"/>
+</svg>

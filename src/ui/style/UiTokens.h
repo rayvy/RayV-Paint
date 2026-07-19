@@ -58,8 +58,8 @@ struct UiTokens {
     float holdThresholdSec = 0.18f;
     float dropdownPanelAlpha = 0.94f;
 
-    // Tooltip
-    float tooltipDelaySec = 1.0f;
+    // Tooltip (short delay — long delay felt like "missing" tips)
+    float tooltipDelaySec = 0.40f;
 
     // Modal/popup scrim (darken, not bleach)
     float scrimDarken = 0.45f; // ~45% black overlay (~user asked ~15% blur + darken)

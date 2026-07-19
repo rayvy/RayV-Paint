@@ -154,12 +154,8 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 ImGui::SameLine(0, hdrGap);
                 const auto& tok = Ui::Tokens();
                 bool hasFxTop = !al.filters.empty() || !al.styles.empty();
-                if (hasFxTop) {
-                    ImVec4 ac = tok.accent;
-                    ac.w = 0.55f;
-                    ImGui::PushStyleColor(ImGuiCol_Button, ac);
-                }
-                if (ImGui::Button("Fx##top", ImVec2(40, 0))) {
+                if (Ui::IconButton("##fx_top", "layer_fx", ImVec2(28, 28),
+                        "Layer Effects (styles + filters)…", true, hasFxTop).clicked) {
                     state.showLayerEffects = true;
                     if (!al.styles.empty()) {
                         state.layerEffectsSelKind = 0;
@@ -175,9 +171,6 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         state.layerEffectsFocusIdx = -1;
                     }
                 }
-                if (hasFxTop) ImGui::PopStyleColor();
-                if (ImGui::IsItemHovered())
-                    Ui::Tooltip("Layer Effects (filters + styles)…");
                 ImGui::SameLine(0, 4);
                 {
                     bool fxOn = canvas.GetEffectsPreviewEnabled();
@@ -190,7 +183,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         ac.w = 0.40f;
                         ImGui::PushStyleColor(ImGuiCol_Button, ac);
                     }
-                    if (ImGui::Button(fxOn ? "FX##fxprev" : "off##fxprev", ImVec2(36, 0)))
+                    if (ImGui::Button(fxOn ? "ON##fxprev" : "off##fxprev", ImVec2(36, 0)))
                         canvas.SetEffectsPreviewEnabled(!fxOn);
                     ImGui::PopStyleColor();
                     if (ImGui::IsItemHovered())
@@ -968,47 +961,34 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
             float startX = std::max(0.f, (ImGui::GetContentRegionAvail().x - total) * 0.5f);
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + startX);
 
-            if (Ui::IconButton("##addL", "layer_add", ImVec2(iconSz, iconSz), "Add Layer").clicked)
+            if (Ui::IconButton("##addL", "layer_add", ImVec2(iconSz, iconSz),
+                    "Add paint layer").clicked)
                 doAdd();
             ImGui::SameLine(0, gap);
-            if (Ui::IconButton("##addF", "fill_bucket", ImVec2(iconSz, iconSz), "Add Fill Layer").clicked)
+            if (Ui::IconButton("##addF", "layer_fill", ImVec2(iconSz, iconSz),
+                    "Add Fill Layer\nSolid / multi-map color + optional texture").clicked)
                 doAddFill();
             ImGui::SameLine(0, gap);
-            // Vector: no dedicated SVG yet — themed text chip matching icon size
-            {
-                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btok.rSm);
-                ImGui::PushStyleColor(ImGuiCol_Button, btok.bgElevated);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btok.bgElevatedSoft);
-                ImGui::PushStyleColor(ImGuiCol_Text, btok.textPrimary);
-                if (ImGui::Button("V##addV", ImVec2(iconSz, iconSz)))
-                    doAddVector();
-                ImGui::PopStyleColor(3);
-                ImGui::PopStyleVar();
-                if (ImGui::IsItemHovered())
-                    Ui::Tooltip("Add Vector Layer — Rect / Ellipse / Pen tools");
-            }
+            if (Ui::IconButton("##addV", "layer_vector", ImVec2(iconSz, iconSz),
+                    "Add Vector Layer\nRect / Ellipse / Pen tools in the Toolbar").clicked)
+                doAddVector();
             ImGui::SameLine(0, gap);
-            if (Ui::IconButton("##addG", "layer_group_add", ImVec2(iconSz, iconSz), "Add Group").clicked)
+            if (Ui::IconButton("##addG", "layer_group_add", ImVec2(iconSz, iconSz),
+                    "Add Group").clicked)
                 doGroup();
             ImGui::SameLine(0, gap);
-            if (Ui::IconButton("##dup", "layer_duplicate", ImVec2(iconSz, iconSz), "Duplicate (Ctrl+J)").clicked)
+            if (Ui::IconButton("##dup", "layer_duplicate", ImVec2(iconSz, iconSz),
+                    "Duplicate selection (Ctrl+J)").clicked)
                 doDup();
             ImGui::SameLine(0, gap);
-            {
-                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btok.rSm);
-                ImGui::PushStyleColor(ImGuiCol_Button, btok.bgElevated);
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btok.bgElevatedSoft);
-                ImGui::PushStyleColor(ImGuiCol_Text, btok.textPrimary);
-                if (ImGui::Button("M##merge", ImVec2(iconSz, iconSz)))
-                    doMerge();
-                ImGui::PopStyleColor(3);
-                ImGui::PopStyleVar();
-                if (ImGui::IsItemHovered())
-                    Ui::Tooltip("Merge selected / Merge Down (blend modes applied)");
-            }
+            if (Ui::IconButton("##merge", "layer_merge", ImVec2(iconSz, iconSz),
+                    "Merge selected / Merge Down\nBlend modes applied into result").clicked)
+                doMerge();
             ImGui::SameLine(0, gap);
-            if (Ui::IconButton("##del", "layer_delete", ImVec2(iconSz, iconSz), "Delete selection / active").clicked)
+            if (Ui::IconButton("##del", "layer_delete", ImVec2(iconSz, iconSz),
+                    "Delete selection / active layer").clicked)
                 doDel();
+            (void)btok;
         }
 
         Ui::EndDockPanel();
