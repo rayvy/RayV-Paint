@@ -80,6 +80,8 @@ void TileCache::EvictLRU() {
         }
     }
     // Shared TileData may live on in undo history after eviction.
+    // GPU still has the slot — queue clear so compose does not draw a ghost.
+    m_PendingGpuClears.insert(victim);
     m_Tiles.erase(victim);
 }
 
@@ -624,7 +626,8 @@ void TileCache::MarkDirty(int tileX, int tileY) {
 
 void TileCache::MarkAllDirty() {
     for (auto& [k, t] : m_Tiles) t.dirty = true;
-    m_PendingGpuClears.clear();
+    // Keep PendingGpuClears — absent tiles still need a zero/remove upload.
+    // Callers that fully ClearSurface may clear pending themselves.
 }
 
 void TileCache::ClearDirty(int tileX, int tileY) {
@@ -691,6 +694,26 @@ TileSnapshot TileCache::SnapshotTile(int tileX, int tileY) const {
     return TileSnapshot{ t->data };
 }
 
+void TileCache::DetachLiveFromHistory(int tileX, int tileY) {
+    Tile* t = FindTile(tileX, tileY);
+    if (!t || !t->data) return;
+    // If live still shares the history blob (use_count > 1), clone so history is immutable.
+    if (t->data.use_count() > 1) {
+        t->data = std::make_shared<TileData>(*t->data);
+    }
+}
+
+TileSnapshot TileCache::DeepCopySnapshot(const TileSnapshot& snap) {
+    if (!snap.data) return {};
+    return TileSnapshot{ std::make_shared<TileData>(*snap.data) };
+}
+
+void TileCache::EnsureResidentCapacityForFullGrid() {
+    const size_t need = (size_t)std::max(1, m_TilesX) * (size_t)std::max(1, m_TilesY);
+    if (m_MaxTilesInRAM < need)
+        m_MaxTilesInRAM = need;
+}
+
 void TileCache::RestoreTile(int tileX, int tileY, const TileSnapshot& snap) {
     if (tileX < 0 || tileY < 0 || tileX >= m_TilesX || tileY >= m_TilesY) return;
     const uint32_t key = Key(tileX, tileY);
@@ -702,11 +725,13 @@ void TileCache::RestoreTile(int tileX, int tileY, const TileSnapshot& snap) {
     }
 
     m_PendingGpuClears.erase(key);
+    // Undo/redo must never drop other restored tiles: grow cap to full grid first.
+    EnsureResidentCapacityForFullGrid();
     if (m_Tiles.size() >= m_MaxTilesInRAM && !m_Tiles.count(key)) {
         EvictLRU();
     }
     Tile& t = m_Tiles[key];
-    t.data       = snap.data; // share restored history blob
+    t.data       = snap.data; // share restored history blob (immutable while use_count>1)
     t.dirty      = true;
     t.lastAccess = ++m_AccessCounter;
 }

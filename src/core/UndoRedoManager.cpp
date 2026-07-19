@@ -31,45 +31,47 @@ PaintStrokeCommand::PaintStrokeCommand(const std::string& name, int layerIdx,
                                        std::vector<TileDelta> deltas)
     : m_Name(name), m_LayerIdx(layerIdx), m_Deltas(std::move(deltas)) {}
 
-void PaintStrokeCommand::Undo(Canvas* canvas) {
+static void ApplyPaintStrokeDeltas(Canvas* canvas, int layerIdx,
+                                   const std::vector<TileDelta>& deltas,
+                                   bool useNew) {
     auto& layers = canvas->GetLayers();
-    if (m_LayerIdx < 0 || m_LayerIdx >= (int)layers.size()) return;
-    auto& layer = layers[m_LayerIdx];
+    if (layerIdx < 0 || layerIdx >= (int)layers.size()) return;
+    auto& layer = layers[layerIdx];
     if (!layer.tileCache) return;
 
-    for (const auto& delta : m_Deltas) {
-        layer.tileCache->RestoreTile(delta.tileX, delta.tileY, delta.oldState);
-        // Mark dirty so sparse filter refresh picks these tiles up
+    // Undo/redo of Move/Transform can touch many sparse tiles — never LRU-drop mid-restore.
+    layer.tileCache->EnsureResidentCapacityForFullGrid();
+
+    for (const auto& delta : deltas) {
+        const TileSnapshot& snap = useNew ? delta.newState : delta.oldState;
+        layer.tileCache->RestoreTile(delta.tileX, delta.tileY, snap);
+        // MarkDirty: present → dirty upload; absent → PendingGpuClear (zero/remove on GPU)
         layer.tileCache->MarkDirty(delta.tileX, delta.tileY);
+        // Live must not alias history blobs — next paint/move would mutate undo memory.
+        if (!snap.IsEmpty())
+            layer.tileCache->DetachLiveFromHistory(delta.tileX, delta.tileY);
     }
-    layer.needsUpload  = true;
-    // Prefer sparse refilter over full-document filtersDirty thrash
-    if (!layer.filters.empty())
-        layer.filtersDirty = false; // ComposeLayers will RefreshFilteredCache(onlyDirty)
+
+    // Stale FX/presentation must not be drawn over restored raw (shows tile holes).
+    layer.filteredCache.reset();
+    layer.presentationCache.reset();
+    layer.filtersDirty = !layer.filters.empty();
     layer.presentationDirty = layer.HasEnabledStyles();
     layer.stylesDirty = layer.HasEnabledStyles();
-    // Parents + GPU kind rebind (do not full-filter-dirty — tiles already marked)
-    canvas->NotifyLayerVisualsChanged(m_LayerIdx, /*contentPixelsChanged=*/true,
-                                      /*markFiltersDirty=*/false);
+    layer.needsUpload = true;
+    layer.gpuDisplayKind = 0xFF; // force ClearSurface + full re-upload in ComposeLayers
+    layer.thumbDirty = true;
+
+    canvas->NotifyLayerVisualsChanged(layerIdx, /*contentPixelsChanged=*/true,
+                                      /*markFiltersDirty=*/true);
+}
+
+void PaintStrokeCommand::Undo(Canvas* canvas) {
+    ApplyPaintStrokeDeltas(canvas, m_LayerIdx, m_Deltas, /*useNew=*/false);
 }
 
 void PaintStrokeCommand::Redo(Canvas* canvas) {
-    auto& layers = canvas->GetLayers();
-    if (m_LayerIdx < 0 || m_LayerIdx >= (int)layers.size()) return;
-    auto& layer = layers[m_LayerIdx];
-    if (!layer.tileCache) return;
-
-    for (const auto& delta : m_Deltas) {
-        layer.tileCache->RestoreTile(delta.tileX, delta.tileY, delta.newState);
-        layer.tileCache->MarkDirty(delta.tileX, delta.tileY);
-    }
-    layer.needsUpload  = true;
-    if (!layer.filters.empty())
-        layer.filtersDirty = false;
-    layer.presentationDirty = layer.HasEnabledStyles();
-    layer.stylesDirty = layer.HasEnabledStyles();
-    canvas->NotifyLayerVisualsChanged(m_LayerIdx, /*contentPixelsChanged=*/true,
-                                      /*markFiltersDirty=*/false);
+    ApplyPaintStrokeDeltas(canvas, m_LayerIdx, m_Deltas, /*useNew=*/true);
 }
 
 size_t PaintStrokeCommand::GetOverheadBytes() const {

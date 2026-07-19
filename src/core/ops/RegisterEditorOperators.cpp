@@ -28,11 +28,17 @@ void RegisterEditorOperators(OperatorHost host) {
 
     // --- Edit ---
     R.Register("Undo", [H] {
-        if (H().canvas) H().canvas->Undo();
+        if (!H().canvas) return OperatorResult::Cancelled;
+        if (!H().canvas->CanUndo())
+            return OperatorResult::Cancelled; // past history start — no-op, never corrupt
+        H().canvas->Undo();
         return Ok();
     });
     R.Register("Redo", [H] {
-        if (H().canvas) H().canvas->Redo();
+        if (!H().canvas) return OperatorResult::Cancelled;
+        if (!H().canvas->CanRedo())
+            return OperatorResult::Cancelled;
+        H().canvas->Redo();
         return Ok();
     });
     R.Register("FillSecondary", [H] {
@@ -313,7 +319,9 @@ void RegisterEditorOperators(OperatorHost host) {
 
     // --- Selection / Image ---
     R.Register("SelectAll", [H] {
-        if (H().canvas) H().canvas->SelectAll();
+        if (!H().canvas) return OperatorResult::Cancelled;
+        H().canvas->SelectAll();
+        if (H().device) H().canvas->UpdateSelectionMaskTexture(H().device);
         return Ok();
     });
     R.Register("Deselect", [H] {
@@ -323,7 +331,9 @@ void RegisterEditorOperators(OperatorHost host) {
         return Ok();
     });
     R.Register("InvertSelection", [H] {
-        if (H().canvas) H().canvas->InvertSelection();
+        if (!H().canvas) return OperatorResult::Cancelled;
+        H().canvas->InvertSelection();
+        if (H().device) H().canvas->UpdateSelectionMaskTexture(H().device);
         return Ok();
     });
     R.Register("CropToSelection", [H] {

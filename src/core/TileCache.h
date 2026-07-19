@@ -130,6 +130,13 @@ public:
     // ---- Shared snapshots (cheap — shares TileData) ----
     TileSnapshot SnapshotTile(int tileX, int tileY) const;
     void RestoreTile(int tileX, int tileY, const TileSnapshot& snap);
+    // After SnapshotTile for undo newState: clone live away from the shared history
+    // blob so subsequent LockTile/writes can never mutate committed history.
+    void DetachLiveFromHistory(int tileX, int tileY);
+    // Expand resident cap to full document grid (never LRU-drop undo restores).
+    void EnsureResidentCapacityForFullGrid();
+    // Deep-copy a snapshot so undo history owns an immutable blob (never aliases live).
+    static TileSnapshot DeepCopySnapshot(const TileSnapshot& snap);
 
 private:
     struct Tile {

@@ -168,9 +168,12 @@ static void StampAt(TileCache& cache, float px, float py,
                         }
                     }
 
+                    // Selection as temp paint mask: full-document size required.
+                    // Empty / wrong size = no clip (paint whole canvas).
                     float selVal = 1.0f;
-                    if (!selectionMask.empty()) {
-                        selVal = selectionMask[(size_t)y * width + x] / 255.0f;
+                    if (!selectionMask.empty() &&
+                        selectionMask.size() == (size_t)width * (size_t)height) {
+                        selVal = selectionMask[(size_t)y * (size_t)width + (size_t)x] / 255.0f;
                         if (selVal <= 0.0f) continue;
                     }
 

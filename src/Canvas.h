@@ -904,7 +904,8 @@ private:
                          int tx, int ty, const uint8_t* data, int bytesPerPixel,
                          int docW, int docH);
     // Upload into layer: GpuTileStore if surface active, else classic texture.
-    void UploadLayerContentTile(ID3D11Device* device, ID3D11DeviceContext* context,
+    // false → GPU upload failed; caller must keep tile dirty for retry.
+    bool UploadLayerContentTile(ID3D11Device* device, ID3D11DeviceContext* context,
                                 Layer& layer, int tx, int ty, const uint8_t* data, int bpp);
 
     PaintTarget m_PaintTarget = PaintTarget::LayerContent;

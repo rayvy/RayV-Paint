@@ -49,6 +49,10 @@ static std::wstring UTF8ToWString(const std::string& str) {
 extern "C" unsigned char* stbi_zlib_compress(unsigned char* data, int data_len, int* out_len, int quality);
 extern "C" char* stbi_zlib_decode_malloc(const char* buffer, int len, int* outlen);
 
+// Defined later (near BackupTile); used by paint/transform commit paths.
+static std::vector<TileDelta> SealActiveStrokeDeltas(
+    std::unordered_map<int, TileDelta>& active, TileCache* cache);
+
 using json = nlohmann::json;
 
 // ============================================================
@@ -92,9 +96,20 @@ static uint8_t SelF2U8(float v) {
 static float SelU82F(uint8_t v) {
     return v / 255.f;
 }
+static float GetSelWeight(const std::vector<uint8_t>& mask, int w, int h, int x, int y, bool hasSel) {
+    // Active selection = hasSel + full-document mask. Empty / wrong size → full canvas (no clip).
+    if (!hasSel || mask.empty() || w <= 0 || h <= 0) return 1.f;
+    if (mask.size() != (size_t)w * (size_t)h) return 1.f;
+    if (x < 0 || y < 0 || x >= w || y >= h) return 0.f;
+    return SelU82F(mask[(size_t)y * (size_t)w + (size_t)x]);
+}
+// Overload kept for call sites that only have width (document square indexing).
 static float GetSelWeight(const std::vector<uint8_t>& mask, int w, int x, int y, bool hasSel) {
-    if (!hasSel || mask.empty()) return 1.f;
-    return SelU82F(mask[(size_t)y * w + x]);
+    // height unknown — require exact size match via width when square not assumed:
+    if (!hasSel || mask.empty() || w <= 0) return 1.f;
+    if ((mask.size() % (size_t)w) != 0) return 1.f;
+    const int h = (int)(mask.size() / (size_t)w);
+    return GetSelWeight(mask, w, h, x, y, hasSel);
 }
 // Full-document float composites explode on large textures (16K RGBA32F ≈ 4 GiB).
 static constexpr int kMaxFlatCompositePixels = 8192 * 8192;
@@ -930,21 +945,25 @@ void Canvas::UploadLayerTile(ID3D11DeviceContext* context, ID3D11Texture2D* dest
     if (device) device->Release();
 }
 
-void Canvas::UploadLayerContentTile(ID3D11Device* device, ID3D11DeviceContext* context,
+// Returns false if GPU upload failed (caller must keep tile dirty for retry).
+bool Canvas::UploadLayerContentTile(ID3D11Device* device, ID3D11DeviceContext* context,
                                     Layer& layer, int tx, int ty, const uint8_t* data, int bpp) {
-    if (!context || !data || bpp < 1) return;
+    if (!context || !data || bpp < 1) return false;
     const int x0 = tx * TILE_SIZE;
     const int y0 = ty * TILE_SIZE;
     const int w = std::min(TILE_SIZE, m_Width - x0);
     const int h = std::min(TILE_SIZE, m_Height - y0);
-    if (w < 1 || h < 1) return;
+    if (w < 1 || h < 1) return true;
     const int pitch = TILE_SIZE * bpp;
     if (layer.gpuSurfaceId && device) {
-        m_GpuTiles.UploadTile(device, context, layer.gpuSurfaceId, tx, ty, data, pitch, w, h);
-        return;
+        return m_GpuTiles.UploadTile(device, context, layer.gpuSurfaceId, tx, ty, data, pitch, w, h);
     }
-    if (layer.texture)
+    if (layer.texture) {
         UploadLayerTile(context, layer.texture, tx, ty, data, bpp, m_Width, m_Height);
+        return true;
+    }
+    // No GPU backing yet — not a hard failure; recreate path will upload later.
+    return true;
 }
 
 void Canvas::EnsureGpuBlur(ID3D11Device* device, ID3D11DeviceContext* ctx) {
@@ -1491,6 +1510,10 @@ void Canvas::PaintMaskStamp(float cx, float cy, const BrushSettings& brush) {
     const float softStart = radius * hardness;
     const float r2 = radius * radius;
 
+    // Selection is a temp mask: paint/erase layer mask only inside selection.
+    const bool clipSel = m_HasSelection &&
+        m_SelectionMask.size() == (size_t)m_Width * (size_t)m_Height;
+
     for (int y = y0; y <= y1; ++y) {
         for (int x = x0; x <= x1; ++x) {
             float dx = (float)x + 0.5f - cx;
@@ -1504,6 +1527,11 @@ void Canvas::PaintMaskStamp(float cx, float cy, const BrushSettings& brush) {
                 w = w * w * (3.f - 2.f * w);
             }
             w *= opacity;
+            if (clipSel) {
+                const float sel = SelU82F(m_SelectionMask[(size_t)y * (size_t)m_Width + (size_t)x]);
+                if (sel <= 0.f) continue;
+                w *= sel;
+            }
             if (w <= 0.f) continue;
             float cur = layer.maskTiles->Get(x, y) / 255.f;
             float out = cur * (1.f - w) + paintVal * w;
@@ -1582,14 +1610,7 @@ void Canvas::ApplyLayerMask(int index) {
     DeleteLayerMask(index);
     
     if (!m_ActiveStrokeDeltas.empty()) {
-        std::vector<TileDelta> deltas;
-        for (auto& pair : m_ActiveStrokeDeltas) {
-            auto& delta = pair.second;
-            delta.newState = layer.tileCache
-                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                : TileSnapshot{};
-            deltas.push_back(std::move(delta));
-        }
+        auto deltas = SealActiveStrokeDeltas(m_ActiveStrokeDeltas, layer.tileCache.get());
         m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Apply Mask", index, std::move(deltas)));
         m_ActiveStrokeDeltas.clear();
     }
@@ -2612,6 +2633,26 @@ void Canvas::ToggleLayerIsolation(int layerIdx) {
     m_CompositeDirty = true;
 }
 
+// Snapshot newState + deep-copy both ends into an immutable undo delta list.
+static std::vector<TileDelta> SealActiveStrokeDeltas(
+    std::unordered_map<int, TileDelta>& active,
+    TileCache* cache) {
+    std::vector<TileDelta> deltas;
+    deltas.reserve(active.size());
+    for (auto& pair : active) {
+        auto& delta = pair.second;
+        delta.newState = cache ? cache->SnapshotTile(delta.tileX, delta.tileY) : TileSnapshot{};
+        if (delta.oldState.data && delta.newState.data &&
+            delta.oldState.data.get() == delta.newState.data.get())
+            continue;
+        if (!delta.oldState.data && !delta.newState.data) continue;
+        delta.oldState = TileCache::DeepCopySnapshot(delta.oldState);
+        delta.newState = TileCache::DeepCopySnapshot(delta.newState);
+        deltas.push_back(std::move(delta));
+    }
+    return deltas;
+}
+
 void Canvas::BackupTile(int tileX, int tileY) {
     if (m_ActiveLayerIdx < 0 || m_ActiveLayerIdx >= (int)m_Layers.size()) return;
     int numTilesX = (m_Width + TILE_SIZE - 1) / TILE_SIZE;
@@ -2950,9 +2991,11 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
 
         // Place the very first stamp immediately
         // CRITICAL: never pass a temporary copy of the full selection mask (8K = 64 MiB/dab).
+        // Selection acts as a temp paint mask: empty / size-mismatch → no clip.
         static const std::vector<uint8_t> kEmptySel;
+        const size_t selNeed = (size_t)m_Width * (size_t)m_Height;
         const std::vector<uint8_t>& selMask =
-            (m_HasSelection && !m_SelectionMask.empty()) ? m_SelectionMask : kEmptySel;
+            (m_HasSelection && m_SelectionMask.size() == selNeed) ? m_SelectionMask : kEmptySel;
         PaintEngine::DrawStamp(*m_Layers[m_ActiveLayerIdx].tileCache,
                                currRawX, currRawY, activeBrush,
                                m_MirrorHorizontal, m_MirrorVertical,
@@ -3004,10 +3047,11 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
                           static_cast<float>(m_Width) - stabilizedX, static_cast<float>(m_Height) - stabilizedY);
         }
 
-        // Draw stroke segment (no selection-mask copy)
+        // Draw stroke segment (no selection-mask copy); selection = temp paint mask
         static const std::vector<uint8_t> kEmptySelUpd;
+        const size_t selNeedUpd = (size_t)m_Width * (size_t)m_Height;
         const std::vector<uint8_t>& selMask =
-            (m_HasSelection && !m_SelectionMask.empty()) ? m_SelectionMask : kEmptySelUpd;
+            (m_HasSelection && m_SelectionMask.size() == selNeedUpd) ? m_SelectionMask : kEmptySelUpd;
         PaintEngine::DrawStrokeSegment(*m_Layers[m_ActiveLayerIdx].tileCache,
                                        m_PrevStabilizedX, m_PrevStabilizedY,
                                        stabilizedX, stabilizedY,
@@ -3071,14 +3115,7 @@ void Canvas::PaintOnActiveLayer(float currRawX, float currRawY, StrokePhase phas
             std::vector<TileDelta> deltas;
             deltas.reserve(m_ActiveStrokeDeltas.size());
 
-            for (auto& pair : m_ActiveStrokeDeltas) {
-                auto& delta = pair.second;
-                // Shared snapshot AFTER the stroke (shares live TileData).
-                delta.newState = layer.tileCache
-                    ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                    : TileSnapshot{};
-                deltas.push_back(std::move(delta));
-            }
+            deltas = SealActiveStrokeDeltas(m_ActiveStrokeDeltas, layer.tileCache.get());
 
             auto cmd = std::make_shared<PaintStrokeCommand>(
                 brush.erase ? "Eraser Stroke" : "Brush Stroke",
@@ -3396,16 +3433,28 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 m_IsStrokeActive && (int)i == m_ActiveLayerIdx;
 
             if (!isActiveStrokeLayer) {
+                // ClearDirty after ForEach (not during) — pending-clear set is iterated.
+                std::vector<std::pair<int,int>> uploaded;
+                uploaded.reserve(64);
+                bool anyUploadFail = false;
                 src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int /*pitch*/) {
                     layerHadUploads = true;
                     ++dirtyUploaded;
-                    UploadLayerContentTile(device, context, layer, tx, ty, data, bpp);
-                    InvalidateCompositeRect(tx * TILE_SIZE, ty * TILE_SIZE,
-                        std::min(m_Width - 1, tx * TILE_SIZE + TILE_SIZE - 1),
-                        std::min(m_Height - 1, ty * TILE_SIZE + TILE_SIZE - 1));
+                    if (UploadLayerContentTile(device, context, layer, tx, ty, data, bpp)) {
+                        uploaded.emplace_back(tx, ty);
+                        InvalidateCompositeRect(tx * TILE_SIZE, ty * TILE_SIZE,
+                            std::min(m_Width - 1, tx * TILE_SIZE + TILE_SIZE - 1),
+                            std::min(m_Height - 1, ty * TILE_SIZE + TILE_SIZE - 1));
+                    } else {
+                        anyUploadFail = true;
+                    }
                 });
-                src->ClearAllDirty();
-                layer.needsUpload = false;
+                for (const auto& p : uploaded)
+                    src->ClearDirty(p.first, p.second);
+                // Never wipe all dirty after partial fail — leaves permanent GPU tile holes.
+                layer.needsUpload = anyUploadFail || src->HasPendingGpuWork();
+                if (layer.needsUpload)
+                    m_CompositeDirty = true;
             } else {
                 struct Key { int tx, ty; float d2; };
                 std::vector<Key> keys;
@@ -3427,13 +3476,14 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                         if (zeroTile.size() < need) zeroTile.assign(need, 0);
                         data = zeroTile.data();
                     }
-                    UploadLayerContentTile(device, context, layer, tx, ty, data, bpp);
-                    src->ClearDirty(tx, ty);
-                    InvalidateCompositeRect(tx * TILE_SIZE, ty * TILE_SIZE,
-                        std::min(m_Width - 1, tx * TILE_SIZE + TILE_SIZE - 1),
-                        std::min(m_Height - 1, ty * TILE_SIZE + TILE_SIZE - 1));
-                    layerHadUploads = true;
-                    ++dirtyUploaded;
+                    if (UploadLayerContentTile(device, context, layer, tx, ty, data, bpp)) {
+                        src->ClearDirty(tx, ty);
+                        InvalidateCompositeRect(tx * TILE_SIZE, ty * TILE_SIZE,
+                            std::min(m_Width - 1, tx * TILE_SIZE + TILE_SIZE - 1),
+                            std::min(m_Height - 1, ty * TILE_SIZE + TILE_SIZE - 1));
+                        layerHadUploads = true;
+                        ++dirtyUploaded;
+                    }
                 }
                 const bool lodDeferred = src->HasPendingGpuWork();
                 layer.needsUpload = lodDeferred;
@@ -3456,11 +3506,13 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             }
         }
 
-        // Selection mask upload
-        if (m_SelectionMaskNeedsUpload && m_SelectionMaskTexture && !m_SelectionMask.empty()) {
-            context->UpdateSubresource(m_SelectionMaskTexture, 0, nullptr,
-                m_SelectionMask.data(), m_Width * sizeof(uint8_t), 0);
-            m_SelectionMaskNeedsUpload = false;
+        // Selection mask: create GPU texture if needed + upload (ants + future GPU tools).
+        // Previous path only uploaded when texture already existed → Select All / undo
+        // after dormancy left m_HasSelection true but no SRV (invisible ants).
+        if (m_HasSelection && (m_SelectionMaskNeedsUpload || !m_SelectionMaskSRV)) {
+            UpdateSelectionMaskTexture(device);
+        } else if (!m_HasSelection && m_SelectionMaskNeedsUpload && m_SelectionMaskTexture) {
+            UpdateSelectionMaskTexture(device); // clear GPU mask on deselect
         }
 
         device->Release();
@@ -4026,30 +4078,44 @@ void Canvas::Render(ID3D11DeviceContext* context, float viewportWidth, float vie
     context->DrawIndexed(6, 0, 0);
     context->RSSetState(nullptr);
 
-    // 3.5 Draw selection outline overlay if active
-    if (m_HasSelection && m_SelectionMaskSRV) {
-        m_SelectionOutlineTime += 0.016f; // approx 60 FPS step
-        
-        // Re-upload constant buffer with u_ViewportFlags.z set to m_SelectionOutlineTime
-        D3D11_MAPPED_SUBRESOURCE mappedResource2;
-        if (SUCCEEDED(context->Map(m_ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource2))) {
-            CanvasBuffer* cb = (CanvasBuffer*)mappedResource2.pData;
-            cb->viewportSizeAndZoom = DirectX::XMFLOAT4(viewportWidth, viewportHeight, m_Zoom, m_RotationAngle);
-            cb->offsetAndCanvasSize = DirectX::XMFLOAT4(m_Pan.x, m_Pan.y, (float)m_Width, (float)m_Height);
-            cb->channelMasks = DirectX::XMFLOAT4(m_ChannelR ? 1.0f : 0.0f, m_ChannelG ? 1.0f : 0.0f, m_ChannelB ? 1.0f : 0.0f, m_ChannelA ? 1.0f : 0.0f);
-            cb->viewportFlags = DirectX::XMFLOAT4(m_ViewportFlipH ? 1.0f : 0.0f, m_ViewportFlipV ? 1.0f : 0.0f, m_SelectionOutlineTime, 0.0f);
-            context->Unmap(m_ConstantBuffer, 0);
+    // 3.5 Draw selection outline overlay if active (marching ants)
+    if (m_HasSelection && m_SelectionOutlinePixelShader) {
+        // Guarantee GPU mask exists even if ComposeLayers early-out skipped upload.
+        if (!m_SelectionMaskSRV || m_SelectionMaskNeedsUpload) {
+            ID3D11Device* dev = nullptr;
+            context->GetDevice(&dev);
+            if (dev) {
+                UpdateSelectionMaskTexture(dev);
+                dev->Release();
+            }
         }
+        if (m_SelectionMaskSRV) {
+            m_SelectionOutlineTime += 0.016f; // approx 60 FPS step
 
-        context->PSSetShader(m_SelectionOutlinePixelShader, nullptr, 0);
-        context->PSSetShaderResources(1, 1, &m_SelectionMaskSRV);
-        
-        context->RSSetState(m_RasterizerState);
-        context->DrawIndexed(6, 0, 0);
-        context->RSSetState(nullptr);
-        
-        ID3D11ShaderResourceView* nullSRV1 = nullptr;
-        context->PSSetShaderResources(1, 1, &nullSRV1);
+            // Re-upload constant buffer with u_ViewportFlags.z set to m_SelectionOutlineTime
+            D3D11_MAPPED_SUBRESOURCE mappedResource2;
+            if (SUCCEEDED(context->Map(m_ConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource2))) {
+                CanvasBuffer* cb = (CanvasBuffer*)mappedResource2.pData;
+                cb->viewportSizeAndZoom = DirectX::XMFLOAT4(viewportWidth, viewportHeight, m_Zoom, m_RotationAngle);
+                cb->offsetAndCanvasSize = DirectX::XMFLOAT4(m_Pan.x, m_Pan.y, (float)m_Width, (float)m_Height);
+                cb->channelMasks = DirectX::XMFLOAT4(m_ChannelR ? 1.0f : 0.0f, m_ChannelG ? 1.0f : 0.0f, m_ChannelB ? 1.0f : 0.0f, m_ChannelA ? 1.0f : 0.0f);
+                cb->viewportFlags = DirectX::XMFLOAT4(m_ViewportFlipH ? 1.0f : 0.0f, m_ViewportFlipV ? 1.0f : 0.0f, m_SelectionOutlineTime, 0.0f);
+                context->Unmap(m_ConstantBuffer, 0);
+            }
+
+            // Opaque overwrite — ants must not depend on leftover blend from compose.
+            context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
+            context->PSSetShader(m_SelectionOutlinePixelShader, nullptr, 0);
+            context->PSSetShaderResources(1, 1, &m_SelectionMaskSRV);
+            context->PSSetSamplers(0, 1, &m_SamplerState);
+
+            context->RSSetState(m_RasterizerState);
+            context->DrawIndexed(6, 0, 0);
+            context->RSSetState(nullptr);
+
+            ID3D11ShaderResourceView* nullSRV1 = nullptr;
+            context->PSSetShaderResources(1, 1, &nullSRV1);
+        }
     }
 
     // Clean slot
@@ -4272,6 +4338,11 @@ bool Canvas::LoadImageToLayer(ID3D11Device* device, const std::string& filepath,
         (m_Layers.size() == 1 &&
          m_Layers[0].name == "Background" &&
          (!m_Layers[0].tileCache || m_Layers[0].tileCache->IsEmpty()));
+
+    // CRITICAL: import must reset undo. Stale "New Layer" / paint cmds from a blank
+    // project survive m_Layers.clear() and a later Ctrl+Z removes the imported layer
+    // (session "out of bounds" → permanent tile/layer corruption on redo).
+    ClearUndoHistory();
 
     if (isFirst) {
         m_Width  = imgWidth;
@@ -6276,22 +6347,8 @@ void Canvas::CommitTransformation(const std::string& actionName) {
     // Paint strokes only backup touched tiles — do NOT invent empty-oldState
     // entries for untouched existing tiles (that would erase them on undo).
 
-    std::vector<TileDelta> deltas;
-    deltas.reserve(m_ActiveStrokeDeltas.size());
-
-    for (auto& pair : m_ActiveStrokeDeltas) {
-        auto& delta = pair.second;
-        delta.newState = layer.tileCache
-            ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-            : TileSnapshot{};
-        // Skip no-op (shared blob unchanged = no write / COW did not occur).
-        if (delta.oldState.data && delta.newState.data &&
-            delta.oldState.data.get() == delta.newState.data.get()) {
-            continue;
-        }
-        if (!delta.oldState.data && !delta.newState.data) continue;
-        deltas.push_back(std::move(delta));
-    }
+    std::vector<TileDelta> deltas = SealActiveStrokeDeltas(
+        m_ActiveStrokeDeltas, layer.tileCache.get());
 
     if (!deltas.empty()) {
         auto cmd = std::make_shared<PaintStrokeCommand>(
@@ -6910,9 +6967,26 @@ bool Canvas::PasteContentAsNewLayer(ID3D11Device* device, const std::string& nam
 }
 
 void Canvas::SetSelectionMask(const std::vector<uint8_t>& mask) {
-    if (mask.size() == (size_t)m_Width * m_Height) {
+    // Empty = deselect (SelectionCommand undo/redo of ClearSelection).
+    if (mask.empty()) {
+        if (m_SelectionBoundsValid)
+            ExpandSelectionGpuDirty(m_SelectionBoundsX, m_SelectionBoundsY,
+                m_SelectionBoundsX + m_SelectionBoundsW - 1,
+                m_SelectionBoundsY + m_SelectionBoundsH - 1);
+        else
+            m_SelectionGpuDirtyValid = false;
+        m_SelectionMask.clear();
+        m_HasSelection = false;
+        m_SelectionBoundsValid = false;
+        m_SelectionBoundsW = m_SelectionBoundsH = 0;
+        m_SelectionMaskNeedsUpload = true;
+        return;
+    }
+    if (mask.size() == (size_t)m_Width * (size_t)m_Height) {
         m_SelectionMask = mask;
         m_SelectionGpuDirtyValid = false; // full mask replaced
+        // Seed AABB invalid so recompute does a full scan
+        m_SelectionBoundsValid = false;
         RecomputeSelectionBoundsFromMask();
         m_SelectionMaskNeedsUpload = true;
     }
@@ -6980,22 +7054,25 @@ void Canvas::ExpandSelectionGpuDirty(int x0, int y0, int x1, int y1) {
 }
 
 void Canvas::RecomputeSelectionBoundsFromMask() {
-    m_SelectionBoundsValid = false;
     m_HasSelection = false;
     if (m_SelectionMask.size() != (size_t)m_Width * (size_t)m_Height) {
         m_SelectionBoundsX = m_SelectionBoundsY = 0;
         m_SelectionBoundsW = m_SelectionBoundsH = 0;
+        m_SelectionBoundsValid = false;
         return;
     }
     int minX = m_Width, minY = m_Height, maxX = -1, maxY = -1;
     // Prefer previous AABB + pad as seed if valid; else full scan.
+    // Capture seed BEFORE clearing valid (was a no-op bug: valid cleared first).
     int sx0 = 0, sy0 = 0, sx1 = m_Width - 1, sy1 = m_Height - 1;
-    if (m_SelectionBoundsValid && m_SelectionBoundsW > 0 && m_SelectionBoundsH > 0) {
+    const bool hadSeed = m_SelectionBoundsValid && m_SelectionBoundsW > 0 && m_SelectionBoundsH > 0;
+    if (hadSeed) {
         sx0 = std::max(0, m_SelectionBoundsX - 2);
         sy0 = std::max(0, m_SelectionBoundsY - 2);
         sx1 = std::min(m_Width - 1, m_SelectionBoundsX + m_SelectionBoundsW + 1);
         sy1 = std::min(m_Height - 1, m_SelectionBoundsY + m_SelectionBoundsH + 1);
     }
+    m_SelectionBoundsValid = false;
     for (int y = sy0; y <= sy1; ++y) {
         const size_t row = (size_t)y * (size_t)m_Width;
         for (int x = sx0; x <= sx1; ++x) {
@@ -7622,9 +7699,11 @@ void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const floa
         }
     }
 
+    const bool useSel = m_HasSelection &&
+        m_SelectionMask.size() == (size_t)m_Width * (size_t)m_Height;
     for (int y = 0; y < m_Height; ++y) {
         for (int x = 0; x < m_Width; ++x) {
-            float selectionVal = m_HasSelection ? SelU82F(m_SelectionMask[(size_t)y * m_Width + x]) : 1.0f;
+            float selectionVal = useSel ? SelU82F(m_SelectionMask[(size_t)y * m_Width + x]) : 1.0f;
             float maskVal = temp.at<uint8_t>(y, x) / 255.0f;
             float fillAlpha = maskVal * selectionVal * color[3];
 
@@ -7650,14 +7729,7 @@ void Canvas::ApplyBucketFill(int startX, int startY, float tolerance, const floa
     m_IsDocumentModified = true;
 
     if (!m_ActiveStrokeDeltas.empty()) {
-        std::vector<TileDelta> deltas;
-        for (auto& pair : m_ActiveStrokeDeltas) {
-            auto& delta = pair.second;
-            delta.newState = layer.tileCache
-                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                : TileSnapshot{};
-            deltas.push_back(std::move(delta));
-        }
+        auto deltas = SealActiveStrokeDeltas(m_ActiveStrokeDeltas, layer.tileCache.get());
         m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Bucket Fill", m_ActiveLayerIdx, std::move(deltas)));
         m_ActiveStrokeDeltas.clear();
     }
@@ -7695,7 +7767,7 @@ void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColo
             lerpColor[2] = startColor[2] * (1.0f - t) + endColor[2] * t;
             lerpColor[3] = startColor[3] * (1.0f - t) + endColor[3] * t;
 
-            float selectionVal = m_HasSelection ? SelU82F(m_SelectionMask[(size_t)y * m_Width + x]) : 1.0f;
+            float selectionVal = GetSelWeight(m_SelectionMask, m_Width, m_Height, x, y, m_HasSelection);
             float alphaVal = lerpColor[3] * selectionVal;
 
             if (alphaVal > 0.0f) {
@@ -7720,14 +7792,7 @@ void Canvas::ApplyGradient(int x1, int y1, int x2, int y2, const float startColo
     m_IsDocumentModified = true;
 
     if (!m_ActiveStrokeDeltas.empty()) {
-        std::vector<TileDelta> deltas;
-        for (auto& pair : m_ActiveStrokeDeltas) {
-            auto& delta = pair.second;
-            delta.newState = layer.tileCache
-                ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                : TileSnapshot{};
-            deltas.push_back(std::move(delta));
-        }
+        auto deltas = SealActiveStrokeDeltas(m_ActiveStrokeDeltas, layer.tileCache.get());
         m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>("Gradient", m_ActiveLayerIdx, std::move(deltas)));
         m_ActiveStrokeDeltas.clear();
     }
@@ -8362,7 +8427,11 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
             layer.maskNeedsUpload = true;
         }
 
+        // Move selection with content (undoable) — previously silent, so Ctrl+Z stack
+        // desynced vs pixels and further redo/undo left inconsistent ants/clip.
         if (m_HasSelection && !m_OriginalSelectionMask.empty()) {
+            std::vector<uint8_t> oldSel = m_SelectionMask;
+            const bool oldHas = m_HasSelection;
             std::vector<uint8_t> shiftedSelection((size_t)m_Width * (size_t)m_Height, 0);
             for (int y = destY0; y <= destY1; ++y) {
                 for (int x = destX0; x <= destX1; ++x) {
@@ -8381,7 +8450,13 @@ void Canvas::CommitMovePixels(ID3D11Device* device) {
                 }
             }
             m_SelectionMask = std::move(shiftedSelection);
+            m_SelectionBoundsValid = false;
+            RecomputeSelectionBoundsFromMask();
+            m_SelectionGpuDirtyValid = false;
+            m_SelectionMaskNeedsUpload = true;
             UpdateSelectionMaskTexture(device);
+            m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
+                "Move Selection", std::move(oldSel), oldHas, m_SelectionMask, m_HasSelection));
         }
     }
 
@@ -8851,8 +8926,14 @@ std::vector<float> Canvas_BuildSplineLUT(const std::vector<std::pair<float,float
 void Canvas::SelectAll() {
     std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHas = m_HasSelection;
-    m_SelectionMask.assign((size_t)m_Width * m_Height, 255);
+    m_SelectionMask.assign((size_t)m_Width * (size_t)m_Height, 255);
     m_HasSelection = true;
+    m_SelectionBoundsX = 0;
+    m_SelectionBoundsY = 0;
+    m_SelectionBoundsW = m_Width;
+    m_SelectionBoundsH = m_Height;
+    m_SelectionBoundsValid = true;
+    m_SelectionGpuDirtyValid = false; // full upload
     m_SelectionMaskNeedsUpload = true;
     m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
         "Select All", std::move(oldMask), oldHas, m_SelectionMask, m_HasSelection));
@@ -8892,6 +8973,9 @@ void Canvas::SelectOpaquePixels(int layerIdx) {
             }
         }
     }
+    m_SelectionBoundsValid = false;
+    RecomputeSelectionBoundsFromMask();
+    m_SelectionGpuDirtyValid = false;
     m_SelectionMaskNeedsUpload = true;
     m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
         "Select Layer Pixels", std::move(oldMask), oldHas, m_SelectionMask, m_HasSelection));
@@ -8914,10 +8998,9 @@ void Canvas::SelectFromLayerMask(int layerIdx) {
     bool oldHas = m_HasSelection;
     // White / high mask value = selected (PS: load selection from mask).
     m_SelectionMask = layer.mask;
-    m_HasSelection = false;
-    for (uint8_t v : m_SelectionMask) {
-        if (v > 0) { m_HasSelection = true; break; }
-    }
+    m_SelectionBoundsValid = false;
+    RecomputeSelectionBoundsFromMask();
+    m_SelectionGpuDirtyValid = false;
     m_SelectionMaskNeedsUpload = true;
     m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
         "Select From Mask", std::move(oldMask), oldHas, m_SelectionMask, m_HasSelection));
@@ -8928,15 +9011,20 @@ void Canvas::InvertSelection() {
     std::vector<uint8_t> oldMask = m_SelectionMask;
     bool oldHas = m_HasSelection;
     if (!m_HasSelection) {
-        m_SelectionMask.assign((size_t)m_Width * m_Height, 255);
+        m_SelectionMask.assign((size_t)m_Width * (size_t)m_Height, 255);
         m_HasSelection = true;
+        m_SelectionBoundsX = 0; m_SelectionBoundsY = 0;
+        m_SelectionBoundsW = m_Width; m_SelectionBoundsH = m_Height;
+        m_SelectionBoundsValid = true;
     } else {
-        if (m_SelectionMask.empty())
-            m_SelectionMask.assign((size_t)m_Width * m_Height, 0);
+        if (m_SelectionMask.empty() ||
+            m_SelectionMask.size() != (size_t)m_Width * (size_t)m_Height)
+            m_SelectionMask.assign((size_t)m_Width * (size_t)m_Height, 0);
         for (auto& v : m_SelectionMask) v = (uint8_t)(255 - v);
-        m_HasSelection = false;
-        for (uint8_t v : m_SelectionMask) { if (v) { m_HasSelection = true; break; } }
+        m_SelectionBoundsValid = false;
+        RecomputeSelectionBoundsFromMask();
     }
+    m_SelectionGpuDirtyValid = false;
     m_SelectionMaskNeedsUpload = true;
     m_UndoRedoManager.PushCommand(std::make_shared<SelectionCommand>(
         "Invert Selection", std::move(oldMask), oldHas, m_SelectionMask, m_HasSelection));
@@ -9351,15 +9439,7 @@ void Canvas::SmudgeOnActiveLayer(float x, float y, StrokePhase phase, const Smud
         m_SmudgePickupValid = false;
         m_IsStrokeActive = false;
         if (!m_ActiveStrokeDeltas.empty()) {
-            std::vector<TileDelta> deltas;
-            deltas.reserve(m_ActiveStrokeDeltas.size());
-            for (auto& pair : m_ActiveStrokeDeltas) {
-                auto& delta = pair.second;
-                delta.newState = layer.tileCache
-                    ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY)
-                    : TileSnapshot{};
-                deltas.push_back(std::move(delta));
-            }
+            auto deltas = SealActiveStrokeDeltas(m_ActiveStrokeDeltas, layer.tileCache.get());
             m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>(
                 "Smudge", m_ActiveLayerIdx, std::move(deltas)));
             m_ActiveStrokeDeltas.clear();
@@ -9486,13 +9566,7 @@ void Canvas::BlurToolOnActiveLayer(float x, float y, StrokePhase phase, const Sm
         m_SmudgePickupValid = false;
         m_IsStrokeActive = false;
         if (!m_ActiveStrokeDeltas.empty()) {
-            std::vector<TileDelta> deltas;
-            for (auto& pair : m_ActiveStrokeDeltas) {
-                auto& delta = pair.second;
-                delta.newState = layer.tileCache
-                    ? layer.tileCache->SnapshotTile(delta.tileX, delta.tileY) : TileSnapshot{};
-                deltas.push_back(std::move(delta));
-            }
+            auto deltas = SealActiveStrokeDeltas(m_ActiveStrokeDeltas, layer.tileCache.get());
             m_UndoRedoManager.PushCommand(std::make_shared<PaintStrokeCommand>(
                 "Blur Tool", m_ActiveLayerIdx, std::move(deltas)));
             m_ActiveStrokeDeltas.clear();
