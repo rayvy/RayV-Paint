@@ -729,29 +729,22 @@ namespace UI {
         Ui::TooltipSetDelay(Ui::Tokens().tooltipDelaySec);
         ImGuiViewport* mainViewport = ImGui::GetMainViewport();
 
-        // 0. Custom title bar (undecorated window): drag + project tabs + window controls
-        {
-            const float titleH = 32.f;
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f, 4.f));
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.f, 0.f));
-            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.08f, 0.10f, 1.f));
-            ImGui::BeginViewportSideBar("##TitleBar", mainViewport, ImGuiDir_Up, titleH,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
-                ImGuiWindowFlags_NoDocking);
+        // =====================================================================
+        // Chrome (UX questionnaire): menu bar ON TOP, document tabs BELOW.
+        // Window caption buttons flush-right, equal size, vertically centered.
+        // =====================================================================
 
-            // Drag region: full bar minus right buttons
-            const float btnW = 42.f;
-            const float rightCtrls = btnW * 3.f + 8.f;
-            ImVec2 barMin = ImGui::GetWindowPos();
-            ImVec2 barSize = ImGui::GetWindowSize();
-            ImGui::InvisibleButton("##title_drag", ImVec2(std::max(40.f, barSize.x - rightCtrls - 8.f), titleH - 4.f));
-            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
-                if (GLFWwindow* gw = window) {
-                    int wx = 0, wy = 0;
-                    glfwGetWindowPos(gw, &wx, &wy);
-                    ImVec2 d = ImGui::GetIO().MouseDelta;
-                    glfwSetWindowPos(gw, wx + (int)d.x, wy + (int)d.y);
-                }
+        // Caption button strip width — reserved on the menu bar so tools don't collide.
+        static constexpr float kCapBtnW = 46.f;
+        static constexpr float kCapCount = 3.f;
+        static constexpr float kCapStripW = kCapBtnW * kCapCount;
+
+        auto dragWindowFromItem = [&]() {
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left) && window) {
+                int wx = 0, wy = 0;
+                glfwGetWindowPos(window, &wx, &wy);
+                ImVec2 d = ImGui::GetIO().MouseDelta;
+                glfwSetWindowPos(window, wx + (int)d.x, wy + (int)d.y);
             }
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && window) {
                 if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED))
@@ -759,104 +752,57 @@ namespace UI {
                 else
                     glfwMaximizeWindow(window);
             }
-            // Draw title + tabs over drag region
-            {
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                auto& tok = Ui::Tokens();
-                dl->AddText(ImVec2(barMin.x + 10.f, barMin.y + 8.f), tok.ColU32(tok.textSecondary), "RayV");
-                float tabX = barMin.x + 52.f;
-                float tabY = barMin.y + 4.f;
-                auto tabs = ProjectManager::Get().ListTabs();
-                for (const auto& tab : tabs) {
-                    std::string label = tab.title;
-                    if (tab.dirty) label += " *";
-                    // Dormancy badges (ASCII-safe for title font)
-                    if (tab.restoring) label += " ...";
-                    else if (tab.diskHibernated) label += " [disk]";
-                    else if (tab.gpuSuspended) label += " [z]";
-                    ImVec2 ts = ImGui::CalcTextSize(label.c_str());
-                    float tw = ts.x + 28.f;
-                    ImVec2 a(tabX, tabY);
-                    ImVec2 b(tabX + tw, tabY + titleH - 8.f);
-                    ImU32 bg = tab.active ? IM_COL32(50, 70, 110, 220) : IM_COL32(35, 35, 42, 180);
-                    if (!tab.active && tab.diskHibernated)
-                        bg = IM_COL32(28, 32, 40, 160);
-                    else if (!tab.active && tab.gpuSuspended)
-                        bg = IM_COL32(30, 34, 48, 170);
-                    dl->AddRectFilled(a, b, bg, 4.f);
-                    ImU32 tc = tok.ColU32(tok.textPrimary);
-                    if (!tab.active && (tab.gpuSuspended || tab.diskHibernated))
-                        tc = tok.ColU32(tok.textSecondary);
-                    dl->AddText(ImVec2(a.x + 8.f, a.y + 4.f), tc, label.c_str());
-                    // Hit: select tab
-                    if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(0) &&
-                        !ImGui::IsMouseDragging(0)) {
-                        if (!tab.active) ProjectManager::Get().SwitchTo(tab.id);
-                    }
-                    if (ImGui::IsMouseHoveringRect(a, b) && !ImGui::IsMouseDragging(0)) {
-                        if (tab.diskHibernated)
-                            Ui::Tooltip("Disk hibernate — click to RESTORE (pixels on disk)");
-                        else if (tab.gpuSuspended)
-                            Ui::Tooltip("GPU sleep — click to wake (pixels in RAM)");
-                        else if (tab.restoring)
-                            Ui::Tooltip("RESTORING…");
-                    }
-                    // Close x
-                    ImVec2 xa(b.x - 16.f, a.y + 4.f);
-                    ImVec2 xb(b.x - 4.f, a.y + 16.f);
-                    if (ImGui::IsMouseHoveringRect(xa, ImVec2(b.x - 2.f, b.y - 2.f))) {
-                        dl->AddText(xa, IM_COL32(255, 120, 120, 255), "x");
-                        if (ImGui::IsMouseClicked(0)) {
-                            if (!ProjectManager::Get().CloseProject(tab.id, false)) {
-                                g_ProjectTabCloseRequest.projectId = tab.id;
-                                g_ProjectTabCloseRequest.pending = true;
-                            }
-                        }
+        };
+
+        auto drawCaptionButtons = [&](float barY, float barH) {
+            // Absolute right of main viewport — equal cells, full bar height (not SmallButton drift).
+            const float x0 = mainViewport->Pos.x + mainViewport->Size.x - kCapStripW;
+            ImDrawList* dl = ImGui::GetForegroundDrawList(mainViewport);
+            auto& tok = Ui::Tokens();
+            const char* labelsA[3] = { "-", "[]", "X" };
+            // Subtle separator left of caption strip
+            dl->AddLine(ImVec2(x0 - 1.f, barY + 4.f), ImVec2(x0 - 1.f, barY + barH - 4.f),
+                        IM_COL32(70, 70, 80, 180), 1.f);
+            for (int i = 0; i < 3; ++i) {
+                ImVec2 a(x0 + kCapBtnW * (float)i, barY);
+                ImVec2 b(a.x + kCapBtnW, barY + barH);
+                const bool hov = ImGui::IsMouseHoveringRect(a, b, false);
+                ImU32 bg = hov
+                    ? (i == 2 ? IM_COL32(200, 55, 55, 255) : IM_COL32(58, 58, 68, 255))
+                    : IM_COL32(36, 36, 42, 255);
+                dl->AddRectFilled(a, b, bg);
+                ImVec2 ts = ImGui::CalcTextSize(labelsA[i]);
+                dl->AddText(ImVec2(a.x + (kCapBtnW - ts.x) * 0.5f,
+                                   a.y + (barH - ts.y) * 0.5f),
+                            tok.ColU32(tok.textPrimary), labelsA[i]);
+                if (hov && ImGui::IsMouseClicked(0) && window) {
+                    if (i == 0) glfwIconifyWindow(window);
+                    else if (i == 1) {
+                        if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED))
+                            glfwRestoreWindow(window);
+                        else
+                            glfwMaximizeWindow(window);
                     } else {
-                        dl->AddText(xa, tok.ColU32(tok.textSecondary), "x");
+                        glfwSetWindowShouldClose(window, GLFW_TRUE);
                     }
-                    tabX += tw + 4.f;
                 }
-                // New tab
-                ImVec2 na(tabX, tabY);
-                ImVec2 nb(tabX + 22.f, tabY + titleH - 8.f);
-                dl->AddRectFilled(na, nb, IM_COL32(40, 40, 48, 200), 4.f);
-                dl->AddText(ImVec2(na.x + 6.f, na.y + 3.f), tok.ColU32(tok.textPrimary), "+");
-                if (ImGui::IsMouseHoveringRect(na, nb) && ImGui::IsMouseClicked(0))
-                    ProjectManager::Get().CreateEmptyProject();
-            }
-
-            // Window controls (right)
-            ImGui::SetCursorScreenPos(ImVec2(barMin.x + barSize.x - rightCtrls, barMin.y + 2.f));
-            if (ImGui::SmallButton("—##min")) {
-                if (window) glfwIconifyWindow(window);
-            }
-            if (ImGui::IsItemHovered()) Ui::Tooltip("Minimize");
-            ImGui::SameLine(0, 2);
-            if (ImGui::SmallButton("[]##max")) {
-                if (window) {
-                    if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED))
-                        glfwRestoreWindow(window);
-                    else
-                        glfwMaximizeWindow(window);
+                if (hov) {
+                    if (i == 0) Ui::Tooltip("Minimize");
+                    else if (i == 1) Ui::Tooltip("Maximize / Restore");
+                    else Ui::Tooltip("Close");
                 }
             }
-            if (ImGui::IsItemHovered()) Ui::Tooltip("Maximize / Restore");
-            ImGui::SameLine(0, 2);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1.f));
-            if (ImGui::SmallButton("X##close")) {
-                if (window) glfwSetWindowShouldClose(window, GLFW_TRUE);
-            }
-            ImGui::PopStyleColor();
-            if (ImGui::IsItemHovered()) Ui::Tooltip("Close");
+        };
 
-            ImGui::End();
-            ImGui::PopStyleColor();
-            ImGui::PopStyleVar(2);
-        }
-
-        // 1. Persistent Header (Main Menu Bar)
+        // 0. Main menu bar FIRST (top of window) — File / Edit / … + mode tools + caption
         if (ImGui::BeginMainMenuBar()) {
+            // Brand (subtle)
+            {
+                ImGui::TextDisabled("RayV");
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("RayV Paint — drag the tab strip below to move the window");
+                ImGui::SameLine(0, 12.f);
+            }
             if (ImGui::BeginMenu("File")) {
                 // Catalog-backed: same poll + execute as hotkeys
                 core::ops::MenuAction("NewProject");
@@ -1178,7 +1124,7 @@ namespace UI {
                 ImGui::EndMenu();
             }
 
-            // ---- Right header: mode · I/O · map switcher (compact, high-use) ----
+            // ---- Right header: mode · I/O · map switcher (leave room for caption strip) ----
             {
                 Project* hp = ProjectManager::Get().ActiveProject();
                 auto ptype = canvas.GetProjectType();
@@ -1186,19 +1132,18 @@ namespace UI {
                 if (hp) hp->textureSets.EnsureSimpleDefault();
                 texset::TextureSet* hset = hp ? hp->textureSets.Active() : nullptr;
 
-                // Estimate width of right tools
                 float rightTools = 210.f; // mode + I/O
                 if (adv && hset) {
                     for (const auto& m : hset->maps)
                         if (m.enabled || m.kind == texset::MapKind::Diffuse)
                             rightTools += 72.f;
                 }
+                // Caption strip always owns the last kCapStripW of the bar
                 float barW = ImGui::GetWindowWidth();
-                float x = barW - rightTools - 8.f;
+                float x = barW - rightTools - kCapStripW - 12.f;
                 if (x > ImGui::GetCursorPosX() + 40.f)
                     ImGui::SameLine(x);
 
-                // Project mode
                 {
                     int mi = (ptype == Canvas::ProjectType::Simple) ? 0
                            : (ptype == Canvas::ProjectType::AdvancedModMode) ? 2 : 1;
@@ -1235,7 +1180,104 @@ namespace UI {
                 }
             }
 
+            // Window caption buttons (flush right, equal cells) — drawn after menu content
+            {
+                ImVec2 wp = ImGui::GetWindowPos();
+                float barH = ImGui::GetWindowSize().y;
+                drawCaptionButtons(wp.y, barH);
+            }
+
             ImGui::EndMainMenuBar();
+        }
+
+        // 1. Document tabs strip BELOW the menu (was incorrectly on the title bar)
+        {
+            const float tabsH = 28.f;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f, 3.f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.f, 0.f));
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.10f, 0.12f, 1.f));
+            ImGui::BeginViewportSideBar("##DocTabs", mainViewport, ImGuiDir_Up, tabsH,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoDocking);
+
+            ImVec2 barMin = ImGui::GetWindowPos();
+            ImVec2 barSize = ImGui::GetWindowSize();
+            // Drag empty area of tab strip to move undecorated window
+            ImGui::InvisibleButton("##tabs_drag", ImVec2(barSize.x, tabsH - 2.f));
+            dragWindowFromItem();
+
+            {
+                ImDrawList* dl = ImGui::GetWindowDrawList();
+                auto& tok = Ui::Tokens();
+                float tabX = barMin.x + 8.f;
+                float tabY = barMin.y + 3.f;
+                const float tabH = tabsH - 6.f;
+                auto tabs = ProjectManager::Get().ListTabs();
+                for (const auto& tab : tabs) {
+                    std::string label = tab.title;
+                    if (tab.dirty) label += " *";
+                    if (tab.restoring) label += " ...";
+                    else if (tab.diskHibernated) label += " [disk]";
+                    else if (tab.gpuSuspended) label += " [z]";
+                    ImVec2 ts = ImGui::CalcTextSize(label.c_str());
+                    float tw = ts.x + 28.f;
+                    ImVec2 a(tabX, tabY);
+                    ImVec2 b(tabX + tw, tabY + tabH);
+                    ImU32 bg = tab.active ? IM_COL32(50, 70, 110, 230) : IM_COL32(32, 32, 38, 200);
+                    if (!tab.active && tab.diskHibernated)
+                        bg = IM_COL32(28, 32, 40, 160);
+                    else if (!tab.active && tab.gpuSuspended)
+                        bg = IM_COL32(30, 34, 48, 170);
+                    dl->AddRectFilled(a, b, bg, 4.f);
+                    ImU32 tc = tok.ColU32(tok.textPrimary);
+                    if (!tab.active && (tab.gpuSuspended || tab.diskHibernated))
+                        tc = tok.ColU32(tok.textSecondary);
+                    const float textY = a.y + (tabH - ts.y) * 0.5f;
+                    dl->AddText(ImVec2(a.x + 8.f, textY), tc, label.c_str());
+                    if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(0) &&
+                        !ImGui::IsMouseDragging(0)) {
+                        if (!tab.active) ProjectManager::Get().SwitchTo(tab.id);
+                    }
+                    if (ImGui::IsMouseHoveringRect(a, b) && !ImGui::IsMouseDragging(0)) {
+                        if (tab.diskHibernated)
+                            Ui::Tooltip("Disk hibernate — click to RESTORE (pixels on disk)");
+                        else if (tab.gpuSuspended)
+                            Ui::Tooltip("GPU sleep — click to wake (pixels in RAM)");
+                        else if (tab.restoring)
+                            Ui::Tooltip("RESTORING…");
+                    }
+                    // Close — vertically centered
+                    ImVec2 xa(b.x - 16.f, a.y + (tabH - ImGui::GetFontSize()) * 0.5f);
+                    ImVec2 hitMin(b.x - 18.f, a.y);
+                    ImVec2 hitMax(b.x - 2.f, b.y);
+                    if (ImGui::IsMouseHoveringRect(hitMin, hitMax)) {
+                        dl->AddText(xa, IM_COL32(255, 120, 120, 255), "x");
+                        if (ImGui::IsMouseClicked(0)) {
+                            if (!ProjectManager::Get().CloseProject(tab.id, false)) {
+                                g_ProjectTabCloseRequest.projectId = tab.id;
+                                g_ProjectTabCloseRequest.pending = true;
+                            }
+                        }
+                    } else {
+                        dl->AddText(xa, tok.ColU32(tok.textSecondary), "x");
+                    }
+                    tabX += tw + 4.f;
+                }
+                // New tab
+                ImVec2 na(tabX, tabY);
+                ImVec2 nb(tabX + 24.f, tabY + tabH);
+                dl->AddRectFilled(na, nb, IM_COL32(40, 40, 48, 200), 4.f);
+                ImVec2 plusSz = ImGui::CalcTextSize("+");
+                dl->AddText(ImVec2(na.x + (24.f - plusSz.x) * 0.5f,
+                                   na.y + (tabH - plusSz.y) * 0.5f),
+                            tok.ColU32(tok.textPrimary), "+");
+                if (ImGui::IsMouseHoveringRect(na, nb) && ImGui::IsMouseClicked(0))
+                    ProjectManager::Get().CreateEmptyProject();
+            }
+
+            ImGui::End();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar(2);
         }
 
         // Dirty close confirm
