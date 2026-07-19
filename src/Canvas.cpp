@@ -3655,13 +3655,46 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     layer.needsUpload = true;
                 }
                 if (layer.presentationCache && !layer.presentationCache->IsEmpty()) {
-                    if (!layer.texture)
-                        RecreateLayerTexture(groupDev, layer);
+                    TileCache* src = layer.presentationCache.get();
+                    const int pw = src->GetWidth();
+                    const int ph = src->GetHeight();
+                    // Proxy group bake may be smaller than document — match texture to cache.
+                    bool sizeOk = false;
                     if (layer.texture) {
-                        TileCache* src = layer.presentationCache.get();
+                        D3D11_TEXTURE2D_DESC d{};
+                        layer.texture->GetDesc(&d);
+                        sizeOk = (int)d.Width == pw && (int)d.Height == ph;
+                    }
+                    if (!layer.texture || !sizeOk) {
+                        if (layer.texture) { DeferReleaseTex(layer.texture); layer.texture = nullptr; }
+                        if (layer.srv) { DeferReleaseSRV(layer.srv); layer.srv = nullptr; }
+                        if (pw > 0 && ph > 0 &&
+                            MemoryStats::TryReserveVram(
+                                MemoryStats::EstimateImageBytes(pw, ph, BytesPerPixel(m_CanvasFormat)),
+                                "GroupPresentation.tex")) {
+                            D3D11_TEXTURE2D_DESC desc = {};
+                            desc.Width = (UINT)pw;
+                            desc.Height = (UINT)ph;
+                            desc.MipLevels = 1;
+                            desc.ArraySize = 1;
+                            desc.Format = GetLayerDxgiFormat();
+                            desc.SampleDesc.Count = 1;
+                            desc.Usage = D3D11_USAGE_DEFAULT;
+                            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                            if (SUCCEEDED(groupDev->CreateTexture2D(&desc, nullptr, &layer.texture)) &&
+                                layer.texture) {
+                                groupDev->CreateShaderResourceView(layer.texture, nullptr, &layer.srv);
+                                src->MarkAllDirty();
+                            } else {
+                                MemoryStats::ReleaseVram(
+                                    MemoryStats::EstimateImageBytes(pw, ph, BytesPerPixel(m_CanvasFormat)));
+                            }
+                        }
+                    }
+                    if (layer.texture) {
                         const int gbpp = src->GetBytesPerPixel();
                         src->ForEachDirtyTile([&](int tx, int ty, const uint8_t* data, int) {
-                            UploadLayerTile(context, layer.texture, tx, ty, data, gbpp, m_Width, m_Height);
+                            UploadLayerTile(context, layer.texture, tx, ty, data, gbpp, pw, ph);
                         });
                         src->ClearAllDirty();
                         layer.needsUpload = false;
@@ -3669,6 +3702,7 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                 }
                 if (layer.srv) {
                     // Presentation already bakes group fill + styles → draw at opacity 1
+                    // (proxy texture stretches over full canvas UVs — interactive OK).
                     const bool gFirst = firstVisible && m_LayerBlendStateReplace;
                     ID3D11BlendState* gBlend = gFirst ? m_LayerBlendStateReplace : m_LayerBlendState;
                     context->OMSetBlendState(gBlend, nullptr, 0xFFFFFFFF);
@@ -10782,8 +10816,12 @@ void Canvas::RebuildGroupPresentation(int groupIdx, bool fullQuality) {
             return;
         m_PresentationRebuildDeferred = false;
     }
+    if (m_Width <= 0 || m_Height <= 0) {
+        group.stylesDirty = group.presentationDirty = group.filtersDirty = false;
+        return;
+    }
 
-    // Ensure children presentations/filters are ready
+    // Ensure children presentations/filters are ready (also proxy when interactive)
     for (int i = 0; i < (int)m_Layers.size(); ++i) {
         if (i == groupIdx || !IsLayerUnderGroup(i, groupIdx)) continue;
         Layer& ch = m_Layers[i];
@@ -10793,78 +10831,203 @@ void Canvas::RebuildGroupPresentation(int groupIdx, bool fullQuality) {
             RebuildLayerPresentation(ch, fullQuality);
     }
 
-    // Flatten children in stack order (bottom → top)
-    std::vector<float> acc((size_t)m_Width * m_Height * 4, 0.f);
+    // P2: interactive group FX always at proxy res on large docs (was full float 16K → multi‑GiB / multi‑s).
+    int bakeW = m_Width, bakeH = m_Height;
+    if (!fullQuality)
+        ComputeCompositePreviewSize(m_Width, m_Height, bakeW, bakeH);
+    const bool useProxy = (bakeW != m_Width || bakeH != m_Height);
+    const float invScaleX = useProxy ? (float)m_Width / (float)bakeW : 1.f;
+    const float invScaleY = useProxy ? (float)m_Height / (float)bakeH : 1.f;
+    const float scaleX = useProxy ? (float)bakeW / (float)m_Width : 1.f;
+    const float scaleY = useProxy ? (float)bakeH / (float)m_Height : 1.f;
+
+    if (fullQuality && !CanAllocateFlatComposite(m_Width, m_Height, "RebuildGroupPresentation")) {
+        Logger::Get().WarnTag("fx",
+            "Group FX full bake refused — falling back to proxy for " +
+            std::to_string(m_Width) + "x" + std::to_string(m_Height));
+        ComputeCompositePreviewSize(m_Width, m_Height, bakeW, bakeH);
+    }
+
+    std::vector<float> acc;
+    try {
+        acc.assign((size_t)bakeW * (size_t)bakeH * 4u, 0.f);
+    } catch (const std::bad_alloc&) {
+        Logger::Get().ErrorTag("fx", "OOM group flatten buffer");
+        group.stylesDirty = group.presentationDirty = group.filtersDirty = false;
+        return;
+    }
+
+    auto sampleChildToBake = [&](Layer& L, std::vector<float>& outBake) {
+        outBake.assign((size_t)bakeW * (size_t)bakeH * 4u, 0.f);
+        const TileCache* src = nullptr;
+        if (L.HasEnabledStyles() && L.presentationCache && !L.presentationCache->IsEmpty())
+            src = L.presentationCache.get();
+        else if (L.filteredCache && !L.filteredCache->IsEmpty() && LayerFilterListHasEnabled(L.filters))
+            src = L.filteredCache.get();
+        else if (L.tileCache && !L.tileCache->IsEmpty())
+            src = L.tileCache.get();
+
+        if (L.IsFill() && !src) {
+            float c[4];
+            L.fill.ResolveRgba(c);
+            for (size_t i = 0, n = (size_t)bakeW * bakeH; i < n; ++i) {
+                outBake[i * 4 + 0] = c[0];
+                outBake[i * 4 + 1] = c[1];
+                outBake[i * 4 + 2] = c[2];
+                outBake[i * 4 + 3] = c[3] * L.opacity;
+            }
+            return;
+        }
+        if (!src) return;
+
+        const int sw = src->GetWidth();
+        const int sh = src->GetHeight();
+        for (int y = 0; y < bakeH; ++y) {
+            int syDoc = useProxy
+                ? std::min(m_Height - 1, (int)(y * invScaleY + 0.5f))
+                : y;
+            int sy = (sh == m_Height) ? syDoc
+                : std::min(sh - 1, (int)((float)syDoc * ((float)sh / (float)std::max(1, m_Height)) + 0.5f));
+            for (int x = 0; x < bakeW; ++x) {
+                int sxDoc = useProxy
+                    ? std::min(m_Width - 1, (int)(x * invScaleX + 0.5f))
+                    : x;
+                int sx = (sw == m_Width) ? sxDoc
+                    : std::min(sw - 1, (int)((float)sxDoc * ((float)sw / (float)std::max(1, m_Width)) + 0.5f));
+                float px[4];
+                src->GetPixelF(sx, sy, px);
+                // Child styles already bake fill opacity; raw path apply layer opacity.
+                if (!(L.HasEnabledStyles() && L.presentationCache && !L.presentationCache->IsEmpty())) {
+                    px[3] *= L.opacity;
+                }
+                size_t di = ((size_t)y * bakeW + x) * 4;
+                outBake[di + 0] = px[0];
+                outBake[di + 1] = px[1];
+                outBake[di + 2] = px[2];
+                outBake[di + 3] = px[3];
+            }
+        }
+    };
+
+    // Flatten children bottom → top at bake resolution
     for (int i = 0; i < (int)m_Layers.size(); ++i) {
         Layer& L = m_Layers[i];
         if (L.isGroup || !L.visible || !IsLayerUnderGroup(i, groupIdx)) continue;
-
         std::vector<float> content;
-        if (L.HasEnabledStyles() && L.presentationCache && !L.presentationCache->IsEmpty()) {
-            content.resize((size_t)m_Width * m_Height * 4);
-            L.presentationCache->ExportRGBA32F(content.data(), m_Width, m_Height);
-        } else {
-            content = ResolveLayerContentF(L);
-            if (!L.filters.empty()) {
-                if (L.filtersDirty) RebuildFilteredPixels(L);
-                if (L.filteredCache && !L.filteredCache->IsEmpty()) {
-                    content.resize((size_t)m_Width * m_Height * 4);
-                    L.filteredCache->ExportRGBA32F(content.data(), m_Width, m_Height);
-                }
-            }
-            layer_fx::PresentationParams pp;
-            pp.fillOpacity = L.opacity;
-            pp.bakeFillOpacity = true;
-            pp.hasMask = L.hasMask && !L.mask.empty();
-            pp.mask = pp.hasMask ? L.mask.data() : nullptr;
-            pp.maskBytes = L.mask.size();
-            pp.previewQuality = !fullQuality;
-            content = layer_fx::BuildPresentation(content, m_Width, m_Height, {}, {}, pp);
+        try {
+            sampleChildToBake(L, content);
+        } catch (const std::bad_alloc&) {
+            Logger::Get().ErrorTag("fx", "OOM sampling group child");
+            continue;
         }
-        layer_fx::CompositeOver(acc.data(), content.data(), m_Width * m_Height);
+        if (!content.empty())
+            layer_fx::CompositeOver(acc.data(), content.data(), bakeW * bakeH);
     }
 
-    // Group filters + styles on the flattened sum
+    // Group filters + styles on flattened sum (geometry scaled to bake res)
     layer_fx::PresentationParams gpp;
     gpp.fillOpacity = group.opacity;
-    gpp.bakeFillOpacity = true; // styles independent: silhouette uses pre-fillOpacity path inside BuildPresentation
-    gpp.hasMask = group.hasMask && !group.mask.empty();
-    gpp.mask = gpp.hasMask ? group.mask.data() : nullptr;
-    gpp.maskBytes = group.mask.size();
+    gpp.bakeFillOpacity = true;
     gpp.previewQuality = !fullQuality;
 
-    // If only opacity and no FX: still store flattened with opacity baked for simple draw
-    if (!group.filters.empty() || group.HasEnabledStyles()) {
-        // For group styles independence: pass fillOpacity correctly
-        // BuildPresentation: silhouette without fill, content with fill
-        gpp.fillOpacity = group.opacity;
-        acc = layer_fx::BuildPresentation(acc, m_Width, m_Height, group.filters, group.styles, gpp);
+    std::vector<uint8_t> bakeMask;
+    if (group.hasMask) {
+        bakeMask.resize((size_t)bakeW * bakeH, 255);
+        for (int y = 0; y < bakeH; ++y) {
+            int sy = useProxy ? std::min(m_Height - 1, (int)(y * invScaleY + 0.5f)) : y;
+            for (int x = 0; x < bakeW; ++x) {
+                int sx = useProxy ? std::min(m_Width - 1, (int)(x * invScaleX + 0.5f)) : x;
+                uint8_t mv = 255;
+                if (group.maskTiles && group.maskTiles->Valid())
+                    mv = group.maskTiles->Get(sx, sy);
+                else if (group.mask.size() == (size_t)m_Width * m_Height)
+                    mv = group.mask[(size_t)sy * m_Width + sx];
+                bakeMask[(size_t)y * bakeW + x] = mv;
+            }
+        }
+        gpp.hasMask = true;
+        gpp.mask = bakeMask.data();
+        gpp.maskBytes = bakeMask.size();
     } else {
-        for (size_t i = 0; i < (size_t)m_Width * m_Height; ++i)
+        gpp.hasMask = false;
+        gpp.mask = nullptr;
+        gpp.maskBytes = 0;
+    }
+
+    if (!group.filters.empty() || group.HasEnabledStyles()) {
+        std::vector<LayerStyle> scaledStyles = group.styles;
+        for (auto& st : scaledStyles) {
+            st.distance *= scaleX;
+            st.offsetX *= scaleX;
+            st.offsetY *= scaleY;
+            st.size *= (scaleX + scaleY) * 0.5f;
+            st.outlineSize *= (scaleX + scaleY) * 0.5f;
+        }
+        try {
+            acc = layer_fx::BuildPresentation(acc, bakeW, bakeH, group.filters, scaledStyles, gpp);
+        } catch (const std::bad_alloc&) {
+            Logger::Get().ErrorTag("fx", "OOM group style bake");
+            group.stylesDirty = group.presentationDirty = group.filtersDirty = false;
+            return;
+        }
+    } else {
+        for (size_t i = 0, n = (size_t)bakeW * bakeH; i < n; ++i)
             acc[i * 4 + 3] = std::clamp(acc[i * 4 + 3] * group.opacity, 0.f, 1.f);
     }
 
-    // Optional proxy bake for large docs when preview
-    if (!fullQuality) {
-        int bakeW = m_Width, bakeH = m_Height;
-        ComputeCompositePreviewSize(m_Width, m_Height, bakeW, bakeH);
-        if (bakeW != m_Width || bakeH != m_Height) {
-            // RebuildGroup already did full flatten — downsample result for cheaper style already done
-            // at full; for large docs, downsample final for GPU upload size still full texture...
-            // Keep full for simplicity of upload path; cost was flatten. OK.
-            (void)bakeW; (void)bakeH;
+    // Prefer full-doc presentation only when fullQuality and RAM allows; else keep proxy
+    // (draw stretches proxy texture over canvas — fine for interactive preview).
+    int outW = bakeW, outH = bakeH;
+    std::vector<float> out;
+    if (fullQuality && bakeW == m_Width && bakeH == m_Height) {
+        out = std::move(acc);
+        outW = m_Width;
+        outH = m_Height;
+    } else if (fullQuality && CanAllocateFlatComposite(m_Width, m_Height, "RebuildGroupPresentation.upsample")) {
+        try {
+            out.resize((size_t)m_Width * m_Height * 4);
+            for (int y = 0; y < m_Height; ++y) {
+                int sy = std::min(bakeH - 1, (int)(y * scaleY));
+                for (int x = 0; x < m_Width; ++x) {
+                    int sx = std::min(bakeW - 1, (int)(x * scaleX));
+                    size_t di = ((size_t)y * m_Width + x) * 4;
+                    size_t si = ((size_t)sy * bakeW + x) * 4;
+                    // fix: sx not x
+                    si = ((size_t)sy * bakeW + sx) * 4;
+                    out[di + 0] = acc[si + 0];
+                    out[di + 1] = acc[si + 1];
+                    out[di + 2] = acc[si + 2];
+                    out[di + 3] = acc[si + 3];
+                }
+            }
+            outW = m_Width;
+            outH = m_Height;
+        } catch (const std::bad_alloc&) {
+            out = std::move(acc);
+            outW = bakeW;
+            outH = bakeH;
         }
+    } else {
+        out = std::move(acc);
+        outW = bakeW;
+        outH = bakeH;
     }
 
     if (!group.presentationCache)
         group.presentationCache = std::make_unique<TileCache>();
-    group.presentationCache->Init(m_Width, m_Height, m_CanvasFormat);
-    group.presentationCache->ImportRGBA32F(acc.data(), m_Width, m_Height);
+    group.presentationCache->Init(outW, outH, m_CanvasFormat);
+    group.presentationCache->ImportRGBA32F(out.data(), outW, outH);
     group.presentationCache->MarkAllDirty();
     group.stylesDirty = false;
     group.presentationDirty = false;
     group.filtersDirty = false;
     group.needsUpload = true;
+    // Force classic texture recreate to match proxy presentation size next compose.
+    if (group.texture && (outW != m_Width || outH != m_Height)) {
+        DeferReleaseTex(group.texture);
+        group.texture = nullptr;
+        if (group.srv) { DeferReleaseSRV(group.srv); group.srv = nullptr; }
+    }
 }
 
 // ============================================================

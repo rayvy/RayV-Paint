@@ -201,7 +201,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 ImGui::PopID();
                 ImGui::Separator();
 
-                // Fill Layer: compact map chips with smart wrap
+                // Fill Layer: compact single-column props (was half-panel chips that still clipped).
                 if (al.IsFill()) {
                     ImGui::PushID("##fill_props");
                     al.fill.EnsureDefaults();
@@ -221,7 +221,6 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         canvas.SetDocumentModified(true);
                     };
 
-                    ImGui::TextDisabled("Fill maps · swatch opens color · R/G/B/A = write mask");
                     std::vector<texset::MapKind> mapsToShow;
                     if (tset) {
                         for (const auto& m : tset->maps)
@@ -231,158 +230,154 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         mapsToShow.push_back(texset::MapKind::Diffuse);
                     }
 
-                    // Fixed chip size + wrap like ImGui button demo
-                    const float chipW = 168.f;
-                    const float chipH = 52.f;
-                    const float swatch = 20.f;
-                    ImGuiStyle& style = ImGui::GetStyle();
-                    float winVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+                    // Collapsing section — default open, height-capped so layer list stays visible
+                    if (ImGui::CollapsingHeader("Fill##fill_hdr", ImGuiTreeNodeFlags_DefaultOpen)) {
+                        ImGui::BeginChild("##fill_body",
+                            ImVec2(0.f, std::min(220.f, ImGui::GetContentRegionAvail().y * 0.45f)),
+                            true, ImGuiWindowFlags_None);
 
-                    for (int idx = 0; idx < (int)mapsToShow.size(); ++idx) {
-                        texset::MapKind mk = mapsToShow[idx];
-                        int mi = (int)mk;
-                        auto& mc = al.fill.mapColor[mi];
-                        ImGui::PushID(mi);
-                        const char* lab = texset::MapKindName(mk);
-                        if (tset) {
-                            if (const texset::MapSlot* sl = tset->GetMap(mk))
-                                lab = sl->DisplayName();
-                        }
+                        const char* chs[4] = { "R", "G", "B", "A" };
+                        for (int idx = 0; idx < (int)mapsToShow.size(); ++idx) {
+                            texset::MapKind mk = mapsToShow[idx];
+                            int mi = (int)mk;
+                            auto& mc = al.fill.mapColor[mi];
+                            ImGui::PushID(mi);
+                            const char* lab = texset::MapKindName(mk);
+                            if (tset) {
+                                if (const texset::MapSlot* sl = tset->GetMap(mk))
+                                    lab = sl->DisplayName();
+                            }
 
-                        ImGui::BeginChild("##chip", ImVec2(chipW, chipH), true,
-                            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-
-                        if (mc.enabled)
-                            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.18f, 0.40f, 0.70f, 0.55f));
-                        bool en = mc.enabled;
-                        if (ImGui::Checkbox(lab, &en)) {
-                            mc.enabled = en;
-                            dirtyFill();
-                        }
-                        if (mc.enabled) ImGui::PopStyleColor();
-
-                        if (mc.enabled) {
-                            ImGui::SameLine(0, 4);
-                            bool pip = false;
-                            if (Ui::ColorField("##fillcol", mc.rgba,
-                                    Ui::ColorFieldFlags_FullPicker | Ui::ColorFieldFlags_AlphaBar |
-                                    Ui::ColorFieldFlags_Pipette,
-                                    nullptr, &pip)) {
+                            // One dense row: [✓ Map] [color+pip] R G B A
+                            bool en = mc.enabled;
+                            if (ImGui::Checkbox("##en", &en)) {
+                                mc.enabled = en;
                                 dirtyFill();
                             }
-                            if (pip)
-                                UI::ArmFillPipette(ai, mi);
-                            if (UI::FillPipetteArmedFor(ai, mi)) {
-                                ImGui::SameLine(0, 4);
-                                ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "…");
-                            }
-                            (void)swatch;
-                            // Write mask row
-                            const char* chs[4] = { "R", "G", "B", "A" };
-                            for (int c = 0; c < 4; ++c) {
-                                ImGui::PushID(c);
-                                bool on = mc.WritesChannel(c);
-                                if (c > 0) ImGui::SameLine(0, 4);
-                                if (ImGui::Checkbox(chs[c], &on)) {
-                                    mc.SetChannel(c, on);
+                            if (ImGui::IsItemHovered())
+                                Ui::Tooltip("Enable this map target for Fill");
+                            ImGui::SameLine(0, 4);
+                            ImGui::TextUnformatted(lab);
+                            if (mc.enabled) {
+                                ImGui::SameLine(0, 6);
+                                bool pip = false;
+                                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 88.f);
+                                if (Ui::ColorField("##fillcol", mc.rgba,
+                                        Ui::ColorFieldFlags_FullPicker | Ui::ColorFieldFlags_AlphaBar |
+                                        Ui::ColorFieldFlags_Pipette,
+                                        nullptr, &pip)) {
                                     dirtyFill();
                                 }
-                                if (ImGui::IsItemHovered())
-                                    Ui::Tooltip(on
-                                        ? "ON: write this channel"
-                                        : "OFF: leave underlay (no overwrite)");
-                                ImGui::PopID();
+                                if (pip)
+                                    UI::ArmFillPipette(ai, mi);
+                                if (UI::FillPipetteArmedFor(ai, mi)) {
+                                    ImGui::SameLine(0, 2);
+                                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "…");
+                                }
+                                ImGui::SameLine(0, 6);
+                                for (int c = 0; c < 4; ++c) {
+                                    ImGui::PushID(c);
+                                    bool on = mc.WritesChannel(c);
+                                    if (c > 0) ImGui::SameLine(0, 2);
+                                    if (ImGui::Checkbox(chs[c], &on)) {
+                                        mc.SetChannel(c, on);
+                                        dirtyFill();
+                                    }
+                                    if (ImGui::IsItemHovered())
+                                        Ui::Tooltip(on ? "Write channel" : "Leave underlay");
+                                    ImGui::PopID();
+                                }
                             }
+                            ImGui::PopID();
                         }
-                        ImGui::EndChild();
 
-                        // Wrap to next line only when the next chip would clip
-                        float lastX2 = ImGui::GetItemRectMax().x;
-                        float nextX2 = lastX2 + style.ItemSpacing.x + chipW;
-                        if (idx + 1 < (int)mapsToShow.size() && nextX2 < winVisibleX2)
-                            ImGui::SameLine(0, style.ItemSpacing.x);
+                        if (UI::IsFillPipetteArmed()) {
+                            ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f),
+                                "Pipette — click canvas");
+                        }
 
-                        ImGui::PopID();
-                    }
-                    if (UI::IsFillPipetteArmed() && UI::FillPipetteArmedFor(ai, -1)) {
-                        ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f),
-                            "Pipette armed — click canvas to sample");
-                    }
-                    ImGui::TextDisabled("Unchecked R/G/B/A = no write (underlay stays)");
+                        ImGui::Separator();
+                        bool useTex = al.fill.useTexture;
+                        if (ImGui::Checkbox("Texture##filltex", &useTex)) {
+                            if (!useTex)
+                                canvas.BindFillTextureAsset(ai, "");
+                            else
+                                al.fill.useTexture = true;
+                            al.needsUpload = true;
+                            canvas.MarkCompositeDirty();
+                        }
+                        if (ImGui::IsItemHovered())
+                            Ui::Tooltip("Tile a texture over the fill (optional)");
 
-                    bool useTex = al.fill.useTexture;
-                    if (ImGui::Checkbox("Use Texture##filltex", &useTex)) {
-                        if (!useTex)
-                            canvas.BindFillTextureAsset(ai, "");
-                        else
-                            al.fill.useTexture = true;
-                        al.needsUpload = true;
-                        canvas.MarkCompositeDirty();
-                    }
-                    // Consume asset picker result for this fill layer
-                    {
                         static int s_FillPickLayer = -1;
                         std::string picked;
-                        // Only consume picker when we opened it (avoid stealing Outline picks).
                         if (s_FillPickLayer >= 0 && Ui::AssetPickerResult(picked) && !picked.empty()) {
                             canvas.BindFillTextureAsset(s_FillPickLayer, picked);
                             s_FillPickLayer = -1;
                         }
+
                         if (al.fill.useTexture || !al.fill.textureAssetKey.empty()) {
-                            std::string name = assets::AssetManager::Get().DisplayName(al.fill.textureAssetKey);
-                            if (name.empty()) name = al.fill.textureAssetKey.empty() ? "(none)" : al.fill.textureAssetKey;
                             ID3D11ShaderResourceView* thumb =
                                 assets::AssetManager::Get().GetThumbSrv(device, al.fill.textureAssetKey, false);
                             if (thumb) {
-                                ImGui::Image((ImTextureID)thumb, ImVec2(32, 32));
-                                ImGui::SameLine();
+                                ImGui::Image((ImTextureID)thumb, ImVec2(22, 22));
+                                ImGui::SameLine(0, 4);
                             }
-                            ImGui::TextWrapped("%s", name.c_str());
-                            auto st = assets::AssetManager::Get().GetLoadState(al.fill.textureAssetKey);
-                            if (st == assets::AssetLoadState::Pending)
-                                ImGui::TextDisabled("Loading…");
-                            else if (st == assets::AssetLoadState::Failed)
-                                ImGui::TextColored(ImVec4(1.f, 0.4f, 0.35f, 1.f), "Missing / failed");
-                            else if (al.fill.textureW > 0)
-                                ImGui::TextDisabled("Texture %dx%d", al.fill.textureW, al.fill.textureH);
+                            std::string name = assets::AssetManager::Get().DisplayName(al.fill.textureAssetKey);
+                            if (name.empty())
+                                name = al.fill.textureAssetKey.empty() ? "(none)" : al.fill.textureAssetKey;
+                            ImGui::TextUnformatted(name.c_str());
+                            if (ImGui::IsItemHovered() && al.fill.textureW > 0)
+                                Ui::Tooltip((std::to_string(al.fill.textureW) + "×" +
+                                             std::to_string(al.fill.textureH)).c_str());
 
-                            if (ImGui::Button("Choose Asset…##filltex")) {
+                            if (ImGui::SmallButton("Asset##filltex")) {
                                 s_FillPickLayer = ai;
                                 assets::AssetFilter f;
                                 f.kind = assets::AssetKind::Texture;
                                 Ui::OpenAssetPicker(f, "Fill Texture");
                             }
-                            ImGui::SameLine();
-                            if (ImGui::Button("Import File…##filltex")) {
+                            ImGui::SameLine(0, 4);
+                            if (ImGui::SmallButton("File##filltex")) {
                                 char path[512] = {};
                                 if (Ui::ShowOpenFile(path, sizeof(path),
                                     "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds\0All\0*.*\0")) {
                                     canvas.LoadFillTexture(ai, path);
                                 }
                             }
-                            ImGui::SameLine();
-                            if (ImGui::Button("Clear##filltex"))
+                            ImGui::SameLine(0, 4);
+                            if (ImGui::SmallButton("Clear##filltex"))
                                 canvas.BindFillTextureAsset(ai, "");
 
-                            if (Ui::SmartSliderFloat("Scale X##fts", &al.fill.texScale[0], 0.05f, 8.f, 1.f, 0.05f) ||
-                                Ui::SmartSliderFloat("Scale Y##fts", &al.fill.texScale[1], 0.05f, 8.f, 1.f, 0.05f) ||
-                                Ui::SmartSliderFloat("Off X##fto", &al.fill.texOffset[0], -2.f, 2.f, 0.f, 0.05f) ||
-                                Ui::SmartSliderFloat("Off Y##fto", &al.fill.texOffset[1], -2.f, 2.f, 0.f, 0.05f)) {
+                            // Compact 2×2 transforms
+                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.48f);
+                            bool tchg = Ui::SmartSliderFloat("##ftsX", &al.fill.texScale[0], 0.05f, 8.f, 1.f, 0.05f, "Sx %.2f");
+                            ImGui::SameLine(0, 4);
+                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                            tchg |= Ui::SmartSliderFloat("##ftsY", &al.fill.texScale[1], 0.05f, 8.f, 1.f, 0.05f, "Sy %.2f");
+                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.48f);
+                            tchg |= Ui::SmartSliderFloat("##ftoX", &al.fill.texOffset[0], -2.f, 2.f, 0.f, 0.05f, "Ox %.2f");
+                            ImGui::SameLine(0, 4);
+                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                            tchg |= Ui::SmartSliderFloat("##ftoY", &al.fill.texOffset[1], -2.f, 2.f, 0.f, 0.05f, "Oy %.2f");
+                            if (tchg) {
                                 al.needsUpload = true;
                                 al.presentationDirty = true;
                                 al.presentationCache.reset();
                                 canvas.MarkCompositeDirty();
                             }
                         } else if (useTex) {
-                            if (ImGui::Button("Choose Asset…##filltex0")) {
+                            if (ImGui::SmallButton("Choose Asset…##filltex0")) {
                                 s_FillPickLayer = ai;
                                 assets::AssetFilter f;
                                 f.kind = assets::AssetKind::Texture;
                                 Ui::OpenAssetPicker(f, "Fill Texture");
                             }
                         }
+
+                        ImGui::TextDisabled("Shape with layer mask (content paint blocked)");
+                        ImGui::EndChild();
                     }
-                    ImGui::TextDisabled("Paint content blocked — paint the mask to shape fill");
                     ImGui::PopID();
                     ImGui::Separator();
                 }
