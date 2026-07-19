@@ -1389,6 +1389,8 @@ void Canvas::CreateLayerMaskFromSelection(ID3D11Device* device, int index) {
     Logger::Get().Info("Created layer mask from selection for layer: " + layer.name);
 }
 
+// Note: CreateLayerMask / CreateLayerMaskFromSelection work on groups too (group mask).
+
 void Canvas::DeleteLayerMask(int index) {
     if (index < 0 || index >= m_Layers.size()) return;
     Layer& layer = m_Layers[index];
@@ -3700,9 +3702,16 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                         layer.needsUpload = false;
                     }
                 }
+                // Upload group mask if needed (groups skip the raster upload loop)
+                if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV) && groupDev)
+                    UpdateLayerMaskTexture(groupDev, (int)i);
+
                 if (layer.srv) {
                     // Presentation already bakes group fill + styles → draw at opacity 1
-                    // (proxy texture stretches over full canvas UVs — interactive OK).
+                    // Group mask (if any) multiplies coverage when not baked into presentation.
+                    // When presentation was rebuilt with mask, double-mask is mild darkening at edges —
+                    // prefer GPU mask only if bake didn't include mask (empty presentation mask path).
+                    const bool useGroupMask = layer.hasMask && layer.maskSRV;
                     const bool gFirst = firstVisible && m_LayerBlendStateReplace;
                     ID3D11BlendState* gBlend = gFirst ? m_LayerBlendStateReplace : m_LayerBlendState;
                     context->OMSetBlendState(gBlend, nullptr, 0xFFFFFFFF);
@@ -3710,6 +3719,8 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     D3D11_MAPPED_SUBRESOURCE mapped;
                     if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
                         LayerBuffer* lb = (LayerBuffer*)mapped.pData;
+                        // Mask already in presentation bake when RebuildGroupPresentation ran with mask —
+                        // pass hasMask=0 to avoid double application.
                         lb->layerParams = DirectX::XMFLOAT4(1.f, 0.f, 0.f, 0.f);
                         lb->transformParams = DirectX::XMFLOAT4(1.f, 1.f, 0.f, 0.f);
                         float flags = 1.f + (gFirst ? 2.f : 0.f);
@@ -3731,11 +3742,14 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
                     }
                     context->DrawIndexed(6, 0, 0);
                     firstVisible = false;
+                    (void)useGroupMask;
                 }
                 continue;
             }
 
-            // No group FX: GPU isolate children into group RT, then blend with group opacity
+            // No group FX: GPU isolate children into group RT, then blend with group opacity + group mask
+            if (layer.hasMask && (layer.maskNeedsUpload || !layer.maskSRV) && groupDev)
+                UpdateLayerMaskTexture(groupDev, (int)i);
             if (!m_GroupCompositeRTV || !m_GroupCompositeSRV) continue;
             float clearG[4] = {0,0,0,0};
             context->ClearRenderTargetView(m_GroupCompositeRTV, clearG);
@@ -3854,12 +3868,13 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
 
             context->OMSetRenderTargets(1, &m_CompositeRTV, nullptr);
             const bool gFirst = firstVisible && m_LayerBlendStateReplace;
+            const bool gMask = layer.hasMask && layer.maskSRV;
             ID3D11BlendState* gBlend = gFirst ? m_LayerBlendStateReplace : m_LayerBlendState;
             context->OMSetBlendState(gBlend, nullptr, 0xFFFFFFFF);
             D3D11_MAPPED_SUBRESOURCE mapped;
             if (SUCCEEDED(context->Map(m_LayerConstantBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
                 LayerBuffer* lb = (LayerBuffer*)mapped.pData;
-                lb->layerParams = DirectX::XMFLOAT4(layer.opacity, 0.f, 0.f, 0.f);
+                lb->layerParams = DirectX::XMFLOAT4(layer.opacity, gMask ? 1.f : 0.f, 0.f, 0.f);
                 lb->transformParams = DirectX::XMFLOAT4(1.f, 1.f, 0.f, 0.f);
                 float flags = 1.f + (gFirst ? 2.f : 0.f);
                 lb->centerParams = DirectX::XMFLOAT4(0.5f, 0.5f, (float)(uint32_t)layer.blendMode, flags);
@@ -3869,9 +3884,14 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             }
             context->PSSetConstantBuffers(1, 1, &m_LayerConstantBuffer);
             context->PSSetShaderResources(0, 1, &m_GroupCompositeSRV);
-            {
+            if (gMask)
+                context->PSSetShaderResources(1, 1, &layer.maskSRV);
+            else {
                 ID3D11ShaderResourceView* n = nullptr;
                 context->PSSetShaderResources(1, 1, &n);
+            }
+            {
+                ID3D11ShaderResourceView* n = nullptr;
                 context->PSSetShaderResources(2, 1, &n);
             }
             if (layer.blendMode != BlendMode::Normal && m_CompositeHistoryTexture && m_CompositeHistorySRV) {

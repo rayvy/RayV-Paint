@@ -544,8 +544,8 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
             }
             ImGui::SameLine(0, rowPad);
 
-            // Mask column — always reserved for non-groups (fixed width)
-            if (!layer.isGroup) {
+            // Mask column — layers + groups (group mask clips whole stack)
+            {
                 alignMid(thumb);
                 if (layer.hasMask && layer.maskSRV) {
                     bool isActiveMask = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerMask);
@@ -561,18 +561,21 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         canvas.SetActiveLayerIndex(i);
                         canvas.SetPaintTarget(PaintTarget::LayerMask);
                         setSoleSelection(i);
-                        // Alt+Click: load mask → selection (PS-like "load selection from mask")
                         if (io.KeyAlt) {
                             canvas.SelectFromLayerMask(i);
                             canvas.UpdateSelectionMaskTexture(device);
                         }
                     }
                     if (ImGui::IsItemHovered()) {
-                        Ui::Tooltip("Layer Mask\nClick: edit mask  ·  Alt+Click: load mask as selection\nRight-click: Apply / Delete");
+                        Ui::Tooltip(layer.isGroup
+                            ? "Group Mask\nClick: edit  ·  Alt+Click: load as selection\nRight-click: Delete"
+                            : "Layer Mask\nClick: edit  ·  Alt+Click: load as selection\nRight-click: Apply / Delete");
                     }
                     if (ImGui::BeginPopupContextItem("##maskctx")) {
-                        if (ImGui::MenuItem("Apply Mask")) canvas.ApplyLayerMask(i);
-                        if (ImGui::MenuItem("Delete Mask")) canvas.DeleteLayerMask(i);
+                        if (!layer.isGroup && ImGui::MenuItem("Apply Mask"))
+                            canvas.ApplyLayerMask(i);
+                        if (ImGui::MenuItem("Delete Mask"))
+                            canvas.DeleteLayerMask(i);
                         ImGui::EndPopup();
                     }
                     ImGui::PopStyleVar();
@@ -580,7 +583,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 } else {
                     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.12f, 0.13f, 0.65f));
                     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.18f, 0.20f, 0.85f));
-                    if (ImGui::Button("+M##addm", ImVec2(thumb, thumb))) {
+                    if (ImGui::Button(layer.isGroup ? "+GM##addm" : "+M##addm", ImVec2(thumb, thumb))) {
                         if (canvas.HasSelection())
                             canvas.CreateLayerMaskFromSelection(device, i);
                         else
@@ -589,9 +592,13 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     }
                     ImGui::PopStyleColor(2);
                     if (ImGui::IsItemHovered()) {
-                        Ui::Tooltip(canvas.HasSelection()
-                            ? "Add Layer Mask from Selection"
-                            : "Add Layer Mask");
+                        Ui::Tooltip(layer.isGroup
+                            ? (canvas.HasSelection()
+                                ? "Add Group Mask from Selection"
+                                : "Add Group Mask (clips all children)")
+                            : (canvas.HasSelection()
+                                ? "Add Layer Mask from Selection"
+                                : "Add Layer Mask"));
                     }
                 }
                 ImGui::SameLine(0, rowPad);
@@ -739,13 +746,22 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         s_RenameIdx = i;
                         std::snprintf(s_RenameBuf, sizeof(s_RenameBuf), "%s", layer.name.c_str());
                     }
-                    if (ImGui::MenuItem("Remove from Group", nullptr, false, layer.parentGroupId != -1))
+                    if (ImGui::MenuItem("Remove from Group", nullptr, false, layer.parentGroupId != -1)) {
                         canvas.RemoveLayerFromGroup(i);
+                        canvas.MarkCompositeDirty();
+                    }
+                    if (ImGui::IsItemHovered() && layer.parentGroupId < 0)
+                        Ui::Tooltip("Layer is not inside a group");
                     if (ImGui::BeginMenu("Add to Group")) {
+                        bool any = false;
                         for (int g = 0; g < (int)layers.size(); ++g) {
-                            if (layers[g].isGroup && g != i && ImGui::MenuItem(layers[g].name.c_str()))
-                                canvas.AddLayerToGroup(i, g);
+                            if (layers[g].isGroup && g != i) {
+                                any = true;
+                                if (ImGui::MenuItem(layers[g].name.c_str()))
+                                    canvas.AddLayerToGroup(i, g);
+                            }
                         }
+                        if (!any) ImGui::TextDisabled("(no groups)");
                         ImGui::EndMenu();
                     }
                     {
@@ -761,17 +777,19 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                                 nullptr, false, canRast))
                             canvas.RasterizeLayer(device, i);
                     }
-                    if (!layer.isGroup) {
-                        ImGui::Separator();
-                        if (!layer.hasMask) {
-                            if (ImGui::MenuItem(canvas.HasSelection() ? "Add Mask from Selection" : "Add Mask")) {
-                                if (canvas.HasSelection()) canvas.CreateLayerMaskFromSelection(device, i);
-                                else canvas.CreateLayerMask(device, i);
-                            }
-                        } else {
-                            if (ImGui::MenuItem("Apply Mask")) canvas.ApplyLayerMask(i);
-                            if (ImGui::MenuItem("Delete Mask")) canvas.DeleteLayerMask(i);
+                    ImGui::Separator();
+                    if (!layer.hasMask) {
+                        if (ImGui::MenuItem(canvas.HasSelection()
+                                ? (layer.isGroup ? "Add Group Mask from Selection" : "Add Mask from Selection")
+                                : (layer.isGroup ? "Add Group Mask" : "Add Mask"))) {
+                            if (canvas.HasSelection()) canvas.CreateLayerMaskFromSelection(device, i);
+                            else canvas.CreateLayerMask(device, i);
                         }
+                    } else {
+                        if (!layer.isGroup && ImGui::MenuItem("Apply Mask"))
+                            canvas.ApplyLayerMask(i);
+                        if (ImGui::MenuItem("Delete Mask"))
+                            canvas.DeleteLayerMask(i);
                     }
                     ImGui::Separator();
                     if (!layer.isGroup && i > 0 && ImGui::MenuItem("Merge Down")) {
@@ -821,7 +839,34 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                         canvas.DuplicateLayer(device, i);
                         setSoleSelection(canvas.GetActiveLayerIndex());
                     }
-                    if (layers.size() > 1 && ImGui::MenuItem("Delete Layer")) {
+                    if (layer.isGroup) {
+                        // DeleteLayer alone unparents children (group shell only).
+                        if (layers.size() > 1 && ImGui::MenuItem("Delete Group Only")) {
+                            canvas.DeleteLayer(i);
+                            pruneSel();
+                        }
+                        if (ImGui::IsItemHovered())
+                            Ui::Tooltip("Remove group header; children become top-level");
+                        if (layers.size() > 1 && ImGui::MenuItem("Delete Group and Contents")) {
+                            std::vector<int> kids;
+                            for (int j = 0; j < (int)layers.size(); ++j) {
+                                if (j != i && canvas.IsLayerUnderGroup(j, i))
+                                    kids.push_back(j);
+                            }
+                            std::sort(kids.begin(), kids.end(), std::greater<int>());
+                            int gi = i;
+                            for (int j : kids) {
+                                if (j < gi) --gi;
+                                canvas.DeleteLayer(j);
+                            }
+                            if (gi >= 0 && gi < (int)canvas.GetLayers().size() &&
+                                canvas.GetLayers()[gi].isGroup)
+                                canvas.DeleteLayer(gi);
+                            pruneSel();
+                        }
+                        if (ImGui::IsItemHovered())
+                            Ui::Tooltip("Delete the group and all nested layers");
+                    } else if (layers.size() > 1 && ImGui::MenuItem("Delete Layer")) {
                         canvas.DeleteLayer(i);
                         pruneSel();
                     }

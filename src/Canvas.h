@@ -401,6 +401,8 @@ public:
     void CreateLayerGroup(ID3D11Device* device, const std::string& name);
     void AddLayerToGroup(int layerIdx, int groupLayerIdx);
     void RemoveLayerFromGroup(int layerIdx);
+    // True if layerIdx is under groupIdx (any depth).
+    bool IsLayerUnderGroup(int layerIdx, int groupIdx) const;
     // Reorder + remaps parentGroupId. Returns new index of moved layer.
     int  ReorderLayer(int fromIdx, int toIdx);
     // Move layer into group (reparent + place under header). Returns new layer index.
@@ -936,9 +938,6 @@ private:
     void ReleaseFillPatternGpu(Layer& layer);
     // True if layer should be drawn as top-level (parentGroupId < 0 or parent missing).
     static bool IsTopLevelLayer(const Layer& layer);
-    // True if layerIdx is under groupIdx (any depth).
-    bool IsLayerUnderGroup(int layerIdx, int groupIdx) const;
-
 
     bool ExtractAndSetICCProfile(const std::string& pngPath);
 
