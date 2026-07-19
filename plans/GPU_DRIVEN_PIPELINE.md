@@ -195,28 +195,149 @@ Acceptance:
                             viewport / export path
 ```
 
-### 4.2 Two FX strategies (pick per phase)
+### 4.2 Two FX strategies — and the dual-implementation tax
 
 | Strategy | When | Pros | Cons |
 |----------|------|------|------|
-| **A. Preview-only GPU** | P1–P2 | Safe; undo/export unchanged | Two implementations until golden match |
-| **B. GPU = bake into presentationCache** | P4 optional | One path | Must match CPU; readback cost; seams |
+| **A. Preview-only GPU** | P1–P3 (interactive) | Undo/export unchanged; safe rollback | **Two filter/style impls** (CPU `layer_fx` + HLSL) must stay in sync |
+| **B. GPU bake into presentation/filtered caches** | P4+ only after goldens | One interactive path | Readback cost; must prove pixel policy; seams |
 
-**Recommendation:** ship **A** first with continuous golden tests against current CPU `layer_fx`. Only promote to B when tests green.
+**Recommendation:** ship **A** first. Promote to B only when goldens stay green for a release cycle.
 
-### 4.3 Brush / tools (your “GPU paints, cores catch up”)
+#### 4.2.1 Dual-impl is not a one-shot migration — it is ongoing load
 
-**P2 model (recommended first tool slice):**
+While A is live (likely **entire P1–P3**, months of calendar time if paced carefully):
 
-1. On dab: enqueue `OpIntent::Paint`.  
-2. GPU: draw dab into **stroke overlay RT** (or tile atlas) immediately (provisional).  
-3. Worker/main: `BackupTile` + `PaintEngine` stamp into `tileCache` in order.  
-4. When commit for seq N done: upload dirty tiles; drop overlay for those tiles.  
-5. Stroke End: wait for queue catch-up (or soft-wait with “syncing…”); then seal undo **once**.
+| Change type | What you must touch twice | Failure if you forget |
+|-------------|---------------------------|------------------------|
+| New filter kind / param | `LayerTypes` + `ApplyPixelFilters` **and** HLSL cbuffer/pass | Preview wrong; export “right” → user trust dies |
+| Shadow/outline math tweak | `BuildPresentation` **and** GPU style passes | Halo size differs on export |
+| Premul / selection weight | Both paths | Fringes on undo/export |
+| Bit-depth (U8/F16/F32) | CPU already multi-format; GPU RT formats must match policy | Clipping / banding in preview only |
 
-**Not for P2:** writing GPU readback as content without CPU paint engine (breaks exact stamp/scatter/tip parity).
+**Mitigations (mandatory in plan, not optional polish):**
 
-**P3+ for 8K–128K:** same model; overlay may be lower resolution; catch-up may be multi-threaded tile writers with **strict seq order per tile**.
+1. **Single source of param structs** — C++ `LayerFilter` / style params serialize once; GPU uploads the same POD layout (document cbuffer layout next to struct, static_assert size).  
+2. **Golden matrix CI/smoke** — fixed seeds (HSV Δ, Blur r=1/2/8, Curves, DropShadow, Outline) on 64² and 512²; CPU vs GPU max-abs / PSNR; **block merge** if regress.  
+3. **Feature flag per filter** — `GpuFxCaps::hsv`, `::blur`, … CPU fallback if GPU path missing/failed; never half-ship a new filter only on one side.  
+4. **“CPU is export authority until P4”** — product copy: preview can be GPU; file always CPU full bake (or proven-identical). Reduces dual-path *user-facing* risk.  
+5. **Kill dual as soon as P4 lands** — explicit exit criterion: delete or `#if 0` interactive CPU bake when GPU is authority for interactive + export matches. Do not leave dual forever.  
+6. **No new filter in P1–P3 without both impls + goldens** — process rule for agents/humans.
+
+**Cost budget:** every new FX feature costs ~1.5–2× until P4. Accept it; do not “save time” by GPU-only without export path.
+
+### 4.3 Brush / tools — P2 deep dive (highest technical risk)
+
+Claude’s note: **P2 is the riskiest technical junction** (GPU provisional × `PaintEngine` / `BackupTile` / tip parity). The short checklist in older drafts is **not** enough to implement from — this section is the contract.
+
+#### 4.3.1 Goals vs non-goals
+
+| Goal | Non-goal (until much later) |
+|------|-----------------------------|
+| GPU shows stroke **immediately** (provisional overlay) | GPU readback becomes document pixels |
+| Authoritative stamp remains **`PaintEngine` on `tileCache`** | Two stamp engines (GPU tip vs CPU tip) both writing history |
+| Undo seal = **bit-identical** to today’s single-threaded stroke | “Close enough” scatter/tip for history |
+| Catch-up may lag on huge docs | Reordering dabs across tiles |
+
+#### 4.3.2 Data plane split (hard)
+
+```
+                    ┌─────────────────────────────┐
+  pointer dab ──►   │  DabRecord (immutable)      │  seq, layer, x,y, pressure,
+                    │  brush snapshot, tip id,    │  rotation, scatter seed, …
+                    │  selection/mask clip ref    │
+                    └──────────┬──────────────────┘
+               ┌───────────────┴───────────────┐
+               ▼                               ▼
+     PROVISIONAL (GPU only)           AUTHORITATIVE (CPU tiles)
+     StrokeOverlay RT / atlas         BackupTile → LockTile → DrawStamp
+     no COW, no undo                  Seal only after all dabs Committed
+     may drop under VRAM              bit-identical to pre-P2 path
+```
+
+**Key:** GPU and CPU both consume the **same `DabRecord` list** (or CPU is the only consumer of records and GPU approximates — see parity modes). Prefer **shared DabRecord** so parameters cannot diverge.
+
+#### 4.3.3 Parity modes (choose explicitly per phase)
+
+| Mode | GPU overlay | CPU truth | When |
+|------|-------------|-----------|------|
+| **P2a Sync dual** | Optional overlay for feel | **Main thread** runs full `PaintEngine` every dab **as today** | First ship — zero race with BackupTile |
+| **P2b Async catch-up** | Overlay from DabRecord | Worker(s) replay DabRecords through **same** `PaintEngine` | Only after P2a stable |
+| **P2c GPU content** | — | Forbidden until proven stamp shader == PaintEngine | Not in this plan’s default path |
+
+**Default ship order:** **P2a first** (overlay is pure candy; truth path unchanged). **P2b only** when overlay already trusted and we need lag hiding on large docs.
+
+P2a still needs care: composite must draw `tileCache` upload **plus** overlay without double-painting (overlay only for dabs not yet uploaded, or overlay = full stroke and tiles underneath cleared/hidden for active stroke — pick one policy and document it).
+
+**Recommended composite policy for P2a:**
+
+- Mid-stroke: composite uses **raw tiles + StrokeOverlay** (do not bake FX mid-stroke — already true today).  
+- Overlay covers only the **active stroke** AABB.  
+- On stroke End: flush any pending CPU dabs (none in P2a), seal undo, **destroy overlay**, upload dirty tiles, then FX as today.
+
+**P2b composite policy:**
+
+- Overlay holds dabs with `state < Committed`.  
+- When dab N commits: upload that dab’s dirty tiles; clear overlay texels for those tiles (or rebuild overlay from remaining Pending records).  
+- Never leave overlay covering committed tiles (double opacity).
+
+#### 4.3.4 BackupTile / Seal ordering (race kill list)
+
+Today (must preserve semantics):
+
+```
+Stroke Begin: clear m_ActiveStrokeDeltas
+  dab: BackupTile (first touch only, shared snapshot) → PaintEngine write
+Stroke End: SealActiveStrokeDeltas (deep-copy old/new) → PaintStrokeCommand
+```
+
+**P2b race conditions and required rules:**
+
+| Race | Bad outcome | Rule |
+|------|-------------|------|
+| Seal while worker still writing tile | History incomplete / torn pixels | **I9:** Seal only when all stroke dabs `Committed` or `Failed` |
+| Two workers `LockTile` same tile out of order | COW chaos / lost dab | **Per-tile serial queue** (see 4.3.5) |
+| `BackupTile` on worker without main-thread exclusive layer | Double backup / wrong oldState | Backup on **owner thread of tileCache** only (main), **or** hold layer mutex for Backup+stamp as one critical section |
+| Undo mid catch-up | Worker writes after restore | Generation token: cancel workers; discard Pending; clear overlay |
+| Export mid catch-up | Partial stroke on disk | `FlushPipeline` + document lock (existing JobManager pattern) |
+| GPU overlay uses different tip sampling | “Looks good, undoes wrong” | CPU remains stamp authority; overlay may be cheaper approx **only if** labeled / same DabRecord params and user accepts preview soft-diff — default: **same tip bytes**, cheaper only in P5 LOD |
+
+**Practical threading rule for P2b (conservative):**
+
+1. **Main thread only** mutates `tileCache` / calls `BackupTile` / `Seal*` (same as today).  
+2. Workers may **only** prepare dab math (optional) or stay unused until we have a proven tile-mutex design.  
+3. If workers later stamp: one **tile owner** model — each tile has a serial chain of dabs; worker acquires tile lock, main never touches that tile concurrently; seal still on main after barrier.
+
+**Do not** start with multi-worker `LockTile` in the first P2 PR. That is how undo holes return.
+
+#### 4.3.5 Per-tile sequence (for P2b/P3 catch-up)
+
+```text
+Global seq:  1,2,3,4,5  (dab order, stroke-global)
+Tile (3,7):  dabs 1,3,5 must apply as 1→3→5 never 1→5→3
+Tile (4,7):  dabs 2,3   as 2→3
+```
+
+- Global order defines happens-before for overlapping tiles.  
+- Independent tiles **may** parallelize **only if** no shared dab and no shared BackupTile map without locking `m_ActiveStrokeDeltas`.  
+- Simpler correct design: **single consumer** replays dabs in global seq on main (async only for “not blocking input” via overlay). Parallel tile writers are a **P3/P5 optimization**, not P2 requirement.
+
+#### 4.3.6 Bit-identical CPU path (acceptance for P2)
+
+Before enabling async:
+
+1. Record stroke as DabRecords; replay offline through PaintEngine → hash tiles.  
+2. Live stroke without overlay → same hash.  
+3. Live stroke with overlay disabled mid-way → same hash after End.  
+4. Scatter/angle jitter: seed must live in DabRecord, not `rand()` at stamp time twice.
+
+If (1)≠(2), fix before any GPU overlay ships.
+
+#### 4.3.7 Rollback for P2
+
+- Feature flag `GpuStrokeOverlay=0` → identical to pre-P2 main.  
+- Branch `GPU-DRIVEN-PARADIGME`; never merge P2b to main until thrash undo stress passes.  
+- Overlay alloc fail → silent disable, CPU-only (no crash).
 
 ### 4.4 Layer FX GPU (P1)
 
@@ -231,6 +352,66 @@ Use / adapt `ai-answers/LayerFx.hlsl` + `GpuFxDispatch` **after** bringing into 
 
 **Group FX:** flatten children to group provisional RT (GPU) — harder; schedule after single-layer P1.
 
+### 4.5 Op-queue ↔ existing threading / single-document model
+
+Claude’s note: do **not** assume op-queue is “compatible by default” with today’s concurrency. Explicit join points:
+
+#### 4.5.1 What exists today
+
+| Mechanism | Role | Thread | Document interaction |
+|-----------|------|--------|----------------------|
+| **Main / UI / D3D** | Paint, compose, ImGui, most Canvas mutation | Main | Authoritative |
+| **`JobManager`** | Named jobs; `locksDocument` blocks edits via `AppContext` / `BlocksCanvasInteraction` | Job may be async; lock is logical | Export, open, autosave |
+| **`AsyncFilterQueue`** | Snapshot tiles on main → worker filter → **apply on main** via `Poll` | Worker + main poll | Generation cancel; was source of ghost tiles when mis-applied |
+| **`ThreadPool`** | Asset thumbs, decode chunks, etc. | Pool | Must not touch live `tileCache` without snapshot |
+| **Single active document** | `ProjectManager` / active Canvas | — | One paint target; simplifies barriers |
+
+There is **no** general multi-document paint pipeline. Op-queue designs for **one Canvas** first.
+
+#### 4.5.2 How OpQueue should plug in (P3 contract)
+
+```text
+                    Main thread                              Workers
+                    ───────────                              ───────
+ Input → DabRecord / OpIntent
+      → Provisional GPU (D3D: main only unless deferred context policy)
+      → OpQueue push
+      → each frame: Poll completes → apply tiles / clear overlay
+      → FlushPipeline: spin/poll until empty (like job lock)
+                                                          optional:
+                                                          prepare / filter snapshot
+                                                          (never Seal, never free SRV)
+```
+
+**Rules:**
+
+1. **D3D11 immediate context:** treat as **main-thread only** unless we introduce a dedicated render thread + deferred contexts (out of scope until needed). GPU provisional submit = main.  
+2. **`JobManager::locksDocument`:** `FlushPipeline` must complete **before** or **as part of** starting a document-lock job; paint path already checks `BlocksCanvasInteraction`.  
+3. **`AsyncFilterQueue`:** either (a) **subsumed** by OpQueue (preferred long-term), or (b) stays separate but **ordered after** paint commits for that layer (filter job generation bumps when paint seals). Do not run filter apply while paint catch-up pending for same layer.  
+4. **ThreadPool tasks** that need pixels: **snapshot** on main (`SnapTile` bytes), process offline, return results; main applies — same pattern as `FilterJobInput`.  
+5. **Single-document:** OpQueue is a member of `Canvas` (or AppContext pointing at active canvas). Switching document: flush or cancel all ops; never process ops against a destroyed Canvas.  
+6. **Python / scripting:** `get_composite` / save → `FlushPipeline` (same as export).  
+7. **Autosave:** already `locksDocument`; must flush pipeline first so .rayp matches tiles not overlay.
+
+#### 4.5.3 Compatibility checklist (explicit — do not skip at P3 start)
+
+- [ ] Document lock blocks new OpIntent enqueue (or enqueues only cancel).  
+- [ ] Undo/Redo: cancel workers, flush or discard queue, clear overlay, then apply command.  
+- [ ] Layer delete: cancel ops for that `layerIdx`.  
+- [ ] `AsyncFilterQueue` idle or ordered after paint for that layer.  
+- [ ] No worker calls `BackupTile` / `PushCommand` / `ImGui`.  
+- [ ] Stress: export during scribble → either blocked or flush-complete before encode.
+
+#### 4.5.4 What “single-document-per-core” means here
+
+Interpret as: **one live editable document core graph**, not “one OS thread total.” Multiple cores may:
+
+- decode assets,  
+- run filter snapshots,  
+- later (P5) prepare dab bounds,
+
+…but **one** ordered authority stream commits into that document’s tiles. OpQueue is that stream’s scheduler, not a free-for-all work-stealing heap of paint.
+
 ---
 
 ## 5. Operation order (formal)
@@ -242,6 +423,7 @@ Op {
   layerIdx, bounds
   state: Pending → Provisional → Committing → Committed | Failed
   dependsOn: optional seq  // barrier
+  // Paint: optional dabIndex, tileKeys[], strokeId
 }
 ```
 
@@ -249,9 +431,11 @@ Op {
 
 1. Global `seq` never reordered for **same layer content**.  
 2. Cross-layer: composite may draw latest provisional; export waits all Committed.  
-3. **Barrier ops:** undo, export, save .rayp, bit-depth convert, crop — `FlushPipeline()` until empty.  
+3. **Barrier ops:** undo, export, save .rayp, bit-depth convert, crop, autosave — `FlushPipeline()` until empty.  
 4. Undo of committed stroke: mark superseding provisional ops **Failed**; rebuild provisional from tiles.  
-5. UI: show catch-up depth; optional “pause input when backlog > N” for extreme sizes.
+5. UI: show catch-up depth; optional “pause input when backlog > N” for extreme sizes.  
+6. **Per-tile:** if parallel commit ever exists, apply dabs in global seq order per tile (§4.3.5).  
+7. **Join JobManager:** document-lock jobs require empty pipeline (§4.5).
 
 ---
 
@@ -268,6 +452,10 @@ I7  No MarkDirty-clear on GPU upload unless all intended tiles uploaded (existin
 I8  Effects params changes = LayerPropsCommand; pixels change = PaintStrokeCommand.
 I9  Mid-stroke: never seal incomplete async commits.
 I10 Display may be proxy; Export must be full-res for user-facing files until user opts into proxy export.
+I11 Dual FX (CPU+GPU): every interactive GPU filter has CPU export twin + golden until P4 exit.
+I12 DabRecord is the single param source for overlay and PaintEngine replay (no second rand).
+I13 tileCache mutation / BackupTile / Seal run only on the document owner thread (main) unless a documented tile-lock protocol is introduced.
+I14 Document-lock jobs and OpQueue cannot race: flush or block enqueue.
 ```
 
 ---
@@ -283,6 +471,10 @@ I10 Display may be proxy; Export must be full-res for user-facing files until us
 | 128K before op-queue | OOM / thrash |
 | Skip golden CPU↔GPU tests | Display≠export forever |
 | Free SRV while ImGui still holds thumb | Crash (known class) |
+| **P2b multi-worker LockTile without per-tile seq** | Torn stamps / undo holes — worst class of bug |
+| **P2 overlay double-composite with committed tiles** | Double opacity, “fat” strokes |
+| **New filter GPU-only “we’ll add CPU later”** | Dual-tax debt + export lies |
+| **Assume OpQueue ⊥ JobManager** | Autosave/export partial docs |
 
 ---
 
@@ -314,10 +506,13 @@ Do not: ...
 - [ ] P1b: blur dirty-rect GPU (no seams at tile borders in proxy)  
 - [ ] P1c: shadow/outline GPU preview  
 - [ ] P1d: Effects Preview uses GPU path; stroke-end no full CPU rebuild when GPU OK  
-- [ ] P2a: stroke overlay RT for Brush  
-- [ ] P2b: mask paint overlay  
-- [ ] P3: OpQueue + FlushPipeline on export/undo  
-- [ ] P4: export golden vs viewport full-res  
+- [ ] P1 dual-tax: golden matrix + feature flags for each GPU filter  
+- [ ] P2a: stroke overlay RT + **main-thread PaintEngine unchanged** + no double paint  
+- [ ] P2a′: DabRecord capture + offline replay hash == live stroke  
+- [ ] P2b: async catch-up only after P2a′; still main-thread BackupTile/Seal  
+- [ ] P2 mask paint overlay (same rules as content)  
+- [ ] P3: OpQueue + FlushPipeline; join JobManager document lock checklist §4.5.3  
+- [ ] P4: export golden vs viewport full-res; plan dual-FX exit  
 - [ ] P5: memory policy + backlog UI for extreme docs  
 
 ### 8.4 Token budget rule
@@ -343,22 +538,34 @@ Never implement P3+P1 in the same session.
 3. Interactive `RebuildLayerPresentation` / `RefreshFilteredCache`:  
    - if GPU ready → provisional presentation SRV  
    - else CPU fallback  
-4. Golden: HSV, Blur r=2, DropShadow on 512².  
+4. Golden: HSV, Blur r=2, DropShadow on 512² (CPU vs GPU).  
 5. Keep export on CPU full bake.  
-6. Stroke policy: mid-stroke still raw; optional live GPU FX over raw without rebaking tiles (better than today’s hitch).
+6. Stroke policy: mid-stroke still raw; optional live GPU FX over raw without rebaking tiles.  
+7. Document dual-tax: caps flags + “no new filter without both sides.”
 
-### P2 — Tool provisional (2–3 sessions)
+### P2 — Tool provisional (split; 3–5 sessions)
 
-1. `StrokeOverlay` RT per active layer (or shared).  
-2. Brush dabs draw GPU overlay + enqueue CPU stamp.  
-3. Sync path when queue empty = today’s behavior (bit-identical tiles).  
-4. Stress: fast scribble + undo.
+**P2a (safe):**  
+1. DabRecord log (can be debug-only first).  
+2. StrokeOverlay RT; composite = tiles + overlay mid-stroke.  
+3. **CPU stamp path 100% as today** on main.  
+4. End: drop overlay, seal, FX.  
+5. Stress scribble + undo; flag off == bit-identical.
 
-### P3 — Op queue (2 sessions)
+**P2a′ (parity gate):** offline DabRecord replay hash == live.
+
+**P2b (only after gate):**  
+1. Overlay stays; CPU catch-up may lag **but still main-thread PaintEngine** unless tile protocol exists.  
+2. Seal only when backlog empty.  
+3. No multi-worker LockTile in first P2b.
+
+### P3 — Op queue (2–3 sessions)
 
 1. Global seq, states, FlushPipeline.  
-2. Export/Save/Undo/Redo call flush.  
-3. HUD backlog counter.  
+2. Export/Save/Undo/Redo/Autosave call flush.  
+3. Wire `JobManager` document-lock checklist §4.5.3.  
+4. Order vs `AsyncFilterQueue` (subsume or barrier).  
+5. HUD backlog counter.
 
 ### P4 — Export fidelity (1–2 sessions)
 
