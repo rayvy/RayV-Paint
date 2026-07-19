@@ -69,16 +69,21 @@ void DrawAssetBrowserPanel(UIState& state, Canvas& canvas, ID3D11Device* device)
     }
     if (ImGui::IsItemHovered()) Ui::Tooltip("Rescan libraries");
 
-    // Bind fill if applicable (icon-only, no long status text)
+    // Bind fill when a Fill layer is active
     int ai = canvas.GetActiveLayerIndex();
     const auto& layers = canvas.GetLayers();
     bool fillActive = ai >= 0 && ai < (int)layers.size() && layers[ai].IsFill();
-    if (fillActive && !grid.selectedKey.empty()) {
+    if (fillActive) {
         ImGui::SameLine();
-        if (ImGui::SmallButton("Use Fill")) {
-            canvas.BindFillTextureAsset(ai, grid.selectedKey);
+        if (!grid.selectedKey.empty()) {
+            if (ImGui::SmallButton("Use on Fill")) {
+                canvas.BindFillTextureAsset(ai, grid.selectedKey);
+            }
+            if (ImGui::IsItemHovered())
+                Ui::Tooltip("Bind selected texture to active Fill layer");
+        } else {
+            ImGui::TextDisabled("Select a texture · Fill layer active");
         }
-        if (ImGui::IsItemHovered()) Ui::Tooltip("Bind selected asset to active Fill layer");
     }
 
     Ui::EndDockPanel();

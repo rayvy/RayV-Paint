@@ -114,12 +114,17 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     s_committedOpacity = al.opacity;
                     s_committedBlend = al.blendMode;
                 }
-                if (Ui::SmartSliderFloat("##op_top", &al.opacity, 0.f, 1.f, 1.f, 0.05f, "Fill %.2f")) {
-                    // Content/fill opacity — styles keep independent style.opacity
+                // Layer opacity = content/fill strength. FX styles keep their own opacity.
+                if (Ui::SmartSliderFloat("##op_top", &al.opacity, 0.f, 1.f, 1.f, 0.01f, "Opacity %.2f")) {
                     if (al.HasEnabledStyles() || al.isGroup)
                         canvas.RequestPresentationRebuild(ai);
                     else
                         canvas.MarkCompositeDirty();
+                }
+                if (ImGui::IsItemHovered()) {
+                    Ui::Tooltip(
+                        "Layer opacity (content / fill).\n"
+                        "Does not change Shadow/Outline — those use style opacity in Effects.");
                 }
                 if (ImGui::IsItemDeactivatedAfterEdit() && al.opacity != s_committedOpacity) {
                     LayerPropsCommand::Props before = Canvas::CaptureLayerProps(al);
@@ -147,11 +152,15 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     canvas.MarkCompositeDirty();
                 }
                 ImGui::SameLine(0, hdrGap);
+                const auto& tok = Ui::Tokens();
                 bool hasFxTop = !al.filters.empty() || !al.styles.empty();
-                if (hasFxTop) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.6f, 0.9f, 0.55f));
+                if (hasFxTop) {
+                    ImVec4 ac = tok.accent;
+                    ac.w = 0.55f;
+                    ImGui::PushStyleColor(ImGuiCol_Button, ac);
+                }
                 if (ImGui::Button("Fx##top", ImVec2(40, 0))) {
                     state.showLayerEffects = true;
-                    // Prefer first style, else first filter
                     if (!al.styles.empty()) {
                         state.layerEffectsSelKind = 0;
                         state.layerEffectsSelIdx = 0;
@@ -172,12 +181,18 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                 ImGui::SameLine(0, 4);
                 {
                     bool fxOn = canvas.GetEffectsPreviewEnabled();
-                    if (!fxOn) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.25f, 0.15f, 0.75f));
-                    if (ImGui::Button(fxOn ? "FX##fxprev" : "off##fxprev", ImVec2(36, 0))) {
-                        canvas.SetEffectsPreviewEnabled(!fxOn);
-                        // RefreshCanvas is called inside SetEffectsPreviewEnabled
+                    if (!fxOn) {
+                        ImVec4 d = tok.danger;
+                        d.w = 0.75f;
+                        ImGui::PushStyleColor(ImGuiCol_Button, d);
+                    } else {
+                        ImVec4 ac = tok.accent;
+                        ac.w = 0.40f;
+                        ImGui::PushStyleColor(ImGuiCol_Button, ac);
                     }
-                    if (!fxOn) ImGui::PopStyleColor();
+                    if (ImGui::Button(fxOn ? "FX##fxprev" : "off##fxprev", ImVec2(36, 0)))
+                        canvas.SetEffectsPreviewEnabled(!fxOn);
+                    ImGui::PopStyleColor();
                     if (ImGui::IsItemHovered())
                         Ui::Tooltip(fxOn
                             ? "Effects preview ON (CPU bake)\nClick to disable for fast paint"
@@ -232,9 +247,11 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
 
                     // Collapsing section — default open, height-capped so layer list stays visible
                     if (ImGui::CollapsingHeader("Fill##fill_hdr", ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::BeginChild("##fill_body",
-                            ImVec2(0.f, std::min(220.f, ImGui::GetContentRegionAvail().y * 0.45f)),
+                        const float fillBodyH = std::clamp(
+                            ImGui::GetContentRegionAvail().y * 0.42f, 140.f, 260.f);
+                        ImGui::BeginChild("##fill_body", ImVec2(0.f, fillBodyH),
                             true, ImGuiWindowFlags_None);
+                        const auto& ftok = Ui::Tokens();
 
                         const char* chs[4] = { "R", "G", "B", "A" };
                         for (int idx = 0; idx < (int)mapsToShow.size(); ++idx) {
@@ -248,7 +265,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                                     lab = sl->DisplayName();
                             }
 
-                            // One dense row: [✓ Map] [color+pip] R G B A
+                            // Row 1: enable + map name + color + pipette
                             bool en = mc.enabled;
                             if (ImGui::Checkbox("##en", &en)) {
                                 mc.enabled = en;
@@ -256,12 +273,12 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                             }
                             if (ImGui::IsItemHovered())
                                 Ui::Tooltip("Enable this map target for Fill");
-                            ImGui::SameLine(0, 4);
+                            ImGui::SameLine(0, ftok.s1);
+                            ImGui::AlignTextToFramePadding();
                             ImGui::TextUnformatted(lab);
                             if (mc.enabled) {
-                                ImGui::SameLine(0, 6);
+                                ImGui::SameLine(0, ftok.s2);
                                 bool pip = false;
-                                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 88.f);
                                 if (Ui::ColorField("##fillcol", mc.rgba,
                                         Ui::ColorFieldFlags_FullPicker | Ui::ColorFieldFlags_AlphaBar |
                                         Ui::ColorFieldFlags_Pipette,
@@ -271,14 +288,23 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                                 if (pip)
                                     UI::ArmFillPipette(ai, mi);
                                 if (UI::FillPipetteArmedFor(ai, mi)) {
-                                    ImGui::SameLine(0, 2);
-                                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f), "…");
+                                    ImGui::SameLine(0, ftok.s1);
+                                    ImGui::TextColored(ftok.accent, "●");
+                                    if (ImGui::IsItemHovered())
+                                        Ui::Tooltip("Pipette armed — click canvas");
                                 }
-                                ImGui::SameLine(0, 6);
+
+                                // Row 2: channel write mask (wraps on narrow panels)
+                                ImGui::Indent(ImGui::GetFrameHeight() + ftok.s1);
+                                ImGui::TextDisabled("Write");
+                                ImGui::SameLine(0, ftok.s1);
                                 for (int c = 0; c < 4; ++c) {
                                     ImGui::PushID(c);
                                     bool on = mc.WritesChannel(c);
-                                    if (c > 0) ImGui::SameLine(0, 2);
+                                    if (c > 0) ImGui::SameLine(0, ftok.s1);
+                                    // Wrap if not enough room for remaining chips
+                                    if (c > 0 && ImGui::GetContentRegionAvail().x < 36.f)
+                                        ImGui::NewLine();
                                     if (ImGui::Checkbox(chs[c], &on)) {
                                         mc.SetChannel(c, on);
                                         dirtyFill();
@@ -287,18 +313,22 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                                         Ui::Tooltip(on ? "Write channel" : "Leave underlay");
                                     ImGui::PopID();
                                 }
+                                ImGui::Unindent(ImGui::GetFrameHeight() + ftok.s1);
                             }
                             ImGui::PopID();
+                            if (idx + 1 < (int)mapsToShow.size())
+                                ImGui::Spacing();
                         }
 
                         if (UI::IsFillPipetteArmed()) {
-                            ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.f, 1.f),
-                                "Pipette — click canvas");
+                            ImGui::Spacing();
+                            ImGui::TextColored(ftok.accent, "Pipette — click canvas to sample");
                         }
 
                         ImGui::Separator();
+                        ImGui::TextDisabled("Texture");
                         bool useTex = al.fill.useTexture;
-                        if (ImGui::Checkbox("Texture##filltex", &useTex)) {
+                        if (ImGui::Checkbox("Use texture##filltex", &useTex)) {
                             if (!useTex)
                                 canvas.BindFillTextureAsset(ai, "");
                             else
@@ -307,7 +337,7 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                             canvas.MarkCompositeDirty();
                         }
                         if (ImGui::IsItemHovered())
-                            Ui::Tooltip("Tile a texture over the fill (optional)");
+                            Ui::Tooltip("Tile a texture over the solid fill color");
 
                         static int s_FillPickLayer = -1;
                         std::string picked;
@@ -320,24 +350,27 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                             ID3D11ShaderResourceView* thumb =
                                 assets::AssetManager::Get().GetThumbSrv(device, al.fill.textureAssetKey, false);
                             if (thumb) {
-                                ImGui::Image((ImTextureID)thumb, ImVec2(22, 22));
-                                ImGui::SameLine(0, 4);
+                                ImGui::Image((ImTextureID)thumb, ImVec2(28, 28));
+                                ImGui::SameLine(0, ftok.s1);
                             }
                             std::string name = assets::AssetManager::Get().DisplayName(al.fill.textureAssetKey);
                             if (name.empty())
                                 name = al.fill.textureAssetKey.empty() ? "(none)" : al.fill.textureAssetKey;
+                            ImGui::AlignTextToFramePadding();
                             ImGui::TextUnformatted(name.c_str());
                             if (ImGui::IsItemHovered() && al.fill.textureW > 0)
                                 Ui::Tooltip((std::to_string(al.fill.textureW) + "×" +
                                              std::to_string(al.fill.textureH)).c_str());
 
+                            // Action row — wraps on narrow width
                             if (ImGui::SmallButton("Asset##filltex")) {
                                 s_FillPickLayer = ai;
                                 assets::AssetFilter f;
                                 f.kind = assets::AssetKind::Texture;
                                 Ui::OpenAssetPicker(f, "Fill Texture");
                             }
-                            ImGui::SameLine(0, 4);
+                            if (ImGui::IsItemHovered()) Ui::Tooltip("Pick from Asset Browser");
+                            ImGui::SameLine(0, ftok.s1);
                             if (ImGui::SmallButton("File##filltex")) {
                                 char path[512] = {};
                                 if (Ui::ShowOpenFile(path, sizeof(path),
@@ -345,20 +378,22 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                                     canvas.LoadFillTexture(ai, path);
                                 }
                             }
-                            ImGui::SameLine(0, 4);
+                            ImGui::SameLine(0, ftok.s1);
                             if (ImGui::SmallButton("Clear##filltex"))
                                 canvas.BindFillTextureAsset(ai, "");
 
-                            // Compact 2×2 transforms
-                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.48f);
+                            ImGui::Spacing();
+                            ImGui::TextDisabled("Scale / Offset");
+                            const float half = ImGui::GetContentRegionAvail().x * 0.5f - ftok.s1 * 0.5f;
+                            ImGui::SetNextItemWidth(half);
                             bool tchg = Ui::SmartSliderFloat("##ftsX", &al.fill.texScale[0], 0.05f, 8.f, 1.f, 0.05f, "Sx %.2f");
-                            ImGui::SameLine(0, 4);
-                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                            ImGui::SameLine(0, ftok.s1);
+                            ImGui::SetNextItemWidth(half);
                             tchg |= Ui::SmartSliderFloat("##ftsY", &al.fill.texScale[1], 0.05f, 8.f, 1.f, 0.05f, "Sy %.2f");
-                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.48f);
+                            ImGui::SetNextItemWidth(half);
                             tchg |= Ui::SmartSliderFloat("##ftoX", &al.fill.texOffset[0], -2.f, 2.f, 0.f, 0.05f, "Ox %.2f");
-                            ImGui::SameLine(0, 4);
-                            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+                            ImGui::SameLine(0, ftok.s1);
+                            ImGui::SetNextItemWidth(half);
                             tchg |= Ui::SmartSliderFloat("##ftoY", &al.fill.texOffset[1], -2.f, 2.f, 0.f, 0.05f, "Oy %.2f");
                             if (tchg) {
                                 al.needsUpload = true;
@@ -375,7 +410,8 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                             }
                         }
 
-                        ImGui::TextDisabled("Shape with layer mask (content paint blocked)");
+                        ImGui::Spacing();
+                        ImGui::TextDisabled("Shape with layer mask · content paint blocked");
                         ImGui::EndChild();
                     }
                     ImGui::PopID();
@@ -925,7 +961,9 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     setSoleSelection(canvas.GetActiveLayerIndex());
             };
 
-            float gap = 4.f;
+            const auto& btok = Ui::Tokens();
+            float gap = btok.s1;
+            // 7 actions: add, fill, vector, group, dup, merge, del
             float total = iconSz * 7 + gap * 6;
             float startX = std::max(0.f, (ImGui::GetContentRegionAvail().x - total) * 0.5f);
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + startX);
@@ -933,15 +971,22 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
             if (Ui::IconButton("##addL", "layer_add", ImVec2(iconSz, iconSz), "Add Layer").clicked)
                 doAdd();
             ImGui::SameLine(0, gap);
-            if (ImGui::Button("Fil##addF", ImVec2(iconSz, iconSz)))
+            if (Ui::IconButton("##addF", "fill_bucket", ImVec2(iconSz, iconSz), "Add Fill Layer").clicked)
                 doAddFill();
-            if (ImGui::IsItemHovered()) Ui::Tooltip("Add Fill Layer");
             ImGui::SameLine(0, gap);
-            if (ImGui::Button("Vec##addV", ImVec2(iconSz, iconSz)))
-                doAddVector();
-            if (ImGui::IsItemHovered())
-                Ui::Tooltip("Add Vector Layer — editable shapes (Rect/Ellipse/Pen).\n"
-                            "Then use vector tools in the Toolbar.");
+            // Vector: no dedicated SVG yet — themed text chip matching icon size
+            {
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btok.rSm);
+                ImGui::PushStyleColor(ImGuiCol_Button, btok.bgElevated);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btok.bgElevatedSoft);
+                ImGui::PushStyleColor(ImGuiCol_Text, btok.textPrimary);
+                if (ImGui::Button("V##addV", ImVec2(iconSz, iconSz)))
+                    doAddVector();
+                ImGui::PopStyleColor(3);
+                ImGui::PopStyleVar();
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("Add Vector Layer — Rect / Ellipse / Pen tools");
+            }
             ImGui::SameLine(0, gap);
             if (Ui::IconButton("##addG", "layer_group_add", ImVec2(iconSz, iconSz), "Add Group").clicked)
                 doGroup();
@@ -949,11 +994,18 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
             if (Ui::IconButton("##dup", "layer_duplicate", ImVec2(iconSz, iconSz), "Duplicate (Ctrl+J)").clicked)
                 doDup();
             ImGui::SameLine(0, gap);
-            // Merge uses text button if no dedicated icon
-            if (ImGui::Button("Mrg##merge", ImVec2(iconSz, iconSz)))
-                doMerge();
-            if (ImGui::IsItemHovered())
-                Ui::Tooltip("Merge Down / Merge selected (blend modes applied)");
+            {
+                ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, btok.rSm);
+                ImGui::PushStyleColor(ImGuiCol_Button, btok.bgElevated);
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, btok.bgElevatedSoft);
+                ImGui::PushStyleColor(ImGuiCol_Text, btok.textPrimary);
+                if (ImGui::Button("M##merge", ImVec2(iconSz, iconSz)))
+                    doMerge();
+                ImGui::PopStyleColor(3);
+                ImGui::PopStyleVar();
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("Merge selected / Merge Down (blend modes applied)");
+            }
             ImGui::SameLine(0, gap);
             if (Ui::IconButton("##del", "layer_delete", ImVec2(iconSz, iconSz), "Delete selection / active").clicked)
                 doDel();

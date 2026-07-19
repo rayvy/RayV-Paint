@@ -1,6 +1,8 @@
 #include "UiColorField.h"
 #include "UiTooltip.h"
+#include "UiIconButton.h"
 #include "../style/UiTokens.h"
+#include <algorithm>
 #include <cstring>
 
 namespace Ui {
@@ -48,13 +50,14 @@ bool ColorField(const char* id, float rgba[4], ColorFieldFlags flags,
                     changed = true;
             }
             if (flags & ColorFieldFlags_Pipette) {
-                if (ImGui::Button("Pipette", ImVec2(-1, 0))) {
+                ImGui::Spacing();
+                ImVec2 pipSz(std::max(28.f, ImGui::GetContentRegionAvail().x), 28.f);
+                if (IconButton("##pip_pop", "tool_pipette", pipSz,
+                               "Click canvas to sample (active Channels map)").clicked) {
                     if (outPipetteClicked) *outPipetteClicked = true;
                     // Close so next canvas click is not swallowed by ImGui
                     ImGui::CloseCurrentPopup();
                 }
-                if (ImGui::IsItemHovered())
-                    Tooltip("Click canvas to sample (active Channels map)");
             }
             ImGui::EndPopup();
         }
@@ -73,11 +76,10 @@ bool ColorField(const char* id, float rgba[4], ColorFieldFlags flags,
     if (flags & ColorFieldFlags_Pipette) {
         ImGui::SameLine(0, 4);
         ImGui::PushID(id);
-        if (ImGui::SmallButton("Pip")) {
+        if (IconButton("##pip", "tool_pipette", ImVec2(22, 22),
+                       "Pipette — click canvas to sample").clicked) {
             if (outPipetteClicked) *outPipetteClicked = true;
         }
-        if (ImGui::IsItemHovered())
-            Tooltip("Pipette — click canvas to sample");
         ImGui::PopID();
     }
     (void)Tokens(); // keep theme touch-point for future chrome
