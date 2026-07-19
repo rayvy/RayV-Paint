@@ -103,12 +103,20 @@ public:
     void SetActiveId(const std::string& id);
     std::string GetActiveId() const;
 
+    // Favorites for Selector Wheel (RMB hold). Persisted under brushes/favorites.json.
+    void SetFavorite(const std::string& id, bool fav);
+    bool IsFavorite(const std::string& id) const;
+    std::vector<std::string> ListFavoriteIds() const; // ordered; max ~12
+
     // Smoke: returns true if create→save→reload→apply matches. Logs details.
     static bool RunSmokeTest();
 
     // Format constants for UI/docs
     static constexpr int kFormatVersion = 1;
     static constexpr const char* kFormatMagic = "RVBRUSH";
+
+    static std::string Base64Encode(const std::vector<uint8_t>& data);
+    static bool Base64Decode(const std::string& in, std::vector<uint8_t>& out);
 
 private:
     BrushLibrary() = default;
@@ -128,14 +136,15 @@ private:
     bool WriteFile(const Entry& e) const;
     static std::string NewUuid();
     static std::filesystem::path DefaultRootDir();
-    static std::string Base64Encode(const std::vector<uint8_t>& data);
-    static bool Base64Decode(const std::string& in, std::vector<uint8_t>& out);
 
     mutable std::mutex m_Mutex;
     std::filesystem::path m_Root;
     std::vector<Entry> m_Entries;
     std::vector<BrushPresetMeta> m_MetaList;
     std::string m_ActiveId;
+    std::vector<std::string> m_FavoriteIds; // wheel slots, max 12
+    void LoadFavoritesUnlocked();
+    void SaveFavoritesUnlocked() const;
     bool m_Loaded = false;
 
     // Async disk scan

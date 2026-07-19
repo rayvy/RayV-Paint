@@ -531,6 +531,18 @@ PYBIND11_EMBEDDED_MODULE(rayv, m) {
         return py::make_tuple(ch, std::string(buf.data()));
     }, py::arg("label"), py::arg("value"), py::arg("buf_size") = 512);
 
+    // Multi-line text field (prompts, notes). Returns (changed, value).
+    ui.def("input_text_multiline", [](const std::string& label, const std::string& v,
+                                      int buf_size, float height) {
+        std::vector<char> buf((size_t)std::max(64, buf_size), 0);
+        size_t n = std::min(v.size(), buf.size() - 1);
+        if (n) std::memcpy(buf.data(), v.data(), n);
+        ImVec2 size(-1.f, height > 1.f ? height : 80.f);
+        bool ch = ImGui::InputTextMultiline(label.c_str(), buf.data(), buf.size(), size);
+        return py::make_tuple(ch, std::string(buf.data()));
+    }, py::arg("label"), py::arg("value"), py::arg("buf_size") = 4096, py::arg("height") = 80.f,
+       "Multi-line text. Call from on_ui only. Returns (changed, value).");
+
     ui.def("combo", [](const std::string& label, int current, const std::vector<std::string>& items) {
         int cur = current;
         std::vector<const char*> ptrs;

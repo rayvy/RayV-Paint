@@ -245,6 +245,12 @@ set(SOURCES
     src/ui/panels/ProjectSetupPanel.h
     src/ui/panels/ColorsPanel.cpp
     src/ui/panels/ColorsPanel.h
+    src/ui/panels/ToolbarPanel.cpp
+    src/ui/panels/ToolbarPanel.h
+    src/ui/panels/ViewportNavPanel.cpp
+    src/ui/panels/ViewportNavPanel.h
+    src/ui/panels/PropertiesPanel.cpp
+    src/ui/panels/PropertiesPanel.h
     src/ui/style/UiTokens.cpp
     src/ui/style/UiTokens.h
     src/ui/style/UiMotion.cpp

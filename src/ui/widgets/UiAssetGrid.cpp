@@ -196,6 +196,13 @@ bool AssetGrid(const char* id, AssetGridState& st, ID3D11Device* device,
             if (onActivate) onActivate(e->key);
             activated = true;
         }
+        // Drag asset key (drop onto Fill layer / canvas bind)
+        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+            ImGui::SetDragDropPayload("RAYV_ASSET_KEY", e->key.c_str(), e->key.size() + 1);
+            ImGui::TextUnformatted(e->displayName.c_str());
+            if (srv) ImGui::Image((ImTextureID)srv, ImVec2(48, 48));
+            ImGui::EndDragDropSource();
+        }
         ImGui::PopID();
         ++i;
     }

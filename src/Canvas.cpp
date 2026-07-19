@@ -7429,9 +7429,14 @@ void Canvas::RunMagicWand(ID3D11Device* device, int startX, int startY, float to
                     temp[(size_t)y * m_Width + x] = 255;
     }
 
+    // Combine against base-at-click (for preview scrub) or live selection (fresh click).
     std::vector<uint8_t> current((size_t)m_Width * m_Height, 0);
-    if (!m_SelectionMask.empty() && (int)m_SelectionMask.size() == m_Width * m_Height)
+    if (!pushUndo && m_WandBaseMask.size() == (size_t)m_Width * m_Height) {
+        // Tolerance re-preview: always rebuild from pre-click base so scrub can grow/shrink.
+        current = m_WandBaseMask;
+    } else if (!m_SelectionMask.empty() && m_SelectionMask.size() == (size_t)m_Width * m_Height) {
         current = m_SelectionMask;
+    }
 
     m_SelectionMask.resize((size_t)m_Width * m_Height);
     if (add) {
@@ -7463,16 +7468,24 @@ void Canvas::ApplyMagicWandSelection(ID3D11Device* device, int startX, int start
     m_WandSeedX = startX;
     m_WandSeedY = startY;
     m_WandSeedValid = true;
+    // Sticky combine mode for tolerance slider (Ctrl=add, Alt=sub, none=replace).
+    m_WandCombineMode = subtract ? 2 : (add ? 1 : 0);
+    // Snapshot selection BEFORE this click so tolerance re-preview can rebuild correctly.
+    m_WandBaseMask = m_SelectionMask;
+    m_WandBaseHas = m_HasSelection;
+    if (m_WandBaseMask.size() != (size_t)m_Width * (size_t)m_Height)
+        m_WandBaseMask.assign((size_t)m_Width * (size_t)m_Height, 0);
     // Always re-sample layer at click time (cache can be stale after paint/edits).
     InvalidateWandSourceCache();
     EnsureWandSourceCache();
     RunMagicWand(device, startX, startY, tolerance, add, subtract, contiguous, true);
 }
 
-bool Canvas::PreviewWandFromSeed(ID3D11Device* device, float tolerance, bool add, bool subtract, bool contiguous) {
+bool Canvas::PreviewWandFromSeed(ID3D11Device* device, float tolerance, bool contiguous) {
     if (!m_WandSeedValid) return false;
-    // Preview replaces selection without stacking undo (UI should commit on mouse-up if needed).
-    // For live scrub: re-run without push; last committed wand already on stack from click.
+    const bool add = (m_WandCombineMode == 1);
+    const bool subtract = (m_WandCombineMode == 2);
+    // Re-run from sticky seed + sticky combine + pre-click base (no extra undo).
     RunMagicWand(device, m_WandSeedX, m_WandSeedY, tolerance, add, subtract, contiguous, false);
     return true;
 }
@@ -9316,18 +9329,53 @@ void Canvas::ApplyNoise(float strength, bool colorNoise) {
 //  Clone Stamp
 // ============================================================
 
-void Canvas::StampSetSource(float canvasX, float canvasY) {
+bool Canvas::StampSnapToAnchorAxes(float& x, float& y) const {
+    if (!m_StampHasAnchor) return false;
+    const float dx = std::fabs(x - m_StampAnchorX);
+    const float dy = std::fabs(y - m_StampAnchorY);
+    // Dominant axis: lock the other to the free-sample anchor.
+    if (dx >= dy)
+        y = m_StampAnchorY; // horizontal lock (same Y)
+    else
+        x = m_StampAnchorX; // vertical lock (same X)
+    return true;
+}
+
+void Canvas::StampSetSource(float canvasX, float canvasY, bool snapAxis) {
+    if (snapAxis) {
+        // Alt+Shift: hard H/V snap vs free-sample anchor (not vs last snapped source).
+        if (m_StampHasAnchor) {
+            StampSnapToAnchorAxes(canvasX, canvasY);
+        } else if (m_StampHasSource) {
+            // Fallback if anchor missing: use current source as axis origin.
+            const float dx = std::fabs(canvasX - m_StampSrcX);
+            const float dy = std::fabs(canvasY - m_StampSrcY);
+            if (dx >= dy) canvasY = m_StampSrcY;
+            else          canvasX = m_StampSrcX;
+        }
+        // snap does not move the free-sample anchor
+    } else {
+        // Free Alt sample becomes the new axis origin.
+        m_StampAnchorX = canvasX;
+        m_StampAnchorY = canvasY;
+        m_StampHasAnchor = true;
+    }
     m_StampSrcX = canvasX;
     m_StampSrcY = canvasY;
     m_StampHasSource = true;
     m_StampHasOffset = false; // new source resets offset until first dab
     Logger::Get().InfoTag("stamp",
-        "Source set at " + std::to_string((int)canvasX) + "," + std::to_string((int)canvasY));
+        std::string(snapAxis ? "Source (axis-snap) at " : "Source set at ") +
+        std::to_string((int)canvasX) + "," + std::to_string((int)canvasY) +
+        (m_StampHasAnchor
+            ? (" anchor=" + std::to_string((int)m_StampAnchorX) + "," + std::to_string((int)m_StampAnchorY))
+            : ""));
 }
 
 void Canvas::StampClearSource() {
     m_StampHasSource = false;
     m_StampHasOffset = false;
+    m_StampHasAnchor = false;
 }
 
 void Canvas::StampLockOffsetFromDab(float dabX, float dabY) {

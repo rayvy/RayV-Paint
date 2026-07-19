@@ -361,11 +361,18 @@ public:
     void BlurToolOnActiveLayer(float x, float y, StrokePhase phase, const SmudgeSettings& s);
 
     // Clone Stamp (source point + offset resampling). Alt+click sets source.
-    void StampSetSource(float canvasX, float canvasY);
+    // snapAxis: optional H/V lock of sample vs free-sample anchor (UI uses free sample only;
+    // Alt+Shift is paint-on-sample-axes in main, not sample move).
+    void StampSetSource(float canvasX, float canvasY, bool snapAxis = false);
     void StampClearSource();
     bool StampHasSource() const { return m_StampHasSource; }
     bool StampHasOffset() const { return m_StampHasOffset; }
     void StampGetSource(float& outX, float& outY) const { outX = m_StampSrcX; outY = m_StampSrcY; }
+    // Free-sample anchor (updated only by non-snap Alt sample). Used for Alt+Shift guides.
+    void StampGetAnchor(float& outX, float& outY) const { outX = m_StampAnchorX; outY = m_StampAnchorY; }
+    bool StampHasAnchor() const { return m_StampHasAnchor; }
+    // Snap (x,y) to pure H or V of the anchor (no state write). Returns true if snapped.
+    bool StampSnapToAnchorAxes(float& x, float& y) const;
     // Call on first dab after source is set: locks clone offset (dest - source).
     void StampLockOffsetFromDab(float dabX, float dabY);
     void StampGetOffset(float& outOx, float& outOy) const { outOx = m_StampOffsetX; outOy = m_StampOffsetY; }
@@ -426,7 +433,8 @@ public:
     void ClearWandSeed() { m_WandSeedValid = false; }
     void GetWandSeed(int& outX, int& outY) const { outX = m_WandSeedX; outY = m_WandSeedY; }
     // Re-run wand from last seed with new tolerance (no undo until Commit). Returns false if no seed.
-    bool PreviewWandFromSeed(ID3D11Device* device, float tolerance, bool add, bool subtract, bool contiguous);
+    // Uses sticky combine mode from last click (Ctrl=add / Alt=sub) so scrubbing doesn't wipe multi-select.
+    bool PreviewWandFromSeed(ID3D11Device* device, float tolerance, bool contiguous);
     void ApplySmartSelectSelection(ID3D11Device* device, const std::vector<std::pair<int, int>>& points, bool add, bool subtract);
     // Quick Selection (non-AI): brush seeds → region grow with edge stop.
     // Quick Select (PS-like): progressive live selection under brush.
@@ -982,7 +990,9 @@ private:
     // Clone Stamp state (tool)
     bool  m_StampHasSource = false;
     bool  m_StampHasOffset = false;
+    bool  m_StampHasAnchor = false; // free Alt sample origin for Alt+Shift axis snap
     float m_StampSrcX = 0.f, m_StampSrcY = 0.f;
+    float m_StampAnchorX = 0.f, m_StampAnchorY = 0.f;
     float m_StampOffsetX = 0.f, m_StampOffsetY = 0.f;
 
     // Undo/Redo Engine
@@ -1059,6 +1069,11 @@ private:
     bool m_WandSeedValid = false;
     int  m_WandSeedX = 0;
     int  m_WandSeedY = 0;
+    // Combine mode from click modifiers (sticky for tolerance scrub): 0=replace 1=add 2=sub
+    int  m_WandCombineMode = 0;
+    // Selection as of just before last wand click (for correct re-preview on tolerance scrub)
+    std::vector<uint8_t> m_WandBaseMask;
+    bool m_WandBaseHas = false;
     // Cached RGBA8 source for wand / quick-select (alpha matters — transparent ≠ black).
     std::vector<uint8_t> m_WandSourceRGBA;
     int m_WandSourceW = 0, m_WandSourceH = 0;

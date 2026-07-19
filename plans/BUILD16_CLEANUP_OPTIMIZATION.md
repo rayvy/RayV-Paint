@@ -181,14 +181,14 @@ S4b ChannelsPanel extract                         [structure] ✅ (~135 lines)
 S4c ToolSettingsPanel extract                     [structure] ✅
 S4d LayerEffects + ProjectSetup + Colors extracts [structure] ✅
     EditorPanels ~2.7k; panels: Layers/Channels/ToolSettings/FX/Setup/Colors
-S4e next (optional): ModSetup / Properties / ViewportNav / Toolbar
+S4e Toolbar + ViewportNav + Properties extracts   [structure] ✅
 S4fix Mojibake UTF-8 fix (вЂ/В·/в† → —, ·, →, …)   [bugfix] ✅
 S1  UiColorField kit + Fill/FX migrate             [UI kit] ✅
 S5  AssetStore + path keys + refcount              [opt foundation] ✅
 S6  Fill Layer → AssetStore (no private RGBA)      [opt consumer] ✅
-S5b UI Asset Browser shell (pick for Fill)         [opt UI] next
-S7  Project assets ↔ .rayp packing                 [opt portable]
-S8  Motion/token audit on FE + Fill                [UI polish]
+S5b UI Asset Browser shell (pick for Fill)         [opt UI] ✅
+S7  Project assets ↔ .rayp packing                 [opt portable] ✅
+S8  Motion/token audit on FE + Fill                [UI polish] remaining (light)
 ```
 
 Each slice: compile + short manual checklist (below).
@@ -220,7 +220,8 @@ Each slice: compile + short manual checklist (below).
 
 ## 7. Handoff note for next session
 
-**Build 16 mid-flight.** Release green.  
-**Done:** structure panels + kit Combo/ColorField + mojibake + **AssetStore + Fill shared textures**.  
-**Next:** S5b Asset Browser UI (pick texture for Fill) → S7 project packing in .rayp.  
-Do **not** re-decode textures per layer; use `AssetStore::AcquireFile` / keys.
+**Build 16 nearly closed.** Release green.  
+**Done:** panel extracts (incl. S4e Toolbar/ViewportNav/Properties) + kit + Asset Browser + Fill assets + .rayp packing.  
+**Remaining light:** S8 motion/token audit; optional ModSetup extract.  
+**After B16:** see `plans/ForFuture.md` — **#0 GPU-driven Layer FX** (priority), then brush Phase C (flow / size jitter).  
+Do **not** re-decode textures per layer; use `AssetStore` / asset keys.

@@ -69,7 +69,7 @@ void DrawAssetBrowserPanel(UIState& state, Canvas& canvas, ID3D11Device* device)
     }
     if (ImGui::IsItemHovered()) Ui::Tooltip("Rescan libraries");
 
-    // Bind fill when a Fill layer is active
+    // Bind fill when a Fill layer is active (+ drop target)
     int ai = canvas.GetActiveLayerIndex();
     const auto& layers = canvas.GetLayers();
     bool fillActive = ai >= 0 && ai < (int)layers.size() && layers[ai].IsFill();
@@ -82,7 +82,16 @@ void DrawAssetBrowserPanel(UIState& state, Canvas& canvas, ID3D11Device* device)
             if (ImGui::IsItemHovered())
                 Ui::Tooltip("Bind selected texture to active Fill layer");
         } else {
-            ImGui::TextDisabled("Select a texture · Fill layer active");
+            ImGui::TextDisabled("Drag a texture here · or select + Use on Fill");
+        }
+        // Whole footer is a drop target for Fill bind
+        if (ImGui::BeginDragDropTarget()) {
+            if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("RAYV_ASSET_KEY")) {
+                const char* key = (const char*)p->Data;
+                if (key && key[0])
+                    canvas.BindFillTextureAsset(ai, key);
+            }
+            ImGui::EndDragDropTarget();
         }
     }
 

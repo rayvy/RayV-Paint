@@ -229,33 +229,31 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
         if (activeTool == ActiveTool::Stamp) {
             ImGui::TextDisabled(canvas.StampHasSource()
                 ? (canvas.StampHasOffset()
-                    ? "Stamp: source+offset locked · Alt+click = new source"
-                    : "Stamp: source set · first dab locks offset")
-                : "Stamp: Alt+click sets source · then paint elsewhere");
+                    ? "Stamp: offset locked · Alt=sample · Shift=stroke axis · Alt+Shift=paint on sample axes"
+                    : "Stamp: source set · paint · Shift=stroke axis · Alt+Shift=paint on sample H/V")
+                : "Stamp: Alt+click sample · then paint · Shift=stroke axis · Alt+Shift=sample axes");
             ImGui::SameLine();
             if (ImGui::SmallButton("Clear##stamp_src"))
                 canvas.StampClearSource();
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Clear clone source");
         }
-        // Brush blend mode — icon + combo (no verbose label)
+        // Brush blend mode — combo only (no icon, no "Blend mode" label)
         if (activeTool == ActiveTool::Brush && !brush.erase) {
             static const char* blendNames[] = {
                 "Normal","Multiply","Screen","Overlay","Add","Subtract","Darken","Lighten","HardLight","SoftLight"
             };
             int bi = (int)brush.blendMode;
-            Ui::IconButton("##blend_ico", "ts_blend_mode", ImVec2(22, 22),
-                "Blend mode", true, false);
-            ImGui::SameLine(0, 4);
-            ImGui::SetNextItemWidth(100.f);
-            if (Ui::Combo("##brush_blend", &bi, blendNames, IM_ARRAYSIZE(blendNames), "Blend mode"))
+            ImGui::SetNextItemWidth(108.f);
+            if (Ui::Combo("##brush_blend", &bi, blendNames, IM_ARRAYSIZE(blendNames), nullptr))
                 brush.blendMode = (BlendMode)bi;
             if (ImGui::IsItemHovered()) Ui::Tooltip("Brush blend mode");
             ImGui::SameLine();
         }
-        // Brush tips: ids persisted on Canvas (.rayp brush_tip_id / custom pixels)
+        // Tip shape lives in Brush Library / Workshop (presets), not a separate strip control.
+        // Keep project tip id in sync if library applied a tip.
         static BrushTip s_CustomTip;
         static bool s_CustomLoaded = false;
         static std::string s_LastSyncedTipId;
-
         auto ApplyTipId = [&](const std::string& id) {
             if (id == "hard_round") { brush.tip = &BrushPresets::HardRound(); state.brushTipPreset = 1; }
             else if (id == "pencil") { brush.tip = &BrushPresets::Pencil(); state.brushTipPreset = 2; }
@@ -276,67 +274,15 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
                 state.brushTipPreset = 4;
             }
             else if (id == "procedural") { brush.tip = nullptr; state.brushTipPreset = 0; }
-            else { // soft_round default
+            else {
                 brush.tip = &BrushPresets::SoftRound();
                 state.brushTipPreset = 0;
             }
         };
-
-        // Pull tip from project after load / when canvas id changes
         if (canvas.GetBrushTipId() != s_LastSyncedTipId) {
             s_LastSyncedTipId = canvas.GetBrushTipId();
             ApplyTipId(s_LastSyncedTipId.empty() ? "soft_round" : s_LastSyncedTipId);
         }
-
-        const char* tipNames[] = { "Soft", "Hard", "Pencil", "Air", "Custom" };
-        const char* tipIds[] = { "soft_round", "hard_round", "pencil", "airbrush", "custom" };
-        int tipIdx = state.brushTipPreset;
-        Ui::IconButton("##tip_ico", "ts_brush_tip", ImVec2(22, 22), "Brush tip shape", true, false);
-        ImGui::SameLine(0, 4);
-        ImGui::SetNextItemWidth(72.f);
-        if (Ui::Combo("##tip", &tipIdx, tipNames, IM_ARRAYSIZE(tipNames))) {
-            state.brushTipPreset = tipIdx;
-            if (tipIdx >= 0 && tipIdx < 5) {
-                canvas.SetBrushTipId(tipIds[tipIdx]);
-                s_LastSyncedTipId = tipIds[tipIdx];
-                ApplyTipId(tipIds[tipIdx]);
-            }
-        }
-        if (ImGui::IsItemHovered()) Ui::Tooltip("Brush tip (saved in project)");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Load…")) {
-            char path[512] = "";
-            if (Ui::ShowOpenFile(path, sizeof(path), "Images (*.png;*.jpg;*.bmp;*.tga)\0*.png;*.jpg;*.bmp;*.tga\0All\0*.*\0")) {
-                std::vector<uint8_t> px; int tw = 0, th = 0;
-                if (ImageManager::LoadImageFromFile(path, px, tw, th) && tw > 0 && th > 0) {
-                    int side = std::min(std::min(tw, th), 128);
-                    s_CustomTip.size = side;
-                    s_CustomTip.pixels.assign((size_t)side * side, 0);
-                    s_CustomTip.name = "Custom";
-                    s_CustomTip.spacingMul = 1.0f;
-                    for (int y = 0; y < side; ++y) {
-                        for (int x = 0; x < side; ++x) {
-                            int sx = x * tw / side;
-                            int sy = y * th / side;
-                            size_t si = ((size_t)sy * tw + sx) * 4;
-                            uint8_t r8 = px[si], g8 = px[si + 1], b8 = px[si + 2], a8 = px[si + 3];
-                            float lum = (0.2126f * r8 + 0.7152f * g8 + 0.0722f * b8) * (a8 / 255.f);
-                            s_CustomTip.pixels[(size_t)y * side + x] = (uint8_t)std::clamp(lum, 0.f, 255.f);
-                        }
-                    }
-                    s_CustomLoaded = true;
-                    state.hasCustomBrushTip = true;
-                    state.customBrushTipName = path;
-                    brush.tipSourcePath = path;
-                    state.brushTipPreset = 4;
-                    brush.tip = &s_CustomTip;
-                    canvas.SetCustomBrushTip(side, s_CustomTip.pixels); // also sets id=custom
-                    s_LastSyncedTipId = "custom";
-                }
-            }
-        }
-        if (ImGui::IsItemHovered()) Ui::Tooltip("Load grayscale stamp (persisted in .rayp)");
-        ImGui::SameLine();
 
         float maxR = ConfigManager::Get().GetMaxBrushRadius();
         MiniSlider("##rad", &brush.radius, 1.f, maxR, "Radius (px)", 100.f);
@@ -384,17 +330,19 @@ void DrawToolSettingsPanel(UIState& state, Canvas& canvas, BrushSettings& brush,
     else if (activeTool == ActiveTool::MagicWand || activeTool == ActiveTool::SmartSelect || activeTool == ActiveTool::QuickSelect) {
         if (activeTool == ActiveTool::MagicWand) {
             bool changed = false;
-            MiniSlider("##tol", &state.magicWandTolerance, 0.f, 1.f, "Tolerance", 140.f);
+            MiniSlider("##tol", &state.magicWandTolerance, 0.f, 1.f,
+                "Tolerance — uses Ctrl/Alt mode from last click (add/sub/replace)", 160.f);
             if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
             if (ImGui::IsItemActive()) changed = true;
             ImGui::SameLine();
             if (ImGui::Checkbox("##cont", &state.magicWandContiguous)) changed = true;
-            if (ImGui::IsItemHovered()) Ui::Tooltip("Contiguous");
+            if (ImGui::IsItemHovered()) Ui::Tooltip("Contiguous (flood-fill region)");
             if (changed && canvas.HasWandSeed()) {
-                bool add = ImGui::GetIO().KeyCtrl;
-                bool subtract = ImGui::GetIO().KeyAlt;
-                canvas.PreviewWandFromSeed(device, state.magicWandTolerance, add, subtract, state.magicWandContiguous);
+                // Sticky combine mode from last wand click (Ctrl/Alt) — do not read live keys.
+                canvas.PreviewWandFromSeed(device, state.magicWandTolerance, state.magicWandContiguous);
             }
+            ImGui::SameLine();
+            ImGui::TextDisabled("Ctrl+click=add · Alt=sub · slider remembers mode");
         } else if (activeTool == ActiveTool::QuickSelect) {
             float maxR = ConfigManager::Get().GetMaxBrushRadius();
             MiniSlider("##qsr", &brush.radius, 1.f, maxR, "Quick Select size (same as brush · [ ])", 140.f);

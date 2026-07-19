@@ -87,9 +87,6 @@ namespace UI {
     // If armed and LMB on canvas: write sample into fill.mapColor[map] and clear arm. Returns true if consumed.
     bool TryApplyFillPipette(Canvas& canvas, float canvasX, float canvasY);
 
-    // Brush preset popup (RMB in viewport). Call every frame; open via openFlag/pos.
-    void DrawBrushPickerPopup(bool& openFlag, ImVec2 popupPos, BrushSettings& brush);
-
     struct UIState {
         // Window visibility flags
         bool showConsole = true;
@@ -102,6 +99,7 @@ namespace UI {
         bool showToolbar = true;
         bool showColors = true;
         bool showToolSettings = true;
+        bool showBrushWorkshop = false; // Brush Workshop dock (favorites + presets)
         bool showContextDebug = false; // AppContext live dump (footer Context button)
         bool showRulers = true;
         bool showPreview3D = false;    // optional detachable 3D viewport (N-panel)
@@ -206,6 +204,15 @@ namespace UI {
         float fps = 0.0f;
         double startupTimeMs = 0.0f;
     };
+
+    // Brush Workshop dock (full preset editor + ★ favorites for the wheel).
+    // Open via View → Brush Workshop or short RMB click on Brush/Eraser.
+    void DrawBrushWorkshopPanel(UIState& state, BrushSettings& brush);
+    // Floating workshop popup (legacy; prefer the dock panel).
+    void DrawBrushPickerPopup(bool& openFlag, ImVec2 popupPos, BrushSettings& brush);
+    // GTA-style favorite brush wheel. Call while active: holdingRmb=true while RMB down,
+    // then one frame with holdingRmb=false on release to commit the hover slot.
+    bool DrawBrushSelectorWheel(bool holdingRmb, ImVec2 center, BrushSettings& brush);
 
     void RenderAll(UIState& state, Canvas& canvas, BrushSettings& brush, ActiveTool& activeTool, ID3D11Device* device, ID3D11DeviceContext* context, GLFWwindow* window);
 }

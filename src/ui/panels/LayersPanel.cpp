@@ -363,6 +363,15 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                                 Ui::OpenAssetPicker(f, "Fill Texture");
                             }
                             if (ImGui::IsItemHovered()) Ui::Tooltip("Pick from Asset Browser");
+                            // Drop target on the Asset button row
+                            if (ImGui::BeginDragDropTarget()) {
+                                if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("RAYV_ASSET_KEY")) {
+                                    const char* key = (const char*)p->Data;
+                                    if (key && key[0])
+                                        canvas.BindFillTextureAsset(ai, key);
+                                }
+                                ImGui::EndDragDropTarget();
+                            }
                             ImGui::SameLine(0, ftok.s1);
                             if (ImGui::SmallButton("File##filltex")) {
                                 char path[512] = {};
@@ -509,6 +518,19 @@ void DrawLayersPanel(UIState& state, Canvas& canvas, ID3D11Device* device) {
                     canvas.SetActiveLayerIndex((int)i);
                     canvas.SetPaintTarget(PaintTarget::LayerContent);
                 }
+                // Drag texture asset from Asset Browser → bind to this Fill layer
+                if (ImGui::BeginDragDropTarget()) {
+                    if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("RAYV_ASSET_KEY")) {
+                        const char* key = (const char*)p->Data;
+                        if (key && key[0]) {
+                            canvas.SetActiveLayerIndex((int)i);
+                            canvas.BindFillTextureAsset((int)i, key);
+                        }
+                    }
+                    ImGui::EndDragDropTarget();
+                }
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip("Fill layer\nDrop texture from Asset Browser to bind");
             } else if (!layer.isGroup && thumbSrv) {
                 bool isActiveContent = (canvas.GetActiveLayerIndex() == i && canvas.GetPaintTarget() == PaintTarget::LayerContent);
                 if (isActiveContent) {

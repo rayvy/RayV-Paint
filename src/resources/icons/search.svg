@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#000" stroke-width="2">
-  <circle cx="10.5" cy="10.5" r="6"/>
-  <path d="M15.5 15.5 L20 20" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" fill="#000000" viewBox="0 0 24 24" width="24" height="24">
+  <!-- ring (thick annulus as outer-minus-inner approximation: solid disc + handle) -->
+  <path d="M10 3 C6.1 3 3 6.1 3 10 C3 13.9 6.1 17 10 17 C11.5 17 12.9 16.5 14 15.7 L14 15.7 L18.3 20 L20 18.3 L15.7 14 C16.5 12.9 17 11.5 17 10 C17 6.1 13.9 3 10 3 Z M10 5.5 C12.5 5.5 14.5 7.5 14.5 10 C14.5 12.5 12.5 14.5 10 14.5 C7.5 14.5 5.5 12.5 5.5 10 C5.5 7.5 7.5 5.5 10 5.5 Z"/>
 </svg>

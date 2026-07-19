@@ -279,6 +279,7 @@ std::string SvgIconCache::ResolvePath(const char* logicalName) const {
         (name == "tool_pipette" || name == "pipette" ? "tool_pipette.svg" : ""),
         (name == "brush" ? "brush.svg" : ""),
         (name == "eraser" ? "eraser.svg" : ""),
+        (name == "search" || name == "loupe" || name == "magnifier" ? "search.svg" : ""),
         "placeholder.svg",
     };
 

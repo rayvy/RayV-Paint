@@ -1769,30 +1769,37 @@ int main(int argc, char* argv[]) {
                 dragDx = dragDy = 0.f;
             }
 
-            // RMB single-click (Brush/Eraser, no mod) → brush preset popup
+            // RMB on Brush/Eraser (no mod):
+            //   short click  → open Brush Workshop dock
+            //   hold ~180ms  → Selector Wheel (favorites + stroke preview)
             static bool s_BrushRmbArmed = false;
+            static bool s_BrushWheelActive = false;
             static ImVec2 s_BrushRmbStart(0, 0);
+            static double s_BrushRmbDownTime = 0.0;
+            static bool s_WantBrushPopup = false; // legacy floating workshop (unused for short-click)
             static ImVec2 s_BrushPopupPos(0, 0);
-            static bool s_WantBrushPopup = false;
+            constexpr float kBrushWheelHoldSec = 0.18f;
             if (isHovered && brushOrEraser && !ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyAlt
                 && !g_IsCtrlAltRmbDragging && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
                 s_BrushRmbArmed = true;
+                s_BrushWheelActive = false;
                 s_BrushRmbStart = ImGui::GetMousePos();
+                s_BrushRmbDownTime = ImGui::GetTime();
             }
-            if (s_BrushRmbArmed) {
-                if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
-                    ImVec2 p = ImGui::GetMousePos();
-                    float ddx = p.x - s_BrushRmbStart.x, ddy = p.y - s_BrushRmbStart.y;
-                    if (ddx * ddx + ddy * ddy < 36.f) { // <6px = click, not drag
-                        s_WantBrushPopup = true;
-                        s_BrushPopupPos = s_BrushRmbStart;
+            if (s_BrushRmbArmed || s_BrushWheelActive) {
+                const bool rmbDown = ImGui::IsMouseDown(ImGuiMouseButton_Right);
+                if (rmbDown && s_BrushRmbArmed) {
+                    const float held = (float)(ImGui::GetTime() - s_BrushRmbDownTime);
+                    if (held >= kBrushWheelHoldSec)
+                        s_BrushWheelActive = true;
+                } else if (!rmbDown) {
+                    if (s_BrushWheelActive) {
+                        // release handled inside DrawBrushSelectorWheel below
+                    } else if (s_BrushRmbArmed) {
+                        // Short click → Brush Workshop dock
+                        uiState.showBrushWorkshop = true;
                     }
                     s_BrushRmbArmed = false;
-                } else {
-                    ImVec2 p = ImGui::GetMousePos();
-                    float ddx = p.x - s_BrushRmbStart.x, ddy = p.y - s_BrushRmbStart.y;
-                    if (ddx * ddx + ddy * ddy > 100.f) // moved too far → cancel
-                        s_BrushRmbArmed = false;
                 }
             }
 
@@ -1971,10 +1978,26 @@ int main(int argc, char* argv[]) {
                 s_PipetteHasPreview = false;
             }
 
-            // Stamp: Alt+LMB sets clone source (no paint)
-            if (isStampTool && isHovered && isInsideCanvas && ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyCtrl
+            // Stamp modifiers (L/R keys — KeyAlt can mask KeyShift on some layouts):
+            //   Alt          = set clone source (no paint)
+            //   Shift        = stroke axis lock from stroke start (all brush-like)
+            //   Alt+Shift    = paint locked to H/V through sample (stamp only)
+            const bool stampAlt =
+                ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt) ||
+                ImGui::GetIO().KeyAlt;
+            const bool stampShift =
+                ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift) ||
+                ImGui::GetIO().KeyShift;
+            const bool stampCtrl =
+                ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl) ||
+                ImGui::GetIO().KeyCtrl;
+            const bool stampSampleAxisPaint = isStampTool && stampAlt && stampShift && !stampCtrl
+                && ActiveCanvas().StampHasSource();
+
+            // Alt alone (no Shift): set clone source. Alt+Shift never moves the sample.
+            if (isStampTool && isHovered && isInsideCanvas && stampAlt && !stampShift && !stampCtrl
                 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !isPanning) {
-                ActiveCanvas().StampSetSource(canvasX, canvasY);
+                ActiveCanvas().StampSetSource(canvasX, canvasY, /*snapAxis=*/false);
             }
 
             // Build brush for paint (Stamp injects clone offsets)
@@ -1992,45 +2015,67 @@ int main(int argc, char* argv[]) {
                 return b;
             };
 
+            // Snap paint target onto sample H/V (Alt+Shift stamp). Uses free-sample anchor.
+            auto stampSnapPaintToSampleAxes = [&](float& x, float& y) {
+                if (!stampSampleAxisPaint) return;
+                if (ActiveCanvas().StampHasAnchor())
+                    ActiveCanvas().StampSnapToAnchorAxes(x, y);
+                else if (ActiveCanvas().StampHasSource()) {
+                    float sx = 0, sy = 0;
+                    ActiveCanvas().StampGetSource(sx, sy);
+                    const float dx = std::fabs(x - sx), dy = std::fabs(y - sy);
+                    if (dx >= dy) y = sy; else x = sx;
+                }
+            };
+
+            // Alt alone on stamp = sampling (block paint). Alt+Shift = sample-axis paint (allow).
             if (!canvasInputBlocked && isHovered && !isPanning && !g_IsCtrlAltRmbDragging && !g_IsCtrlAltLmbDragging
                 && isBrushLikeTool && !isEyedropperMode && !UI::IsFillPipetteArmed()
                 && !(ImGui::GetIO().KeyCtrl && ImGui::GetIO().KeyAlt)
-                && !(isStampTool && ImGui::GetIO().KeyAlt)) {
+                && !(isStampTool && stampAlt && !stampShift)) {
                 // Stamp without source: no paint
                 const bool stampBlocked = isStampTool && !ActiveCanvas().StampHasSource();
                 if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !stampBlocked) {
                     g_IsPainting = true;
+                    float beginX = canvasX, beginY = canvasY;
+                    stampSnapPaintToSampleAxes(beginX, beginY);
                     if (isStampTool)
-                        ActiveCanvas().StampLockOffsetFromDab(canvasX, canvasY);
+                        ActiveCanvas().StampLockOffsetFromDab(beginX, beginY);
                     BrushSettings pb = makePaintBrush();
-                    if (isShiftHeld && g_HasLastStrokeEnd) {
+                    // Straight line from last stroke end: Shift only (not Alt+Shift sample-axis mode)
+                    if (isShiftHeld && !stampSampleAxisPaint && g_HasLastStrokeEnd) {
                         if (isStampTool)
                             ActiveCanvas().StampLockOffsetFromDab(g_LastStrokeEndX, g_LastStrokeEndY);
                         pb = makePaintBrush();
                         ActiveCanvas().PaintOnActiveLayer(g_LastStrokeEndX, g_LastStrokeEndY, StrokePhase::Begin, pb);
-                        ActiveCanvas().PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Update, pb);
+                        ActiveCanvas().PaintOnActiveLayer(beginX, beginY, StrokePhase::Update, pb);
                         
-                        g_StrokeStartX = canvasX;
-                        g_StrokeStartY = canvasY;
-                        g_LastStrokeEndX = canvasX;
-                        g_LastStrokeEndY = canvasY;
+                        g_StrokeStartX = beginX;
+                        g_StrokeStartY = beginY;
+                        g_LastStrokeEndX = beginX;
+                        g_LastStrokeEndY = beginY;
                         g_LockAxisSelected = false;
                         g_LockAxis = LockAxis::None;
                     } else {
-                        ActiveCanvas().PaintOnActiveLayer(canvasX, canvasY, StrokePhase::Begin, pb);
-                        g_StrokeStartX = canvasX;
-                        g_StrokeStartY = canvasY;
+                        ActiveCanvas().PaintOnActiveLayer(beginX, beginY, StrokePhase::Begin, pb);
+                        g_StrokeStartX = beginX;
+                        g_StrokeStartY = beginY;
                         g_LockAxisSelected = false;
                         g_LockAxis = LockAxis::None;
-                        g_LastStrokeEndX = canvasX;
-                        g_LastStrokeEndY = canvasY;
+                        g_LastStrokeEndX = beginX;
+                        g_LastStrokeEndY = beginY;
                     }
                 } 
                 else if (ImGui::IsMouseDown(ImGuiMouseButton_Left) && g_IsPainting && !stampBlocked) {
                     float targetX = canvasX;
                     float targetY = canvasY;
-                    
-                    if (isShiftHeld) {
+
+                    // Alt+Shift stamp: lock stroke to H/V through sample (not stroke-start).
+                    if (stampSampleAxisPaint) {
+                        stampSnapPaintToSampleAxes(targetX, targetY);
+                        g_LockAxisSelected = false;
+                        g_LockAxis = LockAxis::None;
+                    } else if (isShiftHeld) {
                         if (!g_LockAxisSelected) {
                             float dx = canvasX - g_StrokeStartX;
                             float dy = canvasY - g_StrokeStartY;
@@ -2617,7 +2662,7 @@ int main(int argc, char* argv[]) {
                 dl->PopClipRect();
             }
 
-            // Stamp clone-source crosshair
+            // Stamp clone-source crosshair + Alt+Shift axis guide
             if (g_ActiveTool == ActiveTool::Stamp && ActiveCanvas().StampHasSource()) {
                 float sx = 0, sy = 0;
                 ActiveCanvas().StampGetSource(sx, sy);
@@ -2629,11 +2674,55 @@ int main(int argc, char* argv[]) {
                 dl->AddLine(ImVec2(sp.x - arm, sp.y), ImVec2(sp.x + arm, sp.y), col, 2.0f);
                 dl->AddLine(ImVec2(sp.x, sp.y - arm), ImVec2(sp.x, sp.y + arm), col, 2.0f);
                 dl->AddCircle(sp, 6.f, col, 0, 1.5f);
+
+                // Alt+Shift: paint-axis guides through sample + ghost paint target on axis
+                const bool guideAlt =
+                    ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt) ||
+                    ImGui::GetIO().KeyAlt;
+                const bool guideShift =
+                    ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift) ||
+                    ImGui::GetIO().KeyShift;
+                if (guideAlt && guideShift && isHovered) {
+                    float ax = sx, ay = sy;
+                    if (ActiveCanvas().StampHasAnchor())
+                        ActiveCanvas().StampGetAnchor(ax, ay);
+                    ImVec2 ap = canvasToScreen(ax + 0.5f, ay + 0.5f);
+                    ImU32 guideCol = IM_COL32(255, 200, 60, 140);
+                    dl->AddLine(ImVec2(imageMin.x, ap.y),
+                                ImVec2(imageMin.x + viewportWidth, ap.y), guideCol, 1.0f);
+                    dl->AddLine(ImVec2(ap.x, imageMin.y),
+                                ImVec2(ap.x, imageMin.y + viewportHeight), guideCol, 1.0f);
+                    // Ghost = where paint will land (axis lock), not a new sample
+                    float gx = canvasX, gy = canvasY;
+                    if (ActiveCanvas().StampHasAnchor())
+                        ActiveCanvas().StampSnapToAnchorAxes(gx, gy);
+                    else {
+                        const float dx = std::fabs(gx - ax), dy = std::fabs(gy - ay);
+                        if (dx >= dy) gy = ay; else gx = ax;
+                    }
+                    ImVec2 gp = canvasToScreen(gx + 0.5f, gy + 0.5f);
+                    dl->AddCircle(gp, 8.f, IM_COL32(255, 200, 60, 255), 0, 2.0f);
+                    dl->AddLine(ImVec2(gp.x - 12, gp.y), ImVec2(gp.x + 12, gp.y),
+                                IM_COL32(255, 200, 60, 255), 1.5f);
+                    dl->AddLine(ImVec2(gp.x, gp.y - 12), ImVec2(gp.x, gp.y + 12),
+                                IM_COL32(255, 200, 60, 255), 1.5f);
+                }
+
                 // Live source under cursor when painting with offset
                 if (ActiveCanvas().StampHasOffset() && g_IsPainting) {
                     float ox = 0, oy = 0;
                     ActiveCanvas().StampGetOffset(ox, oy);
-                    ImVec2 live = canvasToScreen(canvasX - ox + 0.5f, canvasY - oy + 0.5f);
+                    // Use last locked paint tip when Alt+Shift axis-paint is active
+                    float px = canvasX, py = canvasY;
+                    if (guideAlt && guideShift) {
+                        if (ActiveCanvas().StampHasAnchor())
+                            ActiveCanvas().StampSnapToAnchorAxes(px, py);
+                        else {
+                            const float dx = std::fabs(px - sx), dy = std::fabs(py - sy);
+                            if (dx >= dy) py = sy; else px = sx;
+                        }
+                    }
+                    ImVec2 live = canvasToScreen(px - ox + 0.5f, py - oy + 0.5f);
                     dl->AddCircle(live, 5.f, IM_COL32(255, 180, 40, 220), 0, 1.5f);
                 }
                 dl->PopClipRect();
@@ -2761,8 +2850,16 @@ int main(int argc, char* argv[]) {
 
             ActiveCanvas().Update(viewportWidth, viewportHeight, isHovered, localMouseX, localMouseY, isPanning, dragDx, dragDy, wheelDelta);
 
-            // Brush preset picker (RMB click on Brush/Eraser)
+            // Brush Selector Wheel (RMB hold) + optional legacy popup
+            if (s_BrushWheelActive) {
+                const bool rmbDown = ImGui::IsMouseDown(ImGuiMouseButton_Right);
+                UI::DrawBrushSelectorWheel(rmbDown, s_BrushRmbStart, g_Brush);
+                if (!rmbDown)
+                    s_BrushWheelActive = false;
+            }
             UI::DrawBrushPickerPopup(s_WantBrushPopup, s_BrushPopupPos, g_Brush);
+            (void)s_WantBrushPopup;
+            (void)s_BrushPopupPos;
         }
 
         ImGui::End();

@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cmath>
 #include <thread>
+#include <unordered_map>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -359,108 +360,182 @@ static void ParamsFromJson(BrushPresetParams& p, const json& j) {
     if (j.contains("tipSourcePath")) p.tipSourcePath = j["tipSourcePath"].get<std::string>();
 }
 
+static void FillTipJson(json& tip, const BrushPresetParams& p, bool embedBase64) {
+    if (p.tipType == BrushPresetParams::TipType::None) {
+        tip["type"] = "none";
+    } else if (p.tipType == BrushPresetParams::TipType::Builtin) {
+        tip["type"] = "builtin";
+        tip["builtin_id"] = p.tipBuiltinId;
+        tip["spacing_mul"] = p.tipSpacingMul;
+    } else {
+        tip["type"] = "embedded";
+        tip["size"] = p.tipSize;
+        tip["spacing_mul"] = p.tipSpacingMul;
+        if (embedBase64) {
+            tip["encoding"] = "raw8_base64";
+            tip["data"] = BrushLibrary::Base64Encode(p.tipPixels);
+        } else {
+            tip["encoding"] = "raw8";
+        }
+    }
+}
+
+static void ApplyTipFromJson(BrushPresetParams& p, const json& tip,
+                             const std::vector<uint8_t>* tipRawBytes) {
+    std::string type = tip.value("type", "none");
+    if (type == "builtin") {
+        p.tipType = BrushPresetParams::TipType::Builtin;
+        p.tipBuiltinId = tip.value("builtin_id", "soft_round");
+        p.tipSpacingMul = tip.value("spacing_mul", 1.f);
+    } else if (type == "embedded") {
+        p.tipType = BrushPresetParams::TipType::Embedded;
+        p.tipSize = tip.value("size", 0);
+        p.tipSpacingMul = tip.value("spacing_mul", 1.f);
+        std::string enc = tip.value("encoding", "");
+        if (tipRawBytes && !tipRawBytes->empty()) {
+            p.tipPixels = *tipRawBytes;
+        } else if (tip.contains("data") && tip["data"].is_string()) {
+            std::vector<uint8_t> decoded;
+            if (BrushLibrary::Base64Decode(tip["data"].get<std::string>(), decoded))
+                p.tipPixels = std::move(decoded);
+        }
+        if (p.tipSize <= 0 && !p.tipPixels.empty()) {
+            int n = (int)p.tipPixels.size();
+            int s = (int)std::lround(std::sqrt((double)n));
+            if (s * s == n) p.tipSize = s;
+        }
+        if (p.tipPixels.empty() || p.tipSize <= 0)
+            p.tipType = BrushPresetParams::TipType::None;
+    } else {
+        p.tipType = BrushPresetParams::TipType::None;
+    }
+}
+
 bool BrushLibrary::WriteFile(const Entry& e) const {
     if (e.meta.isBuiltin) return false;
     if (m_Root.empty()) return false;
 
-    json cfg;
-    cfg["id"] = e.meta.id;
-    cfg["name"] = e.meta.displayName;
-    cfg["params"] = ParamsToJson(e.params);
-    json tip;
-    std::vector<uint8_t> tipRaw;
-    int tipSize = 0;
-    if (e.params.tipType == BrushPresetParams::TipType::None) {
-        tip["type"] = "none";
-    } else if (e.params.tipType == BrushPresetParams::TipType::Builtin) {
-        tip["type"] = "builtin";
-        tip["builtin_id"] = e.params.tipBuiltinId;
-        tip["spacing_mul"] = e.params.tipSpacingMul;
-    } else {
-        tip["type"] = "embedded";
-        tip["size"] = e.params.tipSize;
-        tip["encoding"] = "raw8";
-        tip["spacing_mul"] = e.params.tipSpacingMul;
-        tipRaw = e.params.tipPixels;
-        tipSize = e.params.tipSize;
-    }
-    cfg["tip"] = tip;
+    // --- Primary: legacy .rvbrush (JSON + base64 tip) — user-visible, portable ---
+    {
+        json root;
+        root["magic"] = kFormatMagic;
+        root["version"] = kFormatVersion;
+        root["id"] = e.meta.id;
+        root["name"] = e.meta.displayName;
+        root["params"] = ParamsToJson(e.params);
+        json tip;
+        FillTipJson(tip, e.params, /*embedBase64=*/true);
+        root["tip"] = tip;
 
-    rvp::Package pkg;
-    if (!rvp::BuildBrushPackage(pkg, e.meta.id, e.meta.displayName, cfg.dump(2), tipRaw, tipSize)) {
-        Logger::Get().Error("BrushLibrary: BuildBrushPackage failed for " + e.meta.id);
-        return false;
+        std::filesystem::path path = m_Root / (e.meta.id + ".rvbrush");
+        std::ofstream f(path, std::ios::binary);
+        if (!f) {
+            Logger::Get().Error("BrushLibrary: cannot write " + path.string());
+            return false;
+        }
+        f << root.dump(2);
+        if (!f) {
+            Logger::Get().Error("BrushLibrary: write failed " + path.string());
+            return false;
+        }
+        Logger::Get().Info("BrushLibrary: saved " + path.string());
     }
-    std::filesystem::path path = m_Root / (e.meta.id + ".rvpbf");
-    std::string err;
-    if (!rvp::WritePackage(path.string(), pkg, &err)) {
-        Logger::Get().Error("BrushLibrary: cannot write " + path.string() + " (" + err + ")");
-        return false;
+
+    // --- Also write .rvpbf package (asset pipeline) ---
+    {
+        json cfg;
+        cfg["id"] = e.meta.id;
+        cfg["name"] = e.meta.displayName;
+        cfg["params"] = ParamsToJson(e.params);
+        json tip;
+        std::vector<uint8_t> tipRaw;
+        int tipSize = 0;
+        FillTipJson(tip, e.params, /*embedBase64=*/false);
+        if (e.params.tipType == BrushPresetParams::TipType::Embedded) {
+            tipRaw = e.params.tipPixels;
+            tipSize = e.params.tipSize;
+        }
+        cfg["tip"] = tip;
+
+        rvp::Package pkg;
+        if (rvp::BuildBrushPackage(pkg, e.meta.id, e.meta.displayName, cfg.dump(2), tipRaw, tipSize)) {
+            std::filesystem::path path = m_Root / (e.meta.id + ".rvpbf");
+            std::string err;
+            if (!rvp::WritePackage(path.string(), pkg, &err))
+                Logger::Get().Warn("BrushLibrary: rvpbf write failed " + path.string() + " (" + err + ")");
+        }
     }
-    Logger::Get().Info("BrushLibrary: saved " + path.string());
     return true;
 }
 
 bool BrushLibrary::LoadFileUnlocked(const std::filesystem::path& path) {
-    rvp::Package pkg;
-    std::string err;
-    if (!rvp::ReadPackage(path.string(), pkg, &err) || pkg.format != rvp::PackageFormat::RVPBF) {
-        Logger::Get().Warn("BrushLibrary: not a valid RVPBF: " + path.string() + " (" + err + ")");
-        return false;
-    }
-    std::string cfg = pkg.GetText(rvp::paths::kConfigJson);
-    if (cfg.empty()) {
-        Logger::Get().Warn("BrushLibrary: RVPBF missing config.json " + path.string());
-        return false;
-    }
-    json root;
-    try {
-        root = json::parse(cfg);
-    } catch (...) {
-        Logger::Get().Warn("BrushLibrary: invalid config.json " + path.string());
-        return false;
-    }
+    auto ext = path.extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
     Entry e;
-    e.meta.id = root.value("id", path.stem().string());
-    e.meta.displayName = root.value("name", e.meta.id);
     e.meta.isBuiltin = false;
     e.meta.isDirty = false;
     e.meta.sourcePath = path.string();
 
-    if (e.meta.id.rfind("builtin.", 0) == 0) {
-        Logger::Get().Warn("BrushLibrary: skip custom with builtin id " + e.meta.id);
+    if (ext == ".rvbrush") {
+        // Legacy JSON format (magic RVBRUSH)
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            Logger::Get().Warn("BrushLibrary: cannot open " + path.string());
+            return false;
+        }
+        json root;
+        try {
+            f >> root;
+        } catch (...) {
+            Logger::Get().Warn("BrushLibrary: invalid JSON " + path.string());
+            return false;
+        }
+        if (root.contains("magic") && root["magic"].is_string() &&
+            root["magic"].get<std::string>() != kFormatMagic) {
+            Logger::Get().Warn("BrushLibrary: bad magic " + path.string());
+            return false;
+        }
+        e.meta.id = root.value("id", path.stem().string());
+        e.meta.displayName = root.value("name", e.meta.id);
+        if (root.contains("params"))
+            ParamsFromJson(e.params, root["params"]);
+        if (root.contains("tip"))
+            ApplyTipFromJson(e.params, root["tip"], nullptr);
+    } else if (ext == ".rvpbf") {
+        rvp::Package pkg;
+        std::string err;
+        if (!rvp::ReadPackage(path.string(), pkg, &err) || pkg.format != rvp::PackageFormat::RVPBF) {
+            Logger::Get().Warn("BrushLibrary: not a valid RVPBF: " + path.string() + " (" + err + ")");
+            return false;
+        }
+        std::string cfg = pkg.GetText(rvp::paths::kConfigJson);
+        if (cfg.empty()) {
+            Logger::Get().Warn("BrushLibrary: RVPBF missing config.json " + path.string());
+            return false;
+        }
+        json root;
+        try {
+            root = json::parse(cfg);
+        } catch (...) {
+            Logger::Get().Warn("BrushLibrary: invalid config.json " + path.string());
+            return false;
+        }
+        e.meta.id = root.value("id", path.stem().string());
+        e.meta.displayName = root.value("name", e.meta.id);
+        if (root.contains("params"))
+            ParamsFromJson(e.params, root["params"]);
+        if (root.contains("tip")) {
+            const auto* tipBytes = pkg.Get(rvp::paths::kTipRaw8);
+            ApplyTipFromJson(e.params, root["tip"], tipBytes);
+        }
+    } else {
         return false;
     }
 
-    if (root.contains("params"))
-        ParamsFromJson(e.params, root["params"]);
-
-    if (root.contains("tip")) {
-        const json& tip = root["tip"];
-        std::string type = tip.value("type", "none");
-        if (type == "builtin") {
-            e.params.tipType = BrushPresetParams::TipType::Builtin;
-            e.params.tipBuiltinId = tip.value("builtin_id", "soft_round");
-            e.params.tipSpacingMul = tip.value("spacing_mul", 1.f);
-        } else if (type == "embedded") {
-            e.params.tipType = BrushPresetParams::TipType::Embedded;
-            e.params.tipSize = tip.value("size", 0);
-            e.params.tipSpacingMul = tip.value("spacing_mul", 1.f);
-            if (const auto* tipBytes = pkg.Get(rvp::paths::kTipRaw8)) {
-                e.params.tipPixels = *tipBytes;
-                if (e.params.tipSize <= 0) {
-                    // Derive size from raw8 square
-                    int n = (int)tipBytes->size();
-                    int s = (int)std::lround(std::sqrt((double)n));
-                    if (s * s == n) e.params.tipSize = s;
-                }
-            } else {
-                e.params.tipType = BrushPresetParams::TipType::None;
-            }
-        } else {
-            e.params.tipType = BrushPresetParams::TipType::None;
-        }
+    if (e.meta.id.rfind("builtin.", 0) == 0) {
+        Logger::Get().Warn("BrushLibrary: skip custom with builtin id " + e.meta.id);
+        return false;
     }
     e.RebuildOwnedTip();
 
@@ -491,6 +566,7 @@ void BrushLibrary::LoadBuiltins() {
     for (auto& s : staging)
         m_Entries.push_back(std::move(s));
     RebuildMetaList();
+    LoadFavoritesUnlocked();
     m_Loaded = true;
     Logger::Get().Info("BrushLibrary: builtins ready (" + std::to_string(m_MetaList.size()) +
                        "), disk scan deferred");
@@ -516,73 +592,77 @@ void BrushLibrary::StartAsyncDiskLoad() {
                 if (!ent.is_regular_file()) continue;
                 auto ext = ent.path().extension().string();
                 std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-                if (ext != ".rvpbf") continue;
+                if (ext != ".rvpbf" && ext != ".rvbrush") continue;
 
-                rvp::Package pkg;
-                if (!rvp::ReadPackage(ent.path().string(), pkg, nullptr) ||
-                    pkg.format != rvp::PackageFormat::RVPBF)
-                    continue;
-                std::string cfg = pkg.GetText(rvp::paths::kConfigJson);
-                if (cfg.empty()) continue;
-                json rootJ;
-                try { rootJ = json::parse(cfg); } catch (...) { continue; }
-
+                // Prefer .rvbrush over .rvpbf when both exist (loaded later overwrites).
+                // Async path: load via same unlocked helper under a temporary library slice.
                 Entry e;
-                e.meta.id = rootJ.value("id", ent.path().stem().string());
-                e.meta.displayName = rootJ.value("name", e.meta.id);
-                e.meta.isBuiltin = false;
-                e.meta.isDirty = false;
-                e.meta.sourcePath = ent.path().string();
-                if (e.meta.id.rfind("builtin.", 0) == 0) continue;
-                auto& p = e.params;
-                if (rootJ.contains("params")) {
-                    const json& j = rootJ["params"];
-                    if (j.contains("radius")) p.radius = j["radius"].get<float>();
-                    if (j.contains("hardness")) p.hardness = j["hardness"].get<float>();
-                    if (j.contains("opacity")) p.opacity = j["opacity"].get<float>();
-                    if (j.contains("spacing")) p.spacing = j["spacing"].get<float>();
-                    if (j.contains("stabilization")) p.stabilization = j["stabilization"].get<int>();
-                    if (j.contains("erase")) p.erase = j["erase"].get<bool>();
-                    if (j.contains("writeR")) p.writeR = j["writeR"].get<bool>();
-                    if (j.contains("writeG")) p.writeG = j["writeG"].get<bool>();
-                    if (j.contains("writeB")) p.writeB = j["writeB"].get<bool>();
-                    if (j.contains("writeA")) p.writeA = j["writeA"].get<bool>();
-                    if (j.contains("pressureRadius")) p.pressureRadius = j["pressureRadius"].get<bool>();
-                    if (j.contains("pressureHardness")) p.pressureHardness = j["pressureHardness"].get<bool>();
-                    if (j.contains("pressureOpacity")) p.pressureOpacity = j["pressureOpacity"].get<bool>();
-                    if (j.contains("rotationDeg")) p.rotationDeg = j["rotationDeg"].get<float>();
-                    if (j.contains("pressureRotation")) p.pressureRotation = j["pressureRotation"].get<bool>();
-                    if (j.contains("scatter")) p.scatter = j["scatter"].get<float>();
-                    if (j.contains("angleJitter")) p.angleJitter = j["angleJitter"].get<float>();
-                    if (j.contains("tipSourcePath")) p.tipSourcePath = j["tipSourcePath"].get<std::string>();
+                // Replicate LoadFileUnlocked logic without holding main mutex
+                if (ext == ".rvbrush") {
+                    std::ifstream f(ent.path(), std::ios::binary);
+                    if (!f) continue;
+                    json rootJ;
+                    try { f >> rootJ; } catch (...) { continue; }
+                    if (rootJ.contains("magic") && rootJ["magic"].is_string() &&
+                        rootJ["magic"].get<std::string>() != kFormatMagic)
+                        continue;
+                    e.meta.id = rootJ.value("id", ent.path().stem().string());
+                    e.meta.displayName = rootJ.value("name", e.meta.id);
+                    e.meta.isBuiltin = false;
+                    e.meta.isDirty = false;
+                    e.meta.sourcePath = ent.path().string();
+                    if (e.meta.id.rfind("builtin.", 0) == 0) continue;
+                    if (rootJ.contains("params"))
+                        ParamsFromJson(e.params, rootJ["params"]);
+                    if (rootJ.contains("tip"))
+                        ApplyTipFromJson(e.params, rootJ["tip"], nullptr);
+                    e.RebuildOwnedTip();
+                    loaded.push_back(std::move(e));
+                } else {
+                    rvp::Package pkg;
+                    if (!rvp::ReadPackage(ent.path().string(), pkg, nullptr) ||
+                        pkg.format != rvp::PackageFormat::RVPBF)
+                        continue;
+                    std::string cfg = pkg.GetText(rvp::paths::kConfigJson);
+                    if (cfg.empty()) continue;
+                    json rootJ;
+                    try { rootJ = json::parse(cfg); } catch (...) { continue; }
+                    e.meta.id = rootJ.value("id", ent.path().stem().string());
+                    e.meta.displayName = rootJ.value("name", e.meta.id);
+                    e.meta.isBuiltin = false;
+                    e.meta.isDirty = false;
+                    e.meta.sourcePath = ent.path().string();
+                    if (e.meta.id.rfind("builtin.", 0) == 0) continue;
+                    if (rootJ.contains("params"))
+                        ParamsFromJson(e.params, rootJ["params"]);
+                    if (rootJ.contains("tip")) {
+                        const auto* tipBytes = pkg.Get(rvp::paths::kTipRaw8);
+                        ApplyTipFromJson(e.params, rootJ["tip"], tipBytes);
+                    }
+                    e.RebuildOwnedTip();
+                    loaded.push_back(std::move(e));
                 }
-                if (rootJ.contains("tip")) {
-                    const json& tip = rootJ["tip"];
-                    std::string type = tip.value("type", "none");
-                    if (type == "builtin") {
-                        p.tipType = BrushPresetParams::TipType::Builtin;
-                        p.tipBuiltinId = tip.value("builtin_id", "soft_round");
-                        p.tipSpacingMul = tip.value("spacing_mul", 1.f);
-                    } else if (type == "embedded") {
-                        p.tipType = BrushPresetParams::TipType::Embedded;
-                        p.tipSize = tip.value("size", 0);
-                        p.tipSpacingMul = tip.value("spacing_mul", 1.f);
-                        if (const auto* tipBytes = pkg.Get(rvp::paths::kTipRaw8)) {
-                            p.tipPixels = *tipBytes;
-                            if (p.tipSize <= 0) {
-                                int n = (int)tipBytes->size();
-                                int s = (int)std::lround(std::sqrt((double)n));
-                                if (s * s == n) p.tipSize = s;
-                            }
-                        } else {
-                            p.tipType = BrushPresetParams::TipType::None;
-                        }
-                    } else {
-                        p.tipType = BrushPresetParams::TipType::None;
+            }
+            // Prefer .rvbrush entries when both formats share an id (scan order arbitrary).
+            // Second pass: if both loaded, keep the .rvbrush one.
+            {
+                std::unordered_map<std::string, size_t> best;
+                for (size_t i = 0; i < loaded.size(); ++i) {
+                    const auto& id = loaded[i].meta.id;
+                    auto it = best.find(id);
+                    bool isBrush = loaded[i].meta.sourcePath.size() >= 8 &&
+                        loaded[i].meta.sourcePath.substr(loaded[i].meta.sourcePath.size() - 8) == ".rvbrush";
+                    if (it == best.end()) {
+                        best[id] = i;
+                    } else if (isBrush) {
+                        best[id] = i;
                     }
                 }
-                e.RebuildOwnedTip();
-                loaded.push_back(std::move(e));
+                std::vector<Entry> dedup;
+                dedup.reserve(best.size());
+                for (auto& kv : best)
+                    dedup.push_back(std::move(loaded[kv.second]));
+                loaded = std::move(dedup);
             }
         }
         {
@@ -636,11 +716,19 @@ void BrushLibrary::LoadAll() {
 
     std::error_code ec;
     if (std::filesystem::exists(m_Root, ec)) {
+        // Load rvpbf first, then rvbrush so JSON legacy wins on id collision.
         for (auto& ent : std::filesystem::directory_iterator(m_Root, ec)) {
             if (!ent.is_regular_file()) continue;
             auto ext = ent.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
             if (ext == ".rvpbf")
+                LoadFileUnlocked(ent.path());
+        }
+        for (auto& ent : std::filesystem::directory_iterator(m_Root, ec)) {
+            if (!ent.is_regular_file()) continue;
+            auto ext = ent.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext == ".rvbrush")
                 LoadFileUnlocked(ent.path());
         }
     }
@@ -699,6 +787,69 @@ std::string BrushLibrary::GetActiveId() const {
     return m_ActiveId;
 }
 
+void BrushLibrary::LoadFavoritesUnlocked() {
+    m_FavoriteIds.clear();
+    auto path = m_Root / "favorites.json";
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec)) return;
+    try {
+        std::ifstream f(path);
+        if (!f) return;
+        json j; f >> j;
+        if (j.contains("ids") && j["ids"].is_array()) {
+            for (const auto& v : j["ids"]) {
+                if (v.is_string()) m_FavoriteIds.push_back(v.get<std::string>());
+                if (m_FavoriteIds.size() >= 12) break;
+            }
+        }
+    } catch (...) {}
+}
+
+void BrushLibrary::SaveFavoritesUnlocked() const {
+    if (m_Root.empty()) return;
+    try {
+        std::filesystem::create_directories(m_Root);
+        json j;
+        j["ids"] = m_FavoriteIds;
+        std::ofstream f(m_Root / "favorites.json");
+        if (f) f << j.dump(2);
+    } catch (...) {}
+}
+
+void BrushLibrary::SetFavorite(const std::string& id, bool fav) {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    auto it = std::find(m_FavoriteIds.begin(), m_FavoriteIds.end(), id);
+    if (fav) {
+        if (it == m_FavoriteIds.end() && m_FavoriteIds.size() < 12)
+            m_FavoriteIds.push_back(id);
+    } else if (it != m_FavoriteIds.end()) {
+        m_FavoriteIds.erase(it);
+    }
+    SaveFavoritesUnlocked();
+}
+
+bool BrushLibrary::IsFavorite(const std::string& id) const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    return std::find(m_FavoriteIds.begin(), m_FavoriteIds.end(), id) != m_FavoriteIds.end();
+}
+
+std::vector<std::string> BrushLibrary::ListFavoriteIds() const {
+    std::lock_guard<std::mutex> lock(m_Mutex);
+    // Filter missing ids
+    std::vector<std::string> out;
+    for (const auto& id : m_FavoriteIds) {
+        if (Find(id)) out.push_back(id);
+    }
+    // Fallback: builtins if empty
+    if (out.empty()) {
+        for (const auto& e : m_Entries) {
+            if (e.meta.isBuiltin) out.push_back(e.meta.id);
+            if (out.size() >= 8) break;
+        }
+    }
+    return out;
+}
+
 std::string BrushLibrary::CreateFromCurrent(const BrushSettings& brush, const std::string& name) {
     std::lock_guard<std::mutex> lock(m_Mutex);
     if (!m_Loaded) {
@@ -725,7 +876,32 @@ bool BrushLibrary::UpdateStaging(const std::string& id, const BrushSettings& bru
     std::lock_guard<std::mutex> lock(m_Mutex);
     Entry* e = Find(id);
     if (!e || e->meta.isBuiltin) return false;
-    e->params = BrushPresetParams::FromSettings(brush, brush.tip);
+    BrushPresetParams next = BrushPresetParams::FromSettings(brush, brush.tip);
+    // Avoid flip-flopping isDirty after Save when live brush matches disk.
+    auto sameTip = [](const BrushPresetParams& a, const BrushPresetParams& b) {
+        if (a.tipType != b.tipType) return false;
+        if (a.tipType == BrushPresetParams::TipType::Builtin)
+            return a.tipBuiltinId == b.tipBuiltinId;
+        if (a.tipType == BrushPresetParams::TipType::Embedded)
+            return a.tipSize == b.tipSize && a.tipPixels == b.tipPixels;
+        return true;
+    };
+    auto sameParams = [&](const BrushPresetParams& a, const BrushPresetParams& b) {
+        return a.radius == b.radius && a.hardness == b.hardness && a.opacity == b.opacity &&
+               a.spacing == b.spacing && a.stabilization == b.stabilization &&
+               a.pressureRadius == b.pressureRadius && a.pressureHardness == b.pressureHardness &&
+               a.pressureOpacity == b.pressureOpacity && a.rotationDeg == b.rotationDeg &&
+               a.pressureRotation == b.pressureRotation && a.scatter == b.scatter &&
+               a.angleJitter == b.angleJitter && a.tipSourcePath == b.tipSourcePath &&
+               sameTip(a, b);
+    };
+    if (sameParams(e->params, next) && !e->meta.isDirty)
+        return false;
+    if (sameParams(e->params, next)) {
+        // Still dirty (name rename etc.) but tip/params unchanged — keep dirty, no rebuild spam
+        return true;
+    }
+    e->params = std::move(next);
     e->RebuildOwnedTip();
     e->meta.isDirty = true;
     RebuildMetaList();
@@ -749,7 +925,7 @@ bool BrushLibrary::SaveToDisk(const std::string& id) {
     EnsureRootExists();
     if (!WriteFile(*e)) return false;
     e->meta.isDirty = false;
-    e->meta.sourcePath = (m_Root / (e->meta.id + ".rvpbf")).string();
+    e->meta.sourcePath = (m_Root / (e->meta.id + ".rvbrush")).string();
     RebuildMetaList();
     return true;
 }

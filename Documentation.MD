@@ -560,6 +560,7 @@ Host embeds STB. Suitable for Comfy PNG responses.
 | `separator` / `spacing` / `same_line` | |
 | `button` → bool | |
 | `checkbox` / `input_int` / `input_text` / `combo` | `(changed, value)` |
+| **`input_text_multiline(label, value, buf_size=4096, height=80)`** | `(changed, value)` — multi-line text field |
 | **`progress_bar(fraction, overlay="")`** | `fraction` in 0..1 |
 | **`set_image_rgba8(key, rgba8, w, h)`** | bool — GPU preview upload |
 | **`image(key, display_w=0, display_h=0)`** | bool — draw preview |
@@ -568,6 +569,45 @@ Host embeds STB. Suitable for Comfy PNG responses.
 Preview keys are strings (e.g. `"gen_preview"`). Max texture side 8192.
 
 Call **`set_next_window_*` immediately before** `begin` / `begin_overlay` (ImGui next-window state).
+
+#### Multi-line text
+
+Use `input_text_multiline` for prompts, notes, or any multi-line string. Same call rules as other `rayv.ui` widgets (**only inside `on_ui`**).
+
+```python
+_state = {"notes": "line one\nline two"}
+
+def on_ui():
+    visible, is_open = rayv.ui.begin("Notes")
+    if not visible:
+        return
+    changed, _state["notes"] = rayv.ui.input_text_multiline(
+        "##notes", _state["notes"], buf_size=8192, height=120
+    )
+    if changed:
+        pass  # value already in _state["notes"]
+    rayv.ui.end()
+```
+
+- `buf_size` — max characters stored (default 4096).
+- `height` — field height in pixels (default 80). Width follows the parent (`-1` stretch).
+- Newlines are preserved in the returned string.
+- Prefer a stable `label` id (`##…`) when you already draw a separate caption with `text`.
+
+#### Resizable panels (host UI + plugin docks)
+
+Yes — panels are resizable:
+
+| Surface | How to resize |
+|---------|----------------|
+| **Built-in docks** (Layers, Channels, Asset Browser, Tool Settings, Brush Workshop, Console, …) | Drag the **dock splitters** between panels. ImGui docking stores layout in `imgui.ini`. |
+| **Min / max size** | Host clamps some leaves (e.g. Tool Settings / Asset Browser) so strips cannot collapse to zero or grow past a useful range. |
+| **Floating windows** | Undock a tab (drag the title tab out) → free window with normal resize grips. |
+| **Plugin `register_dock` / `begin_dock`** | Same dockspace: user can split, tab, float, and resize like built-ins. |
+| **`begin` / free windows** | Resize like any ImGui window; optional `set_next_window_size` on open. |
+| **Overlays (`begin_overlay`)** | Not docked; size via `set_next_window_size` / content. |
+
+There is no separate Python “set panel width” API — layout is interactive (and session-persisted via ImGui). For a fixed-size HUD, use `set_next_window_size` + overlay or free `begin`.
 
 #### Registered docks (preferred for long-lived panels)
 

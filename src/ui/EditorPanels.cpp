@@ -10,6 +10,9 @@
 #include "panels/LayerEffectsPanel.h"
 #include "panels/ProjectSetupPanel.h"
 #include "panels/ColorsPanel.h"
+#include "panels/ToolbarPanel.h"
+#include "panels/ViewportNavPanel.h"
+#include "panels/PropertiesPanel.h"
 #include "widgets/UiAssetPicker.h"
 #include "../core/ConfigManager.h"
 #include "../core/Logger.h"
@@ -89,7 +92,7 @@ namespace UI {
     DocumentLoadingState g_LoadingState;
     ProjectTabCloseRequest g_ProjectTabCloseRequest;
 
-    // Fill Layer popup pipette (arm → click canvas once)
+    // Fill Layer popup pipette (arm в†’ click canvas once)
     static bool s_FillPipetteArmed = false;
     static int s_FillPipetteLayer = -1;
     static int s_FillPipetteMap = -1;
@@ -158,7 +161,7 @@ namespace UI {
         int cx = std::clamp((int)canvasX, 0, canvas.GetWidth() - 1);
         int cy = std::clamp((int)canvasY, 0, canvas.GetHeight() - 1);
         // Always sample the active Channels view composite (map-filtered stack).
-        // Matches what the viewport shows — not the unfiltered all-maps blend.
+        // Matches what the viewport shows вЂ” not the unfiltered all-maps blend.
         canvas.SampleCompositePixel(cx, cy, outColor);
     }
 
@@ -286,201 +289,448 @@ namespace UI {
         }
     }
 
-    void DrawBrushPickerPopup(bool& openFlag, ImVec2 popupPos, BrushSettings& brush) {
+    // 5-point star (no font glyph dependency вЂ” avoids diamond/?)
+    static void DrawStarIcon(ImDrawList* dl, ImVec2 c, float r, ImU32 col, bool filled) {
+        if (!dl) return;
+        ImVec2 pts[10];
+        const float pi = 3.14159265f;
+        for (int i = 0; i < 5; ++i) {
+            float aOuter = -pi * 0.5f + (float)i * (2.f * pi / 5.f);
+            float aInner = aOuter + pi / 5.f;
+            pts[i * 2]     = ImVec2(c.x + std::cos(aOuter) * r,     c.y + std::sin(aOuter) * r);
+            pts[i * 2 + 1] = ImVec2(c.x + std::cos(aInner) * r * 0.42f,
+                                    c.y + std::sin(aInner) * r * 0.42f);
+        }
+        if (filled) {
+            // Star is non-convex вЂ” fill as triangle fan from center
+            for (int i = 0; i < 10; ++i)
+                dl->AddTriangleFilled(c, pts[i], pts[(i + 1) % 10], col);
+        } else {
+            dl->AddPolyline(pts, 10, col, ImDrawFlags_Closed, 1.6f);
+        }
+    }
+
+    // Shared body for popup + dock workshop
+    static void DrawBrushWorkshopBody(BrushSettings& brush, bool isPopup) {
         auto& lib = BrushLibrary::Get();
         auto& T = Ui::Tokens();
-        static bool s_popupOpen = false;
+        // Owned tip for live workshop edits (Load tip image в†’ brush.tip points here)
+        static BrushTip s_WorkshopTip;
+        static bool s_WorkshopTipValid = false;
 
-        if (openFlag) {
-            ImGui::OpenPopup("##BrushPicker");
-            openFlag = false;
-            s_popupOpen = true;
+        ImGui::TextUnformatted("Brush Workshop");
+        ImGui::SameLine();
+        ImGui::TextDisabled(isPopup
+            ? "Save в†’ disk В· star = Selector Wheel В· Load tip = texture brush"
+            : "в… favorites for RMB-hold wheel В· Load tip for texture brushes");
+        ImGui::Separator();
+
+        // --- Left: list ---
+        float listW = std::clamp(ImGui::GetContentRegionAvail().x * 0.42f, 300.f, 420.f);
+        ImGui::BeginChild("##brushlist", ImVec2(listW, 0), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+        if (ImGui::Button("Create brush", ImVec2(-1, 0))) {
+            std::string id = lib.CreateFromCurrent(brush, "New Brush");
+            if (!id.empty()) {
+                lib.SetActiveId(id);
+                const bool er = brush.erase;
+                lib.ApplyTo(id, brush);
+                brush.erase = er;
+            }
         }
+        if (ImGui::IsItemHovered())
+            Ui::Tooltip("Duplicate current settings into a new custom preset (then Save)");
+        ImGui::Spacing();
 
+        const std::string active = lib.GetActiveId();
+        const float rowH = 64.f;
+        const float starColW = 26.f;
+        for (const auto& m : lib.List()) {
+            ImGui::PushID(m.id.c_str());
+            bool sel = (m.id == active);
+            BrushPresetParams params;
+            lib.Get(m.id, params);
+            BrushSettings prev;
+            lib.ApplyTo(m.id, prev);
+
+            ImVec4 chip = m.isBuiltin
+                ? ImVec4(0.25f, 0.55f, 0.95f, 1.f)
+                : (m.isDirty ? ImVec4(1.0f, 0.55f, 0.15f, 1.f) : ImVec4(0.95f, 0.50f, 0.12f, 1.f));
+
+            ImVec2 row0 = ImGui::GetCursorScreenPos();
+            // Favorite star column (own hit target вЂ” not under Selectable)
+            {
+                bool fav = lib.IsFavorite(m.id);
+                if (ImGui::InvisibleButton("##fav", ImVec2(starColW, rowH)))
+                    lib.SetFavorite(m.id, !fav);
+                if (ImGui::IsItemHovered())
+                    Ui::Tooltip(fav ? "Remove from Selector Wheel" : "Add to Selector Wheel (RMB hold)");
+                ImVec2 bmin = ImGui::GetItemRectMin();
+                ImVec2 bmax = ImGui::GetItemRectMax();
+                ImVec2 sc((bmin.x + bmax.x) * 0.5f, bmin.y + 14.f);
+                ImDrawList* sdl = ImGui::GetWindowDrawList();
+                DrawStarIcon(sdl, sc, 7.f,
+                    fav ? IM_COL32(255, 200, 60, 255) : IM_COL32(140, 140, 150, 200), fav);
+            }
+            ImGui::SameLine(0, 0);
+
+            if (ImGui::Selectable("##row", sel, 0, ImVec2(0, rowH))) {
+                const bool er = brush.erase;
+                lib.ApplyTo(m.id, brush);
+                brush.erase = er;
+                lib.SetActiveId(m.id);
+                // After ApplyTo, tip may point into library storage
+                s_WorkshopTipValid = false;
+            }
+            ImVec2 row1 = ImGui::GetItemRectMax();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->AddRectFilled(ImVec2(row0.x + starColW, row0.y + 4),
+                ImVec2(row0.x + starColW + 5, row1.y - 4),
+                ImGui::ColorConvertFloat4ToU32(chip), 2.f);
+            char label[160];
+            std::snprintf(label, sizeof(label), "%s%s", m.displayName.c_str(), m.isDirty ? " *" : "");
+            dl->AddText(ImVec2(row0.x + starColW + 10, row0.y + 4), T.ColU32(T.textPrimary), label);
+            char metaLine[96];
+            std::snprintf(metaLine, sizeof(metaLine), "r=%.0f  h=%.0f%%  op=%.0f%%  sp=%.2f",
+                params.radius, params.hardness * 100.f, params.opacity * 100.f, params.spacing);
+            dl->AddText(ImVec2(row0.x + starColW + 10, row0.y + 20), T.ColU32(T.textSecondary), metaLine);
+            ImVec2 pmin(row0.x + starColW + 10, row0.y + 36);
+            ImVec2 pmax(row1.x - 8, row1.y - 4);
+            dl->AddRectFilled(pmin, pmax, IM_COL32(18, 18, 20, 255), 3.f);
+            DrawBrushStrokePreview(dl, pmin, pmax, prev, IM_COL32(230, 230, 235, 255));
+            ImGui::PopID();
+        }
+        ImGui::EndChild();
+
+        ImGui::SameLine(0, 12);
+
+        // --- Right: inspector ---
+        ImGui::BeginChild("##brushside", ImVec2(0, 0), true);
+        {
+            BrushPresetMeta meta;
+            bool has = lib.GetMeta(lib.GetActiveId(), meta);
+            ImGui::TextUnformatted(has ? meta.displayName.c_str() : "(no preset)");
+            if (has) {
+                ImGui::SameLine();
+                if (meta.isBuiltin) ImGui::TextColored(ImVec4(0.4f, 0.65f, 1.f, 1.f), "builtin");
+                else if (meta.isDirty) ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f), "unsaved");
+                else ImGui::TextColored(ImVec4(1.f, 0.55f, 0.15f, 1.f), "custom");
+            }
+
+            // Rename custom
+            if (has && !meta.isBuiltin) {
+                static char nameBuf[128] = {};
+                static std::string nameForId;
+                if (nameForId != meta.id) {
+                    nameForId = meta.id;
+                    std::snprintf(nameBuf, sizeof(nameBuf), "%s", meta.displayName.c_str());
+                }
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::InputText("##rename", nameBuf, sizeof(nameBuf)))
+                    lib.Rename(meta.id, nameBuf);
+            }
+
+            ImVec2 prevPos = ImGui::GetCursorScreenPos();
+            float prevW = ImGui::GetContentRegionAvail().x;
+            float prevH = 96.f;
+            ImGui::Dummy(ImVec2(prevW, prevH));
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            ImVec2 p0 = prevPos, p1(prevPos.x + prevW, prevPos.y + prevH);
+            dl->AddRectFilled(p0, p1, IM_COL32(16, 16, 18, 255), 6.f);
+            DrawBrushStrokePreview(dl, ImVec2(p0.x + 10, p0.y + 10), ImVec2(p1.x - 10, p1.y - 10),
+                brush, IM_COL32(240, 240, 245, 255));
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Tip texture");
+            ImVec2 t0 = ImGui::GetCursorScreenPos();
+            float th = 80.f;
+            ImGui::Dummy(ImVec2(th, th));
+            DrawTipTextureThumb(dl, t0, ImVec2(t0.x + th, t0.y + th), brush.tip);
+            ImGui::SameLine();
+            ImGui::BeginGroup();
+            if (brush.tip && brush.tip->size > 0)
+                ImGui::Text("%s  %dx%d", brush.tip->name ? brush.tip->name : "tip",
+                    brush.tip->size, brush.tip->size);
+            else
+                ImGui::TextDisabled("Procedural soft circle");
+            if (!brush.tipSourcePath.empty())
+                ImGui::TextWrapped("%s", brush.tipSourcePath.c_str());
+            else if (has && !meta.sourcePath.empty())
+                ImGui::TextWrapped("%s", meta.sourcePath.c_str());
+
+            // Builtin tip chips
+            if (ImGui::SmallButton("Soft")) { brush.tip = &BrushPresets::SoftRound(); s_WorkshopTipValid = false; }
+            ImGui::SameLine(0, 4);
+            if (ImGui::SmallButton("Hard")) { brush.tip = &BrushPresets::HardRound(); s_WorkshopTipValid = false; }
+            ImGui::SameLine(0, 4);
+            if (ImGui::SmallButton("Pencil")) { brush.tip = &BrushPresets::Pencil(); s_WorkshopTipValid = false; }
+            ImGui::SameLine(0, 4);
+            if (ImGui::SmallButton("Air")) { brush.tip = &BrushPresets::Airbrush(); s_WorkshopTipValid = false; }
+            ImGui::SameLine(0, 4);
+            if (ImGui::SmallButton("None")) { brush.tip = nullptr; brush.tipSourcePath.clear(); s_WorkshopTipValid = false; }
+
+            if (ImGui::Button("Load tip imageвЂ¦")) {
+                char path[512] = {};
+                if (Ui::ShowOpenFile(path, sizeof(path),
+                    "Images (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.dds\0All\0*.*\0")) {
+                    std::vector<uint8_t> rgba;
+                    int w = 0, h = 0;
+                    if (ImageManager::LoadImageFromFile(path, rgba, w, h) && w > 0 && h > 0) {
+                        // Downsample / square crop to max 256, grayscale from alpha*luma
+                        const int maxS = 256;
+                        int side = std::min(w, h);
+                        int srcX = (w - side) / 2, srcY = (h - side) / 2;
+                        int outS = std::min(side, maxS);
+                        s_WorkshopTip.pixels.assign((size_t)outS * outS, 0);
+                        for (int y = 0; y < outS; ++y) {
+                            for (int x = 0; x < outS; ++x) {
+                                int sx = srcX + x * side / outS;
+                                int sy = srcY + y * side / outS;
+                                const uint8_t* p = rgba.data() + ((size_t)sy * w + sx) * 4;
+                                float a = p[3] / 255.f;
+                                float luma = (0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2]) / 255.f;
+                                float v = std::clamp(luma * a + (1.f - a) * 0.f, 0.f, 1.f);
+                                // Prefer alpha as coverage if image is white-on-transparent
+                                if (p[3] < 250 && (p[0] + p[1] + p[2]) > 600)
+                                    v = a;
+                                s_WorkshopTip.pixels[(size_t)y * outS + x] = (uint8_t)std::lround(v * 255.f);
+                            }
+                        }
+                        s_WorkshopTip.size = outS;
+                        s_WorkshopTip.spacingMul = 1.f;
+                        s_WorkshopTip.name = "Custom";
+                        s_WorkshopTipValid = true;
+                        brush.tip = &s_WorkshopTip;
+                        brush.tipSourcePath = path;
+                        core::Notifications::Get().Push("Tip texture loaded (" + std::to_string(outS) + "ВІ)",
+                            core::NotifyLevel::Info);
+                    } else {
+                        core::Notifications::Get().Push("Failed to load tip image", core::NotifyLevel::Error);
+                    }
+                }
+            }
+            if (ImGui::IsItemHovered())
+                Ui::Tooltip("Load PNG/JPG/TGA/DDS as grayscale brush tip (embedded into preset on Save)");
+            ImGui::SameLine();
+            if (ImGui::Button("Clear tip")) {
+                brush.tip = nullptr;
+                brush.tipSourcePath.clear();
+                s_WorkshopTipValid = false;
+            }
+            ImGui::EndGroup();
+
+            ImGui::Separator();
+            ImGui::Text("Parameters");
+            float maxR = ConfigManager::Get().GetMaxBrushRadius();
+            Ui::SmartSliderFloat("Size", &brush.radius, 1.f, maxR, 20.f, 1.f, "%.1f px");
+            Ui::SmartSliderFloat("Hardness", &brush.hardness, 0.f, 1.f, 0.5f, 0.05f, "%.2f");
+            Ui::SmartSliderFloat("Opacity", &brush.opacity, 0.f, 1.f, 1.f, 0.05f, "%.2f");
+            Ui::SmartSliderFloat("Spacing", &brush.spacing, 0.01f, 2.f, 0.1f, 0.05f, "%.2f");
+            Ui::SmartSliderInt("Stabilization", &brush.stabilization, 1, 50, 1, 1);
+
+            ImGui::Separator();
+            ImGui::Text("Tablet pressure");
+            ImGui::Checkbox("в†’ Radius", &brush.pressureRadius); ImGui::SameLine();
+            ImGui::Checkbox("в†’ Hardness", &brush.pressureHardness); ImGui::SameLine();
+            ImGui::Checkbox("в†’ Opacity", &brush.pressureOpacity);
+
+            ImGui::Separator();
+            ImGui::Text("Rotation / dynamics");
+            Ui::SmartSliderFloat("Rotation", &brush.rotationDeg, 0.f, 360.f, 0.f, 1.f, "%.0fВ°");
+            ImGui::Checkbox("Pressure в†’ Rotation", &brush.pressureRotation);
+            Ui::SmartSliderFloat("Scatter", &brush.scatter, 0.f, 1.f, 0.f, 0.05f, "%.2f");
+            Ui::SmartSliderFloat("Angle jitter", &brush.angleJitter, 0.f, 1.f, 0.f, 0.05f, "%.2f");
+
+            ImGui::Separator();
+            if (has && meta.isBuiltin) {
+                if (ImGui::Button("Save as new customвЂ¦", ImVec2(-1, 0))) {
+                    std::string id = lib.CreateFromCurrent(brush, meta.displayName + " copy");
+                    if (!id.empty()) {
+                        lib.UpdateStaging(id, brush);
+                        if (lib.SaveToDisk(id))
+                            core::Notifications::Get().Push("Saved custom brush", core::NotifyLevel::Info);
+                        else
+                            core::Notifications::Get().Push("Save failed вЂ” check console", core::NotifyLevel::Error);
+                        lib.SetActiveId(id);
+                        const bool er = brush.erase;
+                        lib.ApplyTo(id, brush);
+                        brush.erase = er;
+                    }
+                }
+            } else {
+                ImGui::BeginDisabled(!has || meta.isBuiltin);
+                if (ImGui::Button("Save preset", ImVec2(-1, 0))) {
+                    lib.UpdateStaging(lib.GetActiveId(), brush);
+                    if (lib.SaveToDisk(lib.GetActiveId()))
+                        core::Notifications::Get().Push("Brush saved", core::NotifyLevel::Info);
+                    else
+                        core::Notifications::Get().Push("Save failed вЂ” check console", core::NotifyLevel::Error);
+                }
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && (!has || meta.isBuiltin))
+                    Ui::Tooltip("Select or Create a custom brush first");
+            }
+            ImGui::BeginDisabled(!has || meta.isBuiltin);
+            if (ImGui::Button("Delete", ImVec2(-1, 0))) {
+                lib.DeleteCustom(lib.GetActiveId());
+                lib.SetActiveId("builtin.soft_round");
+                const bool er = brush.erase;
+                lib.ApplyTo("builtin.soft_round", brush);
+                brush.erase = er;
+                s_WorkshopTipValid = false;
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::EndChild();
+
+        // Keep dirty staging in sync while open (no-op if params match saved)
+        if (!lib.GetActiveId().empty()) {
+            BrushPresetMeta meta;
+            if (lib.GetMeta(lib.GetActiveId(), meta) && !meta.isBuiltin)
+                lib.UpdateStaging(lib.GetActiveId(), brush);
+        }
+        (void)s_WorkshopTipValid;
+    }
+
+    void DrawBrushPickerPopup(bool& openFlag, ImVec2 popupPos, BrushSettings& brush) {
+        auto& T = Ui::Tokens();
+        if (openFlag) {
+            ImGui::OpenPopup("##BrushWorkshopPopup");
+            openFlag = false;
+        }
         ImGui::SetNextWindowPos(popupPos, ImGuiCond_Appearing);
-        // Wide enough for long stroke previews + inspector
         ImGui::SetNextWindowSize(ImVec2(780, 480), ImGuiCond_Appearing);
         ImGui::SetNextWindowSizeConstraints(ImVec2(640, 400), ImVec2(1400, 900));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, T.rMd);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12, 12));
         ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(T.bgElevated.x, T.bgElevated.y, T.bgElevated.z, 0.97f));
-
-        if (ImGui::BeginPopup("##BrushPicker")) {
-            s_popupOpen = true;
-            ImGui::Text("Brush presets");
-            ImGui::SameLine();
-            ImGui::TextDisabled("RMB · Save stores size/opacity/tablet/tip · drag edges to resize");
-            ImGui::Separator();
-
-            // --- Left: list (wider for stroke dab visibility) ---
-            float listW = std::clamp(ImGui::GetContentRegionAvail().x * 0.42f, 300.f, 420.f);
-            ImGui::BeginChild("##brushlist", ImVec2(listW, 0), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
-            if (ImGui::Button("Create brush", ImVec2(-1, 0))) {
-                std::string id = lib.CreateFromCurrent(brush, "New Brush");
-                if (!id.empty()) {
-                    lib.SetActiveId(id);
-                    const bool er = brush.erase;
-                    lib.ApplyTo(id, brush);
-                    brush.erase = er;
-                }
-            }
-            ImGui::Spacing();
-
-            const std::string active = lib.GetActiveId();
-            const float rowH = 64.f; // taller rows = longer visible stroke
-            for (const auto& m : lib.List()) {
-                ImGui::PushID(m.id.c_str());
-                bool sel = (m.id == active);
-                BrushPresetParams params;
-                lib.Get(m.id, params);
-                BrushSettings prev;
-                lib.ApplyTo(m.id, prev);
-
-                ImVec4 chip = m.isBuiltin
-                    ? ImVec4(0.25f, 0.55f, 0.95f, 1.f)
-                    : (m.isDirty ? ImVec4(1.0f, 0.55f, 0.15f, 1.f) : ImVec4(0.95f, 0.50f, 0.12f, 1.f));
-
-                ImVec2 row0 = ImGui::GetCursorScreenPos();
-                if (ImGui::Selectable("##row", sel, 0, ImVec2(0, rowH))) {
-                    const bool er = brush.erase;
-                    lib.ApplyTo(m.id, brush);
-                    brush.erase = er;
-                    lib.SetActiveId(m.id);
-                }
-                ImVec2 row1 = ImGui::GetItemRectMax();
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                dl->AddRectFilled(ImVec2(row0.x, row0.y + 4), ImVec2(row0.x + 5, row1.y - 4),
-                    ImGui::ColorConvertFloat4ToU32(chip), 2.f);
-                char label[160];
-                std::snprintf(label, sizeof(label), "%s%s", m.displayName.c_str(), m.isDirty ? " *" : "");
-                dl->AddText(ImVec2(row0.x + 12, row0.y + 4), T.ColU32(T.textPrimary), label);
-                // Meta line
-                char metaLine[96];
-                std::snprintf(metaLine, sizeof(metaLine), "r=%.0f  h=%.0f%%  op=%.0f%%  sp=%.2f",
-                    params.radius, params.hardness * 100.f, params.opacity * 100.f, params.spacing);
-                dl->AddText(ImVec2(row0.x + 12, row0.y + 20), T.ColU32(T.textSecondary), metaLine);
-                ImVec2 pmin(row0.x + 12, row0.y + 36);
-                ImVec2 pmax(row1.x - 8, row1.y - 4);
-                dl->AddRectFilled(pmin, pmax, IM_COL32(18, 18, 20, 255), 3.f);
-                DrawBrushStrokePreview(dl, pmin, pmax, prev, IM_COL32(230, 230, 235, 255));
-                ImGui::PopID();
-            }
-            ImGui::EndChild();
-
-            ImGui::SameLine(0, 12);
-
-            // --- Right: inspector / params ---
-            ImGui::BeginChild("##brushside", ImVec2(0, 0), true);
-            {
-                BrushPresetMeta meta;
-                bool has = lib.GetMeta(lib.GetActiveId(), meta);
-                ImGui::TextUnformatted(has ? meta.displayName.c_str() : "(no preset)");
-                if (has) {
-                    ImGui::SameLine();
-                    if (meta.isBuiltin) ImGui::TextColored(ImVec4(0.4f, 0.65f, 1.f, 1.f), "builtin");
-                    else if (meta.isDirty) ImGui::TextColored(ImVec4(1.f, 0.6f, 0.2f, 1.f), "unsaved");
-                    else ImGui::TextColored(ImVec4(1.f, 0.55f, 0.15f, 1.f), "custom");
-                }
-
-                // Large stroke preview
-                ImVec2 prevPos = ImGui::GetCursorScreenPos();
-                float prevW = ImGui::GetContentRegionAvail().x;
-                float prevH = 96.f;
-                ImGui::Dummy(ImVec2(prevW, prevH));
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                ImVec2 p0 = prevPos, p1(prevPos.x + prevW, prevPos.y + prevH);
-                dl->AddRectFilled(p0, p1, IM_COL32(16, 16, 18, 255), 6.f);
-                DrawBrushStrokePreview(dl, ImVec2(p0.x + 10, p0.y + 10), ImVec2(p1.x - 10, p1.y - 10),
-                    brush, IM_COL32(240, 240, 245, 255));
-
-                ImGui::Spacing();
-                ImGui::TextDisabled("Tip texture");
-                ImVec2 t0 = ImGui::GetCursorScreenPos();
-                float th = 80.f;
-                ImGui::Dummy(ImVec2(th, th));
-                DrawTipTextureThumb(dl, t0, ImVec2(t0.x + th, t0.y + th), brush.tip);
-                ImGui::SameLine();
-                ImGui::BeginGroup();
-                if (brush.tip && brush.tip->size > 0)
-                    ImGui::Text("%s  %dx%d", brush.tip->name ? brush.tip->name : "tip",
-                        brush.tip->size, brush.tip->size);
-                else
-                    ImGui::TextDisabled("Procedural soft circle");
-                if (!brush.tipSourcePath.empty())
-                    ImGui::TextWrapped("%s", brush.tipSourcePath.c_str());
-                else if (has && !meta.sourcePath.empty())
-                    ImGui::TextWrapped("%s", meta.sourcePath.c_str());
-                ImGui::EndGroup();
-
-                ImGui::Separator();
-                ImGui::Text("Parameters");
-                float maxR = ConfigManager::Get().GetMaxBrushRadius();
-                Ui::SmartSliderFloat("Size", &brush.radius, 1.f, maxR, 20.f, 1.f, "%.1f px");
-                Ui::SmartSliderFloat("Hardness", &brush.hardness, 0.f, 1.f, 0.5f, 0.05f, "%.2f");
-                Ui::SmartSliderFloat("Opacity", &brush.opacity, 0.f, 1.f, 1.f, 0.05f, "%.2f");
-                Ui::SmartSliderFloat("Spacing", &brush.spacing, 0.01f, 2.f, 0.1f, 0.05f, "%.2f");
-                Ui::SmartSliderInt("Stabilization", &brush.stabilization, 1, 50, 1, 1);
-
-                ImGui::Separator();
-                ImGui::Text("Tablet pressure");
-                ImGui::Checkbox("→ Radius", &brush.pressureRadius); ImGui::SameLine();
-                ImGui::Checkbox("→ Hardness", &brush.pressureHardness); ImGui::SameLine();
-                ImGui::Checkbox("→ Opacity", &brush.pressureOpacity);
-
-                ImGui::Separator();
-                ImGui::Text("Rotation / dynamics");
-                ImGui::TextDisabled("Applied in paint engine (tip rotation + dab scatter/jitter)");
-                Ui::SmartSliderFloat("Rotation", &brush.rotationDeg, 0.f, 360.f, 0.f, 1.f, "%.0f°");
-                ImGui::Checkbox("Pressure → Rotation", &brush.pressureRotation);
-                Ui::SmartSliderFloat("Scatter", &brush.scatter, 0.f, 1.f, 0.f, 0.05f, "%.2f");
-                Ui::SmartSliderFloat("Angle jitter", &brush.angleJitter, 0.f, 1.f, 0.f, 0.05f, "%.2f");
-
-                ImGui::Separator();
-                ImGui::BeginDisabled(!has || meta.isBuiltin);
-                if (ImGui::Button("Save preset", ImVec2(-1, 0))) {
-                    // Push live brush into staging then disk
-                    if (meta.isDirty || !meta.isBuiltin) {
-                        lib.UpdateStaging(lib.GetActiveId(), brush);
-                        lib.SaveToDisk(lib.GetActiveId());
-                    }
-                }
-                ImGui::EndDisabled();
-                ImGui::BeginDisabled(!has || meta.isBuiltin);
-                if (ImGui::Button("Delete", ImVec2(-1, 0))) {
-                    lib.DeleteCustom(lib.GetActiveId());
-                    lib.SetActiveId("builtin.soft_round");
-                    const bool er = brush.erase;
-                    lib.ApplyTo("builtin.soft_round", brush);
-                    brush.erase = er;
-                }
-                ImGui::EndDisabled();
-            }
-            ImGui::EndChild();
-
-            // Keep dirty staging in sync while popup open
-            if (!lib.GetActiveId().empty()) {
-                BrushPresetMeta meta;
-                if (lib.GetMeta(lib.GetActiveId(), meta) && !meta.isBuiltin)
-                    lib.UpdateStaging(lib.GetActiveId(), brush);
-            }
-
+        if (ImGui::BeginPopup("##BrushWorkshopPopup")) {
+            DrawBrushWorkshopBody(brush, true);
             ImGui::EndPopup();
-        } else {
-            s_popupOpen = false;
         }
-
         ImGui::PopStyleColor();
         ImGui::PopStyleVar(2);
-        (void)s_popupOpen;
     }
 
-    // Themed combo — kit API (Ui::Combo). Local alias for call-site brevity.
+    void DrawBrushWorkshopPanel(UIState& state, BrushSettings& brush) {
+        if (!state.showBrushWorkshop) return;
+        Ui::BeginDockPanel("Brush Workshop", &state.showBrushWorkshop);
+        Ui::ClampDockLeafBox(420.f, 1200.f, 320.f, 1200.f);
+        DrawBrushWorkshopBody(brush, false);
+        Ui::EndDockPanel();
+    }
+
+    bool DrawBrushSelectorWheel(bool holdingRmb, ImVec2 center, BrushSettings& brush) {
+        // Call every frame while wheel is active, including the release frame
+        // (holdingRmb=false on release в†’ apply hover and return false next frame).
+        static bool s_wasActive = false;
+        static int s_lastHover = -1;
+        static std::vector<std::string> s_slotIds;
+
+        if (!holdingRmb && !s_wasActive)
+            return false;
+
+        auto& lib = BrushLibrary::Get();
+        auto& T = Ui::Tokens();
+
+        if (holdingRmb && !s_wasActive) {
+            s_slotIds = lib.ListFavoriteIds();
+            s_lastHover = -1;
+            s_wasActive = true;
+        }
+        if (s_slotIds.empty()) {
+            // Nothing to pick вЂ” dismiss and hint via workshop
+            s_wasActive = false;
+            return false;
+        }
+
+        const int n = (int)s_slotIds.size();
+        const float outerR = 140.f;
+        const float innerR = 48.f;
+        const float slotR = (outerR + innerR) * 0.5f;
+        ImDrawList* dl = ImGui::GetForegroundDrawList();
+        ImVec2 mouse = ImGui::GetIO().MousePos;
+
+        // Background ring
+        dl->AddCircleFilled(center, outerR + 8.f, IM_COL32(12, 12, 14, 200), 64);
+        dl->AddCircle(center, outerR + 8.f, T.ColU32(T.strokeHairline), 64, 1.5f);
+        dl->AddCircleFilled(center, innerR, IM_COL32(20, 20, 24, 230), 48);
+
+        float ang = std::atan2(mouse.y - center.y, mouse.x - center.x);
+        int hover = -1;
+        const float twoPi = 6.2831853f;
+        float sector = twoPi / (float)n;
+
+        for (int i = 0; i < n; ++i) {
+            float a0 = -1.5708f + sector * (float)i; // start at top
+            float a1 = a0 + sector;
+            float amid = (a0 + a1) * 0.5f;
+            float an = ang;
+            while (an < a0) an += twoPi;
+            while (an >= a0 + twoPi) an -= twoPi;
+            bool hot = (an >= a0 && an < a1);
+            float dist = std::sqrt((mouse.x - center.x) * (mouse.x - center.x) +
+                                  (mouse.y - center.y) * (mouse.y - center.y));
+            if (hot && dist > innerR && dist < outerR + 20.f) hover = i;
+
+            ImU32 col = (hot || i == s_lastHover)
+                ? T.ColU32(T.accent) : IM_COL32(40, 40, 48, 220);
+            const int segs = 10;
+            for (int s = 0; s < segs; ++s) {
+                float t0 = a0 + (a1 - a0) * ((float)s / segs);
+                float t1 = a0 + (a1 - a0) * ((float)(s + 1) / segs);
+                ImVec2 p0(center.x + std::cos(t0) * innerR, center.y + std::sin(t0) * innerR);
+                ImVec2 p1(center.x + std::cos(t0) * outerR, center.y + std::sin(t0) * outerR);
+                ImVec2 p2(center.x + std::cos(t1) * outerR, center.y + std::sin(t1) * outerR);
+                ImVec2 p3(center.x + std::cos(t1) * innerR, center.y + std::sin(t1) * innerR);
+                dl->AddQuadFilled(p0, p1, p2, p3, col);
+            }
+
+            ImVec2 slot(center.x + std::cos(amid) * slotR, center.y + std::sin(amid) * slotR);
+            BrushSettings prev;
+            lib.ApplyTo(s_slotIds[i], prev);
+            ImVec2 pmin(slot.x - 28, slot.y - 14);
+            ImVec2 pmax(slot.x + 28, slot.y + 14);
+            dl->AddRectFilled(pmin, pmax, IM_COL32(16, 16, 18, 255), 4.f);
+            DrawBrushStrokePreview(dl, pmin, pmax, prev, IM_COL32(240, 240, 245, 255));
+
+            BrushPresetMeta meta;
+            if (lib.GetMeta(s_slotIds[i], meta)) {
+                ImVec2 ts = ImGui::CalcTextSize(meta.displayName.c_str());
+                dl->AddText(ImVec2(slot.x - ts.x * 0.5f, slot.y + 16), T.ColU32(T.textPrimary),
+                    meta.displayName.c_str());
+            }
+        }
+
+        const char* mid = "Brushes";
+        ImVec2 mts = ImGui::CalcTextSize(mid);
+        dl->AddText(ImVec2(center.x - mts.x * 0.5f, center.y - mts.y * 0.5f),
+            T.ColU32(T.textSecondary), mid);
+
+        if (holdingRmb) {
+            s_lastHover = hover;
+            return true;
+        }
+
+        // Release frame: apply last hovered favorite
+        if (s_lastHover >= 0 && s_lastHover < n) {
+            const bool er = brush.erase;
+            lib.ApplyTo(s_slotIds[s_lastHover], brush);
+            brush.erase = er;
+            lib.SetActiveId(s_slotIds[s_lastHover]);
+        }
+        s_wasActive = false;
+        s_lastHover = -1;
+        s_slotIds.clear();
+        return true;
+    }
+
+    // Themed combo вЂ” kit API (Ui::Combo). Local alias for call-site brevity.
     static bool UiCombo(const char* id, int* idx, const char* const* items, int count,
                         const char* label = nullptr) {
         return Ui::Combo(id, idx, items, count, label);
     }
 
-    // ICC preset combo (presets only — no free-text path). Returns true if changed.
+    // ICC preset combo (presets only вЂ” no free-text path). Returns true if changed.
     static bool DrawIccPresetCombo(Canvas& canvas, const char* label = "ICC Profile") {
         static const Canvas::IccPreset kPresets[] = {
             Canvas::IccPreset::None,
@@ -508,221 +758,6 @@ namespace UI {
         return false;
     }
 
-    static void DrawKeybindBadge(ImVec2 btnMax, const std::string& keybindString, float btnSize) {
-        if (keybindString.empty()) return;
-
-        std::string badgeText;
-        size_t plusPos = keybindString.find_last_of('+');
-        if (plusPos != std::string::npos) {
-            badgeText = keybindString.substr(plusPos + 1);
-        } else {
-            badgeText = keybindString;
-        }
-        if (badgeText.empty()) return;
-
-        std::string singleChar = badgeText.substr(0, 1);
-        float badgeSize = std::clamp(btnSize * 0.32f, 10.0f, 18.0f);
-        ImVec2 badgeMin = ImVec2(btnMax.x - badgeSize, btnMax.y - badgeSize);
-        ImVec2 badgeMax = btnMax;
-
-        ImDrawList* drawList = ImGui::GetWindowDrawList();
-        drawList->AddRectFilled(badgeMin, badgeMax, ImGui::GetColorU32(ImGuiCol_FrameBgActive), 2.0f);
-        drawList->AddRect(badgeMin, badgeMax, ImGui::GetColorU32(ImGuiCol_Border), 2.0f);
-
-        ImVec2 textSize = ImGui::CalcTextSize(singleChar.c_str());
-        float fontScale = std::clamp(btnSize / 44.0f, 0.55f, 1.0f);
-        ImVec2 textPos = ImVec2(
-            badgeMin.x + (badgeSize - textSize.x * fontScale) * 0.5f,
-            badgeMin.y + (badgeSize - textSize.y * fontScale) * 0.5f - 1.0f);
-        drawList->AddText(ImGui::GetFont(), ImGui::GetFontSize() * fontScale, textPos,
-            ImGui::GetColorU32(ImGuiCol_Text), singleChar.c_str());
-    }
-
-    static float ComputeAdaptiveToolButtonSize(ImVec2 avail, bool isVertical, int buttonCount, bool hasSeparator) {
-        constexpr float kMin = 16.0f;
-        constexpr float kMax = 64.0f;
-        if (buttonCount <= 0) return 44.0f;
-
-        ImGuiStyle& style = ImGui::GetStyle();
-        float gap = isVertical ? style.ItemSpacing.y : style.ItemSpacing.x;
-        float separatorExtra = 0.0f;
-        if (hasSeparator) {
-            separatorExtra = gap * 2.0f + 1.0f;
-        }
-
-        float usableMain = isVertical ? avail.y : avail.x;
-        usableMain -= separatorExtra + gap * (float)(buttonCount - 1);
-        float sizeFromMain = usableMain / (float)buttonCount;
-        float sizeFromCross = isVertical ? avail.x : avail.y;
-
-        return std::clamp(std::min(sizeFromMain, sizeFromCross), kMin, kMax);
-    }
-
-    static void ToolbarAdvance(bool isVertical, float gap) {
-        if (isVertical) {
-            ImGui::Dummy(ImVec2(0.0f, gap));
-        } else {
-            ImGui::SameLine(0.0f, gap);
-        }
-    }
-
-    static void ToolbarBeginLayout(ImVec2 avail, bool isVertical, int buttonCount, float btnSize, float gap, bool hasSeparator) {
-        // Anchor to top-left, no dynamic alignment padding
-    }
-
-    static const char* IconNameForAction(const char* actionName) {
-        if (!actionName) return "placeholder";
-        if (strcmp(actionName, "BrushTool") == 0) return "tool_brush";
-        if (strcmp(actionName, "EraserTool") == 0) return "tool_eraser";
-        if (strcmp(actionName, "BucketFillTool") == 0) return "tool_fill";
-        if (strcmp(actionName, "GradientTool") == 0) return "tool_gradient";
-        if (strcmp(actionName, "SmudgeTool") == 0) return "tool_smudge";
-        if (strcmp(actionName, "BlurTool") == 0) return "tool_blur";
-        if (strcmp(actionName, "StampTool") == 0) return "tool_stamp";
-        if (strcmp(actionName, "PipetteTool") == 0) return "tool_pipette";
-        if (strcmp(actionName, "PanTool") == 0) return "tool_pan";
-        if (strcmp(actionName, "TransformTool") == 0) return "tool_transform";
-        if (strcmp(actionName, "RectSelectTool") == 0) return "tool_select_rect";
-        if (strcmp(actionName, "EllipseSelectTool") == 0) return "tool_select_ellipse";
-        if (strcmp(actionName, "LassoSelectTool") == 0) return "tool_lasso";
-        if (strcmp(actionName, "PolygonalLassoTool") == 0) return "tool_lasso_poly";
-        if (strcmp(actionName, "MagicWandTool") == 0) return "tool_wand";
-        if (strcmp(actionName, "QuickSelectTool") == 0) return "tool_quick_select";
-        if (strcmp(actionName, "SmartSelectTool") == 0) return "tool_smart_select";
-        if (strcmp(actionName, "Reset") == 0) return "tool_reset";
-        // Vector tools — dedicated icons where available
-        if (strcmp(actionName, "VectorRectTool") == 0) return "tool_select_rect";
-        if (strcmp(actionName, "VectorEllipseTool") == 0) return "tool_select_ellipse";
-        if (strcmp(actionName, "VectorLineTool") == 0) return "tool_vector_line";
-        if (strcmp(actionName, "VectorPenTool") == 0) return "tool_vector_pen";
-        if (strcmp(actionName, "VectorFreehandTool") == 0) return "tool_lasso";
-        if (strcmp(actionName, "VectorPolygonTool") == 0) return "tool_lasso_poly";
-        if (strcmp(actionName, "VectorSelectTool") == 0) return "tool_transform";
-        if (strcmp(actionName, "VectorEditTool") == 0) return "tool_vector_pen";
-        return "placeholder";
-    }
-
-    static void ToolbarCenterCursor(float size) {
-        ImGuiWindow* win = ImGui::GetCurrentWindow();
-        float winWidth = win->Size.x;
-        float winHeight = win->Size.y;
-        bool isVertical = (winHeight > winWidth);
-        if (isVertical) {
-            float posX = (winWidth - size) * 0.5f;
-            if (posX > 0.0f) ImGui::SetCursorPosX(posX);
-        } else {
-            float posY = (winHeight - size) * 0.5f;
-            if (posY > 0.0f) ImGui::SetCursorPosY(posY);
-        }
-    }
-
-    struct ToolVariant {
-        const char* actionName;
-        const char* displayName;
-        ActiveTool tool;
-    };
-
-    // Stage 1 kit: SVG icon button with press/bounce motion
-    static void RenderToolButton(const char* actionName, const char* displayName, ActiveTool targetTool, bool isEraseTool, std::string keybindString, float size, std::string& rebindAction, ActiveTool& activeTool, BrushSettings& brush, Canvas& canvas) {
-        bool isActive = (activeTool == targetTool && (targetTool != ActiveTool::Brush || isEraseTool == brush.erase));
-        if (strcmp(actionName, "Reset") == 0) isActive = false;
-
-        ToolbarCenterCursor(size);
-        char tip[256];
-        if (strcmp(actionName, "Reset") == 0)
-            std::snprintf(tip, sizeof(tip), "Reset View\nHome — fit document");
-        else
-            std::snprintf(tip, sizeof(tip), "%s%s%s\nRight-click: rebind hotkey",
-                displayName,
-                keybindString.empty() ? "" : "  (",
-                keybindString.empty() ? "" : (keybindString + ")").c_str());
-
-        auto r = Ui::IconButton(actionName, IconNameForAction(actionName), ImVec2(size, size), tip, true, isActive);
-        if (r.clicked) {
-            if (strcmp(actionName, "Reset") == 0) {
-                canvas.ResetView();
-            } else {
-                activeTool = targetTool;
-                if (targetTool == ActiveTool::Brush)
-                    brush.erase = isEraseTool;
-            }
-        }
-        if (strcmp(actionName, "Reset") != 0 && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-            rebindAction = actionName;
-            ImGui::OpenPopup("RebindToolPopup");
-        }
-        if (strcmp(actionName, "Reset") != 0 && !keybindString.empty()) {
-            DrawKeybindBadge(ImGui::GetItemRectMax(), keybindString, size);
-        }
-    }
-
-    static void RenderGroupedToolButton(
-        const char* groupId,
-        const char* rebindActionName,
-        const ToolVariant* variants,
-        int variantCount,
-        const char* groupTooltip,
-        const std::string& keybindString,
-        float size,
-        std::string& rebindAction,
-        ActiveTool& activeTool)
-    {
-        static std::unordered_map<std::string, int> s_LastVariantIndex;
-
-        int activeIdx = -1;
-        for (int i = 0; i < variantCount; ++i) {
-            if (activeTool == variants[i].tool) {
-                activeIdx = i;
-                break;
-            }
-        }
-
-        int displayIdx = (activeIdx >= 0) ? activeIdx : s_LastVariantIndex[groupId];
-        if (displayIdx < 0 || displayIdx >= variantCount) displayIdx = 0;
-
-        const ToolVariant& display = variants[displayIdx];
-        bool isActive = (activeIdx >= 0);
-
-        // Build label list for dual-mode dropdown
-        std::vector<const char*> labels;
-        labels.reserve(variantCount);
-        for (int i = 0; i < variantCount; ++i)
-            labels.push_back(variants[i].displayName);
-
-        ToolbarCenterCursor(size);
-        char tip[256];
-        std::snprintf(tip, sizeof(tip), "%s%s%s\nClick: activate/cycle  ·  Hold: pick variant\nRight-click: rebind",
-            groupTooltip,
-            keybindString.empty() ? "" : "  (",
-            keybindString.empty() ? "" : (keybindString + ")").c_str());
-
-        int sel = displayIdx;
-        // ClickAndHold dropdown: short click opens list; hold scrub+release selects
-        bool changed = Ui::DropdownIcon(groupId, IconNameForAction(display.actionName), ImVec2(size, size),
-            labels.data(), variantCount, &sel, tip, Ui::DropdownFlags_ClickAndHold, isActive);
-
-        if (changed && sel >= 0 && sel < variantCount) {
-            activeTool = variants[sel].tool;
-            s_LastVariantIndex[groupId] = sel;
-        } else {
-            // Short click on closed dropdown opens it — also treat simple IconButton click-activate:
-            // DropdownIcon uses IconButton internally; if user clicked without selecting (re-activated group)
-            // ensure tool is active with last variant
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Left) && !isActive && !changed) {
-                activeTool = display.tool;
-                s_LastVariantIndex[groupId] = displayIdx;
-            }
-        }
-
-        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-            rebindAction = rebindActionName;
-            ImGui::OpenPopup("RebindToolPopup");
-        }
-        if (!keybindString.empty())
-            DrawKeybindBadge(ImGui::GetItemRectMax(), keybindString, size);
-        // Active chrome: soft fill via DropdownIcon(active); outline = floating square
-    }
-
     void RenderAll(UIState& state, Canvas& canvas, BrushSettings& brush, ActiveTool& activeTool, ID3D11Device* device, ID3D11DeviceContext* context, GLFWwindow* window) {
         if (device)
             Ui::SvgIconCache::Get().SetDevice(device);
@@ -734,7 +769,7 @@ namespace UI {
         // Window caption buttons flush-right, equal size, vertically centered.
         // =====================================================================
 
-        // Caption button strip width — reserved on the menu bar so tools don't collide.
+        // Caption button strip width вЂ” reserved on the menu bar so tools don't collide.
         static constexpr float kCapBtnW = 46.f;
         static constexpr float kCapCount = 3.f;
         static constexpr float kCapStripW = kCapBtnW * kCapCount;
@@ -746,7 +781,7 @@ namespace UI {
 
         auto chromeDragBegin = [&]() {
             if (!window || s_ChromeDragging) return;
-            // Maximized: Win32 ignores SetWindowPos — restore first under cursor.
+            // Maximized: Win32 ignores SetWindowPos вЂ” restore first under cursor.
             if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED)) {
                 glfwRestoreWindow(window);
             }
@@ -783,7 +818,7 @@ namespace UI {
             chromeDragUpdate();
 
         auto drawCaptionButtons = [&](float barY, float barH) {
-            // Absolute right of main viewport — equal cells, full bar height (not SmallButton drift).
+            // Absolute right of main viewport вЂ” equal cells, full bar height (not SmallButton drift).
             const float x0 = mainViewport->Pos.x + mainViewport->Size.x - kCapStripW;
             ImDrawList* dl = ImGui::GetForegroundDrawList(mainViewport);
             auto& tok = Ui::Tokens();
@@ -822,7 +857,7 @@ namespace UI {
             }
         };
 
-        // 0. Main menu bar FIRST (top of window) — File / Edit / … + mode tools + caption
+        // 0. Main menu bar FIRST (top of window) вЂ” File / Edit / вЂ¦ + mode tools + caption
         if (ImGui::BeginMainMenuBar()) {
             // Brand + small drag handle (menu gap + tab strip are primary grab zones)
             {
@@ -840,7 +875,7 @@ namespace UI {
                 if (ImGui::MenuItem("New Blank Tab")) {
                     ProjectManager::Get().CreateEmptyProject();
                 }
-                if (ImGui::MenuItem("Import Texture…")) {
+                if (ImGui::MenuItem("Import TextureвЂ¦")) {
                     UI::FileExplorerOpen(state.fileExplorer, UI::FileExplorerMode::ImportTexture);
                 }
                 core::ops::MenuAction("OpenProject");
@@ -853,9 +888,9 @@ namespace UI {
                 {
                     // Prefill export path for Simple, then same AdvancedExport operator
                     const bool advanced = canvas.GetProjectType() != Canvas::ProjectType::Simple;
-                    const char* aeLabel = advanced ? "Batch Export…" : "Advanced Export…";
+                    const char* aeLabel = advanced ? "Batch ExportвЂ¦" : "Advanced ExportвЂ¦";
                     std::string sc = KeymapManager::Get().GetActionShortcutString("AdvancedExport");
-                    if (ImGui::MenuItem(aeLabel, (sc == "—" || sc == "None") ? nullptr : sc.c_str())) {
+                    if (ImGui::MenuItem(aeLabel, (sc == "вЂ”" || sc == "None") ? nullptr : sc.c_str())) {
                         if (!advanced && !canvas.GetExportPath().empty()) {
                             try {
                                 auto p = std::filesystem::path(PathUtil::Utf8ToWide(canvas.GetExportPath()));
@@ -897,7 +932,7 @@ namespace UI {
                 }
                 std::string undoSc = KeymapManager::Get().GetActionShortcutString("Undo");
                 if (ImGui::MenuItem(undoLabel.c_str(),
-                        (undoSc == "—" || undoSc == "None") ? nullptr : undoSc.c_str(),
+                        (undoSc == "вЂ”" || undoSc == "None") ? nullptr : undoSc.c_str(),
                         false, canvas.CanUndo())) {
                     core::ops::Invoke("Undo");
                 }
@@ -908,7 +943,7 @@ namespace UI {
                 }
                 std::string redoSc = KeymapManager::Get().GetActionShortcutString("Redo");
                 if (ImGui::MenuItem(redoLabel.c_str(),
-                        (redoSc == "—" || redoSc == "None") ? nullptr : redoSc.c_str(),
+                        (redoSc == "вЂ”" || redoSc == "None") ? nullptr : redoSc.c_str(),
                         false, canvas.CanRedo())) {
                     core::ops::Invoke("Redo");
                 }
@@ -949,7 +984,7 @@ namespace UI {
                 if (ImGui::MenuItem("New Vector Layer")) {
                     canvas.CreateVectorLayer(device, "Vector");
                 }
-                if (ImGui::MenuItem("Export Vector Layer as SVG…", nullptr, false, isVec)) {
+                if (ImGui::MenuItem("Export Vector Layer as SVGвЂ¦", nullptr, false, isVec)) {
                     vec::VectorActionExportSvg(canvas);
                 }
                 if (ImGui::MenuItem("Rasterize Layer", nullptr, false, ai >= 0)) {
@@ -990,7 +1025,7 @@ namespace UI {
                     if (ImGui::MenuItem("32-bit float (F32)", nullptr, cur == BD::F32))
                         canvas.SetDocumentBitDepth(BD::F32);
                     ImGui::Separator();
-                    ImGui::TextDisabled("Working space only — export packing free.");
+                    ImGui::TextDisabled("Working space only вЂ” export packing free.");
                     ImGui::TextDisabled("U8 default for diffuse/BC7. F16/F32 for height/HDR.");
                     ImGui::EndMenu();
                 }
@@ -1013,6 +1048,7 @@ namespace UI {
                 ImGui::MenuItem("Channels", nullptr, &state.showChannels);
                 ImGui::MenuItem("Colors Window", nullptr, &state.showColors);
                 ImGui::MenuItem("Tool Settings", nullptr, &state.showToolSettings);
+                ImGui::MenuItem("Brush Workshop", nullptr, &state.showBrushWorkshop);
                 ImGui::MenuItem("Console logs", nullptr, &state.showConsole);
                 script::ScriptDockRegistry::Get().DrawViewMenuItems();
                 ImGui::Separator();
@@ -1023,13 +1059,13 @@ namespace UI {
                     }
                     if (ImGui::IsItemHovered())
                         Ui::Tooltip(
-                            "ON: bake shadows/outlines/filters for display (CPU — can lag).\n"
+                            "ON: bake shadows/outlines/filters for display (CPU вЂ” can lag).\n"
                             "OFF: show raw paint content so brush stays fast.\n"
                             "Effects stay on the layer; toggle ON to re-bake.\n"
                             "Export always applies full effects.");
                 }
                 ImGui::MenuItem("Rulers", nullptr, &state.showRulers);
-                ImGui::MenuItem("Mod Setup…", nullptr, &state.showModSetup);
+                ImGui::MenuItem("Mod SetupвЂ¦", nullptr, &state.showModSetup);
                 ImGui::MenuItem("3D Preview", nullptr, &state.showPreview3D);
                 if (ImGui::MenuItem("Reset View")) {
                     canvas.ResetView();
@@ -1052,7 +1088,7 @@ namespace UI {
                 {
                     auto& host = script::ScriptPluginHost::Get();
                     if (host.List().empty()) {
-                        ImGui::TextDisabled("(no plugins — Refresh Scripts)");
+                        ImGui::TextDisabled("(no plugins вЂ” Refresh Scripts)");
                     } else {
                         for (const auto& p : host.List()) {
                             std::string label = p.title;
@@ -1098,7 +1134,7 @@ namespace UI {
                                 "Explorer register OK. Restart Explorer / F5 if icons linger.");
                         else
                             Logger::Get().Error(
-                                "Register incomplete — accept UAC, ensure RayVPaint_DdsThumb.dll "
+                                "Register incomplete вЂ” accept UAC, ensure RayVPaint_DdsThumb.dll "
                                 "is next to Core.");
                     }
                     if (ImGui::IsItemHovered())
@@ -1115,7 +1151,7 @@ namespace UI {
                     if (ImGui::IsItemHovered())
                         Ui::Tooltip("Removes our CLSID / ShellEx / property handler (elevates for HKLM).");
                     ImGui::Separator();
-                    // ---- Helper microservices (PNG→DDS + atlas) — registry only ----
+                    // ---- Helper microservices (PNGв†’DDS + atlas) вЂ” registry only ----
                     {
                         auto hs = HelperShellRegister::QueryStatus();
                         ImGui::TextUnformatted("PNG helper tools");
@@ -1127,19 +1163,19 @@ namespace UI {
                         ImGui::TextDisabled("%s", hs.exeLine.c_str());
                         ImGui::TextDisabled("%s", hs.convertLine.c_str());
                         ImGui::TextDisabled("%s", hs.atlasLine.c_str());
-                        if (ImGui::MenuItem("Register helpers (PNG → DDS + Atlas)")) {
+                        if (ImGui::MenuItem("Register helpers (PNG в†’ DDS + Atlas)")) {
                             if (HelperShellRegister::EnsureRegistered())
                                 Logger::Get().Info(
                                     "PNG helpers registered. Right-click PNG(s) in Explorer.");
                             else
                                 Logger::Get().Error(
-                                    "Helpers register failed — build RayVHelpers.exe next to Core.");
+                                    "Helpers register failed вЂ” build RayVHelpers.exe next to Core.");
                         }
                         if (ImGui::IsItemHovered())
                             Ui::Tooltip(
                                 "Registers Explorer context menu for multi-select PNG:\n"
-                                "• Convert to DDS (RayVPaint)\n"
-                                "• Create Texture Atlas (RayVPaint)\n"
+                                "вЂў Convert to DDS (RayVPaint)\n"
+                                "вЂў Create Texture Atlas (RayVPaint)\n"
                                 "Uses RayVHelpers.exe + same app icon. HKCU only (no Admin).");
                         if (ImGui::MenuItem("Unregister helpers")) {
                             if (HelperShellRegister::Unregister())
@@ -1150,7 +1186,7 @@ namespace UI {
                     }
                     ImGui::Separator();
                 }
-                if (ImGui::MenuItem("About RayV-Paint…"))
+                if (ImGui::MenuItem("About RayV-PaintвЂ¦"))
                     state.openAboutModal = true;
                 ImGui::EndMenu();
             }
@@ -1200,7 +1236,7 @@ namespace UI {
                             canvas.SetViewMapKind(texset::MapKind::Diffuse);
                     }
                     if (ImGui::IsItemHovered())
-                        Ui::Tooltip("Project mode — workspace layout");
+                        Ui::Tooltip("Project mode вЂ” workspace layout");
                 }
                 ImGui::SameLine(0, 6);
                 if (adv) {
@@ -1221,7 +1257,7 @@ namespace UI {
                 }
             }
 
-            // Window caption buttons (flush right, equal cells) — drawn after menu content
+            // Window caption buttons (flush right, equal cells) вЂ” drawn after menu content
             {
                 ImVec2 wp = ImGui::GetWindowPos();
                 float barH = ImGui::GetWindowSize().y;
@@ -1278,13 +1314,13 @@ namespace UI {
                     dl->AddText(ImVec2(a.x + 8.f, textY), tc, label.c_str());
                     if (ImGui::IsMouseHoveringRect(a, b) && !ImGui::IsMouseDragging(0, 2.f)) {
                         if (tab.diskHibernated)
-                            Ui::Tooltip("Disk hibernate — click to RESTORE (pixels on disk)");
+                            Ui::Tooltip("Disk hibernate вЂ” click to RESTORE (pixels on disk)");
                         else if (tab.gpuSuspended)
-                            Ui::Tooltip("GPU sleep — click to wake (pixels in RAM)");
+                            Ui::Tooltip("GPU sleep вЂ” click to wake (pixels in RAM)");
                         else if (tab.restoring)
-                            Ui::Tooltip("RESTORING…");
+                            Ui::Tooltip("RESTORINGвЂ¦");
                     }
-                    // Close — vertically centered
+                    // Close вЂ” vertically centered
                     ImVec2 xa(b.x - 16.f, a.y + (tabH - ImGui::GetFontSize()) * 0.5f);
                     ImVec2 hitMin(b.x - 18.f, a.y);
                     ImVec2 hitMax(b.x - 2.f, b.y);
@@ -1371,7 +1407,7 @@ namespace UI {
             endAdjSession(false, nullptr);
         s_WasAnyAdjModal = anyAdjModal;
 
-        // Operator modals: NO dim/scrim — user must see live image changes (not a "cat in a bag").
+        // Operator modals: NO dim/scrim вЂ” user must see live image changes (not a "cat in a bag").
         auto beginOperatorModal = [](const char* name, bool* open) -> bool {
             ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg, ImVec4(0.f, 0.f, 0.f, 0.f));
             bool openOk = ImGui::BeginPopupModal(name, open, ImGuiWindowFlags_AlwaysAutoResize);
@@ -1388,7 +1424,7 @@ namespace UI {
         if (beginOperatorModal("Blur##modal", &state.showBlurModal)) {
             if (!s_AdjPreviewBegun && ensureAdjPreview())
                 canvas.UpdateAdjustPreviewBlur(state.blurRadius);
-            ImGui::Text("Blur (3-pass box) — preview on active layer");
+            ImGui::Text("Blur (3-pass box) вЂ” preview on active layer");
             ImGui::TextDisabled("Respects selection; only this layer");
             if (Ui::SmartSliderFloat("Radius", &state.blurRadius, 0.5f, 80.0f, 5.f, 0.5f, "%.1f px")) {
                 if (ensureAdjPreview())
@@ -1414,7 +1450,7 @@ namespace UI {
         if (beginOperatorModal("HSV Adjust##modal", &state.showHSVModal)) {
             if (!s_AdjPreviewBegun) ensureAdjPreview();
             ImGui::Text("Hue / Saturation / Value");
-            ImGui::TextDisabled("Live preview on active layer · selection mask");
+            ImGui::TextDisabled("Live preview on active layer В· selection mask");
             bool ch = false;
             ch |= Ui::SmartSliderFloat("Hue", &state.hsvH, -0.5f, 0.5f, 0.f, 0.01f, "%.3f");
             ch |= Ui::SmartSliderFloat("Saturation", &state.hsvS, -1.0f, 1.0f, 0.f, 0.05f, "%.3f");
@@ -1467,7 +1503,7 @@ namespace UI {
             endOperatorModal();
         }
 
-        // Curves Modal — interactive spline editor + live canvas preview
+        // Curves Modal вЂ” interactive spline editor + live canvas preview
         if (state.showCurvesModal) ImGui::OpenPopup("Curves##modal");
         if (beginOperatorModal("Curves##modal", &state.showCurvesModal)) {
             if (!s_AdjPreviewBegun) ensureAdjPreview();
@@ -1482,7 +1518,7 @@ namespace UI {
 
             static const char* chanNames[] = {"RGB","Alpha"};
             UiCombo("##curves_chan", &state.curvesChannel, chanNames, 2, "Channel");
-            ImGui::SameLine(); ImGui::TextDisabled("Live layer preview · selection");
+            ImGui::SameLine(); ImGui::TextDisabled("Live layer preview В· selection");
 
             std::vector<std::pair<float,float>>& activePoints = (state.curvesChannel == 0) ? state.curvesPointsRGB : state.curvesPointsAlpha;
             std::vector<float>& activeLUT = (state.curvesChannel == 0) ? state.curvesLUTRGB : state.curvesLUTAlpha;
@@ -1601,7 +1637,7 @@ namespace UI {
             endOperatorModal();
         }
 
-        // 2. Persistent Footer — FIXED height (never jumps when jobs appear)
+        // 2. Persistent Footer вЂ” FIXED height (never jumps when jobs appear)
         core::JobManager::Get().PruneFinished(2500.0);
         const auto jobs = core::JobManager::Get().Snapshot();
         bool hasActiveJob = false;
@@ -1614,7 +1650,7 @@ namespace UI {
         const bool feBusy = UI::FileExplorerIsBusy();
         const bool assetsBusy = assets::AssetManager::Get().IsBusy();
         const bool showBusyChrome = hasActiveJob || feBusy || assetsBusy || g_LoadingState.isLoading;
-        // Always 28px — job status is centered in-band (no second row)
+        // Always 28px вЂ” job status is centered in-band (no second row)
         const float statusBarH = 28.0f;
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.0f, 4.0f));
@@ -1658,7 +1694,7 @@ namespace UI {
             const bool floatDoc = (canvas.GetDocumentBitDepth() != Canvas::DocumentBitDepth::U8);
 
             // Layout: LEFT metrics | CENTER job (fixed slot) | RIGHT notify + context
-            // Heights fixed — job strip never changes footer height.
+            // Heights fixed вЂ” job strip never changes footer height.
             const float winW = ImGui::GetWindowWidth();
             const float contextBtnW = 72.f;
             const float notifyChipW = 148.f;
@@ -1666,7 +1702,7 @@ namespace UI {
             const float rightReserve = contextBtnW + notifyChipW + 16.f;
             const float leftMax = std::max(80.f, winW - rightReserve - centerJobW - 24.f);
 
-            // LEFT — compact metrics (clipped)
+            // LEFT вЂ” compact metrics (clipped)
             {
                 char left[256];
                 if (floatDoc) {
@@ -1686,7 +1722,7 @@ namespace UI {
                 ImGui::PopTextWrapPos();
             }
 
-            // CENTER — fixed job slot (always reserved position, content optional)
+            // CENTER вЂ” fixed job slot (always reserved position, content optional)
             {
                 const float centerX = (winW - centerJobW) * 0.5f;
                 ImGui::SameLine(std::max(leftMax + 8.f, centerX));
@@ -1717,7 +1753,7 @@ namespace UI {
                             std::snprintf(line, sizeof(line), "%s %d%%", j.name.c_str(),
                                 (int)std::lround(j.progress * 100.f));
                         else
-                            std::snprintf(line, sizeof(line), "%s…", j.name.c_str());
+                            std::snprintf(line, sizeof(line), "%sвЂ¦", j.name.c_str());
                         ImGui::TextUnformatted(line);
                         if (j.cancellable) {
                             ImGui::SameLine();
@@ -1731,22 +1767,22 @@ namespace UI {
                     }
                     if (!drew) {
                         if (g_LoadingState.isLoading)
-                            ImGui::TextUnformatted("Opening…");
+                            ImGui::TextUnformatted("OpeningвЂ¦");
                         else if (state.fileExplorer.dirListingBusy)
-                            ImGui::TextUnformatted("Indexing folder…");
+                            ImGui::TextUnformatted("Indexing folderвЂ¦");
                         else if (assets::AssetManager::Get().IsIndexScanning())
-                            ImGui::TextUnformatted("Indexing assets…");
+                            ImGui::TextUnformatted("Indexing assetsвЂ¦");
                         else if (feBusy || assetsBusy)
-                            ImGui::TextUnformatted("Background…");
+                            ImGui::TextUnformatted("BackgroundвЂ¦");
                     }
                 }
                 ImGui::EndChild();
             }
 
-            // RIGHT — notification + context (absolute positions, stable)
+            // RIGHT вЂ” notification + context (absolute positions, stable)
             {
                 std::string preview = core::Notifications::Get().LatestPreview(28);
-                if (preview.empty()) preview = "—";
+                if (preview.empty()) preview = "вЂ”";
                 ImVec4 col(0.75f, 0.78f, 0.85f, 1.f);
                 switch (core::Notifications::Get().LatestLevel()) {
                 case core::NotifyLevel::Warning: col = ImVec4(1.f, 0.82f, 0.4f, 1.f); break;
@@ -1959,7 +1995,7 @@ namespace UI {
             }
             ImGui::Spacing();
             DrawIccPresetCombo(canvas, "ICC Profile (PNG)");
-            ImGui::TextDisabled("Presets only — no free-text ICC path");
+            ImGui::TextDisabled("Presets only вЂ” no free-text ICC path");
             ImGui::Separator();
             if (ImGui::Button("Export", ImVec2(120, 0))) {
                 if (canvas.SaveCanvasStandard(exportPath, canvas.GetExportIccPreset())) {
@@ -2046,7 +2082,7 @@ namespace UI {
                     ImGui::TextWrapped(
                         "Single source of truth: ActionCatalog (src/core/ops). "
                         "Categories group related actions. Group tools (Lasso L, Select S, Wand W) "
-                        "cycle variants — members show \"via …\" when unbound.");
+                        "cycle variants вЂ” members show \"via вЂ¦\" when unbound.");
                     ImGui::Separator();
                     ImGui::Spacing();
 
@@ -2054,7 +2090,7 @@ namespace UI {
                     if (state.listeningForKey) {
                         core::ops::AppContext::NotifyUiKeyboardCapture();
                         ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.f, 1.f),
-                            "Listening for \"%s\" — press key (+ mods). Esc cancels.",
+                            "Listening for \"%s\" вЂ” press key (+ mods). Esc cancels.",
                             state.rebindingAction.c_str());
                         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                             state.listeningForKey = false;
@@ -2257,8 +2293,8 @@ namespace UI {
             ImGui::SetNextWindowSize(ImVec2(720, 480), ImGuiCond_Appearing);
             if (ImGui::BeginPopupModal("Recent Autosaves##recents", nullptr,
                     ImGuiWindowFlags_NoCollapse)) {
-                ImGui::TextUnformatted("Welcome back — recent autosaves");
-                ImGui::TextDisabled("UNTITLED / project · time stamp · type · quit saves included");
+                ImGui::TextUnformatted("Welcome back вЂ” recent autosaves");
+                ImGui::TextDisabled("UNTITLED / project В· time stamp В· type В· quit saves included");
                 ImGui::Separator();
 
                 static std::vector<core::AutosaveEntry> s_recent;
@@ -2325,8 +2361,8 @@ namespace UI {
                     }
                     ImGui::SameLine();
                     ImGui::BeginGroup();
-                    std::string label = e.baseName + "  ·  " + e.projectType +
-                        (e.isQuit ? "  ·  quit" : "");
+                    std::string label = e.baseName + "  В·  " + e.projectType +
+                        (e.isQuit ? "  В·  quit" : "");
                     if (ImGui::Selectable(label.c_str(), selected, 0, ImVec2(0, thumb * 0.45f)))
                         s_sel = i;
                     // time
@@ -2352,7 +2388,7 @@ namespace UI {
                     ImGui::PopID();
                 }
                 if (s_recent.empty()) {
-                    ImGui::TextDisabled("No autosaves yet. Paint something — saves every %d min.",
+                    ImGui::TextDisabled("No autosaves yet. Paint something вЂ” saves every %d min.",
                         ConfigManager::Get().GetAutoSaveIntervalMinutes());
                 }
                 ImGui::EndChild();
@@ -2418,524 +2454,14 @@ namespace UI {
             ImGui::EndPopup();
         }
 
-        // 5. Draw Toolbar Panel
-        if (state.showToolbar) {
-            ImGuiWindow* window = ImGui::FindWindowByName("Toolbar");
-            bool isVertical = true;
-            if (window) {
-                isVertical = (window->Size.y > window->Size.x);
-            }
-            if (isVertical) {
-                ImGui::SetNextWindowSizeConstraints(ImVec2(36.0f, 100.0f), ImVec2(64.0f, 16384.0f));
-            } else {
-                ImGui::SetNextWindowSizeConstraints(ImVec2(100.0f, 36.0f), ImVec2(16384.0f, 64.0f));
-            }
-            Ui::BeginDockPanel("Toolbar", &state.showToolbar);
-            // Hard clamp: no overshoot while dragging splitter
-            Ui::ClampDockLeafCrossAxis(isVertical, 36.0f, 64.0f);
-
-            ImVec2 avail = ImGui::GetContentRegionAvail();
-
-            // ---- Hotkey-driven grouping: same key+mods → one stack; else separate ----
-            struct ToolDef {
-                const char* action;
-                const char* display;
-                ActiveTool tool;
-                bool erase = false;
-            };
-            static const ToolDef kAllTools[] = {
-                { "BrushTool", "Brush", ActiveTool::Brush, false },
-                { "EraserTool", "Eraser", ActiveTool::Eraser, true },
-                { "StampTool", "Stamp", ActiveTool::Stamp, false },
-                { "BucketFillTool", "Fill", ActiveTool::BucketFill, false },
-                { "GradientTool", "Gradient", ActiveTool::Gradient, false },
-                { "SmudgeTool", "Smudge", ActiveTool::Smudge, false },
-                { "BlurTool", "Blur", ActiveTool::BlurTool, false },
-                { "PipetteTool", "Pipette", ActiveTool::Pipette, false },
-                { "RectSelectTool", "Rect Select", ActiveTool::RectSelect, false },
-                { "EllipseSelectTool", "Ellipse Select", ActiveTool::EllipseSelect, false },
-                { "LassoSelectTool", "Lasso", ActiveTool::LassoSelect, false },
-                { "PolygonalLassoTool", "Poly Lasso", ActiveTool::PolygonalLasso, false },
-                { "MagicWandTool", "Magic Wand", ActiveTool::MagicWand, false },
-                { "QuickSelectTool", "Quick Select", ActiveTool::QuickSelect, false },
-                { "SmartSelectTool", "Smart Select", ActiveTool::SmartSelect, false },
-                { "TransformTool", "Move", ActiveTool::MovePixels, false },
-                { "PanTool", "Hand", ActiveTool::Pan, false },
-                // Vector group (clear names — workflow: draw shape → Select → Edit)
-                { "VectorRectTool", "Rectangle", ActiveTool::VectorRect, false },
-                { "VectorEllipseTool", "Ellipse", ActiveTool::VectorEllipse, false },
-                { "VectorLineTool", "Line", ActiveTool::VectorLine, false },
-                { "VectorPenTool", "Pen", ActiveTool::VectorPen, false },
-                { "VectorFreehandTool", "Freehand", ActiveTool::VectorFreehand, false },
-                { "VectorPolygonTool", "Polygon", ActiveTool::VectorPolygon, false },
-                { "VectorSelectTool", "Select shapes", ActiveTool::VectorSelect, false },
-                { "VectorEditTool", "Edit nodes", ActiveTool::VectorEdit, false },
-            };
-
-            struct KeySig {
-                int key = 0;
-                bool ctrl = false, shift = false, alt = false;
-                bool operator==(const KeySig& o) const {
-                    return key == o.key && ctrl == o.ctrl && shift == o.shift && alt == o.alt;
-                }
-            };
-            auto bindingOf = [](const char* action) -> KeySig {
-                KeySig s;
-                const auto& map = KeymapManager::Get().GetBindings();
-                auto it = map.find(action);
-                if (it == map.end() || it->second.key == 0) return s;
-                s.key = it->second.key;
-                s.ctrl = it->second.ctrl;
-                s.shift = it->second.shift;
-                s.alt = it->second.alt;
-                return s;
-            };
-
-            // Catalog group actions also share a key — fold members onto group key if member unbound
-            auto effectiveKey = [&](const ToolDef& t) -> KeySig {
-                KeySig s = bindingOf(t.action);
-                if (s.key != 0) return s;
-                if (t.tool == ActiveTool::RectSelect || t.tool == ActiveTool::EllipseSelect)
-                    return bindingOf("SelectToolGroup");
-                if (t.tool == ActiveTool::LassoSelect || t.tool == ActiveTool::PolygonalLasso)
-                    return bindingOf("LassoToolGroup");
-                if (t.tool == ActiveTool::MagicWand || t.tool == ActiveTool::QuickSelect ||
-                    t.tool == ActiveTool::SmartSelect)
-                    return bindingOf("WandToolGroup");
-                return s;
-            };
-
-            // Build ordered unique slots: first occurrence order of tools, merged by key
-            struct Slot {
-                KeySig key;
-                std::vector<int> toolIdx; // indices into kAllTools
-            };
-            std::vector<Slot> slots;
-            for (int i = 0; i < (int)IM_ARRAYSIZE(kAllTools); ++i) {
-                KeySig k = effectiveKey(kAllTools[i]);
-                int found = -1;
-                if (k.key != 0) {
-                    for (int s = 0; s < (int)slots.size(); ++s) {
-                        if (slots[s].key.key != 0 && slots[s].key == k) { found = s; break; }
-                    }
-                }
-                if (found >= 0)
-                    slots[found].toolIdx.push_back(i);
-                else {
-                    Slot sl;
-                    sl.key = k;
-                    sl.toolIdx.push_back(i);
-                    slots.push_back(std::move(sl));
-                }
-            }
-
-            static std::string s_RebindAction = "";
-            const int nSlots = (int)slots.size();
-            const bool hasSeparator = true;
-            float btnSize = ComputeAdaptiveToolButtonSize(avail, isVertical, nSlots + 1 /* color */, hasSeparator);
-            float gap = isVertical ? ImGui::GetStyle().ItemSpacing.y : ImGui::GetStyle().ItemSpacing.x;
-
-            ToolbarBeginLayout(avail, isVertical, nSlots, btnSize, gap, hasSeparator);
-
-            ImVec2 accentMin(0, 0), accentMax(0, 0);
-            bool accentHasTarget = false;
-            auto markAccent = [&]() {
-                if (ImGui::GetItemID() != 0) {
-                    accentMin = ImGui::GetItemRectMin();
-                    accentMax = ImGui::GetItemRectMax();
-                    accentHasTarget = true;
-                }
-            };
-
-            for (int si = 0; si < nSlots; ++si) {
-                if (si) ToolbarAdvance(isVertical, gap);
-                const Slot& sl = slots[si];
-                if (sl.toolIdx.size() == 1) {
-                    const ToolDef& t = kAllTools[sl.toolIdx[0]];
-                    std::string bind = KeymapManager::Get().GetActionShortcutString(t.action);
-                    if (bind == "—" || bind == "None") bind.clear();
-                    // Fall back to group shortcut string for display
-                    if (bind.empty() && sl.key.key != 0) {
-                        if (t.tool == ActiveTool::RectSelect || t.tool == ActiveTool::EllipseSelect)
-                            bind = KeymapManager::Get().GetActionShortcutString("SelectToolGroup");
-                        else if (t.tool == ActiveTool::LassoSelect || t.tool == ActiveTool::PolygonalLasso)
-                            bind = KeymapManager::Get().GetActionShortcutString("LassoToolGroup");
-                        else if (UI::IsWandTool(t.tool))
-                            bind = KeymapManager::Get().GetActionShortcutString("WandToolGroup");
-                        if (bind == "—" || bind == "None") bind.clear();
-                    }
-                    RenderToolButton(t.action, t.display, t.tool, t.erase, bind, btnSize,
-                        s_RebindAction, activeTool, brush, canvas);
-                    bool on = (activeTool == t.tool);
-                    if (t.tool == ActiveTool::Brush)
-                        on = (activeTool == ActiveTool::Brush && brush.erase == t.erase) ||
-                             (t.erase && activeTool == ActiveTool::Eraser);
-                    if (t.erase)
-                        on = (activeTool == ActiveTool::Eraser ||
-                              (activeTool == ActiveTool::Brush && brush.erase));
-                    if (on) markAccent();
-                } else {
-                    // Multi-tool stack for shared hotkey
-                    std::vector<ToolVariant> vars;
-                    vars.reserve(sl.toolIdx.size());
-                    for (int ti : sl.toolIdx) {
-                        const ToolDef& t = kAllTools[ti];
-                        vars.push_back({ t.action, t.display, t.tool });
-                    }
-                    std::string bind;
-                    if (sl.key.key != 0)
-                        bind = KeymapManager::Get().GetActionShortcutString(kAllTools[sl.toolIdx[0]].action);
-                    if (bind == "—" || bind == "None") bind.clear();
-                    char gid[64];
-                    std::snprintf(gid, sizeof(gid), "DynGroup_%d_%d", sl.key.key, (int)sl.toolIdx.size());
-                    RenderGroupedToolButton(gid, kAllTools[sl.toolIdx[0]].action,
-                        vars.data(), (int)vars.size(), "Tools (same hotkey — cycle)",
-                        bind, btnSize, s_RebindAction, activeTool);
-                    // Explicit multi-tool marker (stack count + corner chevron)
-                    {
-                        ImVec2 rmin = ImGui::GetItemRectMin();
-                        ImVec2 rmax = ImGui::GetItemRectMax();
-                        ImDrawList* dl = ImGui::GetWindowDrawList();
-                        auto& tok = Ui::Tokens();
-                        // Bottom-right fold / chevron
-                        float s = std::max(6.f, btnSize * 0.22f);
-                        ImVec2 c(rmax.x - 2.f, rmax.y - 2.f);
-                        dl->AddTriangleFilled(
-                            ImVec2(c.x - s, c.y), ImVec2(c.x, c.y), ImVec2(c.x, c.y - s),
-                            tok.ColU32(tok.accent));
-                        // Small count badge top-right
-                        char nb[8];
-                        std::snprintf(nb, sizeof(nb), "%d", (int)sl.toolIdx.size());
-                        ImVec2 ts = ImGui::CalcTextSize(nb);
-                        ImVec2 bp(rmax.x - ts.x - 3.f, rmin.y + 1.f);
-                        dl->AddRectFilled(ImVec2(bp.x - 2.f, bp.y), ImVec2(rmax.x - 1.f, bp.y + ts.y + 1.f),
-                            IM_COL32(20, 20, 28, 200), 2.f);
-                        dl->AddText(bp, tok.ColU32(tok.textPrimary), nb);
-                    }
-                    for (int ti : sl.toolIdx) {
-                        if (activeTool == kAllTools[ti].tool) { markAccent(); break; }
-                    }
-                    // Keep erase flag consistent when Eraser shares a stack with Brush
-                    if (activeTool == ActiveTool::Eraser) brush.erase = true;
-                    else if (activeTool == ActiveTool::Brush) brush.erase = false;
-                }
-            }
-
-            // Floating square outline — jumps tool-to-tool (EaseOutCubic via exp-smooth)
-            {
-                static ImVec2 s_accMin(0, 0), s_accMax(0, 0);
-                static bool s_accInit = false;
-                float dt = Ui::DeltaTime();
-                if (accentHasTarget) {
-                    if (!s_accInit) {
-                        s_accMin = accentMin; s_accMax = accentMax; s_accInit = true;
-                    } else {
-                        // Smooth exp toward target (~EaseOut feel); rate ~14 → snappy jump
-                        float k = 1.f - std::exp(-dt * 14.f);
-                        s_accMin.x += (accentMin.x - s_accMin.x) * k;
-                        s_accMin.y += (accentMin.y - s_accMin.y) * k;
-                        s_accMax.x += (accentMax.x - s_accMax.x) * k;
-                        s_accMax.y += (accentMax.y - s_accMax.y) * k;
-                    }
-                    // Slight outward pad so outline floats around the item (not glued to edges)
-                    const float pad = 2.5f;
-                    auto& tok = Ui::Tokens();
-                    ImGui::GetWindowDrawList()->AddRect(
-                        ImVec2(s_accMin.x - pad, s_accMin.y - pad),
-                        ImVec2(s_accMax.x + pad, s_accMax.y + pad),
-                        tok.ColU32(tok.strokeActive), tok.rSm, 0, 1.75f);
-                }
-            }
-            if (isVertical) {
-                ImGui::Spacing();
-                ImGui::Separator();
-                ImGui::Spacing();
-            } else {
-                ImGui::SameLine(0.0f, gap * 2.0f);
-            }
-
-            // Primary / Secondary color chip (replaces Reset View) — X or click swaps with animation
-            {
-                ToolbarCenterCursor(btnSize);
-                ImVec2 cpos = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton("##colorswap", ImVec2(btnSize, btnSize));
-                bool chipHover = ImGui::IsItemHovered();
-                bool chipClick = ImGui::IsItemClicked(ImGuiMouseButton_Left);
-                if (chipClick) {
-                    std::swap(brush.color[0], g_SecondaryColor[0]);
-                    std::swap(brush.color[1], g_SecondaryColor[1]);
-                    std::swap(brush.color[2], g_SecondaryColor[2]);
-                    std::swap(brush.color[3], g_SecondaryColor[3]);
-                    g_ColorSwapPending = true;
-                }
-                if (chipHover)
-                    Ui::Tooltip("Primary / Secondary\nClick or X: swap");
-
-                // After color swap: start at crossed positions (t=1) → ease to rest (t=0)
-                static Ui::AnimFloat s_swapT;
-                if (g_ColorSwapPending) {
-                    s_swapT.Snap(1.f);
-                    s_swapT.SetTarget(0.f, Ui::Tokens().durMed * 1.15f, Ui::EaseKind::EaseOutCubic);
-                    g_ColorSwapPending = false;
-                }
-                s_swapT.Update(Ui::DeltaTime());
-                g_ColorSwapAnim = s_swapT.value;
-                float useT = s_swapT.value;
-
-                auto& tok = Ui::Tokens();
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                float sq = btnSize * 0.48f;
-                ImVec2 pPri(cpos.x + btnSize * 0.12f, cpos.y + btnSize * 0.12f);
-                ImVec2 pSec(cpos.x + btnSize * 0.40f, cpos.y + btnSize * 0.40f);
-                ImVec2 a0 = ImVec2(pPri.x + (pSec.x - pPri.x) * useT, pPri.y + (pSec.y - pPri.y) * useT);
-                ImVec2 b0 = ImVec2(pSec.x + (pPri.x - pSec.x) * useT, pSec.y + (pPri.y - pSec.y) * useT);
-                // Secondary behind
-                dl->AddRectFilled(b0, ImVec2(b0.x + sq, b0.y + sq),
-                    IM_COL32((int)(g_SecondaryColor[0]*255),(int)(g_SecondaryColor[1]*255),
-                             (int)(g_SecondaryColor[2]*255),(int)(g_SecondaryColor[3]*255)), tok.rSm);
-                dl->AddRect(b0, ImVec2(b0.x + sq, b0.y + sq), tok.ColU32(tok.strokeHairline), tok.rSm, 0, 1.f);
-                // Primary in front
-                dl->AddRectFilled(a0, ImVec2(a0.x + sq, a0.y + sq),
-                    IM_COL32((int)(brush.color[0]*255),(int)(brush.color[1]*255),
-                             (int)(brush.color[2]*255),(int)(brush.color[3]*255)), tok.rSm);
-                dl->AddRect(a0, ImVec2(a0.x + sq, a0.y + sq),
-                    chipHover ? tok.ColU32(tok.strokeActive) : tok.ColU32(tok.strokeHairline), tok.rSm, 0, 1.25f);
-            }
-
-            if (ImGui::BeginPopup("RebindToolPopup")) {
-                ImGui::Text("Rebind Action: %s", s_RebindAction.c_str());
-                ImGui::Separator();
-                ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "[Press any key to rebind]");
-                
-                ImGuiIO& io = ImGui::GetIO();
-                bool bound = false;
-                for (int k = 0; k < ImGuiKey_NamedKey_END; ++k) {
-                    ImGuiKey imguiKey = (ImGuiKey)k;
-                    if (ImGui::IsKeyPressed(imguiKey)) {
-                        int glfwKey = 0;
-                        if (imguiKey >= ImGuiKey_A && imguiKey <= ImGuiKey_Z) glfwKey = GLFW_KEY_A + (imguiKey - ImGuiKey_A);
-                        else if (imguiKey >= ImGuiKey_0 && imguiKey <= ImGuiKey_9) glfwKey = GLFW_KEY_0 + (imguiKey - ImGuiKey_0);
-                        else if (imguiKey >= ImGuiKey_F1 && imguiKey <= ImGuiKey_F12) glfwKey = GLFW_KEY_F1 + (imguiKey - ImGuiKey_F1);
-                        else if (imguiKey == ImGuiKey_Space) glfwKey = GLFW_KEY_SPACE;
-                        else if (imguiKey == ImGuiKey_Enter || imguiKey == ImGuiKey_KeypadEnter) glfwKey = GLFW_KEY_ENTER;
-                        else if (imguiKey == ImGuiKey_Escape) glfwKey = GLFW_KEY_ESCAPE;
-                        else if (imguiKey == ImGuiKey_Tab) glfwKey = GLFW_KEY_TAB;
-                        else if (imguiKey == ImGuiKey_Backspace) glfwKey = GLFW_KEY_BACKSPACE;
-                        else if (imguiKey == ImGuiKey_Insert) glfwKey = GLFW_KEY_INSERT;
-                        else if (imguiKey == ImGuiKey_Delete) glfwKey = GLFW_KEY_DELETE;
-                        else if (imguiKey == ImGuiKey_RightArrow) glfwKey = GLFW_KEY_RIGHT;
-                        else if (imguiKey == ImGuiKey_LeftArrow) glfwKey = GLFW_KEY_LEFT;
-                        else if (imguiKey == ImGuiKey_DownArrow) glfwKey = GLFW_KEY_DOWN;
-                        else if (imguiKey == ImGuiKey_UpArrow) glfwKey = GLFW_KEY_UP;
-                        else if (imguiKey == ImGuiKey_Comma) glfwKey = GLFW_KEY_COMMA;
-                        else if (imguiKey == ImGuiKey_Period) glfwKey = GLFW_KEY_PERIOD;
-                        else if (imguiKey == ImGuiKey_Slash) glfwKey = GLFW_KEY_SLASH;
-                        else if (imguiKey == ImGuiKey_Semicolon) glfwKey = GLFW_KEY_SEMICOLON;
-                        else if (imguiKey == ImGuiKey_Equal) glfwKey = GLFW_KEY_EQUAL;
-                        else if (imguiKey == ImGuiKey_Minus) glfwKey = GLFW_KEY_MINUS;
-                        else if (imguiKey == ImGuiKey_LeftBracket) glfwKey = GLFW_KEY_LEFT_BRACKET;
-                        else if (imguiKey == ImGuiKey_RightBracket) glfwKey = GLFW_KEY_RIGHT_BRACKET;
-                        else if (imguiKey == ImGuiKey_Backslash) glfwKey = GLFW_KEY_BACKSLASH;
-                        else if (imguiKey == ImGuiKey_GraveAccent) glfwKey = GLFW_KEY_GRAVE_ACCENT;
-
-                        if (imguiKey != ImGuiKey_LeftCtrl && imguiKey != ImGuiKey_RightCtrl &&
-                            imguiKey != ImGuiKey_LeftShift && imguiKey != ImGuiKey_RightShift &&
-                            imguiKey != ImGuiKey_LeftAlt && imguiKey != ImGuiKey_RightAlt) {
-                            
-                            if (glfwKey != 0) {
-                                KeyCombination pendingCombo;
-                                pendingCombo.key = glfwKey;
-                                pendingCombo.ctrl = io.KeyCtrl;
-                                pendingCombo.shift = io.KeyShift;
-                                pendingCombo.alt = io.KeyAlt;
-                                
-                                KeymapManager::Get().BindAction(s_RebindAction, pendingCombo);
-                                KeymapManager::Get().Save();
-                                bound = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (bound) {
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::EndPopup();
-            }
-
-            Ui::EndDockPanel();
-        }
-
-        // 6a. Viewport Navigation — compact, icon flips, no Reset button (Backspace on hover)
-        if (state.showViewportNav) {
-            Ui::BeginDockPanel("Viewport Navigation", &state.showViewportNav);
-            ImGui::Text("Zoom %.0f%%   ·   Pan (%.0f, %.0f)",
-                canvas.GetZoom() * 100.0f, canvas.GetPan().x, canvas.GetPan().y);
-            ImGui::Spacing();
-            bool flipH = canvas.GetViewportFlipH();
-            bool flipV = canvas.GetViewportFlipV();
-            if (Ui::IconToggle("##fliph", "ts_mirror_h", &flipH, ImVec2(32, 32),
-                    "Flip Horizontal (on)", "Flip Horizontal (off)"))
-                canvas.SetViewportFlipH(flipH);
-            ImGui::SameLine();
-            if (Ui::IconToggle("##flipv", "ts_mirror_v", &flipV, ImVec2(32, 32),
-                    "Flip Vertical (on)", "Flip Vertical (off)"))
-                canvas.SetViewportFlipV(flipV);
-            float rotAngle = canvas.GetRotationAngle() * (180.0f / 3.14159265f);
-            if (Ui::SmartSliderFloat("Rotation", &rotAngle, -180.0f, 180.0f, 0.f, 45.f, "%.0f°")) {
-                canvas.SetRotationAngle(rotAngle * (3.14159265f / 180.0f));
-            }
-            ImGui::TextDisabled("Hover slider + Backspace: reset  ·  Ctrl: 45° snap");
-            Ui::EndDockPanel();
-        }
-
-        // 6b. Properties — project / export only
-        if (state.showProperties) {
-            Ui::BeginDockPanel("Properties", &state.showProperties);
-            
-            ImGui::Text("Project Properties:");
-            int pType =
-                (canvas.GetProjectType() == Canvas::ProjectType::Simple) ? 0 :
-                (canvas.GetProjectType() == Canvas::ProjectType::AdvancedModMode) ? 2 : 1;
-            const char* pTypeNames[] = {
-                "Simple Project",
-                "Advanced Project (.rayp)",
-                "Advanced Mod Mode (.rayp)"
-            };
-            if (UiCombo("##cmb_pType", &pType, pTypeNames, IM_ARRAYSIZE(pTypeNames), "Project Type")) {
-                if (pType == 0) canvas.SetProjectType(Canvas::ProjectType::Simple);
-                else if (pType == 2) canvas.SetProjectType(Canvas::ProjectType::AdvancedModMode);
-                else canvas.SetProjectType(Canvas::ProjectType::Advanced);
-            }
-
-            ImGui::Text("Document Bit Depth:");
-            int bd = (int)canvas.GetDocumentBitDepth();
-            const char* bdNames[] = {
-                "8-bit (U8) — default / diffuse",
-                "16-bit float (F16) — HDR mid",
-                "32-bit float (F32) — height / full float"
-            };
-            if (UiCombo("##cmb_bitDepth", &bd, bdNames, IM_ARRAYSIZE(bdNames),
-                    "Working space for paint storage. Export format stays free.")) {
-                canvas.SetDocumentBitDepth(static_cast<Canvas::DocumentBitDepth>(bd));
-            }
-            ImGui::TextDisabled("Canvas %d x %d · storage %d B/px",
-                canvas.GetWidth(), canvas.GetHeight(),
-                BytesPerPixel(Canvas::FormatForBitDepth(canvas.GetDocumentBitDepth())));
-
-            char propProjPath[512] = "";
-            std::strncpy(propProjPath, canvas.GetCurrentProjectFilePath().c_str(), sizeof(propProjPath));
-            if (Ui::PathField("##projpath", "Project Path", propProjPath, sizeof(propProjPath),
-                    ShowOpenFileWin32, "RayP Projects (*.rayp)\0*.rayp\0All Files (*.*)\0*.*\0")) {
-                canvas.SetCurrentProjectFilePath(propProjPath);
-            }
-
-            // Advanced Mod Mode — setup lives in dedicated window (not Properties)
-            if (canvas.GetProjectType() == Canvas::ProjectType::AdvancedModMode) {
-                ImGui::NewLine();
-                ImGui::Separator();
-                ImGui::Text("Advanced Mod");
-                if (ImGui::Button("Mod Setup…##prop_mod"))
-                    state.showModSetup = true;
-                ImGui::SameLine();
-                if (ImGui::Button("3D Preview##prop_3d")) {
-                    state.showPreview3D = true;
-                    state.preview3DNeedReload = true;
-                }
-                if (canvas.IsModParseOk())
-                    ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.f), "INI parsed OK");
-                else
-                    ImGui::TextDisabled("INI not applied — open Mod Setup");
-            }
-
-            ImGui::NewLine();
-            ImGui::Separator();
-            ImGui::Text("Project Output Format (DDS ↔ PNG):");
-            ImGui::TextDisabled("Hard container switch — batch + quick export both use this.");
-
-            char propExportPath[512] = "";
-            std::strncpy(propExportPath, canvas.GetExportPath().c_str(), sizeof(propExportPath));
-
-            int outFmt = (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) ? 1 : 0;
-            const char* outFmtNames[] = { "PNG / Standard image", "DDS (compressed)" };
-            if (UiCombo("##cmb_outFmt", &outFmt, outFmtNames, IM_ARRAYSIZE(outFmtNames), "Output Type")) {
-                canvas.SetExportContainer(outFmt == 1
-                    ? Canvas::ExportContainer::DDS
-                    : Canvas::ExportContainer::PNG);
-                std::string synced = canvas.GetExportPath();
-                std::strncpy(propExportPath, synced.c_str(), sizeof(propExportPath) - 1);
-                propExportPath[sizeof(propExportPath) - 1] = '\0';
-            }
-
-            if (Ui::PathField("##exppath", "Export Path", propExportPath, sizeof(propExportPath),
-                    ShowSaveFileWin32, "PNG (*.png)\0*.png\0DDS (*.dds)\0*.dds\0All Files (*.*)\0*.*\0")
-                || std::string(propExportPath) != canvas.GetExportPath()) {
-                canvas.SetExportPath(propExportPath);
-                // Infer container from path extension when user picks a file
-                std::string pathStr = propExportPath;
-                size_t d = pathStr.find_last_of('.');
-                if (d != std::string::npos) {
-                    std::string e = pathStr.substr(d + 1);
-                    std::transform(e.begin(), e.end(), e.begin(), ::tolower);
-                    if (e == "dds")
-                        canvas.SetExportContainer(Canvas::ExportContainer::DDS);
-                    else if (e == "png")
-                        canvas.SetExportContainer(Canvas::ExportContainer::PNG);
-                }
-                canvas.SyncExportPathExtension();
-                std::string synced = canvas.GetExportPath();
-                std::strncpy(propExportPath, synced.c_str(), sizeof(propExportPath) - 1);
-                propExportPath[sizeof(propExportPath) - 1] = '\0';
-            }
-
-            if (canvas.GetExportContainer() == Canvas::ExportContainer::DDS) {
-                static const char* formats[] = {
-                    "BC7 (sRGB, DX 11+)", "BC7 (Linear, DX 11+)",
-                    "BC3 (Linear, DXT5)", "BC1 (Linear, DXT1)",
-                    "BC5 (Linear, Unsigned)", "R8G8B8A8 (Linear, A8B8G8R8)",
-                    "RGBA16_FLOAT", "RGBA32_FLOAT", "R32 (Linear, Float)"
-                };
-                int currentFormatIdx = 0;
-                std::string currentFmt = canvas.GetExportFormat();
-                for (int i = 0; i < IM_ARRAYSIZE(formats); ++i) {
-                    if (currentFmt == formats[i]) currentFormatIdx = i;
-                }
-                if (UiCombo("##cmb_currentFormatIdx", &currentFormatIdx, formats, IM_ARRAYSIZE(formats), "DDS Preset")) {
-                    canvas.SetExportFormat(formats[currentFormatIdx]);
-                }
-                bool mips = canvas.GetExportGenerateMipMaps();
-                if (ImGui::Checkbox("Mipmaps", &mips)) canvas.SetExportGenerateMipMaps(mips);
-                if (mips) {
-                    const char* filters[] = { "Point", "Box", "Linear", "Cubic" };
-                    int currentFilterIdx = 3;
-                    std::string currentFilter = canvas.GetExportMipFilter();
-                    for (int i = 0; i < IM_ARRAYSIZE(filters); ++i) {
-                        if (currentFilter == filters[i]) currentFilterIdx = i;
-                    }
-                    if (UiCombo("##cmb_currentFilterIdx", &currentFilterIdx, filters, IM_ARRAYSIZE(filters), "Mip Filter")) {
-                        canvas.SetExportMipFilter(filters[currentFilterIdx]);
-                    }
-                }
-                const char* speeds[] = { "Fast", "Medium", "Slow", "Best" };
-                int si = 1;
-                std::string cs = canvas.GetExportCompressionSpeed();
-                for (int i = 0; i < 4; ++i) if (cs == speeds[i]) si = i;
-                if (UiCombo("##cmb_compSpeed", &si, speeds, 4, "Quality"))
-                    canvas.SetExportCompressionSpeed(speeds[si]);
-            } else {
-                DrawIccPresetCombo(canvas, "ICC Profile");
-            }
-
-            if (ImGui::Button("Quick Export (project format)", ImVec2(-1, 0))) {
-                state.openQuickExportTrigger = true;
-            }
-            if (ImGui::IsItemHovered()) Ui::Tooltip("Export using the path/format above (same as Ctrl+E)");
-
-            Ui::EndDockPanel();
-        }
+        // 5–6. Tool strip + Viewport Nav + Properties (extracted panels)
+        UI::DrawToolbarPanel(state, canvas, brush, activeTool);
+        UI::DrawViewportNavPanel(state, canvas);
+        UI::DrawPropertiesPanel(state, canvas);
 
         UI::DrawLayersPanel(state, canvas, device);
         UI::DrawAssetBrowserPanel(state, canvas, device);
+        UI::DrawBrushWorkshopPanel(state, brush);
         Ui::DrawAssetPicker(device);
 
         // Layer Effects modal (extracted)
@@ -2981,7 +2507,7 @@ namespace UI {
             if (ImGui::IsItemHovered())
                 Ui::Tooltip("Copy entire console to clipboard");
             ImGui::SameLine();
-            ImGui::TextDisabled("Click line = copy · multi-select with Ctrl");
+            ImGui::TextDisabled("Click line = copy В· multi-select with Ctrl");
             ImGui::Separator();
             ImGui::BeginChild("LogScrollRegion", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar);
             static std::vector<int> s_logSelected;
@@ -3133,7 +2659,7 @@ namespace UI {
             }
         }
 
-        // ---- Mod Setup (INI / dump / semantics) — separate from Properties ----
+        // ---- Mod Setup (INI / dump / semantics) вЂ” separate from Properties ----
         if (state.showModSetup) {
             ImGui::SetNextWindowSize(ImVec2(520, 640), ImGuiCond_FirstUseEver);
             if (ImGui::Begin("Mod Setup", &state.showModSetup)) {
@@ -3181,7 +2707,7 @@ namespace UI {
                         scene.DrawCount(), scene.TextureBindCount());
 
                     if (ImGui::TreeNode("Vertex semantics (roles)##mod_sem")) {
-                        ImGui::TextDisabled("TEXCOORD ≠ always UV. Role=None ignores attribute.");
+                        ImGui::TextDisabled("TEXCOORD в‰  always UV. Role=None ignores attribute.");
                         int roleCount = 0;
                         const char* const* roleNames = modio::AttrRoleNameTable(roleCount);
                         auto drawLayoutEditor = [&](const char* label, modio::BufferLayout& layout) {
@@ -3246,7 +2772,7 @@ namespace UI {
                                                 if (ImGui::Checkbox("Batch visible", &bat.visible))
                                                     state.preview3DNeedReload = true;
                                                 for (const auto& t : bat.textures) {
-                                                    ImGui::BulletText("%s → %s%s",
+                                                    ImGui::BulletText("%s в†’ %s%s",
                                                         modio::MaterialSlotName(t.slot),
                                                         t.resourceName.c_str(),
                                                         t.exists ? "" : " [missing]");
@@ -3474,7 +3000,7 @@ namespace UI {
                     nTab(3, "O", "Orientation");
                     nTab(4, "P", "Parts");
                     nTab(5, "D", "Debug");
-                    if (ImGui::Button("«##np", ImVec2(nTabW - 6, 22)))
+                    if (ImGui::Button("В«##np", ImVec2(nTabW - 6, 22)))
                         s_NPanel = 0;
                     if (ImGui::IsItemHovered()) Ui::Tooltip("Collapse N-panel");
                     ImGui::EndGroup();
@@ -3486,9 +3012,9 @@ namespace UI {
                         auto& L = s_Preview.Lighting();
                         float yawDeg = L.yaw * (180.f / 3.14159265f);
                         float pitchDeg = L.pitch * (180.f / 3.14159265f);
-                        if (Ui::SmartSliderFloat("Yaw", &yawDeg, -180.f, 180.f, 0.f, 1.f, "%.0f°"))
+                        if (Ui::SmartSliderFloat("Yaw", &yawDeg, -180.f, 180.f, 0.f, 1.f, "%.0fВ°"))
                             L.yaw = yawDeg * (3.14159265f / 180.f);
-                        if (Ui::SmartSliderFloat("Pitch", &pitchDeg, -89.f, 89.f, 0.f, 1.f, "%.0f°"))
+                        if (Ui::SmartSliderFloat("Pitch", &pitchDeg, -89.f, 89.f, 0.f, 1.f, "%.0fВ°"))
                             L.pitch = pitchDeg * (3.14159265f / 180.f);
                         Ui::SmartSliderFloat("Intensity", &L.intensity, 0.f, 2.f, 1.f, 0.05f, "%.2f");
                         Ui::SmartSliderFloat("Ambient", &L.ambient, 0.f, 1.f, 0.3f, 0.05f, "%.2f");
@@ -3500,7 +3026,7 @@ namespace UI {
                         if (ImGui::Button("Right")) { L.yaw = 0.9f; L.pitch = 0.4f; }
                     } else if (s_NPanel == 2) {
                         ImGui::TextUnformatted("Shading");
-                        ImGui::TextDisabled("Uber shader · channel remaps");
+                        ImGui::TextDisabled("Uber shader В· channel remaps");
                         auto& lib = preview3d::ShaderPresetLibrary::Get();
                         if (lib.All().empty()) lib.LoadBuiltins();
                         auto& items = s_Preview.Items();
@@ -3531,7 +3057,7 @@ namespace UI {
                                 lib.SavePreset(items[s_SelPart].material, dir);
                             }
 
-                            // Bind diagnostics — verify multi-texture paths
+                            // Bind diagnostics вЂ” verify multi-texture paths
                             if (ImGui::TreeNode("Bound textures (paths)##binds")) {
                                 const char* slotN[] = { "Diffuse", "Normal", "LightMap", "Material" };
                                 auto& it = items[s_SelPart];
@@ -3547,7 +3073,7 @@ namespace UI {
                                     ImGui::SameLine();
                                     ImGui::TextWrapped("%s\n  file: %s",
                                         it.resNames[mi].empty() ? "?" : it.resNames[mi].c_str(),
-                                        ok ? base.c_str() : "(missing — grey fallback)");
+                                        ok ? base.c_str() : "(missing вЂ” grey fallback)");
                                 }
                                 ImGui::TextDisabled(
                                     "LightMap debug uses UV0 now (not UV2).\n"
@@ -3566,7 +3092,7 @@ namespace UI {
                             ImGui::Checkbox("Normal RG only", &mat.normalRGOnly);
                             ImGui::Checkbox("Alpha clip (Material.R)", &mat.alphaClip);
                             if (ImGui::TreeNode("Channel remap##ch")) {
-                                ImGui::TextDisabled("If look is wrong — remap first, then blame shader.");
+                                ImGui::TextDisabled("If look is wrong вЂ” remap first, then blame shader.");
                                 auto editCh = [](const char* label, preview3d::ChannelSource& ch) {
                                     ImGui::PushID(label);
                                     ImGui::AlignTextToFramePadding();
@@ -3605,7 +3131,7 @@ namespace UI {
                                 ImGui::TreePop();
                             }
                         } else {
-                            ImGui::TextDisabled("No mesh — Apply INI + Reload");
+                            ImGui::TextDisabled("No mesh вЂ” Apply INI + Reload");
                         }
                     } else if (s_NPanel == 3) {
                         ImGui::TextUnformatted("Orientation");
@@ -3618,7 +3144,7 @@ namespace UI {
                         ImGui::Checkbox("Flip X", &O.flipX);
                         ImGui::Checkbox("Flip Y", &O.flipY);
                         ImGui::Checkbox("Flip Z", &O.flipZ);
-                        Ui::SmartSliderFloat("Yaw offset", &O.yawOffsetDeg, -180.f, 180.f, 0.f, 1.f, "%.0f°");
+                        Ui::SmartSliderFloat("Yaw offset", &O.yawOffsetDeg, -180.f, 180.f, 0.f, 1.f, "%.0fВ°");
                         if (ImGui::Button("ZZZ default (+Z up)")) {
                             O.upAxis = preview3d::ModelUpAxis::PlusZ;
                             O.flipX = O.flipY = O.flipZ = false;
@@ -3651,12 +3177,12 @@ namespace UI {
                         ImGui::EndDisabled();
                         Ui::SmartSliderFloat("Outline thick (view)", &P.outlineThickness, 0.2f, 3.0f, 1.f, 0.05f, "%.2f");
                         Ui::SmartSliderFloat("Outline ink (albedo*)", &P.outlineAlbedoMul, 0.15f, 0.75f, 0.4f, 0.05f, "%.2f");
-                        ImGui::Checkbox("Outline × COLOR.r (thick)", &P.outlineUseVertexColor);
-                        ImGui::TextDisabled("View-space expand ≈ game (not 3D balloon).\nInk ~0.4 = soft; 0.15 = black.");
+                        ImGui::Checkbox("Outline Г— COLOR.r (thick)", &P.outlineUseVertexColor);
+                        ImGui::TextDisabled("View-space expand в‰€ game (not 3D balloon).\nInk ~0.4 = soft; 0.15 = black.");
                         ImGui::Checkbox("Fixed outline tint", &P.outlineUseFixedTint);
                         if (P.outlineUseFixedTint)
                             ImGui::ColorEdit3("Tint", P.outlineTint, ImGuiColorEditFlags_NoInputs);
-                        ImGui::TextDisabled("Outline ≠ GI math. Mode locked to ZZZ for now.");
+                        ImGui::TextDisabled("Outline в‰  GI math. Mode locked to ZZZ for now.");
 
                         ImGui::Separator();
                         int dbg = s_Preview.GetDebugMode();
@@ -3671,7 +3197,7 @@ namespace UI {
                             state.preview3DNeedReload = true;
                         if (ImGui::Button("Open Mod Setup", ImVec2(-1, 0)))
                             state.showModSetup = true;
-                        ImGui::TextDisabled("LMB orbit · MMB pan · Wheel · Home");
+                        ImGui::TextDisabled("LMB orbit В· MMB pan В· Wheel В· Home");
                     }
                     ImGui::EndChild();
                 }
@@ -3682,7 +3208,7 @@ namespace UI {
 
         Ui::TooltipEndFrame();
 
-        // Non-modal open progress — never freeze the whole UI with a modal.
+        // Non-modal open progress вЂ” never freeze the whole UI with a modal.
         // Document is locked via JobManager; chrome (panels, FE, console) stays interactive.
         if (g_LoadingState.isLoading) {
             ImGuiViewport* mainViewport = ImGui::GetMainViewport();
@@ -3724,7 +3250,7 @@ namespace UI {
                 }
                 ImGui::ProgressBar(progress > 0.f ? progress : -1.f * (float)ImGui::GetTime(),
                                    ImVec2(280, 0), stage.c_str());
-                ImGui::TextDisabled("UI stays responsive · document locked until done");
+                ImGui::TextDisabled("UI stays responsive В· document locked until done");
             }
             ImGui::End();
         }
