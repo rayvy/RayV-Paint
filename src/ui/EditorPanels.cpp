@@ -739,20 +739,48 @@ namespace UI {
         static constexpr float kCapCount = 3.f;
         static constexpr float kCapStripW = kCapBtnW * kCapCount;
 
-        auto dragWindowFromItem = [&]() {
-            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left) && window) {
-                int wx = 0, wy = 0;
-                glfwGetWindowPos(window, &wx, &wy);
-                ImVec2 d = ImGui::GetIO().MouseDelta;
-                glfwSetWindowPos(window, wx + (int)d.x, wy + (int)d.y);
+        // Undecorated window drag state (ImGui item Active alone is unreliable on menu/tabs).
+        static bool s_ChromeDragging = false;
+        static int s_ChromeDragWinX = 0, s_ChromeDragWinY = 0;
+        static ImVec2 s_ChromeDragMouse0{};
+
+        auto chromeDragBegin = [&]() {
+            if (!window || s_ChromeDragging) return;
+            // Maximized: Win32 ignores SetWindowPos — restore first under cursor.
+            if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED)) {
+                glfwRestoreWindow(window);
             }
+            glfwGetWindowPos(window, &s_ChromeDragWinX, &s_ChromeDragWinY);
+            s_ChromeDragMouse0 = ImGui::GetIO().MousePos;
+            s_ChromeDragging = true;
+        };
+        auto chromeDragUpdate = [&]() {
+            if (!s_ChromeDragging || !window) return;
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                s_ChromeDragging = false;
+                return;
+            }
+            ImVec2 m = ImGui::GetIO().MousePos;
+            glfwSetWindowPos(window,
+                s_ChromeDragWinX + (int)(m.x - s_ChromeDragMouse0.x),
+                s_ChromeDragWinY + (int)(m.y - s_ChromeDragMouse0.y));
+        };
+        auto chromeDragOnItem = [&]() {
+            // Call after InvisibleButton / drag handle that owns the click.
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && window) {
+                s_ChromeDragging = false;
                 if (glfwGetWindowAttrib(window, GLFW_MAXIMIZED))
                     glfwRestoreWindow(window);
                 else
                     glfwMaximizeWindow(window);
+                return;
             }
+            if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f))
+                chromeDragBegin();
         };
+        // Keep drag alive even if ActiveId is lost mid-gesture.
+        if (s_ChromeDragging)
+            chromeDragUpdate();
 
         auto drawCaptionButtons = [&](float barY, float barH) {
             // Absolute right of main viewport — equal cells, full bar height (not SmallButton drift).
@@ -796,12 +824,15 @@ namespace UI {
 
         // 0. Main menu bar FIRST (top of window) — File / Edit / … + mode tools + caption
         if (ImGui::BeginMainMenuBar()) {
-            // Brand (subtle)
+            // Brand + small drag handle (menu gap + tab strip are primary grab zones)
             {
                 ImGui::TextDisabled("RayV");
+                ImGui::SameLine(0, 4.f);
+                ImGui::InvisibleButton("##branddrag", ImVec2(28.f, ImGui::GetFrameHeight()));
+                chromeDragOnItem();
                 if (ImGui::IsItemHovered())
-                    Ui::Tooltip("RayV Paint — drag the tab strip below to move the window");
-                ImGui::SameLine(0, 12.f);
+                    Ui::Tooltip("Drag to move window");
+                ImGui::SameLine(0, 8.f);
             }
             if (ImGui::BeginMenu("File")) {
                 // Catalog-backed: same poll + execute as hotkeys
@@ -1124,7 +1155,7 @@ namespace UI {
                 ImGui::EndMenu();
             }
 
-            // ---- Right header: mode · I/O · map switcher (leave room for caption strip) ----
+            // ---- Drag gap between menus and right tools (primary grab for title drag) ----
             {
                 Project* hp = ProjectManager::Get().ActiveProject();
                 auto ptype = canvas.GetProjectType();
@@ -1132,16 +1163,26 @@ namespace UI {
                 if (hp) hp->textureSets.EnsureSimpleDefault();
                 texset::TextureSet* hset = hp ? hp->textureSets.Active() : nullptr;
 
-                float rightTools = 210.f; // mode + I/O
+                float rightTools = 210.f;
                 if (adv && hset) {
                     for (const auto& m : hset->maps)
                         if (m.enabled || m.kind == texset::MapKind::Diffuse)
                             rightTools += 72.f;
                 }
-                // Caption strip always owns the last kCapStripW of the bar
                 float barW = ImGui::GetWindowWidth();
+                float afterMenus = ImGui::GetCursorPosX();
+                float dragW = barW - afterMenus - rightTools - kCapStripW - 16.f;
+                if (dragW > 12.f) {
+                    ImGui::SameLine(0, 4.f);
+                    ImGui::InvisibleButton("##menudrag", ImVec2(dragW, ImGui::GetFrameHeight()));
+                    chromeDragOnItem();
+                    if (ImGui::IsItemHovered())
+                        Ui::Tooltip("Drag to move window");
+                }
+
+                // Caption strip always owns the last kCapStripW of the bar
                 float x = barW - rightTools - kCapStripW - 12.f;
-                if (x > ImGui::GetCursorPosX() + 40.f)
+                if (x > ImGui::GetCursorPosX() + 8.f)
                     ImGui::SameLine(x);
 
                 {
@@ -1190,7 +1231,7 @@ namespace UI {
             ImGui::EndMainMenuBar();
         }
 
-        // 1. Document tabs strip BELOW the menu (was incorrectly on the title bar)
+        // 1. Document tabs strip BELOW the menu
         {
             const float tabsH = 28.f;
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8.f, 3.f));
@@ -1201,10 +1242,11 @@ namespace UI {
                 ImGuiWindowFlags_NoDocking);
 
             ImVec2 barMin = ImGui::GetWindowPos();
-            ImVec2 barSize = ImGui::GetWindowSize();
-            // Drag empty area of tab strip to move undecorated window
-            ImGui::InvisibleButton("##tabs_drag", ImVec2(barSize.x, tabsH - 2.f));
-            dragWindowFromItem();
+            ImVec2 barSize = ImGui::GetContentRegionAvail();
+            // Full-strip drag handle (tabs drawn on top; empty space + handle still drag)
+            ImGui::SetCursorScreenPos(barMin);
+            ImGui::InvisibleButton("##tabs_drag", ImVec2(std::max(1.f, barSize.x), tabsH));
+            chromeDragOnItem();
 
             {
                 ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1234,11 +1276,7 @@ namespace UI {
                         tc = tok.ColU32(tok.textSecondary);
                     const float textY = a.y + (tabH - ts.y) * 0.5f;
                     dl->AddText(ImVec2(a.x + 8.f, textY), tc, label.c_str());
-                    if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseClicked(0) &&
-                        !ImGui::IsMouseDragging(0)) {
-                        if (!tab.active) ProjectManager::Get().SwitchTo(tab.id);
-                    }
-                    if (ImGui::IsMouseHoveringRect(a, b) && !ImGui::IsMouseDragging(0)) {
+                    if (ImGui::IsMouseHoveringRect(a, b) && !ImGui::IsMouseDragging(0, 2.f)) {
                         if (tab.diskHibernated)
                             Ui::Tooltip("Disk hibernate — click to RESTORE (pixels on disk)");
                         else if (tab.gpuSuspended)
@@ -1252,7 +1290,7 @@ namespace UI {
                     ImVec2 hitMax(b.x - 2.f, b.y);
                     if (ImGui::IsMouseHoveringRect(hitMin, hitMax)) {
                         dl->AddText(xa, IM_COL32(255, 120, 120, 255), "x");
-                        if (ImGui::IsMouseClicked(0)) {
+                        if (ImGui::IsMouseClicked(0) && !s_ChromeDragging) {
                             if (!ProjectManager::Get().CloseProject(tab.id, false)) {
                                 g_ProjectTabCloseRequest.projectId = tab.id;
                                 g_ProjectTabCloseRequest.pending = true;
@@ -1260,6 +1298,13 @@ namespace UI {
                         }
                     } else {
                         dl->AddText(xa, tok.ColU32(tok.textSecondary), "x");
+                    }
+                    // Select tab (click, not drag)
+                    if (ImGui::IsMouseHoveringRect(a, b) && ImGui::IsMouseReleased(0) &&
+                        !s_ChromeDragging && !ImGui::IsMouseDragging(0, 4.f)) {
+                        // Only if release inside and not on close
+                        if (!ImGui::IsMouseHoveringRect(hitMin, hitMax) && !tab.active)
+                            ProjectManager::Get().SwitchTo(tab.id);
                     }
                     tabX += tw + 4.f;
                 }
@@ -1271,7 +1316,8 @@ namespace UI {
                 dl->AddText(ImVec2(na.x + (24.f - plusSz.x) * 0.5f,
                                    na.y + (tabH - plusSz.y) * 0.5f),
                             tok.ColU32(tok.textPrimary), "+");
-                if (ImGui::IsMouseHoveringRect(na, nb) && ImGui::IsMouseClicked(0))
+                if (ImGui::IsMouseHoveringRect(na, nb) && ImGui::IsMouseReleased(0) &&
+                    !s_ChromeDragging)
                     ProjectManager::Get().CreateEmptyProject();
             }
 
