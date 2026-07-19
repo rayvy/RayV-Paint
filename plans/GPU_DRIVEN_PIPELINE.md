@@ -629,8 +629,20 @@ TRUTH = tileCache (+ mask/selection CPU)
 PREVIEW = GPU provisional (droppable)
 HISTORY = sealed tile snapshots only
 EXPORT = flush + full quality (CPU until P4)
-STROKE = mid: raw tiles + optional GPU overlay; end: commit + FX
-NEVER = provisional → undo; composite RT → document; async seal early
-PHASE = P0 contracts → P1 FX GPU → P2 stroke GPU → P3 queue → P4 export → P5 extreme
-SESSION = one vertical slice; re-read this plan §6–§8 first
+STROKE = P2a: overlay + main PaintEngine same as today
+         P2b: catch-up only after DabRecord parity gate; seal after empty backlog
+DUAL FX = CPU export + GPU preview until P4; goldens block merge
+THREADS = D3D+Seal+BackupTile on main; workers snapshot-only; JobManager lock ⇒ flush
+NEVER = provisional→undo; composite RT→document; async seal early; multi-worker LockTile unordered
+PHASE = P0→P1 FX→P2a/P2b stroke→P3 queue→P4 export→P5 extreme
+SESSION = one slice; re-read §4.2–4.5 + §6–§8 first
 ```
+
+---
+
+## 14. Revision notes
+
+| Date | Change |
+|------|--------|
+| 2026-07-19 | Initial plan on branch `GPU-DRIVEN-PARADIGME` |
+| 2026-07-19 | Claude review: expand P2 races/parity (§4.3), dual-FX maintenance tax (§4.2), OpQueue×JobManager/threading (§4.5); I11–I14 |
