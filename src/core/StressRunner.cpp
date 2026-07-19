@@ -101,6 +101,12 @@ void StressRunner::OpenJournal() {
     Journal(std::string("asset: ") + kAsset16K);
     Journal(std::string("hang_budget_ms: ") + std::to_string((int)kHangMs));
     Journal(std::string("wall_timeout_s: ") + std::to_string((int)kWallTimeoutSec));
+    if (MemoryStats::GetSimulatedVramBudgetBytes() > 0) {
+        Journal(std::string("sim_vram_budget: ") +
+                MemoryStats::FormatBytes(MemoryStats::GetSimulatedVramBudgetBytes()));
+    } else {
+        Journal("sim_vram_budget: unlimited");
+    }
     Journal("NOTE: every action is flushed immediately. On CRASH, CrashGuard appends here.");
     Journal("NOTE: silent crash mode ON — no MessageBox; process exits so you are not stuck.");
     Journal("----------------------------------------");
@@ -1001,6 +1007,13 @@ void StressRunner::EmitReport(Canvas& canvas) {
     oss << "MultiTab: slept=" << m_MultiTabSlept
         << " hibernated=" << m_MultiTabHibernated
         << " wakes=" << m_MultiTabWakes << "\n";
+    if (MemoryStats::GetSimulatedVramBudgetBytes() > 0) {
+        oss << "SimVRAM budget/peak/used/refuses: "
+            << MemoryStats::FormatBytes(MemoryStats::GetSimulatedVramBudgetBytes()) << " / "
+            << MemoryStats::FormatBytes(MemoryStats::GetSimulatedVramPeakBytes()) << " / "
+            << MemoryStats::FormatBytes(MemoryStats::GetSimulatedVramUsedBytes()) << " / "
+            << MemoryStats::GetSimulatedVramRefuseCount() << "\n";
+    }
     oss << "Load OK: " << (m_LoadOk ? "yes" : "no")
         << "  asset missing: " << (m_AssetMissing ? "yes" : "no") << "\n";
 

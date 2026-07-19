@@ -109,6 +109,7 @@ private:
         // Free slot indices 0 .. kAtlasGrid*kAtlasGrid-1
         std::deque<int> freeSlots;
         int used = 0;
+        size_t reservedVramBytes = 0; // for simulated VRAM release
     };
 
     struct Surface {

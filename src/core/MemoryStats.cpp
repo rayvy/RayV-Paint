@@ -102,5 +102,64 @@ void MemoryStats::LogSnapshot(const std::string& label) {
         << " PeakWS=" << FormatBytes(info.peakWorkingSetBytes)
         << " SysRAM=" << FormatBytes(info.totalPhysBytes)
         << " Avail=" << FormatBytes(info.availPhysBytes);
+    if (s_VramBudgetBytes > 0) {
+        oss << " | simVRAM=" << FormatBytes(s_VramUsedBytes)
+            << "/" << FormatBytes(s_VramBudgetBytes);
+    }
     Logger::Get().Info(oss.str());
+}
+
+// Simulated VRAM (process-local estimate — not DXGI adapter query)
+size_t MemoryStats::s_VramBudgetBytes = 0;
+size_t MemoryStats::s_VramUsedBytes = 0;
+size_t MemoryStats::s_VramPeakBytes = 0;
+size_t MemoryStats::s_VramRefuseCount = 0;
+
+void MemoryStats::SetSimulatedVramBudgetBytes(size_t bytes) {
+    s_VramBudgetBytes = bytes;
+    Logger::Get().InfoTag("mem",
+        std::string("Simulated VRAM budget = ") +
+        (bytes ? FormatBytes(bytes) : std::string("unlimited")));
+}
+
+size_t MemoryStats::GetSimulatedVramBudgetBytes() { return s_VramBudgetBytes; }
+size_t MemoryStats::GetSimulatedVramUsedBytes() { return s_VramUsedBytes; }
+size_t MemoryStats::GetSimulatedVramPeakBytes() { return s_VramPeakBytes; }
+size_t MemoryStats::GetSimulatedVramRefuseCount() { return s_VramRefuseCount; }
+
+void MemoryStats::ResetSimulatedVram() {
+    s_VramUsedBytes = 0;
+    s_VramPeakBytes = 0;
+    s_VramRefuseCount = 0;
+}
+
+bool MemoryStats::TryReserveVram(size_t bytes, const char* context) {
+    if (s_VramBudgetBytes == 0 || bytes == 0) {
+        s_VramUsedBytes += bytes;
+        if (s_VramUsedBytes > s_VramPeakBytes) s_VramPeakBytes = s_VramUsedBytes;
+        return true;
+    }
+    if (s_VramUsedBytes + bytes > s_VramBudgetBytes) {
+        ++s_VramRefuseCount;
+        // Rate-limit: log 1st, then every 256th — flood was causing 6s "hangs" under stress.
+        if (s_VramRefuseCount == 1 || (s_VramRefuseCount % 256ull) == 0) {
+            Logger::Get().WarnTag("mem",
+                std::string("sim_vram REFUSE ") + (context ? context : "alloc") +
+                " need=" + FormatBytes(bytes) +
+                " used=" + FormatBytes(s_VramUsedBytes) +
+                " budget=" + FormatBytes(s_VramBudgetBytes) +
+                " refuses=" + std::to_string(s_VramRefuseCount) +
+                " — soft degrade (no crash)");
+        }
+        return false;
+    }
+    s_VramUsedBytes += bytes;
+    if (s_VramUsedBytes > s_VramPeakBytes) s_VramPeakBytes = s_VramUsedBytes;
+    return true;
+}
+
+void MemoryStats::ReleaseVram(size_t bytes) {
+    if (bytes == 0) return;
+    if (bytes >= s_VramUsedBytes) s_VramUsedBytes = 0;
+    else s_VramUsedBytes -= bytes;
 }

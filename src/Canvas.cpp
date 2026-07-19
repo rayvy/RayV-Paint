@@ -1764,6 +1764,13 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
         "RecreateLayerTexture " + std::to_string(m_Width) + "x" + std::to_string(m_Height) +
         " estVRAM~" + MemoryStats::FormatBytes(estGpu));
 
+    if (!MemoryStats::TryReserveVram(estGpu, "RecreateLayerTexture.full")) {
+        // Soft VRAM budget: keep CPU tiles. Clear needsUpload so compose does not
+        // re-call Create every frame (was thrashing + log flood under --vram-budget-mb).
+        layer.needsUpload = false;
+        return;
+    }
+
     D3D11_TEXTURE2D_DESC desc = {};
     desc.Width            = m_Width;
     desc.Height           = m_Height;
@@ -1776,6 +1783,7 @@ void Canvas::RecreateLayerTexture(ID3D11Device* device, Layer& layer) {
 
     HRESULT hr = device->CreateTexture2D(&desc, nullptr, &layer.texture);
     if (FAILED(hr)) {
+        MemoryStats::ReleaseVram(estGpu);
         std::ostringstream oss;
         oss << "RecreateLayerTexture: CreateTexture2D failed hr=0x" << std::hex << (unsigned)hr
             << " size=" << std::dec << m_Width << "x" << m_Height
@@ -3276,8 +3284,10 @@ void Canvas::ComposeLayers(ID3D11DeviceContext* context) {
             }
 
             if (!layer.texture && !layer.gpuSurfaceId) {
-                if (layer.needsUpload || (layer.tileCache && layer.tileCache->GetTileCount() > 0) ||
-                    layer.HasEnabledStyles()) {
+                // Retry GPU create only on explicit dirty / pending work / styles —
+                // NOT merely "has CPU tiles" (that spun after soft VRAM refuse every frame).
+                if (layer.needsUpload || layer.HasEnabledStyles() ||
+                    (layer.tileCache && layer.tileCache->HasPendingGpuWork())) {
                     RecreateLayerTexture(device, layer);
                 }
                 if (!layer.texture && !layer.gpuSurfaceId) continue;

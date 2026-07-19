@@ -659,6 +659,26 @@ int main(int argc, char* argv[]) {
             allowMultiInstance = true;
             perfMode = true; // uncapped Present — measure work, not vsync
             StressRunner::Get().Enable(true);
+        } else if (arg.rfind("--vram-budget-mb=", 0) == 0) {
+            // Soft simulated VRAM ceiling for extreme stress (e.g. --vram-budget-mb=512).
+            // Atlas pages / full-layer textures soft-refuse over budget — process must survive.
+            try {
+                int mb = std::stoi(arg.substr(std::string("--vram-budget-mb=").size()));
+                if (mb > 0) {
+                    MemoryStats::SetSimulatedVramBudgetBytes(
+                        (size_t)mb * 1024ull * 1024ull);
+                    MemoryStats::ResetSimulatedVram();
+                }
+            } catch (...) {}
+        } else if (arg == "--vram-budget-mb" && i + 1 < argc) {
+            try {
+                int mb = std::stoi(argv[++i]);
+                if (mb > 0) {
+                    MemoryStats::SetSimulatedVramBudgetBytes(
+                        (size_t)mb * 1024ull * 1024ull);
+                    MemoryStats::ResetSimulatedVram();
+                }
+            } catch (...) {}
         } else if (arg == "--perf") {
             // Uncapped swap chain present (no VSync). Also used when window unfocused.
             perfMode = true;

@@ -16,6 +16,10 @@ int GpuTileStore::BytesPerFormat(DXGI_FORMAT fmt) const {
 }
 
 void GpuTileStore::ReleasePage(AtlasPage& p) {
+    if (p.reservedVramBytes > 0) {
+        MemoryStats::ReleaseVram(p.reservedVramBytes);
+        p.reservedVramBytes = 0;
+    }
     if (p.srv) { p.srv->Release(); p.srv = nullptr; }
     if (p.tex) { p.tex->Release(); p.tex = nullptr; }
     p.freeSlots.clear();
@@ -68,7 +72,13 @@ int GpuTileStore::AllocAtlasSlot(ID3D11Device* device, Surface& s, TileGpu& g) {
     }
 
     // New page
+    const size_t pageBytes = (size_t)kAtlasPixels * (size_t)kAtlasPixels *
+                             (size_t)std::max(1, BytesPerFormat(s.format));
+    if (!MemoryStats::TryReserveVram(pageBytes, "GpuTileStore.atlas_page")) {
+        return -1; // soft VRAM budget — skip new page, paint stays CPU-resident
+    }
     AtlasPage page;
+    page.reservedVramBytes = pageBytes;
     D3D11_TEXTURE2D_DESC td = {};
     td.Width = (UINT)kAtlasPixels;
     td.Height = (UINT)kAtlasPixels;
@@ -80,11 +90,15 @@ int GpuTileStore::AllocAtlasSlot(ID3D11Device* device, Surface& s, TileGpu& g) {
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     HRESULT hr = device->CreateTexture2D(&td, nullptr, &page.tex);
     if (FAILED(hr) || !page.tex) {
+        MemoryStats::ReleaseVram(pageBytes);
+        page.reservedVramBytes = 0;
         Logger::Get().WarnTag("gpu", "GpuTileStore: atlas page CreateTexture2D failed");
         return -1;
     }
     device->CreateShaderResourceView(page.tex, nullptr, &page.srv);
     if (!page.srv) {
+        MemoryStats::ReleaseVram(pageBytes);
+        page.reservedVramBytes = 0;
         page.tex->Release();
         page.tex = nullptr;
         return -1;

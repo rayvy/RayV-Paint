@@ -34,5 +34,24 @@ public:
     // Rare hard ceiling for mathematical / corrupt paths — not everyday soft budget.
     static bool ExceedsHardRamCeiling(size_t estimatedBytes);
 
+    // --- Simulated VRAM budget (stress / low-end GPU rehearsal) ---
+    // 0 = unlimited (default). Soft: TryReserveVram returns false when exceeded;
+    // callers should degrade (skip atlas page / leave needsUpload) — never crash.
+    static void SetSimulatedVramBudgetBytes(size_t bytes);
+    static size_t GetSimulatedVramBudgetBytes();
+    static size_t GetSimulatedVramUsedBytes();
+    // Reserve estimated GPU alloc; false if over budget (no reserve).
+    static bool TryReserveVram(size_t bytes, const char* context = nullptr);
+    static void ReleaseVram(size_t bytes);
+    static void ResetSimulatedVram();
+    static size_t GetSimulatedVramPeakBytes();
+    static size_t GetSimulatedVramRefuseCount();
+
     static std::string FormatBytes(size_t bytes);
+
+private:
+    static size_t s_VramBudgetBytes;
+    static size_t s_VramUsedBytes;
+    static size_t s_VramPeakBytes;
+    static size_t s_VramRefuseCount;
 };
