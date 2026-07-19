@@ -14,7 +14,7 @@ Branch: main (post Build 15)
 
 | # | Item | Notes |
 |---|------|--------|
-| 0 | **GPU-driven Layer Effects / Filters** | **TODO (priority).** Today styles + filters are **CPU bake** (`BuildPresentation` / `ApplyPixelFilters` → float buffer → tile upload). Composite is GPU, but FX themselves are not. Peers (Photoshop Live, Substance, game post) run outline/shadow/HSV/curves as **GPU passes** (often dirty-region / stack). Target: full **GPU-driven FX** — no full-doc CPU re-bake on paint; paint base, shader stack for preview, bake only for export/freeze. Especially **styles** (shadow/outline); then **filters** (HSV/curves/blur). Interim mitigations already: stroke skips filter rebuild, Effects Preview off, proxy bake ≤1536. |
+| 0 | **GPU-driven pipeline + Layer FX** | **Standalone plan:** [`plans/GPU_DRIVEN_PIPELINE.md`](GPU_DRIVEN_PIPELINE.md) (branch `GPU-DRIVEN-PARADIGME`). Covers FX **and** tools (provisional brush GPU + ordered commit), op-queue for 8K–128K, export fidelity. Today: CPU bake + GPU composite. Do **not** mega-PR. Interim mitigations: stroke-skip FX, Effects Preview OFF, proxy bake ≤1536. |
 | 1 | **Large docs (4K–16K)** | Full GPU layer texture; flat selection/mask; full-frame float export can OOM |
 | 2 | **Depth dump = U8 view** | D32 opens as grayscale U8 (not raw F32 Z). Height maps: use R32F |
 | 3 | **Bit-depth convert has no undo** | Accidental U8↔F32 cannot be undone |
