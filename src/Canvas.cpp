@@ -11817,6 +11817,36 @@ void Canvas::SetDocumentBitDepth(DocumentBitDepth d) {
 
     const DocumentBitDepth prev = m_DocumentBitDepth;
     const CanvasPixelFormat target = FormatForBitDepth(d);
+
+    // Capture pre-convert tiles (deep) for undo — convert is lossy U8←float.
+    auto captureSnap = [&]() -> DocumentBitDepthCommand::Snap {
+        DocumentBitDepthCommand::Snap s;
+        s.bitDepth = (uint8_t)m_DocumentBitDepth;
+        s.pixelFormat = (uint8_t)m_CanvasFormat;
+        for (int i = 0; i < (int)m_Layers.size(); ++i) {
+            auto& layer = m_Layers[i];
+            if (layer.isGroup || !layer.tileCache) continue;
+            DocumentBitDepthCommand::LayerTiles lt;
+            lt.layerIdx = i;
+            const int ntx = layer.tileCache->GetTilesX();
+            const int nty = layer.tileCache->GetTilesY();
+            for (int ty = 0; ty < nty; ++ty) {
+                for (int tx = 0; tx < ntx; ++tx) {
+                    if (!layer.tileCache->HasTile(tx, ty)) continue;
+                    TileDelta d;
+                    d.layerIdx = i;
+                    d.tileX = tx; d.tileY = ty;
+                    d.newState = TileCache::DeepCopySnapshot(layer.tileCache->SnapshotTile(tx, ty));
+                    lt.tiles.push_back(std::move(d));
+                }
+            }
+            s.layers.push_back(std::move(lt));
+        }
+        return s;
+    };
+
+    DocumentBitDepthCommand::Snap oldSnap = captureSnap();
+
     size_t tilesConverted = 0;
     size_t bytesEst = 0;
 
@@ -11830,22 +11860,33 @@ void Canvas::SetDocumentBitDepth(DocumentBitDepth d) {
             bytesEst += layer.tileCache->EstimateUniquePixelBytes();
         }
         if (layer.filteredCache) {
-            layer.filteredCache->ConvertFormat(target);
-            layer.filteredCache->MarkAllDirty();
-            layer.filtersDirty = true;
+            layer.filteredCache.reset();
+            layer.filtersDirty = !layer.filters.empty();
         }
+        layer.presentationCache.reset();
+        layer.presentationDirty = layer.HasEnabledStyles();
         // Drop GPU textures — recreated on next compose with new DXGI format.
-        if (layer.texture) { layer.texture->Release(); layer.texture = nullptr; }
-        if (layer.srv)     { layer.srv->Release();     layer.srv = nullptr; }
-        if (layer.thumbSRV) { layer.thumbSRV->Release(); layer.thumbSRV = nullptr; }
-        if (layer.thumbTex) { layer.thumbTex->Release(); layer.thumbTex = nullptr; }
+        if (layer.gpuSurfaceId) {
+            m_GpuTiles.DestroySurface(layer.gpuSurfaceId);
+            layer.gpuSurfaceId = 0;
+        }
+        if (layer.texture) { DeferReleaseTex(layer.texture); layer.texture = nullptr; }
+        if (layer.srv)     { DeferReleaseSRV(layer.srv);     layer.srv = nullptr; }
+        if (layer.thumbSRV) { DeferReleaseSRV(layer.thumbSRV); layer.thumbSRV = nullptr; }
+        if (layer.thumbTex) { DeferReleaseTex(layer.thumbTex); layer.thumbTex = nullptr; }
         layer.thumbDirty = true;
+        layer.gpuDisplayKind = 0xFF;
     }
 
     m_DocumentBitDepth = d;
     m_CanvasFormat = target;
     m_CompositeDirty = true;
     m_ChannelPreviewDirty = true;
+    m_IsDocumentModified = true;
+
+    DocumentBitDepthCommand::Snap newSnap = captureSnap();
+    m_UndoRedoManager.PushCommand(std::make_shared<DocumentBitDepthCommand>(
+        "Bit Depth Convert", std::move(oldSnap), std::move(newSnap)));
 
     // Composite RT is always U8 proxy; no rebuild required for bit depth alone.
     Logger::Get().Info(std::string("DocumentBitDepth ") +

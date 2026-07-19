@@ -466,6 +466,76 @@ void LayerStackCommand::CollectTileData(std::unordered_set<const TileData*>& see
 }
 
 // ---------------------------------------------------------------------------
+// DocumentBitDepthCommand
+// ---------------------------------------------------------------------------
+
+DocumentBitDepthCommand::DocumentBitDepthCommand(const std::string& name, Snap oldSnap, Snap newSnap)
+    : m_Name(name), m_Old(std::move(oldSnap)), m_New(std::move(newSnap)) {}
+
+void DocumentBitDepthCommand::Apply(Canvas* canvas, const Snap& snap) {
+    if (!canvas) return;
+    canvas->m_DocumentBitDepth = static_cast<Canvas::DocumentBitDepth>(snap.bitDepth);
+    canvas->m_CanvasFormat = static_cast<CanvasPixelFormat>(snap.pixelFormat);
+
+    for (const auto& lt : snap.layers) {
+        if (lt.layerIdx < 0 || lt.layerIdx >= (int)canvas->m_Layers.size()) continue;
+        auto& L = canvas->m_Layers[lt.layerIdx];
+        if (L.isGroup) continue;
+        if (!L.tileCache) {
+            L.tileCache = std::make_unique<TileCache>();
+        }
+        L.tileCache->Clear();
+        L.tileCache->Init(canvas->m_Width, canvas->m_Height, canvas->m_CanvasFormat);
+        L.tileCache->EnsureResidentCapacityForFullGrid();
+        for (const auto& d : lt.tiles)
+            L.tileCache->RestoreTile(d.tileX, d.tileY, d.newState);
+        L.tileCache->MarkAllDirty();
+        L.filteredCache.reset();
+        L.presentationCache.reset();
+        L.filtersDirty = !L.filters.empty();
+        L.presentationDirty = L.HasEnabledStyles();
+        L.stylesDirty = L.HasEnabledStyles();
+        L.needsUpload = true;
+        L.thumbDirty = true;
+        L.gpuDisplayKind = 0xFF;
+        if (L.gpuSurfaceId) {
+            canvas->m_GpuTiles.DestroySurface(L.gpuSurfaceId);
+            L.gpuSurfaceId = 0;
+        }
+        if (L.texture) { canvas->DeferReleaseTex(L.texture); L.texture = nullptr; }
+        if (L.srv) { canvas->DeferReleaseSRV(L.srv); L.srv = nullptr; }
+    }
+    canvas->MarkCompositeDirty();
+    canvas->m_ChannelPreviewDirty = true;
+    canvas->m_IsDocumentModified = true;
+}
+
+void DocumentBitDepthCommand::Undo(Canvas* canvas) { Apply(canvas, m_Old); }
+void DocumentBitDepthCommand::Redo(Canvas* canvas) { Apply(canvas, m_New); }
+
+size_t DocumentBitDepthCommand::GetOverheadBytes() const {
+    size_t n = sizeof(DocumentBitDepthCommand) + m_Name.capacity();
+    auto add = [&](const Snap& s) {
+        n += s.layers.capacity() * sizeof(LayerTiles);
+        for (const auto& lt : s.layers)
+            n += lt.tiles.capacity() * sizeof(TileDelta);
+    };
+    add(m_Old);
+    add(m_New);
+    return n;
+}
+
+void DocumentBitDepthCommand::CollectTileData(std::unordered_set<const TileData*>& seen) const {
+    auto walk = [&](const Snap& s) {
+        for (const auto& lt : s.layers)
+            for (const auto& d : lt.tiles)
+                if (d.newState.data) seen.insert(d.newState.data.get());
+    };
+    walk(m_Old);
+    walk(m_New);
+}
+
+// ---------------------------------------------------------------------------
 // VectorEditCommand
 // ---------------------------------------------------------------------------
 

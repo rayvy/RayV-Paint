@@ -164,6 +164,7 @@ public:
     Canvas();
     ~Canvas();
     friend class DocumentGeometryCommand;
+    friend class DocumentBitDepthCommand;
     friend class RasterizeCommand;
     friend class LayerMaskCommand;
     friend class LayerMaskPaintCommand;

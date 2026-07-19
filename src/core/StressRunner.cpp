@@ -728,8 +728,31 @@ bool StressRunner::TickSelectTransform(Canvas& canvas, ID3D11Device* device, flo
     case 3: {
         Journal("ACTION transform_commit");
         canvas.CommitMovePixels(device);
-        canvas.ClearSelection();
+        // Keep selection for Move Selection undo step if present; thrash next.
         m_SubStep = 4;
+        return true;
+    }
+    case 4: {
+        // Regression: select → move → undo past base → redo must not hole tiles
+        // (import stale history / COW share bugs).
+        Journal("ACTION transform_undo_redo_thrash");
+        int undos = 0;
+        while (canvas.CanUndo() && undos < 8) {
+            canvas.Undo();
+            ++undos;
+        }
+        // Extra undos past history start must be no-ops (session boundary).
+        canvas.Undo();
+        canvas.Undo();
+        int redos = 0;
+        while (canvas.CanRedo() && redos < 8) {
+            canvas.Redo();
+            ++redos;
+        }
+        Journalf("ACTION transform_undo_redo_done undos=%d redos=%d", undos, redos);
+        canvas.ClearSelection();
+        if (device) canvas.UpdateSelectionMaskTexture(device);
+        m_SubStep = 5;
         return true;
     }
     default:

@@ -200,6 +200,33 @@ private:
     Snap m_Snap;
 };
 
+// Document bit-depth convert (U8 ↔ F16 ↔ F32): full tile snapshots per layer.
+class DocumentBitDepthCommand : public UndoCommand {
+public:
+    struct LayerTiles {
+        int layerIdx = 0;
+        std::vector<TileDelta> tiles; // newState only (content at this depth)
+    };
+    struct Snap {
+        uint8_t bitDepth = 0; // Canvas::DocumentBitDepth
+        uint8_t pixelFormat = 0; // CanvasPixelFormat
+        std::vector<LayerTiles> layers;
+    };
+
+    DocumentBitDepthCommand(const std::string& name, Snap oldSnap, Snap newSnap);
+    std::string GetName() const override { return m_Name; }
+    void Undo(Canvas* canvas) override;
+    void Redo(Canvas* canvas) override;
+    size_t GetOverheadBytes() const override;
+    void CollectTileData(std::unordered_set<const TileData*>& seen) const override;
+
+private:
+    void Apply(Canvas* canvas, const Snap& snap);
+    std::string m_Name;
+    Snap m_Old;
+    Snap m_New;
+};
+
 // Full document geometry change (crop / canvas edit): stores per-layer tile maps + size.
 class DocumentGeometryCommand : public UndoCommand {
 public:
